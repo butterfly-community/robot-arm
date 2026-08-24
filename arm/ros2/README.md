@@ -24,6 +24,8 @@ NOLO USB Rust server
 - 按新品 102-FL 产品表覆盖六个旋转关节的模型和 `ros2_control` 范围；
 - 添加与当前候选模型一致的 `tool0`；
 - 将 MoveIt `arm` 组定义为 `base_link -> tool0` 链；
+- 只给主动夹爪 `joint7_left` 保留 command interface，`joint7_right` 按 URDF mimic
+  自动反向联动；
 - 将 ROS `joint6` 最大速度从 `13.14` 覆盖为 `3.14 rad/s`。
 
 ## 启动
@@ -49,6 +51,10 @@ arm/ros2/run-moveit-simulation.sh
 IPC schema v2 的每份反馈同时包含 `/joint_states` 和 TF2 的 `base_link -> tool0`。当前
 TCP 及新的 Squeeze 接管原点完全采用该 TF2 位姿；Rust 不维护 URDF 关节链或 FK。
 
+ROS 仿真进程启动时，`GenericSystem` 按厂家模型将 J1–J7 初始化为全零。网页启动或停止
+虚拟 NOLO 只切换输入源，不发送关节回零轨迹，也不暂停或恢复 Servo；停止后模型保持
+当时位置。需要重新从零位测试时，重新启动整个 ROS 仿真进程。
+
 平移比例在 Rust 的版本化设备配置中固定为 `0.2`：手柄移动 5 cm，目标 TCP 移动
 1 cm。ROS 桥不再做第二次缩放；姿态旋转角度保持 1:1，由 Servo 的角速度限制约束。
 
@@ -61,3 +67,8 @@ socket 后重启；不要把“路径存在”直接当作陈旧文件。
 真实 102-FL 后端保留为 TODO。以后只替换 `GenericSystem` 输出端并复用同一 Servo 输入，
 但在确认稳定设备名、零位、方向、软限位、速度/加速度、反馈冻结检测和硬件急停之前，
 不得启动厂家 `robo_driver`。厂家旧驱动构造阶段会复位多圈角，不属于当前仿真路径。
+
+仿真桥中的夹爪 `0°/90°` 轨迹只写入 `GenericSystem`，不得原样接到实物。真实夹爪输出
+必须单独加入位置、电流/功率和保护标志反馈、慢速接近、接触/堵转停止与超时锁定；舵机
+硬件保护是最后防线，不是持续发送完全闭合位置命令的依据。完整顺序见
+[P3 通电机械臂安全接入](../../vr-xr/docs/TODO.md#下一步p3-通电机械臂安全接入)。

@@ -23,6 +23,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>stararm102_moveit_config</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

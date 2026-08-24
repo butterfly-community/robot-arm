@@ -3,6 +3,15 @@
 本文记录已经实现的 P1 设备边界和 P2 末端相对示教仿真。当前实现不会驱动真实机械臂；
 所有输出都是仿真关节目标和诊断快照。
 
+## 阶段基线
+
+P1/P2 已完成并冻结：项目已具备严格只读设备探针、版本化候选模型、NOLO 相对位姿到
+机械臂 TCP 的映射、官方 MoveIt Servo 约束求解、TF2 当前位姿反馈、确定性虚拟输入和
+只读网页数字孪生。Rust 不再维护 FK/IK，ROS 桥不再承担坐标缩放或运动学计算。
+
+该结论只表示仿真链路可用于下一阶段集成，不表示新品 FL 已经允许通电运动。真实输出
+必须完成 [TODO P3](../../vr-xr/docs/TODO.md#下一步p3-通电机械臂安全接入) 的逐级放行。
+
 ## P1：设备配置与只读探针
 
 版本化设备配置位于
@@ -51,6 +60,8 @@ python3 arm/tools/stararm102_fl_readonly_probe.py \
 - `moveit_interface` 只保存 `base_link`、`tool0` 接口帧名、零反馈前的默认关节状态和
   已确认的夹爪模型端点 `0°～90°`；关节几何只保存在 ROS/URDF 模型，不再复制到
   Rust 配置；
+- 夹爪只命令主动关节 `joint7_left`；`joint7_right` 由 URDF
+  `mimic joint="joint7_left" multiplier="-1"` 反向联动，不提供独立 command interface；
 - Rust API 的 `joints_rad` 是 FL 驱动使用的逻辑角；厂家反馈按
   `logical_angle = model_angle * direction` 转换。仿真快照另外发布 `model_joints_rad`，
   网页不得把逻辑角直接写入 URDF；
@@ -104,6 +115,11 @@ robot +Z = NOLO +Y   （上）
 `R * q_relative * R^-1` 变换旋转轴，保留全部三个旋转自由度。参数不散落于 NOLO 采集
 代码。
 
+空间平移不会直接改变 TCP 姿态，只有手柄自身旋转才改变夹爪朝向。默认姿态下执行横向
+平移时，MoveIt 可能主要旋转 J1 并保持末端朝向；在 1:5 比例下手柄 10 cm 只产生 TCP
+2 cm 位移，因此应使用 TF2 当前/目标 TCP 判断结果，而不能用某个关节是否明显转动判断
+坐标映射。
+
 当前 ROS 仿真复用厂家 URDF/SRDF、KDL、碰撞 STL、`ros2_control` 和
 `JointTrajectoryController`。项目补丁按新品产品表覆盖模型和 mock hardware 关节范围，
 添加 `tool0`，把 `arm` 定义为 `base_link -> tool0`，并按已确认要求把 ROS `joint6`
@@ -119,10 +135,15 @@ robot +Z = NOLO +Y   （上）
 六轴逻辑关节角、
 对应 URDF 模型关节角、夹爪角度及开合命令、关节速度、TF2 当前 TCP、期望 TCP、Servo 状态、
 反馈年龄和停止原因。`backend=moveit_servo` 明确表示数据来自 ROS 仿真反馈。
-夹爪模型张开 `90°`、闭合 `0°`，与厂家 FL 插件的舵机逻辑多圈量
+夹爪模型张开 `90°`、闭合 `0°`；命令只面向 `joint7_left`，`joint7_right` 自动反向
+联动。模型角与厂家 FL 插件的舵机逻辑多圈量
 `[-270°, 0°] / direction=-6` 分开保存，不再用传动量推导模型角；网页运动继续复用
 现有关节速度/加速度限制。字段始终包含
 `simulation_only=true`；它不是电机命令接口。
+
+仿真中的 Trigger 是两态显示，不是可直接复用的真机夹持算法。真实 RA8-U35H-M 夹爪
+需要读取位置、电流/功率和保护状态，使用受限速度闭合，并在接触、堵转或超时后停止
+继续收紧；在验证保护阈值和开口映射前，不得持续命令完全闭合角。
 
 ## 已自动验证
 

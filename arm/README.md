@@ -6,6 +6,10 @@
 当前实物是可独立执行命令的 Star Arm 102-FL 新品从臂。上游资料提炼和接入边界见
 [Star Arm 102-FL 新品关键参数](docs/STAR-ARM-102-FL.md)。
 
+当前阶段已经完成设备描述、严格只读探针、NOLO 到 TCP 的坐标映射、官方 MoveIt Servo
+仿真、TF2 反馈和网页数字孪生；这是冻结的 P1/P2 仿真基线。机械臂串口写入和通电运动
+仍未实现或放行，下一阶段仅处理真实驱动、安全状态、夹爪闭环保护与分级实机验收。
+
 当前代码分为三条严格隔离的链路：
 
 - [`tools/stararm102_fl_readonly_probe.py`](tools/stararm102_fl_readonly_probe.py)：只执行
@@ -16,6 +20,10 @@
   模型端点，当前 TCP 统一来自 ROS TF2。
 - [`ros2/`](ros2/)：复用厂家模型、`ros2_control` 和官方 MoveIt Servo 的容器化仿真
   后端；当前只加载 `GenericSystem`，真实 102-FL 后端明确保留为 TODO。
+
+Trigger/J7 当前只是仿真状态。真机夹爪不能持续命令到固定完全闭合角：接入时必须读取
+位置、电流/功率和保护标志，慢速闭合并在接触、堵转或超时后停止继续收紧。舵机自身
+保护只能作为最后防线，不能替代软件限位、状态监测和低风险实机验收。
 
 只读三维显示位于
 [`../vr-xr/src/controller-viewer/public/arm-simulator/`](../vr-xr/src/controller-viewer/public/arm-simulator/)；

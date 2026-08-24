@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from tf2_ros import Buffer, TransformException, TransformListener
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 SCHEMA_VERSION = 2
@@ -45,6 +46,9 @@ class ServoIpcBridge(Node):
         self._pose_publisher = self.create_publisher(
             PoseStamped, "/servo_node/pose_target_cmds", 1
         )
+        self._hand_publisher = self.create_publisher(
+            JointTrajectory, "/hand_controller/joint_trajectory", 1
+        )
         self._joint_subscription = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
@@ -62,6 +66,7 @@ class ServoIpcBridge(Node):
         self._status_code: int | None = None
         self._status_message: str | None = None
         self._sequence = 0
+        self._last_gripper_closed: bool | None = None
         self._socket: socket.socket | None = None
         self._socket_lock = threading.Lock()
         self._stop = threading.Event()
@@ -211,6 +216,20 @@ class ServoIpcBridge(Node):
             message.pose.orientation.w,
         ) = normalized
         self._pose_publisher.publish(message)
+        gripper_closed = command.get("gripper_closed")
+        if isinstance(gripper_closed, bool) and gripper_closed != self._last_gripper_closed:
+            self._publish_gripper(0.0 if gripper_closed else math.pi / 2.0, 0.25)
+            self._last_gripper_closed = gripper_closed
+
+    def _publish_gripper(self, position: float, seconds: float) -> None:
+        trajectory = JointTrajectory()
+        trajectory.joint_names = ["joint7_left"]
+        point = JointTrajectoryPoint()
+        point.positions = [position]
+        point.time_from_start.sec = int(seconds)
+        point.time_from_start.nanosec = int((seconds % 1.0) * 1_000_000_000)
+        trajectory.points = [point]
+        self._hand_publisher.publish(trajectory)
 
     def _close_socket(self) -> None:
         with self._socket_lock:

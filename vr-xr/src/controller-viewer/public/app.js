@@ -33,6 +33,8 @@ let positionTrail = [];
 let positionTrailRevision = 0;
 let lastTrailAt = 0;
 let selectedSource = 0;
+let simulationRequested = false;
+let simulationActive = false;
 
 const SOURCE_LABELS = ["手柄 1", "手柄 2", "头部"];
 const BASE_STATION_FRAME = {
@@ -248,6 +250,7 @@ async function requestOriginFusionCalibration(sourceId, attempt) {
 function localizedDeviceName(name) {
   return String(name)
     .replace("Controller", "控制器")
+    .replace("(Virtual USB)", "（虚拟 USB 报告）")
     .replace("(USB)", "（USB 直连）");
 }
 
@@ -541,10 +544,79 @@ function updateFrame(frame, processMenu = true) {
 
 function receiveFrame(frame) {
   const id = sourceId(frame);
+  if (frame.simulated === true) {
+    const active = frame.communication_fresh === true;
+    setSimulationState(active, active);
+  } else if (frame.communication_fresh === true && !simulationRequested) {
+    setSimulationState(false, false);
+  }
   viewStates[id].latest = frame;
   viewStates[id].lastPoseAt = performance.now();
   if (id === selectedSource) updateFrame(frame);
 }
+
+function setSimulationState(requested, active) {
+  simulationRequested = requested;
+  simulationActive = active;
+  const button = $("simulation-toggle");
+  button.textContent = requested || active ? "停止模拟" : "启动模拟";
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", String(active));
+}
+
+function resetForAutomaticSimulationCalibration() {
+  if (selectedSource !== 0) selectSource(0);
+  viewStates[0] = createViewState(0);
+  loadViewState();
+  setCalibrationMessage(
+    "模拟数据自动标定中",
+    "虚拟手柄会保持静止并自动长按 Menu 6 秒；无需操作真实手柄。标定和接管门槛完成后会先预抬升 20 厘米，再开始循环。",
+  );
+  $("calibration-state").textContent = "等待虚拟 Menu 长按";
+  $("position-lr").textContent = "自动标定中";
+  $("position-ud").textContent = "自动标定中";
+  $("position-fb").textContent = "自动标定中";
+  $("position-distance").textContent = "自动标定中";
+}
+
+async function refreshSimulationState() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    setSimulationState(
+      payload.simulationRequested === true,
+      payload.simulationActive === true,
+    );
+  } catch {
+    // SSE connection state already reports server availability.
+  }
+}
+
+$("simulation-toggle").addEventListener("click", async () => {
+  const button = $("simulation-toggle");
+  const start = !(simulationRequested || simulationActive);
+  button.disabled = true;
+  button.textContent = start ? "正在启动…" : "正在停止…";
+  try {
+    const response = await fetch(
+      start ? "/api/simulation/start" : "/api/simulation/stop",
+      { method: "POST" },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    setSimulationState(start, false);
+    if (start) resetForAutomaticSimulationCalibration();
+    await refreshSimulationState();
+  } catch (error) {
+    $("connection").textContent = `模拟切换失败：${error.message}`;
+    $("connection").classList.add("waiting");
+    await refreshSimulationState();
+  } finally {
+    button.disabled = false;
+  }
+});
+
+void refreshSimulationState();
 
 const source = new EventSource("/events");
 source.addEventListener("status", (event) => {

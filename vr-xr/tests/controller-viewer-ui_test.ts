@@ -28,6 +28,9 @@ Deno.test("viewer exposes both controllers and the head selector", () => {
       throw new Error(`source selector ${sourceId} is missing`);
     }
   }
+  if (!html.includes('id="simulation-toggle"')) {
+    throw new Error("virtual NOLO start/stop control is missing");
+  }
 });
 
 Deno.test("viewer DOM references resolve and use explicit pose validity", () => {
@@ -81,5 +84,27 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
   }
   if (!app.includes("cancelCalibrationHold();")) {
     throw new Error("source changes do not cancel stale calibration holds");
+  }
+  for (
+    const endpoint of ["/api/simulation/start", "/api/simulation/stop"]
+  ) {
+    if (!app.includes(endpoint)) {
+      throw new Error(`viewer does not call ${endpoint}`);
+    }
+  }
+  if (
+    !app.includes("resetForAutomaticSimulationCalibration") ||
+    !app.includes("先预抬升 20 厘米，再开始循环")
+  ) {
+    throw new Error("virtual NOLO does not reset and explain auto calibration");
+  }
+  if (
+    !app.includes("const active = frame.communication_fresh === true") ||
+    !app.includes("setSimulationState(active, active)") ||
+    !app.includes("&& !simulationRequested")
+  ) {
+    throw new Error(
+      "virtual source transitions can leave the simulator button stale",
+    );
   }
 });

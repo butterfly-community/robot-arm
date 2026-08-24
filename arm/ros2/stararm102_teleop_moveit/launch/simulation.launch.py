@@ -55,6 +55,12 @@ def generate_launch_description():
         arguments=["arm_controller", "-c", "/controller_manager"],
         output="screen",
     )
+    hand_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["hand_controller", "-c", "/controller_manager"],
+        output="screen",
+    )
     servo = Node(
         package="moveit_servo",
         executable="servo_node",
@@ -84,6 +90,7 @@ def generate_launch_description():
             ros2_control,
             joint_state_spawner,
             arm_spawner,
+            hand_spawner,
             servo,
             bridge,
         ]

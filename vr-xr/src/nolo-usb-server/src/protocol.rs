@@ -83,6 +83,36 @@ pub fn decode_report(report: &[u8]) -> Result<Option<RawFrame>> {
     Ok(Some(parse_decrypted(&decrypted)))
 }
 
+/// Encode one decoded frame into the encrypted 64-byte report emitted by a
+/// NOLO CV1 HID device.  This is used by the deterministic virtual report
+/// source; production USB input continues to enter through [`decode_report`].
+pub fn encode_report(frame: RawFrame) -> Result<[u8; REPORT_SIZE]> {
+    if frame.controller_id > 1 {
+        bail!("controller_id must be 0 or 1");
+    }
+    let mut report = [0_u8; REPORT_SIZE];
+    report[0] = CONTROLLER_0_REPORT + frame.controller_id;
+    write_position(&mut report, 1, frame.position)?;
+    write_vector_i16(&mut report, 7, frame.accelerometer);
+    write_vector_i16(&mut report, 13, frame.gyroscope);
+    report[19] = frame.buttons;
+    report[20..22].copy_from_slice(&frame.touchpad.unwrap_or([255, 255]));
+    report[22] = frame.unknown_22;
+    report[23] = frame.unknown_23;
+    report[24] = frame.controller_sequence;
+    write_position(&mut report, 25, frame.hmd_position)?;
+    report[31..37].copy_from_slice(&frame.unknown_31_36);
+    write_vector_i16(&mut report, 37, frame.hmd_gyroscope);
+    report[43..49].copy_from_slice(&frame.unknown_43_48);
+    write_vector_i16(&mut report, 49, frame.hmd_accelerometer);
+    report[55..59].copy_from_slice(&frame.unknown_55_58);
+    report[59] = frame.hmd_sequence;
+    report[60] = frame.unknown_60;
+    report[61..64].copy_from_slice(&frame.unknown_61_63);
+    encrypt(&mut report);
+    Ok(report)
+}
+
 fn parse_decrypted(report: &[u8; REPORT_SIZE]) -> RawFrame {
     let pad = [report[20], report[21]];
     RawFrame {
@@ -118,6 +148,29 @@ fn vector_i16(report: &[u8], offset: usize) -> [i16; 3] {
     })
 }
 
+fn write_position(report: &mut [u8], offset: usize, position: [f32; 3]) -> Result<()> {
+    let mut quantized = [0_i16; 3];
+    for (index, value) in position.into_iter().enumerate() {
+        if !value.is_finite() {
+            bail!("position axis {index} is not finite");
+        }
+        let counts = (value / POSITION_SCALE).round();
+        if counts < f32::from(i16::MIN) || counts > f32::from(i16::MAX) {
+            bail!("position axis {index} is outside the NOLO i16 range: {value} m");
+        }
+        quantized[index] = counts as i16;
+    }
+    write_vector_i16(report, offset, quantized);
+    Ok(())
+}
+
+fn write_vector_i16(report: &mut [u8], offset: usize, vector: [i16; 3]) {
+    for (index, value) in vector.into_iter().enumerate() {
+        let start = offset + index * 2;
+        report[start..start + 2].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 fn decrypt(report: &mut [u8; REPORT_SIZE]) {
     let mut words = [0_u32; 15];
     for (index, word) in words.iter_mut().enumerate() {
@@ -125,6 +178,19 @@ fn decrypt(report: &mut [u8; REPORT_SIZE]) {
         *word = u32::from_le_bytes(report[start..start + 4].try_into().unwrap());
     }
     btea_decrypt(&mut words);
+    for (index, word) in words.iter().enumerate() {
+        let start = 1 + index * 4;
+        report[start..start + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn encrypt(report: &mut [u8; REPORT_SIZE]) {
+    let mut words = [0_u32; 15];
+    for (index, word) in words.iter_mut().enumerate() {
+        let start = 1 + index * 4;
+        *word = u32::from_le_bytes(report[start..start + 4].try_into().unwrap());
+    }
+    btea_encrypt(&mut words);
     for (index, word) in words.iter().enumerate() {
         let start = 1 + index * 4;
         report[start..start + 4].copy_from_slice(&word.to_le_bytes());
@@ -153,26 +219,26 @@ fn btea_decrypt(words: &mut [u32; 15]) {
     }
 }
 
+fn btea_encrypt(words: &mut [u32; 15]) {
+    let rounds = 1 + 52 / words.len();
+    let mut sum = 0_u32;
+    let mut z = words[words.len() - 1];
+    for _ in 0..rounds {
+        sum = sum.wrapping_add(DELTA);
+        let e = ((sum >> 2) & 3) as usize;
+        for index in 0..words.len() {
+            let y = words[(index + 1) % words.len()];
+            let mix = ((z >> 5) ^ y.wrapping_shl(2)).wrapping_add((y >> 3) ^ z.wrapping_shl(4))
+                ^ ((sum ^ y).wrapping_add(KEY[(index & 3) ^ e] ^ z));
+            words[index] = words[index].wrapping_add(mix);
+            z = words[index];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn btea_encrypt(words: &mut [u32; 15]) {
-        let rounds = 1 + 52 / words.len();
-        let mut sum = 0_u32;
-        let mut z = words[words.len() - 1];
-        for _ in 0..rounds {
-            sum = sum.wrapping_add(DELTA);
-            let e = ((sum >> 2) & 3) as usize;
-            for index in 0..words.len() {
-                let y = words[(index + 1) % words.len()];
-                let mix = ((z >> 5) ^ y.wrapping_shl(2)).wrapping_add((y >> 3) ^ z.wrapping_shl(4))
-                    ^ ((sum ^ y).wrapping_add(KEY[(index & 3) ^ e] ^ z));
-                words[index] = words[index].wrapping_add(mix);
-                z = words[index];
-            }
-        }
-    }
 
     fn encrypted_sample() -> [u8; REPORT_SIZE] {
         let mut report = [0_u8; REPORT_SIZE];
@@ -257,5 +323,67 @@ mod tests {
     #[test]
     fn rejects_truncated_reports() {
         assert!(decode_report(&[0_u8; 59]).is_err());
+    }
+
+    #[test]
+    fn virtual_report_round_trips_through_production_decoder() {
+        let expected = RawFrame {
+            controller_id: 1,
+            position: [0.1234, 1.0, -0.5678],
+            accelerometer: [100, -200, -1024],
+            gyroscope: [-10, 20, 30],
+            buttons: 0b0001_0010,
+            touchpad: Some([37, 201]),
+            unknown_22: 35,
+            unknown_23: 7,
+            controller_sequence: 255,
+            hmd_position: [-0.25, 1.5, -1.25],
+            unknown_31_36: [1, 2, 3, 4, 5, 6],
+            hmd_gyroscope: [4, 5, 6],
+            unknown_43_48: [7, 8, 9, 10, 11, 12],
+            hmd_accelerometer: [0, 0, -16384],
+            unknown_55_58: [13, 14, 15, 16],
+            hmd_sequence: 254,
+            unknown_60: 17,
+            unknown_61_63: [18, 19, 20],
+        };
+        let encoded = encode_report(expected).unwrap();
+        let actual = decode_report(&encoded).unwrap().unwrap();
+        for (actual, expected) in actual.position.into_iter().zip(expected.position) {
+            assert!((actual - expected).abs() <= POSITION_SCALE);
+        }
+        for (actual, expected) in actual.hmd_position.into_iter().zip(expected.hmd_position) {
+            assert!((actual - expected).abs() <= POSITION_SCALE);
+        }
+        let mut normalized_expected = expected;
+        normalized_expected.position = actual.position;
+        normalized_expected.hmd_position = actual.hmd_position;
+        assert_eq!(actual, normalized_expected);
+    }
+
+    #[test]
+    fn virtual_report_rejects_unrepresentable_positions() {
+        let mut frame = RawFrame {
+            controller_id: 0,
+            position: [0.0; 3],
+            accelerometer: [0; 3],
+            gyroscope: [0; 3],
+            buttons: 0,
+            touchpad: None,
+            unknown_22: 0,
+            unknown_23: 0,
+            controller_sequence: 0,
+            hmd_position: [0.0; 3],
+            unknown_31_36: [0; 6],
+            hmd_gyroscope: [0; 3],
+            unknown_43_48: [0; 6],
+            hmd_accelerometer: [0; 3],
+            unknown_55_58: [0; 4],
+            hmd_sequence: 0,
+            unknown_60: 0,
+            unknown_61_63: [0; 3],
+        };
+        frame.position[0] = 4.0;
+        assert!(encode_report(frame).is_err());
     }
 }

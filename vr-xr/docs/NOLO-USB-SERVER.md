@@ -37,6 +37,7 @@
   累计统计；序号按 `u8` 回绕处理。
 - `measured_rate_hz`、`sample_jitter_ms`：按新样本间隔计算的指数移动统计。
 - `flags`：仅为旧 API 兼容保留，固定为 `0`，禁止解释为 OpenXR tracking flags。
+- `simulated`：该帧是否来自内置虚拟 64 字节报告源；真实 HID 始终为 `false`。
 
 这些字段只判断通信/采样新鲜度。它们不能判断基站是否开机，不能判断光学位置是否
 有效，也不是 OpenXR runtime 返回的真实 tracking flags。`time_ns`
@@ -128,14 +129,56 @@ cargo build --release
 - `/events`：`status` 和 `pose` Server-Sent Events。
 - `/api/status`：当前状态、最后收到的一帧 `latestFrame`，以及三个设备各自最新帧
   `latestFrames`；`latestTeleopIntent` 是 Controller 0 的最新相对示教意图，
-  `latestArmSimulation` 是 Star Arm 102-FL 最新仿真输出。
+  `latestArmSimulation` 是 Star Arm 102-FL 最新仿真输出；`simulationRequested` 和
+  `simulationActive` 分别表示网页切换请求与虚拟报告线程实际状态。
 - `POST /api/gyro-calibration/0|1|2`：开始对应设备的显式陀螺仪零偏标定。
 - `POST /api/pose-calibration/0|1|2`：仅当该设备没有已加载或已完成的零偏时，初始化
   Fusion 并开始首次零偏标定；已有零偏时为空操作。
+- `POST /api/simulation/start`：暂停真实 HID 读取并启动确定性的虚拟 USB 报告循环。
+- `POST /api/simulation/stop`：停止虚拟报告并重新尝试连接真实 HID。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `source_online` 对三种设备具有
 统一语义。网页的“手柄 1 / 手柄 2 / 头部”按钮只切换显示，不会停止其他设备采集。
+
+## 虚拟 USB 报告模拟
+
+网页顶部“启动模拟”使用和真实设备相同的加密 64 字节报告边界。模拟器先构造
+Controller 0/1 与 HMD 的位置、IMU、按键和两个采样序号，调用生产报告编码器，再把
+结果交回生产 `decode_report`；解码之后继续走相同的 Fusion、One Euro、采样新鲜度、
+Squeeze Teleop 和 SSE 路径。它不会绕过采集链路直接写网页 JSON，也不会读取或覆盖
+真实设备的陀螺仪零偏文件。
+
+启动模拟会临时释放真实 HID，并让网页切到 Controller 0。前 6.25 秒虚拟 Menu 保持
+按下，位置和 IMU 保持静止，网页按原有流程从第二秒开始完成 Fusion 零偏并记录原点、
+零姿态和朝向基站的人体前方。虚拟源保持静止到第 10 秒，确保 Fusion 标定和标定故障
+后的 Squeeze 松开门槛都已完成；随后自动按住 Squeeze，在 3 秒内连续上升 20 cm 并
+直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，30 秒一轮
+并持续循环：
+
+1. 从工作高度再向上 10 cm，到达相对原始零点 `+30 cm`；随后向下 10 cm，返回
+   `+20 cm` 工作高度，不回到零点；
+2. 向左 10 cm 后向右 10 cm、向前 10 cm 后向后 10 cm，分别回到工作中心；
+3. 手柄头部抬起 3 cm 后下压 3 cm、向右侧倾 3 cm 后向左侧倾 3 cm，分别回到工作
+   姿态。
+
+姿态的“3 cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算，等价峰值角约
+8.415°。模拟平移进入机械臂链路后仍会应用 1:5 比例，因此手柄 10 cm 对应目标 TCP
+2 cm。Controller 1 和 Head Marker 在该循环中保持静止，但仍按各自名义频率输出。
+
+同一生成器也提供独立程序 `nolo-cv1-simulator`，默认向标准输出写出一次完整的
+43 秒数据（10 秒标定与接管准备、3 秒预抬升 20 cm 和一轮动作），
+格式是连续拼接的加密 64 字节报告：
+
+```bash
+cargo run --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml \
+  --bin nolo-cv1-simulator -- \
+  --output=/tmp/nolo-cv1-sim.bin --reports=10320
+```
+
+添加 `--realtime` 会按 240 报告/秒实时输出。输出文件必须不存在，程序拒绝覆盖已有
+采集。这个程序模拟的是 NOLO HID 报告协议，不在操作系统中创建 USB 枚举项；后者需要
+root、USB gadget 控制器或专用硬件，且不会提高当前采集到机械臂仿真的覆盖率。
 
 ## Controller 0 相对示教意图
 
@@ -208,14 +251,19 @@ TF2 当前 TCP、期望 TCP、Servo 状态/说明、反馈年龄和停止原因�
 上述故障恢复时即使 Squeeze 一直按住也不会自动恢复输出，必须先松开再重新按下。
 候选工作空间越界、MoveIt 奇异、碰撞或关节边界显示为 `constrained`；越界目标只丢弃
 本帧，约束状态的后续目标继续处理，以允许移回安全区域。上游意图故障也要求先松开
-Squeeze 再接管。Trigger 在 active 状态控制网页 J7 在张开
-`90°` 与闭合 `0°` 之间限速移动；夹爪当前仍是 Rust 网页仿真状态，不发送 ROS 或硬件
-夹爪命令。`simulation_only` 永远为 `true`。
+Squeeze 再接管。Trigger 在 active 状态产生两态夹爪意图：Rust 快照让网页 J7 在张开
+`90°` 与闭合 `0°` 之间限速移动，ROS 桥同时向仿真的 `hand_controller/joint7_left`
+发送对应 `JointTrajectory`。两路都只作用于 `GenericSystem` 仿真，不打开串口、不发送
+硬件夹爪命令；`simulation_only` 永远为 `true`。
 
 现场确认的唯一默认姿态和示教启动姿态都是 J1–J7 全部 `0°`。仿真启动时六轴逻辑角、
 URDF 模型角和闭合夹爪角均为零；没有单独的回零姿态、工作姿态或自动展开阶段。松开
 Trigger 后，J7 才会按限速规则从闭合 `0°` 向张开 `90°` 运动。该模型角与 FL 插件的
 舵机逻辑多圈量 `[-270°, 0°] / direction=-6` 独立，不做直接除法换算。
+
+这里的“仿真启动”是 ROS `GenericSystem` 进程启动，不是网页“启动模拟”按钮。网页按钮
+只切换真实/虚拟 NOLO 输入；停止后机械臂保持当前位置，不发送回零轨迹。需要重新从
+J1–J7 全零开始时，重新启动 ROS 仿真进程。
 
 `/arm-simulator/` 每 33 ms 读取一次该快照，用 `model_joints_rad` 的 J1–J6 驱动从厂家
 URDF 构建的关节树，

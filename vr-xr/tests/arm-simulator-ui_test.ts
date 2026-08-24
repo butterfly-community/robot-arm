@@ -132,6 +132,54 @@ Deno.test("arm simulator maps all six simulated joints and manufacturer meshes",
   }
 });
 
+Deno.test("arm simulator URDF uses confirmed FL limits and one active gripper joint", () => {
+  const app = source("app.js");
+  const modelReadme = source("models/README.md");
+  const urdf = source("models/stararm102_description.urdf");
+  if (
+    !modelReadme.includes(
+      "5979b346eb3a417840b29b76740754e4005d071a",
+    )
+  ) {
+    throw new Error(
+      "visualization model source commit is not pinned correctly",
+    );
+  }
+  const limits = [
+    ["joint1", "-1.9198621772", "1.9198621772", "[-110, 110]"],
+    ["joint2", "0", "3.1415926536", "[0, 180]"],
+    ["joint3", "-4.7123889804", "0", "[-270, 0]"],
+    ["joint4", "-1.5707963268", "1.5707963268", "[-90, 90]"],
+    ["joint5", "-1.1344640138", "1.1344640138", "[-65, 65]"],
+    ["joint6", "-2.6179938780", "2.6179938780", "[-150, 150]"],
+    ["joint7_left", "0", "1.5707963268", "[0, 90]"],
+  ];
+  for (const [name, lower, upper, slider] of limits) {
+    const block = urdf.match(
+      new RegExp(`<joint\\s+name="${name}"[\\s\\S]*?</joint>`),
+    )?.[0];
+    if (
+      !block?.includes(`lower="${lower}"`) ||
+      !block.includes(`upper="${upper}"`)
+    ) {
+      throw new Error(`${name} does not use the confirmed FL model range`);
+    }
+    if (!app.includes(slider)) {
+      throw new Error(`${name} slider does not match the confirmed FL range`);
+    }
+  }
+  const right = urdf.match(
+    /<joint\s+name="joint7_right"[\s\S]*?<\/joint>/,
+  )?.[0];
+  if (
+    !right?.includes('<mimic joint="joint7_left" multiplier="-1" />') ||
+    !right.includes('lower="-1.5707963268"') ||
+    !right.includes('upper="0"')
+  ) {
+    throw new Error("joint7_right is not the confirmed inverse mimic joint");
+  }
+});
+
 Deno.test("combined test dashboard embeds both independent viewers", () => {
   const dashboard = Deno.readTextFileSync(
     new URL(

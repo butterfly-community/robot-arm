@@ -20,7 +20,10 @@ moveit_servo:
   command_out_topic: /arm_controller/joint_trajectory
   command_out_type: trajectory_msgs/JointTrajectory
   publish_joint_positions: true
-  publish_joint_velocities: true
+  # The manufacturer's JointTrajectoryController rejects a one-point stream
+  # whose final point carries a non-zero velocity. Let it interpolate position
+  # commands and keep velocity as feedback-only state.
+  publish_joint_velocities: false
   publish_joint_accelerations: false
 
   joint_topic: /joint_states
@@ -31,10 +34,15 @@ moveit_servo:
 
   check_collisions: true
   collision_check_rate: 10.0
-  self_collision_proximity_threshold: 0.01
+  # The folded FL zero pose has 2.464 mm clearance between link1 and link4.
+  # Keep collision checking enabled while avoiding a false slowdown at zero.
+  self_collision_proximity_threshold: 0.002
   scene_collision_proximity_threshold: 0.02
-  lower_singularity_threshold: 17.0
-  hard_stop_singularity_threshold: 30.0
+  # This small arm has a condition number of 112.27 at its valid zero pose.
+  # Offline sampling of 4,547 collision-free states put 300 near the 90th
+  # percentile, so scale above 120 and reserve the hard stop for >= 300.
+  lower_singularity_threshold: 120.0
+  hard_stop_singularity_threshold: 300.0
   leaving_singularity_threshold_multiplier: 2.0
   joint_limit_margins: [0.05]
   halt_all_joints_in_cartesian_mode: true

@@ -14,7 +14,7 @@ const MODEL_JOINT_LIMITS_DEG = [
   [-90, 90],
   [-65, 65],
   [-150, 150],
-  [0, 45],
+  [0, 90],
 ];
 const modelJointTargets = new Float64Array(JOINT_COUNT);
 const liveModelJointDegrees = new Float64Array(DISPLAY_JOINT_COUNT);
