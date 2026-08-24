@@ -135,7 +135,8 @@ cargo build --release
 - `POST /api/pose-calibration/0|1|2`：仅当该设备没有已加载或已完成的零偏时，初始化
   Fusion 并开始首次零偏标定；已有零偏时为空操作。
 - `POST /api/simulation/start`：暂停真实 HID 读取并启动确定性的虚拟 USB 报告循环。
-- `POST /api/simulation/stop`：停止虚拟报告并重新尝试连接真实 HID。
+- `POST /api/simulation/stop`：只停止虚拟报告并重新尝试连接真实 HID。网页随后提示手工
+  执行 `docker restart stararm102-moveit-simulation`，完成后由用户点击确认。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `source_online` 对三种设备具有
@@ -153,27 +154,29 @@ Squeeze Teleop 和 SSE 路径。它不会绕过采集链路直接写网页 JSON�
 按下，位置和 IMU 保持静止，网页按原有流程从第二秒开始完成 Fusion 零偏并记录原点、
 零姿态和朝向基站的人体前方。虚拟源保持静止到第 10 秒，确保 Fusion 标定和标定故障
 后的 Squeeze 松开门槛都已完成；随后自动按住 Squeeze，在 3 秒内连续上升 20 cm 并
-直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，30 秒一轮
+直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，36 秒一轮
 并持续循环：
 
 1. 从工作高度再向上 10 cm，到达相对原始零点 `+30 cm`；随后向下 10 cm，返回
    `+20 cm` 工作高度，不回到零点；
 2. 向左 10 cm 后向右 10 cm、向前 10 cm 后向后 10 cm，分别回到工作中心；
 3. 手柄头部抬起 3 cm 后下压 3 cm、向右侧倾 3 cm 后向左侧倾 3 cm，分别回到工作
-   姿态。
+   姿态；
+4. 手柄向左旋转 5 cm 后向右旋转 5 cm，回到工作姿态。
 
-姿态的“3 cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算，等价峰值角约
-8.415°。模拟平移进入机械臂链路后仍会应用 1:5 比例，因此手柄 10 cm 对应目标 TCP
-2 cm。Controller 1 和 Head Marker 在该循环中保持静止，但仍按各自名义频率输出。
+姿态的“cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算：抬起和侧倾 3 cm
+等价峰值角约 8.415°，左右旋转 5 cm 等价峰值角约 14.117°。模拟平移进入机械臂链路
+后仍会应用 1:5 比例，因此手柄空间移动 10 cm 对应目标 TCP 2 cm；姿态不应用该比例。
+Controller 1 和 Head Marker 在该循环中保持静止，但仍按各自名义频率输出。
 
 同一生成器也提供独立程序 `nolo-cv1-simulator`，默认向标准输出写出一次完整的
-43 秒数据（10 秒标定与接管准备、3 秒预抬升 20 cm 和一轮动作），
+49 秒数据（10 秒标定与接管准备、3 秒预抬升 20 cm 和一轮动作），
 格式是连续拼接的加密 64 字节报告：
 
 ```bash
 cargo run --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml \
   --bin nolo-cv1-simulator -- \
-  --output=/tmp/nolo-cv1-sim.bin --reports=10320
+  --output=/tmp/nolo-cv1-sim.bin --reports=11760
 ```
 
 添加 `--realtime` 会按 240 报告/秒实时输出。输出文件必须不存在，程序拒绝覆盖已有

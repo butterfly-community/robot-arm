@@ -18,7 +18,7 @@ pub const CALIBRATION_SECONDS: f64 = 10.0;
 pub const STARTUP_LIFT_SECONDS: f64 = 3.0;
 pub const MOTION_START_SECONDS: f64 = CALIBRATION_SECONDS + STARTUP_LIFT_SECONDS;
 pub const ACTION_SECONDS: f64 = 3.0;
-pub const ACTION_COUNT: usize = 10;
+pub const ACTION_COUNT: usize = 12;
 pub const LOOP_SECONDS: f64 = ACTION_SECONDS * ACTION_COUNT as f64;
 pub const DEFAULT_REPORT_COUNT: u64 =
     ((MOTION_START_SECONDS + LOOP_SECONDS) * REPORT_RATE_HZ) as u64;
@@ -27,6 +27,7 @@ const POSITION_AMPLITUDE_METERS: f64 = 0.10;
 const STARTUP_LIFT_METERS: f64 = 0.20;
 const CONTROLLER_HEAD_TO_TAIL_METERS: f64 = 0.205;
 const HEAD_DISPLACEMENT_METERS: f64 = 0.03;
+const TURN_HEAD_DISPLACEMENT_METERS: f64 = 0.05;
 const GYRO_DPS_PER_COUNT: f64 = 2000.0 / 32768.0;
 const CONTROLLER_ACCEL_COUNTS_PER_G: f64 = 1024.0;
 
@@ -145,6 +146,7 @@ fn controller_zero_motion(elapsed_seconds: f64) -> ([f64; 3], [f64; 4], [f64; 3]
     let mut angle = 0.0;
     let mut angle_rate = 0.0;
     let orientation_amplitude = (HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
+    let turn_amplitude = (TURN_HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
     let phase = match action {
         0 => {
             position[1] += POSITION_AMPLITUDE_METERS * amount;
@@ -189,12 +191,25 @@ fn controller_zero_motion(elapsed_seconds: f64) -> ([f64; 3], [f64; 4], [f64; 3]
             angle_rate = orientation_amplitude * rate;
             "手柄向右侧倾 3 cm"
         }
-        _ => {
+        9 => {
             axis = [0.0, -1.0, 0.0];
             angle = orientation_amplitude * (1.0 - amount);
             angle_rate = -orientation_amplitude * rate;
             "手柄向左侧倾 3 cm"
         }
+        10 => {
+            axis = [0.0, 0.0, 1.0];
+            angle = turn_amplitude * amount;
+            angle_rate = turn_amplitude * rate;
+            "手柄向左旋转 5 cm"
+        }
+        11 => {
+            axis = [0.0, 0.0, 1.0];
+            angle = turn_amplitude * (1.0 - amount);
+            angle_rate = -turn_amplitude * rate;
+            "手柄向右旋转 5 cm"
+        }
+        _ => unreachable!("action index must be smaller than ACTION_COUNT"),
     };
     (
         position,
@@ -308,8 +323,8 @@ mod tests {
     #[test]
     fn default_capture_contains_setup_and_exactly_one_motion_loop() {
         assert_eq!(MOTION_START_SECONDS, 13.0);
-        assert_eq!(LOOP_SECONDS, 30.0);
-        assert_eq!(DEFAULT_REPORT_COUNT, 43 * 240);
+        assert_eq!(LOOP_SECONDS, 36.0);
+        assert_eq!(DEFAULT_REPORT_COUNT, 49 * 240);
     }
 
     #[test]
@@ -430,11 +445,16 @@ mod tests {
     }
 
     #[test]
-    fn attitude_actions_encode_three_centimetre_tip_displacement() {
+    fn attitude_actions_encode_requested_tip_displacements() {
         let expected = (HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
         let displacement = expected.sin() * CONTROLLER_HEAD_TO_TAIL_METERS;
         assert!((displacement - HEAD_DISPLACEMENT_METERS).abs() < 2.0e-4);
         assert!((expected.to_degrees() - 8.415).abs() < 0.001);
+
+        let expected_turn = (TURN_HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
+        let turn_displacement = expected_turn.sin() * CONTROLLER_HEAD_TO_TAIL_METERS;
+        assert!((turn_displacement - TURN_HEAD_DISPLACEMENT_METERS).abs() < 2.0e-4);
+        assert!((expected_turn.to_degrees() - 14.117).abs() < 0.001);
     }
 
     #[test]
@@ -444,9 +464,13 @@ mod tests {
         let start = Instant::now();
         let head_up_peak = MOTION_START_SECONDS + 7.0 * ACTION_SECONDS - 0.01;
         let right_tilt_peak = MOTION_START_SECONDS + 9.0 * ACTION_SECONDS - 0.01;
+        let left_turn_peak = MOTION_START_SECONDS + 11.0 * ACTION_SECONDS - 0.01;
+        let right_turn_end = MOTION_START_SECONDS + 12.0 * ACTION_SECONDS - 0.01;
         let mut head_up = None;
         let mut right_tilt = None;
-        while right_tilt.is_none() {
+        let mut left_turn = None;
+        let mut right_turn = None;
+        while right_turn.is_none() {
             let sample = generator.next_sample();
             if sample.frame.controller_id != 0 {
                 continue;
@@ -461,9 +485,17 @@ mod tests {
             if (sample.elapsed_seconds - right_tilt_peak).abs() < REPORT_PERIOD_SECONDS {
                 right_tilt = Some(orientation);
             }
+            if (sample.elapsed_seconds - left_turn_peak).abs() < REPORT_PERIOD_SECONDS {
+                left_turn = Some(orientation);
+            }
+            if (sample.elapsed_seconds - right_turn_end).abs() < REPORT_PERIOD_SECONDS {
+                right_turn = Some(orientation);
+            }
         }
         let head_up = head_up.expect("missing head-up peak");
         let right_tilt = right_tilt.expect("missing right-tilt peak");
+        let left_turn = left_turn.expect("missing left-turn peak");
+        let right_turn = right_turn.expect("missing right-turn endpoint");
         assert!(
             head_up[0] < -0.04,
             "unexpected head-up quaternion: {head_up:?}"
@@ -472,7 +504,17 @@ mod tests {
             right_tilt[1] < -0.04,
             "unexpected right-tilt quaternion: {right_tilt:?}"
         );
-        for orientation in [head_up, right_tilt] {
+        let expected_turn_z =
+            (0.5 * (TURN_HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin()).sin();
+        assert!(
+            (left_turn[2] - expected_turn_z as f32).abs() < 0.01,
+            "unexpected left-turn quaternion: {left_turn:?}"
+        );
+        assert!(
+            right_turn[2].abs() < 0.01,
+            "right turn did not return to neutral: {right_turn:?}"
+        );
+        for orientation in [head_up, right_tilt, left_turn, right_turn] {
             let norm_squared: f32 = orientation.into_iter().map(|value| value * value).sum();
             assert!((norm_squared - 1.0).abs() < 1.0e-3);
         }

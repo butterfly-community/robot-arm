@@ -71,7 +71,7 @@ fn parse_config() -> Result<Config> {
             println!(
                 "Usage: nolo-cv1-simulator [--output=PATH|-] [--reports=COUNT] [--realtime]\n\
                  Writes concatenated encrypted 64-byte NOLO CV1 HID reports.\n\
-                 Default: one 43-second calibration/motion pass ({} reports) to stdout.",
+                 Default: one 49-second calibration/motion pass ({} reports) to stdout.",
                 DEFAULT_REPORT_COUNT
             );
             std::process::exit(0);

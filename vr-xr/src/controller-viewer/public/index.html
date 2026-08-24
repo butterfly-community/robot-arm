@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>NOLO CV1 位姿查看器</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=20260824-21" />
   </head>
   <body>
     <main>
@@ -219,6 +219,15 @@
         </section>
       </details>
     </main>
-    <script type="module" src="/app.js?v=20260824-16"></script>
+    <dialog id="moveit-restart-dialog" class="restart-dialog">
+      <form method="dialog">
+        <p class="kicker">手工重启 MoveIt</p>
+        <h2>在服务器终端运行</h2>
+        <pre><code>docker restart stararm102-moveit-simulation</code></pre>
+        <p>命令执行完成后，点击“已完成”。机械臂仿真会从零位重新启动。</p>
+        <button class="diagnostic-action" value="confirm">已完成</button>
+      </form>
+    </dialog>
+    <script type="module" src="/app.js?v=20260824-21"></script>
   </body>
 </html>

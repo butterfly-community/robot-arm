@@ -442,7 +442,7 @@ async fn stop_simulation(State(state): State<AppState>) -> (StatusCode, Json<ser
     (
         StatusCode::ACCEPTED,
         Json(json!({
-            "status": "queued",
+            "status": "stopped",
             "simulation_requested": false
         })),
     )
@@ -1572,12 +1572,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_simulation_only_disables_the_virtual_source() {
+    async fn stop_simulation_only_stops_virtual_input() {
         let state = AppState::new();
         state.request_simulation(true);
-        let (_, Json(response)) = stop_simulation(State(state.clone())).await;
+        let (status, Json(response)) = stop_simulation(State(state.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
         assert!(!state.simulation_requested());
         assert_eq!(response["simulation_requested"], false);
+        assert_eq!(response["status"], "stopped");
     }
 
     #[tokio::test]

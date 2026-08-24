@@ -93,6 +93,16 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
     }
   }
   if (
+    !html.includes('id="moveit-restart-dialog"') ||
+    !html.includes("docker restart stararm102-moveit-simulation") ||
+    !app.includes('$("moveit-restart-dialog").showModal()')
+  ) {
+    throw new Error("stopping simulation does not show the manual MoveIt step");
+  }
+  if (!app.includes("button.disabled = false")) {
+    throw new Error("viewer does not restore the simulation control");
+  }
+  if (
     !app.includes("resetForAutomaticSimulationCalibration") ||
     !app.includes("先预抬升 20 厘米，再开始循环")
   ) {
@@ -105,6 +115,14 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
   ) {
     throw new Error(
       "virtual source transitions can leave the simulator button stale",
+    );
+  }
+  const virtualPhaseBranch = app.match(
+    /if \(\s*\(simulationRequested \|\| simulationActive\)[\s\S]*?startsWith\("NOLO 虚拟 USB："\)[\s\S]*?return;\s*\}/,
+  )?.[0];
+  if (!virtualPhaseBranch || virtualPhaseBranch.includes('$("connection")')) {
+    throw new Error(
+      "normal virtual phase changes still flash as connection failures",
     );
   }
 });

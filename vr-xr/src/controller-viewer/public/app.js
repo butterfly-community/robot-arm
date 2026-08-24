@@ -603,9 +603,18 @@ $("simulation-toggle").addEventListener("click", async () => {
       start ? "/api/simulation/start" : "/api/simulation/stop",
       { method: "POST" },
     );
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(
+        payload.error ?? payload.status ?? `HTTP ${response.status}`,
+      );
+    }
     setSimulationState(start, false);
-    if (start) resetForAutomaticSimulationCalibration();
+    if (start) {
+      resetForAutomaticSimulationCalibration();
+    } else {
+      $("moveit-restart-dialog").showModal();
+    }
     await refreshSimulationState();
   } catch (error) {
     $("connection").textContent = `模拟切换失败：${error.message}`;
@@ -621,6 +630,16 @@ void refreshSimulationState();
 const source = new EventSource("/events");
 source.addEventListener("status", (event) => {
   const { status } = JSON.parse(event.data);
+  if (
+    (simulationRequested || simulationActive) &&
+    String(status).startsWith("NOLO 虚拟 USB：")
+  ) {
+    // Phase changes are normal virtual samples, not connection failures.  The
+    // next pose arrives within one report period.  Do not touch the badge at
+    // all: even a brief phase label changes its width and reflows the embedded
+    // dashboard at every three-second action edge.
+    return;
+  }
   if (!latest || status !== "原始 USB 数据已连接") {
     $("connection").textContent = status;
     $("connection").classList.add("waiting");

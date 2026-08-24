@@ -40,8 +40,9 @@ arm/ros2/run-moveit-simulation.sh
 ```
 
 第二条命令使用官方 `moveit/moveit2:jazzy-release` 镜像，在容器临时目录中构建三个 ROS
-包，然后以前台方式运行。`Ctrl+C` 只停止 MoveIt 仿真容器。若厂家源码不在默认目录，
-可设置任务专用环境变量 `STAR_ARM_102_SOURCE=/绝对路径`。
+包，然后以前台方式运行。`Ctrl+C` 停止整个 MoveIt 仿真容器。若厂家源码不在默认目录，
+可设置任务专用环境变量
+`STAR_ARM_102_SOURCE=/绝对路径`。
 
 网页仍访问 `http://192.168.100.10:8765/arm-simulator/`。只有 IPC 连接、Servo 状态和
 `/joint_states` 反馈均有效时，Rust 才把仿真状态标记为可用；IPC 断开或反馈超过 100 ms
@@ -51,9 +52,15 @@ arm/ros2/run-moveit-simulation.sh
 IPC schema v2 的每份反馈同时包含 `/joint_states` 和 TF2 的 `base_link -> tool0`。当前
 TCP 及新的 Squeeze 接管原点完全采用该 TF2 位姿；Rust 不维护 URDF 关节链或 FK。
 
-ROS 仿真进程启动时，`GenericSystem` 按厂家模型将 J1–J7 初始化为全零。网页启动或停止
-虚拟 NOLO 只切换输入源，不发送关节回零轨迹，也不暂停或恢复 Servo；停止后模型保持
-当时位置。需要重新从零位测试时，重新启动整个 ROS 仿真进程。
+ROS 仿真进程启动时，`GenericSystem` 按厂家模型将 J1–J7 初始化为全零。网页停止虚拟
+NOLO 后不会发送关节回零轨迹；页面会提示在另一终端执行：
+
+```bash
+docker restart stararm102-moveit-simulation
+```
+
+命令完成后在弹框中点击“已完成”。重启后的 `GenericSystem` 从全零状态启动。此手工步骤
+只适用于当前仿真，不属于未来真机停止策略。
 
 平移比例在 Rust 的版本化设备配置中固定为 `0.2`：手柄移动 5 cm，目标 TCP 移动
 1 cm。ROS 桥不再做第二次缩放；姿态旋转角度保持 1:1，由 Servo 的角速度限制约束。
