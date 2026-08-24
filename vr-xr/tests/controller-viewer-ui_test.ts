@@ -64,11 +64,20 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
       "viewer still treats compatibility flags as tracking flags",
     );
   }
+  if (!app.includes("frame.filtered_position")) {
+    throw new Error("viewer does not expose the filtered position diagnostic");
+  }
   if (!app.includes("/api/pose-calibration/${sourceId}")) {
-    throw new Error("pose calibration does not restart Fusion");
+    throw new Error("first pose calibration cannot request a missing bias");
   }
   if (!app.includes("FUSION_CALIBRATION_DELAY_MS = 1000")) {
     throw new Error("pose calibration does not ignore the first second");
+  }
+  if (
+    !app.includes("latest?.gyro_calibration_complete === true") ||
+    !app.includes('originFusionCalibrationStatus = "accepted"')
+  ) {
+    throw new Error("saved gyroscope bias does not skip repeated calibration");
   }
   if (!app.includes("cancelCalibrationHold();")) {
     throw new Error("source changes do not cancel stale calibration holds");

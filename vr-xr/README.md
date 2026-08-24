@@ -11,13 +11,32 @@ OpenHMD/Monado 链路已经
 | 示教设备       | 最终示教仍选一只手柄；查看器可切换两只手柄和头部 |
 | 默认数据链路   | Rust `nolo-usb-server` 直接独占读取 USB/HID      |
 | 姿态算法       | Rust `fusion-ahrs`，分别融合各设备的陀螺仪和加速度计 |
-| 空间位置       | 使用 NOLO 基站给出的设备位置                     |
+| 空间位置       | 保留 NOLO 原始位置，并发布独立 One Euro 滤波位置 |
 | Head Marker    | 发布位置和约 240 Hz IMU 融合姿态，同时承担 USB 中继 |
 | Controller 1   | 与 Controller 0 一样发布；网页按钮切换观察       |
+| 示教意图       | Controller 0 Squeeze 接管；Trigger 控制夹爪       |
 | OpenHMD/Monado | 历史参考；不属于当前方案，不再维护或兼容         |
 
 当前链路不经过 OpenHMD、Monado 或 OpenXR。历史目录中的旧实现不是当前运行时依赖，
 也不进入当前测试与验收。
+
+Controller 0 的采集帧还会在同一 Rust 进程内生成 `idle` / `active` / `faulted` 相对示教
+意图。右侧 Squeeze 键每次新按下都建立新的位置和姿态原点，松开即停止；活动期间
+Trigger 只控制夹爪开合，不再负责接管。断流、休眠或标定也会停止输出，故障恢复后
+不会自动重新使能。独立 100 Hz IPC 会把目标 TCP 交给 ROS 2 MoveIt Servo；厂家
+`GenericSystem` 的关节反馈再返回 Rust，形成网页仿真快照。运行时不再使用自写 IK，
+也没有串口或电机写入能力。详情见
+[后端说明](docs/NOLO-USB-SERVER.md#star-arm-102-fl-仿真输出)和
+[机械臂接入说明](../arm/docs/STAR-ARM-102-FL-INTEGRATION.md)。
+仿真遇到工作空间、奇异、碰撞或关节边界时会显示 MoveIt 状态并继续处理后续目标；
+只有采集/输入故障、IPC 断开或关节反馈失效才进入故障状态。
+
+同一服务还提供独立的 Star Arm 102-FL 只读仿真页：
+`http://<服务地址>:8765/arm-simulator/`。它根据厂家 URDF 建立关节层级、加载厂家 STL，
+并轮询 `/api/status.latestArmSimulation` 驱动 J1–J6。现有 `/` 手柄查看器没有加载该
+页面的脚本或模型；仿真页也没有串口、执行或参数写入接口。仿真页的 J1–J7 可以拖动
+进行纯浏览器模型调整，并会显示一行完整模型角。现场已确认 J1–J7 全部 `0°` 是唯一
+默认姿态，同时也是示教启动姿态；系统不会先切换到另一套展开姿态。
 
 ## 已确认状态与边界
 
@@ -30,8 +49,10 @@ OpenHMD/Monado 链路已经
   [协议说明](docs/NOLO-CV1-PROTOCOL.md)。
 - Controller 0 的前后、左右、上下空间关系和自身三轴姿态已经完成实机定性验收；
   快速旋转停止后的姿态表现正常。
-- 远程网页的设备切换、空间视图和一次 Menu 长按 6 秒完整标定已经实机通过；第一秒
-  摆稳、Fusion 初始化、零偏采集、原点和零姿态记录均按预期工作。
+- 远程网页的设备切换、空间视图和一次 Menu 长按 6 秒标定已经实机通过；首次完成的
+  陀螺仪零偏按设备写入文件，后续长按只更新原点、零姿态和人体前方。
+- 厂家 ROS 模型包已在官方 MoveIt Jazzy 容器构建；`GenericSystem`、KDL、碰撞监视、
+  控制器和 Servo Pose 模式已启动验证，Rust↔ROS IPC 的端到端反馈正常。
 
 尚未确认或尚未放行：
 
@@ -45,8 +66,8 @@ OpenHMD/Monado 链路已经
 - 当前协议没有已确认的磁力计或绝对旋转观测。重力只能修正俯仰和侧倾，yaw
   仍可能漂移。
 - 人体坐标标定不是机械臂基坐标外参。
-- 真实通电机械臂尚未放行。外参、使能、超时、跟踪失效、跳变、限速、工作空间和急停
-  保护均未完成，详见 [TODO](docs/TODO.md)。
+- 真实通电机械臂尚未放行。MoveIt 仿真已完成，但真实 `ros2_control`/驱动输出端、外参、
+  反馈冻结、使能和急停验收均未完成，详见 [TODO](docs/TODO.md)。
 
 ## 启动默认网页
 
@@ -70,13 +91,20 @@ cargo build --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml
 本机打开 `http://127.0.0.1:8765/`。远程访问时把 `127.0.0.1` 换成机器的具体、
 受信任局域网地址。服务没有认证，不要直接绑定 `0.0.0.0` 或暴露到不受信任网络。
 
+- 手柄查看器：`http://127.0.0.1:8765/`
+- 机械臂只读仿真：先按 [`../arm/ros2/README.md`](../arm/ros2/README.md) 启动 MoveIt，
+  再访问 `http://127.0.0.1:8765/arm-simulator/`
+- 手柄与机械臂并排测试：`http://127.0.0.1:8765/test-dashboard/`
+
 后端参数、接口和协议诊断工具见
 [Rust 后端说明](docs/NOLO-USB-SERVER.md)。
 
 默认 `position` 是原始光学标记位置。历史 SDK 推导的实验性握持点会同时输出为
 `grip_position`，但在完成实机符号验证前不要使用
-`--controller-position=grip`。网页诊断区可以在设备平放时执行连续静止 3 秒的
-显式陀螺仪零偏标定。
+`--controller-position=grip`。两只手柄还输出独立的 `filtered_position`：它使用固定
+版本的官方 `casiez/OneEuroFilter` Rust 实现及上游参考参数，只平滑位置，不重复处理
+Fusion 姿态。网页诊断区会并列显示两者，也可以在设备平放时执行连续静止 3 秒的显式
+陀螺仪零偏重新标定。
 
 ## 网页标定
 
@@ -86,8 +114,9 @@ cargo build --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml
 
 1. 人正对基站，手柄距基站至少 50 cm。
 2. 触摸板朝上，手柄头部水平指向基站，尾部朝向胸口。
-3. 保持静止并连续按住 Menu 6 秒；第一秒用于按键后摆稳，从第二秒开始并行完成
-   Fusion 初始化和陀螺仪零偏标定，页面使用最后约 1.2 秒有效样本记录原点和零姿态。
+3. 保持静止并连续按住 Menu 6 秒；页面使用最后约 1.2 秒有效样本记录原点和零姿态。
+   若当前设备尚无持久化零偏，首次长按会同时完成一次零偏标定并写入文件；有记录时
+   直接复用，不重启 Fusion，也不重新采集零偏。
 4. 页面把“标定位置指向基站原点”的水平向量定义为人体前方。
 
 位置输出采用人体坐标：右 `+X`、上 `+Y`、前 `-Z`。姿态输出是相对标定姿态，
@@ -118,7 +147,7 @@ HMD 中继可能重复旧负载。每次协议抓包、位姿验收或示教采�
 
 ## 目录
 
-- [`src/`](src/)：运行代码；包含 Rust USB 后端和共用网页。
+- [`src/`](src/)：运行代码；包含 Rust USB/IPC 后端和共用网页。
 - [`tests/`](tests/)：当前主线测试，不放生产代码或历史兼容测试。
 - [`docs/`](docs/)：TODO、验证记录、协议和运行维护说明。
 - [`reference/`](reference/)：已冻结的历史实现；不进入当前构建和维护。
@@ -128,7 +157,8 @@ HMD 中继可能重复旧负载。每次协议抓包、位姿验收或示教采�
 ```bash
 deno test --allow-read=vr-xr/src/controller-viewer/public \
   vr-xr/tests/controller-viewer-math_test.ts \
-  vr-xr/tests/controller-viewer-ui_test.ts
+  vr-xr/tests/controller-viewer-ui_test.ts \
+  vr-xr/tests/arm-simulator-ui_test.ts
 
 cargo test --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml
 cargo clippy --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml -- -D warnings

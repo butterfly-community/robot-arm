@@ -1,0 +1,2 @@
+# Same motor bus selected by the reviewed Stararm102FL upstream plugin.
+lerobot_motor_starai>=0.0.6

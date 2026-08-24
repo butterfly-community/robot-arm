@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "profile_id": "stararm102-fl-v1",
+  "hardware_variant": "Star Arm 102-FL",
+  "model_id": "stararm102-fl-sim-v1",
+  "simulation_only": true,
+  "transport": {
+    "backend": "lerobot_motor_starai",
+    "minimum_backend_version": "0.0.6",
+    "baudrate": 1000000,
+    "stable_device": null,
+    "feedback_register": "Present_Position",
+    "feedback_unit": "degrees"
+  },
+  "joints": [
+    { "name": "shoulder_pan",  "servo_id": 0, "servo_model": "RA8-U35H-M",      "direction": -1.0, "lower_deg": -110.0, "upper_deg": 110.0, "zero_offset_deg": null, "firmware": null },
+    { "name": "shoulder_lift", "servo_id": 1, "servo_model": "RX8-U50H-M",      "direction": -1.0, "lower_deg": -180.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null },
+    { "name": "elbow_flex",   "servo_id": 2, "servo_model": "RX8-U50H-M",      "direction": 1.0,  "lower_deg": -270.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_flex",   "servo_id": 3, "servo_model": "RA8-U35H-M",      "direction": 1.0,  "lower_deg": -90.0,  "upper_deg": 90.0,  "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_yaw",    "servo_id": 4, "servo_model": "RA8-U27H-M-C005", "direction": 1.0,  "lower_deg": -65.0,  "upper_deg": 65.0,  "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_roll",   "servo_id": 5, "servo_model": "RA8-U35H-M-C047", "direction": -1.0, "lower_deg": -150.0, "upper_deg": 150.0, "zero_offset_deg": null, "firmware": null },
+    { "name": "gripper",      "servo_id": 6, "servo_model": "RA8-U35H-M",      "direction": -6.0, "lower_deg": -270.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null }
+  ],
+  "kinematics": {
+    "base_link": "base_link",
+    "tcp_link": "tool0",
+    "geometry_source": "Star-Arm-102 legacy ROS2 chain; retained only as a versioned simulation candidate",
+    "joint_origins": [
+      { "xyz_m": [0.0, 0.0, 0.02835],       "rpy_rad": [0.0, 0.0, 0.0],                  "axis": [0.0, 0.0, -1.0] },
+      { "xyz_m": [0.0001, 0.0, 0.062025],   "rpy_rad": [-1.5707963268, 0.0, 3.1415926536], "axis": [0.0, 0.0, -1.0] },
+      { "xyz_m": [0.1205653062, -0.0101, 0.026], "rpy_rad": [0.0, 0.0, -1.5707963268], "axis": [0.0, 0.0, -1.0] },
+      { "xyz_m": [0.0162194771, -0.1076040562, -0.026], "rpy_rad": [0.0, 0.0, -1.5707963268], "axis": [0.0, 0.0, -1.0] },
+      { "xyz_m": [0.035, -0.00138, 0.0],    "rpy_rad": [-1.5707963268, 0.0, 0.0],       "axis": [0.0, 0.0, -1.0] },
+      { "xyz_m": [0.15168, 0.0, 0.005225],  "rpy_rad": [-1.5708, 0.0, -1.5708],          "axis": [0.0, 0.0, -1.0] }
+    ],
+    "tcp_origin": {
+      "xyz_m": [0.012325, 0.0, -0.07313],
+      "rpy_rad": [1.5708, -1.5708, 0.0]
+    },
+    "nominal_joints_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  },
+  "teleoperation": {
+    "translation_scale": 1.0,
+    "robot_from_nolo_position_axes": [
+      [0.0, 0.0, -1.0],
+      [-1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0]
+    ],
+    "robot_from_controller_orientation_axes": [
+      [0.0, -1.0, 0.0],
+      [1.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0]
+    ],
+    "workspace_radius_m": [0.08, 0.42],
+    "workspace_z_m": [-0.10, 0.50],
+    "max_joint_speed_rad_s": 1.0,
+    "max_joint_acceleration_rad_s2": 3.0
+  }
+}

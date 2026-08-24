@@ -111,15 +111,23 @@ position_m = raw_i16 × 0.0001
 
 ```text
 acceleration_g = raw / 1024
-angular_velocity_rad_s = raw × 0.001
+angular_velocity_deg_s = raw × (2000 / 32768)
+angular_velocity_rad_s = angular_velocity_deg_s × (π / 180)
 ```
 
 HMD IMU：
 
 ```text
 acceleration_g = raw / 16384
-angular_velocity_rad_s = raw × 0.001
+angular_velocity_deg_s = raw × (2000 / 32768)
+angular_velocity_rad_s = angular_velocity_deg_s × (π / 180)
 ```
+
+陀螺仪比例采用 `nolo-teleop` 的 signed `i16`、±2000 °/s 量程解释，即
+`0.06103515625 °/s/count`（约 `0.0010652644 rad/s/count`）。这是当前主链路的
+工作换算，不是 NOLO 公开协议给出的设备规格。项目没有转台或可靠角度参考，因此接受
+该第三方实现数据，不再安排本地角速度尺度验证。冻结的 OpenHMD 历史补丁使用近似值
+`0.001 rad/s/count`，当前 Rust 后端不再沿用。
 
 当前实机验证后的控制器轴变换：
 
@@ -312,6 +320,10 @@ report[59]：HMD/USB 中继采样序号
 valid/tracked 结论；`optical_tracking_valid` 在协议确认前固定为 `null`。旧
 `flags` 仅为结构兼容保留并固定为零。手柄帧的 `sample_sequence` 取
 `report[24]`，头部帧取 `report[59]`。
+
+Rust API 的 `filtered_position` 是后端对 `report[1..=6]` 换算结果执行 One Euro
+滤波得到的派生量，不对应 HID 报告中的额外字段。协议层的 `position` 和
+`marker_position` 始终保留上述原始换算值。
 
 ## 未知字段处理原则
 

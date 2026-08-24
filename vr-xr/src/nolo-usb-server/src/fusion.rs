@@ -8,7 +8,9 @@ use crate::protocol::RawFrame;
 
 const CONTROLLER_SAMPLE_RATE_HZ: f32 = 120.0;
 const HMD_SAMPLE_RATE_HZ: f32 = 240.0;
-const GYRO_RADIANS_PER_SECOND_PER_COUNT: f32 = 0.001;
+// NOLO reports a signed i16 over a +/-2000 degrees/second range.  Keep the
+// source unit because fusion-ahrs consumes gyroscope values in degrees/second.
+const GYRO_DEGREES_PER_SECOND_PER_COUNT: f32 = 2000.0 / 32768.0;
 const ACCEL_COUNTS_PER_G: f32 = 1024.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +54,26 @@ impl ManualGyroCalibration {
         self.complete = false;
         self.accepted_samples = 0;
         self.sum = Vector3::zeros();
+    }
+
+    fn load_bias(&mut self, bias: [f32; 3]) -> bool {
+        let threshold = OffsetSettings::default().threshold;
+        if bias
+            .into_iter()
+            .any(|value| !value.is_finite() || value.abs() > threshold)
+        {
+            return false;
+        }
+        self.active = false;
+        self.complete = true;
+        self.accepted_samples = self.required_samples;
+        self.sum = Vector3::zeros();
+        self.bias = Vector3::from(bias);
+        true
+    }
+
+    fn completed_bias(&self) -> Option<[f32; 3]> {
+        self.complete.then(|| self.bias.into())
     }
 
     fn correct(&mut self, gyroscope: Vector3<f32>) -> Vector3<f32> {
@@ -117,13 +139,13 @@ impl ImuFusion {
             .filter(|delta| *delta > 0.0 && *delta < 0.1)
             .unwrap_or(1.0 / self.sample_rate_hz);
 
-        // This mirrors the axis reflection and scale that were verified on the
-        // physical Controller 0 during the earlier controlled hardware tests.
+        // The axis reflection was verified on the physical Controller 0.  The
+        // scale follows nolo-teleop's +/-2000 degrees/second interpretation.
         let gyro = Vector3::new(
             -f32::from(gyroscope[0]),
             -f32::from(gyroscope[1]),
             f32::from(gyroscope[2]),
-        ) * GYRO_RADIANS_PER_SECOND_PER_COUNT.to_degrees();
+        ) * GYRO_DEGREES_PER_SECOND_PER_COUNT;
         let accelerometer = Vector3::new(
             f32::from(accelerometer[0]),
             f32::from(accelerometer[1]),
@@ -145,9 +167,19 @@ impl ImuFusion {
     }
 
     fn start_pose_calibration(&mut self) {
-        self.start_gyro_calibration();
-        self.ahrs.initialise();
-        self.previous_update = None;
+        if !self.manual_calibration.complete {
+            self.start_gyro_calibration();
+            self.ahrs.initialise();
+            self.previous_update = None;
+        }
+    }
+
+    fn load_gyro_bias(&mut self, bias: [f32; 3]) -> bool {
+        self.manual_calibration.load_bias(bias)
+    }
+
+    fn completed_gyro_bias(&self) -> Option<[f32; 3]> {
+        self.manual_calibration.completed_bias()
     }
 
     fn diagnostics(&self) -> FusionDiagnostics {
@@ -190,6 +222,14 @@ impl ControllerFusion {
         self.0.start_pose_calibration();
     }
 
+    pub fn load_gyro_bias(&mut self, bias: [f32; 3]) -> bool {
+        self.0.load_gyro_bias(bias)
+    }
+
+    pub fn completed_gyro_bias(&self) -> Option<[f32; 3]> {
+        self.0.completed_gyro_bias()
+    }
+
     pub fn diagnostics(&self) -> FusionDiagnostics {
         self.0.diagnostics()
     }
@@ -214,6 +254,14 @@ impl HmdFusion {
 
     pub fn start_pose_calibration(&mut self) {
         self.0.start_pose_calibration();
+    }
+
+    pub fn load_gyro_bias(&mut self, bias: [f32; 3]) -> bool {
+        self.0.load_gyro_bias(bias)
+    }
+
+    pub fn completed_gyro_bias(&self) -> Option<[f32; 3]> {
+        self.0.completed_gyro_bias()
     }
 
     pub fn diagnostics(&self) -> FusionDiagnostics {
@@ -425,15 +473,14 @@ mod tests {
         assert!(!diagnostics.gyro_calibration_active);
         assert!(diagnostics.gyro_calibration_complete);
         assert_eq!(diagnostics.gyro_calibration_progress, 1.0);
-        let expected =
-            [-10.0, 20.0, 5.0].map(|value| value * GYRO_RADIANS_PER_SECOND_PER_COUNT.to_degrees());
+        let expected = [-10.0, 20.0, 5.0].map(|value| value * GYRO_DEGREES_PER_SECOND_PER_COUNT);
         for (actual, expected) in diagnostics.gyro_bias_dps.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3);
         }
     }
 
     #[test]
-    fn pose_calibration_restarts_fusion_initialisation_and_bias_collection() {
+    fn first_pose_calibration_collects_bias_but_later_requests_reuse_it() {
         let frame = RawFrame {
             controller_id: 0,
             position: [0.0; 3],
@@ -484,5 +531,26 @@ mod tests {
         assert!(!completed.initialising);
         assert!(!completed.gyro_calibration_active);
         assert!(completed.gyro_calibration_complete);
+
+        let saved_bias = fusion.completed_gyro_bias().unwrap();
+        fusion.start_pose_calibration();
+        let reused = fusion.diagnostics();
+        assert!(!reused.initialising);
+        assert!(!reused.gyro_calibration_active);
+        assert!(reused.gyro_calibration_complete);
+        assert_eq!(fusion.completed_gyro_bias(), Some(saved_bias));
+    }
+
+    #[test]
+    fn loaded_bias_skips_pose_calibration() {
+        let mut fusion = ControllerFusion::new();
+        let saved = [0.1, -0.2, 0.3];
+        assert!(fusion.load_gyro_bias(saved));
+        fusion.start_pose_calibration();
+
+        let diagnostics = fusion.diagnostics();
+        assert!(diagnostics.gyro_calibration_complete);
+        assert!(!diagnostics.gyro_calibration_active);
+        assert_eq!(fusion.completed_gyro_bias(), Some(saved));
     }
 }

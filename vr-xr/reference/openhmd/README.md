@@ -34,8 +34,9 @@ RUNPATH 加载独立目录中的 `libopenhmd.so.0`。
 补丁相对固定基线修改 8 个文件，增加 374 行、删除 41 行：
 
 - 修正新版 NOLO Controller/Head Marker 的 gyro、accel 字段语义。
-- 使用实机确认的 Controller `1024 counts/g`、Head Marker `16384 counts/g`、
-  陀螺仪 `0.001 rad/s/count` 和真实秒时间步。
+- 使用 Controller `1024 counts/g`、Head Marker `16384 counts/g`、真实秒时间步，以及
+  当时采用但未完成定量确认的陀螺仪近似值 `0.001 rad/s/count`。当前 Rust 主链路已经
+  改用 `nolo-teleop` 的 ±2000 °/s 量程解释；本补丁仅作为历史记录保留。
 - 增加 `nolo_fusion.c/.h`，接入固定版本 xioTechnologies Fusion AHRS/Bias。
 - 修正镜像坐标下角速度轴向量所需的符号关系。
 - 为 CMake 增加外部 Fusion 源码路径，并把 Fusion C 源码编入 OpenHMD 共享库。

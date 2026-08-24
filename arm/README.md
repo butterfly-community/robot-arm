@@ -1,0 +1,33 @@
+# 机械臂本体
+
+本目录保存机械臂本体的当前资料、后续驱动与测试。VR/XR 手柄采集仍独立维护在
+[`../vr-xr/`](../vr-xr/)。
+
+当前实物是可独立执行命令的 Star Arm 102-FL 新品从臂。上游资料提炼和接入边界见
+[Star Arm 102-FL 新品关键参数](docs/STAR-ARM-102-FL.md)。
+
+当前代码分为三条严格隔离的链路：
+
+- [`tools/stararm102_fl_readonly_probe.py`](tools/stararm102_fl_readonly_probe.py)：只执行
+  ID 0–6 `ping` 和 `Present_Position` 读取，关闭时不释放力矩。
+- [`src/stararm102-control/`](src/stararm102-control/)：完全不包含串口或电机写入的 Rust
+  坐标映射、MoveIt IPC 契约和仿真反馈状态库；运行时不再执行自写 IK。
+- [`ros2/`](ros2/)：复用厂家模型、`ros2_control` 和官方 MoveIt Servo 的容器化仿真
+  后端；当前只加载 `GenericSystem`，真实 102-FL 后端明确保留为 TODO。
+
+只读三维显示位于
+[`../vr-xr/src/controller-viewer/public/arm-simulator/`](../vr-xr/src/controller-viewer/public/arm-simulator/)；
+它加载厂家 URDF/STL，并只读取 Rust 仿真快照，不连接机械臂总线。服务启动后访问
+`http://<服务地址>:8765/arm-simulator/`。
+
+版本化设备配置、候选 URDF、坐标映射和 Servo 边界见
+[Star Arm 102-FL 接入与仿真](docs/STAR-ARM-102-FL-INTEGRATION.md)。
+方案比较和 MoveIt Servo 接口边界见
+[IK 与实时笛卡尔伺服选型](docs/IK-SELECTION.md)。
+
+运行离线测试：
+
+```bash
+cargo test --all-targets --manifest-path arm/src/stararm102-control/Cargo.toml
+python3 -m unittest discover -s arm/tests -v
+```

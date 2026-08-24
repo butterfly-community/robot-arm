@@ -385,7 +385,7 @@ function completeOrigin() {
   } / 前 ${fmt(baseFrame.forward, 3)}`;
   setCalibrationMessage(
     "标定完成",
-    "Fusion 初始化和陀螺仪零偏标定已完成；已将朝向基站定义为前方，并记录原点和零姿态。现在可以松开菜单键。",
+    "已将朝向基站定义为前方，并记录原点和零姿态；已有陀螺仪零偏继续复用。现在可以松开菜单键。",
   );
   $("calibration-state").textContent = "已完成（正对基站）";
   updateRelative(latest);
@@ -403,6 +403,11 @@ function updateFrame(frame, processMenu = true) {
     Number(frame.flags).toString(16).padStart(2, "0")
   }（仅兼容保留）`;
   $("raw-position").textContent = fmt(frame.position);
+  $("filtered-position").textContent = Array.isArray(frame.filtered_position)
+    ? fmt(frame.filtered_position)
+    : isHead
+    ? "头部不适用"
+    : "等待新的有效位置样本";
   $("position-mode").textContent = frame.position_mode === "grip"
     ? "估算握持点（实验）"
     : "原始光学标记";
@@ -514,7 +519,9 @@ function updateFrame(frame, processMenu = true) {
       viewStates[selectedSource].originFusionCalibrationStatus = "waiting";
       setCalibrationMessage(
         positionFrame ? "继续按住 6 秒可重新标定" : "保持标定姿势并继续按住",
-        "第一秒用于按键后摆稳；进入第二秒才启动 Fusion 初始化和陀螺仪零偏标定，最后约 1.2 秒记录原点和零姿态。",
+        latest.gyro_calibration_complete
+          ? "陀螺仪零偏已从文件加载或此前完成，本次只重新记录原点和零姿态。"
+          : "尚无零偏文件；第一秒用于摆稳，随后只在本次完成零偏并写入文件，最后约 1.2 秒记录原点和零姿态。",
       );
     } else if (!pressed && previousMenuPressed) {
       if (!menuWasLong) {
@@ -590,12 +597,20 @@ function animateHold(now) {
     held >= FUSION_CALIBRATION_DELAY_MS &&
     originFusionCalibrationStatus === "waiting"
   ) {
-    originFusionCalibrationStatus = "pending";
-    viewStates[selectedSource].originFusionCalibrationStatus = "pending";
-    void requestOriginFusionCalibration(
-      selectedSource,
-      originFusionCalibrationAttempt,
-    );
+    if (
+      latest?.gyro_calibration_complete === true &&
+      latest?.gyro_calibration_active !== true
+    ) {
+      originFusionCalibrationStatus = "accepted";
+      viewStates[selectedSource].originFusionCalibrationStatus = "accepted";
+    } else {
+      originFusionCalibrationStatus = "pending";
+      viewStates[selectedSource].originFusionCalibrationStatus = "pending";
+      void requestOriginFusionCalibration(
+        selectedSource,
+        originFusionCalibrationAttempt,
+      );
+    }
   }
   if (held >= HOLD_MS && !menuWasLong) completeOrigin();
   if (menuWasLong && latest?.menu_pressed) held = HOLD_MS;

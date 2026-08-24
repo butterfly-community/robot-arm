@@ -4,7 +4,8 @@
 `0483:5750` 和生产版 `28e9:028a`，不经过 OpenHMD、Monado 或 OpenXR。
 
 后端会解密 64 字节新版报告，把 Controller 0、Controller 1 和 Head Marker
-分别发布给网页，并为三者维护独立的 Rust `fusion-ahrs` 状态。
+分别发布给网页，并为三者维护独立的 Rust `fusion-ahrs` 状态。两只手柄还分别维护
+独立的三轴 One Euro 位置滤波状态。
 
 ## 能力与限制
 
@@ -14,6 +15,8 @@
 - 三个设备各自的 `[x, y, z, w]` 融合四元数；
 - Menu、Trigger、Home、Squeeze、Touchpad 按键和触摸板坐标；
 - 原始加速度计、陀螺仪和采样序号诊断数据。
+- Controller 0 的 Squeeze 相对示教接管和 Trigger 夹爪意图；它们只作为后续控制层输入，
+  不访问机械臂。
 
 后端只在对应设备采样序号发生变化时更新 Fusion 和发布新姿态。重复的旧负载不会再次
 积分；USB 完全静默超过 200 ms 时，所有已发布来源都会转为不可用。
@@ -45,9 +48,24 @@
 - `grip_position`：根据历史 NOLO SDK 旋转中心偏移
   `[0, -0.0045, 0.0755] m` 计算的实验性握持点位置。
 - `position`：当前主位置；默认等于 `marker_position`。
+- `filtered_position`：对当前 `position` 做 One Euro 滤波后的结果；手柄为三元素
+  数组，头部和离线状态为 `null`。
 
 `grip_position` 的旋转方向和符号仍需实机验证。默认设置不会改变现有空间位置；只有
 显式使用 `--controller-position=grip` 才会让 `position` 采用估算握持点。
+
+`position`、`marker_position` 和 `grip_position` 始终保留未平滑数据，便于协议诊断、
+回放和定量比较。One Euro 只处理位置，姿态已经由 Fusion AHRS 融合，不重复滤波。
+滤波器直接依赖官方
+[`casiez/OneEuroFilter`](https://github.com/casiez/OneEuroFilter) 的 Rust 实现，并固定
+到提交 `d78925584245597f2aa9c4c01a802eb0f0b77fb9`。默认采用其参考示例参数
+`min_cutoff=1.0 Hz`、`beta=0.1`、`d_cutoff=1.0 Hz`；名义采样率采用 NOLO 单手柄
+`120 Hz`。这些参数没有基于主观手感进行二次调优。
+
+USB 重连、设备序号停止、完整位姿标定、非有限输入或非递增时间戳都会清空对应手柄的滤波历史。
+下一段有效跟踪的第一帧直接穿透，以免旧位置在恢复后造成拖尾。网页只在诊断区并列
+显示原始和滤波位置；手柄空间渲染及页面标定仍使用原始 `position`。机械臂相对意图
+已经消费 `filtered_position`，同时保留原始位置供冻结、跳变和安全判据使用。
 
 姿态融合没有已确认的磁力计或绝对旋转观测，三路 yaw 都可能漂移。USB 端点总计
 约 240 包/秒：两个 Controller 报告各约 120 包/秒；HMD 字段和 `report[59]`
@@ -86,7 +104,18 @@ cargo build --release
 --port=PORT
 --static-dir=PATH
 --controller-position=marker|grip
+--gyro-calibration-file=PATH
+--position-filter-min-cutoff=HZ
+--position-filter-beta=VALUE
+--position-filter-derivative-cutoff=HZ
 ```
+
+三个位置滤波参数用于有测量依据时覆盖上游参考值：截止频率必须大于零，`beta` 必须
+非负，所有值必须有限。无可靠测量时保持默认值。
+
+零偏文件默认是 `vr-xr/state/gyro-bias-v1.json`，可用 `--gyro-calibration-file` 改写。
+文件按 Controller 0、Controller 1、Head Marker 三个来源分别保存；运行时文件由程序
+原子替换，`state/` 已忽略生成内容，不进入 Git。
 
 默认静态目录为相邻的
 `controller-viewer/public/`。服务没有登录认证；远程使用时只绑定
@@ -95,42 +124,128 @@ cargo build --release
 ## HTTP 接口
 
 - `/`：实时网页。
+- `/arm-simulator/`：独立的 Star Arm 102-FL 只读三维仿真页；不改变 `/` 查看器。
 - `/events`：`status` 和 `pose` Server-Sent Events。
 - `/api/status`：当前状态、最后收到的一帧 `latestFrame`，以及三个设备各自最新帧
-  `latestFrames`。
+  `latestFrames`；`latestTeleopIntent` 是 Controller 0 的最新相对示教意图，
+  `latestArmSimulation` 是 Star Arm 102-FL 最新仿真输出。
 - `POST /api/gyro-calibration/0|1|2`：开始对应设备的显式陀螺仪零偏标定。
-- `POST /api/pose-calibration/0|1|2`：重新初始化对应设备的 Fusion，同时开始陀螺仪
-  零偏标定；网页 6 秒标定流程会自动调用。
+- `POST /api/pose-calibration/0|1|2`：仅当该设备没有已加载或已完成的零偏时，初始化
+  Fusion 并开始首次零偏标定；已有零偏时为空操作。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `source_online` 对三种设备具有
 统一语义。网页的“手柄 1 / 手柄 2 / 头部”按钮只切换显示，不会停止其他设备采集。
 
+## Controller 0 相对示教意图
+
+后端在 USB 读取线程中直接把 Controller 0 新样本交给独立的 `TeleopIntent` 状态机，
+不经过网页 SSE。状态机输出保存在进程内 Tokio `watch` latest-value 通道中，同一时刻
+只保留最新值；`/api/status.latestTeleopIntent` 只是诊断快照，不是机械臂控制接口。
+
+状态语义：
+
+- `idle`：没有活动意图，等待观察到 Squeeze 松开后的新按下沿。
+- `active`：Squeeze 保持按下，输出相对位置、相对姿态和 Trigger 夹爪开合命令，
+  `enabled=true`。
+- `faulted`：采样、USB 或标定使当前意图失效。恢复后仍保持锁定；必须先松开 Squeeze，
+  再重新按下才能建立新原点。Trigger 不会解除故障或启动接管。
+
+接管时记录当前 `filtered_position` 和 Fusion 四元数。`relative_position` 是当前滤波位置
+减接管位置，仍处于 NOLO 跟踪空间轴；人体到机械臂坐标映射留给后续运动学层。
+`relative_orientation` 使用 `[x,y,z,w]`，计算为
+`inverse(q_start) * q_current`，并统一四元数符号，等价的 `q` / `-q` 不会产生跳变。
+
+意图同时保留 `raw_position`、`filtered_position`、当前四元数、采样序号和单调 USB 接收
+时间。`sample_valid` 只表示采集数据满足当前结构和新鲜度要求。协议未知的
+`optical_tracking_valid=null` 会原样传递，绝不改写成光学跟踪有效。
+
+下列情况会使意图进入 `faulted` 并清除相对输出：
+
+- Controller 0 通信超时、没有新样本或 `pose_usable=false`；
+- USB 读取中断、长度异常或解码失败；其他 HID 报告类型由解码器忽略，不会误伤正在
+  工作的 Controller 0，是否断流仍以其自身采样序号为准；
+- Fusion 初始化或陀螺仪标定正在进行；
+- 原始/滤波位置非有限、滤波位置缺失或四元数不可用；
+- 将来协议若明确发布 `optical_tracking_valid=false`。
+
+后端启动时不会把已经按住的 Squeeze 当成新按下沿；必须先观察到一次有效松开。活动
+期间 `gripper_closed=true` 表示 Trigger 按下，`false` 表示 Trigger 松开；idle/faulted
+时该字段为 `null`，避免夹爪命令越过接管边界。状态机不打开 Star Arm 串口、不运行
+逆运动学，也不直接产生关节目标。
+
+## Star Arm 102-FL 仿真输出
+
+NOLO 进程在本机 Unix socket 上提供 100 Hz latest-value IPC。它读取唯一最新
+`TeleopIntent`，用 `stararm102-control` 完成坐标映射和目标 TCP，然后发送给 ROS 侧
+`servo_ipc_bridge`。桥接器只转换 JSON、`PoseStamped`、`JointState` 和 `ServoStatus`；
+运动学、限位、奇异、碰撞和平滑全部由 MoveIt Servo 完成。厂家 `GenericSystem` 的
+`/joint_states` 反馈经同一 socket 返回，Rust 校验 schema、六关节名称/长度/有限值、
+FL 方向和范围后生成 `/api/status.latestArmSimulation`。
+
+Squeeze 新接管时记录当前仿真 TCP；相对输入零对应当前末端，重新接管不会跳回旧目标。
+默认坐标映射为 NOLO 前 `-Z` → 机械臂前 `+X`、NOLO 右 `+X` → 机械臂右 `-Y`、
+NOLO 上 `+Y` → 机械臂上 `+Z`。手柄自身姿态不复用位置矩阵，而是按实机动作单独映射：
+头部抬起（原始 `-X`）→ TCP `-Y`，向左侧倾（原始 `+Y`）→ TCP `-X`，向左转向
+（原始 `+Z`）→ TCP `+Z`。两组矩阵都由机械臂版本化配置提供并分别接受正交性检查。
+
+输出包含六轴逻辑角 `joints_rad`、厂家 URDF 模型角 `model_joints_rad`、关节速度、
+当前/期望 TCP、Servo 状态/说明、反馈年龄和停止原因。`backend=moveit_servo`；IPC 缺失、
+反馈超过 100 ms 或反馈非法时不发布目标并进入 `faulted`。候选工作空间越界、MoveIt
+奇异、碰撞或关节边界显示为 `constrained`，后续目标仍继续发送，以允许移回安全区域。
+上游意图故障要求先松开 Squeeze 再接管。Trigger 在 active 状态控制网页 J7 在张开
+`45°` 与闭合 `0°` 之间限速移动；夹爪当前仍是 Rust 网页仿真状态，不发送 ROS 或硬件
+夹爪命令。`simulation_only` 永远为 `true`。
+
+现场确认的唯一默认姿态和示教启动姿态都是 J1–J7 全部 `0°`。仿真启动时六轴逻辑角、
+URDF 模型角和闭合夹爪角均为零；没有单独的回零姿态、工作姿态或自动展开阶段。松开
+Trigger 后，J7 才会按限速规则从闭合 `0°` 向张开 `45°` 运动。
+
+`/arm-simulator/` 每 33 ms 读取一次该快照，用 `model_joints_rad` 的 J1–J6 驱动从厂家
+URDF 构建的关节树，
+并显示当前和目标 TCP。页面使用厂家 STL 表现本体，并按 `gripper_rad` 驱动
+J7 左夹爪及 URDF mimic 右夹爪。页面只发出 `GET /api/status`，没有串口、运动执行、
+零点、参数或力矩写入能力。J1–J7 行提供模型角滑块；拖动后只在当前浏览器暂停实时
+模型跟随并调整 Three.js 关节，不修改后端快照。点击“恢复实时”即可重新跟随后端。
+模型资产来源和固定上游提交记录在
+`src/controller-viewer/public/arm-simulator/models/README.md`。
+
+设备配置、候选 URDF、具体限制和 P1 只读探针见
+[Star Arm 102-FL 接入与仿真](../../arm/docs/STAR-ARM-102-FL-INTEGRATION.md)。
+ROS 启动和补丁见 [MoveIt Servo 仿真链路](../../arm/ros2/README.md)，方案边界见
+[IK 与实时笛卡尔伺服选型](../../arm/docs/IK-SELECTION.md)。
+
 内部解码、Fusion 和 `/api/status` 快照保持设备原生更新率。面向查看器的 SSE 对每个
 来源限制为最高约 60 Hz，离线/恢复转换会立即发送，以免网页 JSON 序列化和网络传输
-积压。机械臂控制不得使用 SSE；后续应接本机有界 latest-value IPC。
+积压。机械臂控制不得使用 SSE；当前仿真使用本机 `watch` + Unix socket latest-value
+边界，未来真实控制也必须保持有界语义，不能改为无界队列。
 
 收到 Ctrl-C 或 SIGTERM 时，后端会通知现有 SSE 流结束，再退出进程并释放 USB。
 
-网页 Three.js 固定从
-`https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js` 加载，工程不保存
-Three.js 源码副本；浏览器必须能访问该 CDN。
+网页 Three.js 固定从 jsDelivr 的 `three@0.180.0` 加载；机械臂仿真页同时使用同版本
+`OrbitControls` 和 `STLLoader` 的 jsDelivr ESM 构建。工程不保存 Three.js 源码副本；
+浏览器必须能访问 `cdn.jsdelivr.net`。
 
 ## 陀螺仪零偏标定
 
-手柄记录原点和零姿态时，连续长按 Menu 6 秒会自动调用完整位姿标定：第一秒只用于
-按键后摆稳，进入第二秒时后端重新进入 Fusion 官方初始化阶段，同时清空 Offset 并
-开始连续 3 秒陀螺仪零偏采集；网页只在 Fusion 初始化和零偏采集都成功后，才使用
-最后约 1.2 秒样本记录原点与零姿态。按键后未能连续静止满 3 秒时，本次标定失败且
-不会覆盖已有网页标定。
+每个设备第一次成功完成的手工陀螺仪零偏会立即写入
+`vr-xr/state/gyro-bias-v1.json`。后端重启或 USB 重连时读取文件，并把对应 Fusion 状态
+直接恢复为“零偏已完成”。因此重复长按 Menu 只使用最后约 1.2 秒样本记录网页原点、
+零姿态和人体前方，不重启 Fusion、不清空 Offset，也不重新采集零偏。
 
-网页诊断区可以为当前设备启动标定，也可以直接调用 HTTP 接口。点击后将设备平稳放在
-桌面并保持静止。后端直接使用 `OffsetSettings::default()` 的持续时间和角速度门限；
-任何超过 Fusion 默认静止门限的样本都会清零连续计时。
+若某个设备在文件中没有有效条目，它第一次长按 Menu 时仍按原流程执行：第一秒用于
+摆稳，随后重新初始化 Fusion，并要求连续静止 3 秒来计算零偏；成功后才记录原点并将
+零偏写入文件。文件存在但缺少该来源、schema 不兼容、数值非有限或超过 Fusion 官方
+静止门限时，都不会冒充有效零偏。
 
-标定结果只保存在当前进程内，重启后失效。运行时 Fusion Offset 直接使用
-`OffsetSettings::default()`，用于补偿标定后的残余慢漂；网页会显示零偏、进度、
-加速度拒绝和恢复状态。
+网页诊断区仍可明确要求覆盖当前设备的已保存零偏，也可以直接调用 HTTP 接口。点击后
+将设备平稳放在桌面并保持静止。后端直接使用 `OffsetSettings::default()` 的持续时间
+和角速度门限；任何超过 Fusion 默认静止门限的样本都会清零连续计时。重新标定成功后
+原子覆盖文件中的对应来源。
+
+运行时 Fusion Offset 继续使用 `OffsetSettings::default()`，用于补偿保存零偏后的残余
+慢漂；Offset 的瞬时内部状态不写文件。网页会显示已加载/测得的零偏、进度、加速度
+拒绝和恢复状态。
 
 AHRS 使用 `Ahrs::new()`，全部算法参数由当前 `fusion-ahrs` 版本的
 `AhrsSettings::default()` 提供，本工程不复制或覆盖默认值。NOLO 没有磁力计，因此

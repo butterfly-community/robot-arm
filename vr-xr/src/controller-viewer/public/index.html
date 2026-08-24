@@ -31,11 +31,11 @@
           <p class="kicker">NOLO 官方方向约束</p>
           <h2 id="calibration-title">记录原点和零姿态</h2>
           <p id="calibration-help">
-            人正对基站并保持至少 50 厘米距离；触摸板朝上，手柄头部水平指向基站、尾部朝向胸口，保持静止长按菜单键 6 秒。第一秒用于按键后摆稳，从第二秒开始 Fusion 初始化和陀螺仪零偏采集，最后记录原点和零姿态。
+            人正对基站并保持至少 50 厘米距离；触摸板朝上，手柄头部水平指向基站、尾部朝向胸口，保持静止长按菜单键 6 秒。已有零偏文件时只记录原点和零姿态，不会再次标定陀螺仪。
           </p>
         </div>
         <div class="hold-meter" role="progressbar" aria-valuemin="0"
-          aria-valuemax="5" aria-valuenow="0">
+          aria-valuemax="6" aria-valuenow="0">
           <svg viewBox="0 0 120 120" aria-hidden="true">
             <circle class="meter-track" cx="60" cy="60" r="49" />
             <circle id="meter-progress" class="meter-progress" cx="60" cy="60"
@@ -138,6 +138,8 @@
               <dd id="flags">—</dd>
               <dt>主位置 p</dt>
               <dd id="raw-position" class="mono">—</dd>
+              <dt>One Euro 滤波位置</dt>
+              <dd id="filtered-position" class="mono">—</dd>
               <dt>主位置来源</dt>
               <dd id="position-mode">—</dd>
               <dt>光学标记位置</dt>
@@ -177,7 +179,7 @@
               静止 3 秒校准当前设备零偏
             </button>
             <p class="diagnostic-help">
-              手柄长按菜单键 6 秒时会自动执行完整标定。此按钮保留给头部或单独诊断零偏；点击后将当前设备平稳放在桌面，任何动作都会清零连续静止计时。
+              后端会持久化每个设备第一次成功的零偏，之后长按菜单键只记录原点和零姿态。此按钮仅用于明确需要覆盖已保存零偏时；点击后将当前设备平稳放在桌面，任何动作都会清零连续静止计时。
             </p>
           </article>
 
@@ -215,6 +217,6 @@
         </section>
       </details>
     </main>
-    <script type="module" src="/app.js?v=20260824-12"></script>
+    <script type="module" src="/app.js?v=20260824-14"></script>
   </body>
 </html>

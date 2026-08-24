@@ -1,0 +1,147 @@
+diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+index 4e86e48..07ac438 100644
+--- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
++++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+@@ -106,7 +106,7 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+-      lower="-2.27"
+-      upper="2.27"
++      lower="-1.9198621772"
++      upper="1.9198621772"
+       effort="100"
+       velocity="1" />
+@@ -222,7 +222,7 @@
+     <axis
+       xyz="0 0 -1" />
+    <limit
+-      lower="-3.14"
++      lower="-4.7123889804"
+       upper="0"
+       effort="100"
+       velocity="1" />
+@@ -281,6 +281,6 @@
+       xyz="0 0 -1" />
+     <limit
+-      lower="-1.57"
+-      upper="2.2"
++      lower="-1.5707963268"
++      upper="1.5707963268"
+       effort="100"
+       velocity="1" />
+@@ -339,6 +339,6 @@
+       xyz="0 0 -1" />
+     <limit
+-      lower="-1.2"
+-      upper="1.2"
++      lower="-1.1344640138"
++      upper="1.1344640138"
+       effort="100"
+       velocity="1" />
+@@ -397,6 +397,6 @@
+       xyz="0 0 -1" />
+     <limit
+-      lower="-3.14"
+-      upper="3.14"
++      lower="-2.6179938780"
++      upper="2.6179938780"
+       effort="100"
+       velocity="1" />
+@@ -518,4 +518,12 @@
+       velocity="3.14" />
+     <mimic joint="joint7_left" multiplier="-1" />
+   </joint>
++  <link name="tool0" />
++  <joint name="tool0_fixed" type="fixed">
++    <origin
++      xyz="0.012325 0 -0.07313"
++      rpy="1.5708 -1.5708 0" />
++    <parent link="link6" />
++    <child link="tool0" />
++  </joint>
+ </robot>
+diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
+index 409326d..60a6e6a 100644
+--- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
++++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
+@@ -6,6 +6,6 @@
+     </hardware>
+     <joint name="joint1">
+       <command_interface name="position">
+-        <param name="min">-2.27</param>
+-        <param name="max">2.27</param>
++        <param name="min">-1.9198621772</param>
++        <param name="max">1.9198621772</param>
+       </command_interface>
+@@ -14,6 +14,6 @@
+     </joint>
+     <joint name="joint2">
+       <command_interface name="position">
+-        <param name="min">-1.57</param>
+-        <param name="max">1.57</param>
++        <param name="min">0</param>
++        <param name="max">3.1415926536</param>
+       </command_interface>
+@@ -22,6 +22,6 @@
+     </joint>
+     <joint name="joint3">
+       <command_interface name="position">
+-        <param name="min">-1.57</param>
+-        <param name="max">1.57</param>
++        <param name="min">-4.7123889804</param>
++        <param name="max">0</param>
+       </command_interface>
+@@ -30,6 +30,6 @@
+     </joint>
+     <joint name="joint4">
+       <command_interface name="position">
+-        <param name="min">-1.57</param>
+-        <param name="max">1.57</param>
++        <param name="min">-1.5707963268</param>
++        <param name="max">1.5707963268</param>
+       </command_interface>
+@@ -38,6 +38,6 @@
+     </joint>
+     <joint name="joint5">
+       <command_interface name="position">
+-        <param name="min">-1.57</param>
+-        <param name="max">1.57</param>
++        <param name="min">-1.1344640138</param>
++        <param name="max">1.1344640138</param>
+       </command_interface>
+@@ -46,6 +46,6 @@
+     </joint>
+     <joint name="joint6">
+       <command_interface name="position">
+-        <param name="min">-2.27</param>
+-        <param name="max">2.27</param>
++        <param name="min">-2.6179938780</param>
++        <param name="max">2.6179938780</param>
+       </command_interface>
+@@ -63,8 +63,4 @@
+     <joint name="joint7_right">
+-      <command_interface name="position">
+-        <param name="min">-1.57</param>
+-        <param name="max">0</param>
+-      </command_interface>
+       <state_interface name="position"/>
+       <state_interface name="velocity"/>
+       <param name="mimic">joint7_left</param>
+diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
+index 24734ba..c9fe2ed 100644
+--- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
++++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
+@@ -2,11 +2,5 @@
+ <robot name="stararm102_description">
+     <!--GROUPS: Representation of a set of joints and links.-->
+     <group name="arm">
+-        <joint name="virtual_joint"/>
+-        <joint name="joint1"/>
+-        <joint name="joint2"/>
+-        <joint name="joint3"/>
+-        <joint name="joint4"/>
+-        <joint name="joint5"/>
+-        <joint name="joint6"/>
++        <chain base_link="base_link" tip_link="tool0"/>
+     </group>

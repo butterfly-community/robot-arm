@@ -2,6 +2,7 @@
 name = "nolo-usb-server"
 version = "0.1.0"
 edition = "2024"
+default-run = "nolo-usb-server"
 license = "MIT"
 description = "Direct USB backend for the NOLO CV1 controller viewer"
 
@@ -13,9 +14,11 @@ fusion-ahrs = "0.7"
 futures-core = "0.3"
 hidapi = { version = "2.6", default-features = false, features = ["linux-static-libusb"] }
 nalgebra = "0.35"
+one_euro_filter = { git = "https://github.com/casiez/OneEuroFilter.git", rev = "d78925584245597f2aa9c4c01a802eb0f0b77fb9" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+stararm102-control = { path = "../../../arm/src/stararm102-control" }
+tokio = { version = "1.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["fs"] }
 
 [profile.release]

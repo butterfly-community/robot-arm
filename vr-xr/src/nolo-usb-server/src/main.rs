@@ -14,16 +14,23 @@ use axum::{
 use hidapi::HidApi;
 use nolo_usb_server::{
     fusion::{ControllerFusion, FusionDiagnostics, HmdFusion},
+    gyro_bias::GyroBiasStore,
     pose::estimated_grip_position,
+    position_filter::{PositionFilter, PositionFilterSettings},
     protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report},
     sample::{InterleavedSampleTracker, SampleObservation, SampleTracker},
+    teleop::{TeleopIntent, TeleopIntentMachine, TeleopSample, TeleopStopReason},
 };
 use serde::Serialize;
 use serde_json::json;
+use stararm102_control::{
+    ArmModel, MoveItSimulationController, RelativeIntent, RelativeIntentState, ServoFeedbackFrame,
+    SimulationSnapshot,
+};
 use std::{
     convert::Infallible,
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path as FilePath, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -32,7 +39,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, watch};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+};
 use tower_http::services::ServeDir;
+
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'";
 
 const DEVICE_NAMES: [&str; 3] = [
     "NOLO CV1: Controller 0 (USB)",
@@ -41,6 +54,7 @@ const DEVICE_NAMES: [&str; 3] = [
 ];
 const SEQUENCE_STALE_AFTER: Duration = Duration::from_millis(200);
 const SSE_MIN_INTERVAL: Duration = Duration::from_micros(16_667);
+const ARM_SIM_INTERVAL: Duration = Duration::from_millis(10);
 const SOURCE_COUNT: usize = 3;
 
 #[derive(Clone, Debug, Serialize)]
@@ -54,6 +68,7 @@ struct PoseFrame {
     /// Deprecated compatibility field. This is not an OpenXR tracking flag.
     flags: u32,
     position: [f32; 3],
+    filtered_position: Option<[f32; 3]>,
     marker_position: [f32; 3],
     grip_position: Option<[f32; 3]>,
     position_mode: &'static str,
@@ -104,6 +119,10 @@ struct StatusPayload {
     latest_frame: Option<PoseFrame>,
     #[serde(rename = "latestFrames")]
     latest_frames: [Option<PoseFrame>; SOURCE_COUNT],
+    #[serde(rename = "latestTeleopIntent")]
+    latest_teleop_intent: TeleopIntent,
+    #[serde(rename = "latestArmSimulation")]
+    latest_arm_simulation: SimulationSnapshot,
 }
 
 #[derive(Clone, Debug)]
@@ -126,12 +145,22 @@ struct AppState {
     calibration_requests: Arc<[AtomicBool; SOURCE_COUNT]>,
     pose_calibration_requests: Arc<[AtomicBool; SOURCE_COUNT]>,
     last_sse_pose: Arc<Mutex<[Option<Instant>; SOURCE_COUNT]>>,
+    teleop_intent: watch::Sender<TeleopIntent>,
+    arm_simulation: watch::Sender<SimulationSnapshot>,
     shutdown: watch::Sender<bool>,
 }
 
 impl AppState {
     fn new() -> Self {
         let (events, _) = broadcast::channel(256);
+        let initial_teleop_intent = TeleopIntentMachine::new().latest().clone();
+        let (teleop_intent, _) = watch::channel(initial_teleop_intent);
+        let initial_arm_simulation = MoveItSimulationController::new(
+            ArmModel::embedded().expect("invalid embedded FL profile"),
+        )
+        .latest()
+        .clone();
+        let (arm_simulation, _) = watch::channel(initial_arm_simulation);
         let (shutdown, _) = watch::channel(false);
         Self {
             snapshot: Arc::new(RwLock::new(Snapshot {
@@ -143,6 +172,8 @@ impl AppState {
             calibration_requests: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
             pose_calibration_requests: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
             last_sse_pose: Arc::new(Mutex::new(std::array::from_fn(|_| None))),
+            teleop_intent,
+            arm_simulation,
             shutdown,
         }
     }
@@ -192,7 +223,17 @@ impl AppState {
             status: snapshot.status.clone(),
             latest_frame: snapshot.latest_frame.clone(),
             latest_frames: snapshot.latest_frames.clone(),
+            latest_teleop_intent: self.teleop_intent.borrow().clone(),
+            latest_arm_simulation: self.arm_simulation.borrow().clone(),
         }
+    }
+
+    fn set_teleop_intent(&self, intent: TeleopIntent) {
+        self.teleop_intent.send_replace(intent);
+    }
+
+    fn set_arm_simulation(&self, snapshot: SimulationSnapshot) {
+        self.arm_simulation.send_replace(snapshot);
     }
 
     fn request_gyro_calibration(&self, source_id: usize) {
@@ -230,6 +271,7 @@ impl AppState {
                 frame.communication_fresh = false;
                 frame.sample_changed = false;
                 frame.pose_usable = false;
+                frame.filtered_position = None;
                 frame.source_online = false;
                 frame.hmd_relay_online = false;
                 frame.menu_active = false;
@@ -269,6 +311,7 @@ impl AppState {
             frame.communication_fresh = false;
             frame.sample_changed = false;
             frame.pose_usable = false;
+            frame.filtered_position = None;
             frame.source_online = false;
             frame.menu_active = false;
             frame.menu_pressed = false;
@@ -293,7 +336,14 @@ impl AppState {
 async fn main() -> Result<()> {
     let config = Config::parse()?;
     let state = AppState::new();
-    spawn_usb_reader(state.clone(), config.controller_position_mode);
+    spawn_usb_reader(
+        state.clone(),
+        config.controller_position_mode,
+        config.position_filter_settings,
+        config.gyro_calibration_file,
+    );
+    let servo_listener = bind_servo_ipc(&config.servo_ipc_path)?;
+    let servo_task = tokio::spawn(servo_ipc_accept_loop(servo_listener, state.clone()));
 
     let static_files = ServeDir::new(&config.static_dir).append_index_html_on_directories(true);
     let app = Router::new()
@@ -317,11 +367,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to listen on http://{address}/"))?;
     println!("NOLO direct USB viewer: http://{address}/");
     println!("Static files: {}", config.static_dir.display());
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state))
         .await
-        .context("web server failed")?;
-    Ok(())
+        .context("web server failed");
+    let _ = servo_task.await;
+    remove_servo_socket(&config.servo_ipc_path)?;
+    server_result
 }
 
 async fn status(State(state): State<AppState>) -> Json<StatusPayload> {
@@ -421,22 +473,182 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        ),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     response
 }
 
-fn spawn_usb_reader(state: AppState, controller_position_mode: ControllerPositionMode) {
+fn spawn_usb_reader(
+    state: AppState,
+    controller_position_mode: ControllerPositionMode,
+    position_filter_settings: PositionFilterSettings,
+    gyro_calibration_file: PathBuf,
+) {
     thread::Builder::new()
         .name("nolo-usb-reader".to_owned())
-        .spawn(move || usb_reader_loop(state, controller_position_mode))
+        .spawn(move || {
+            usb_reader_loop(
+                state,
+                controller_position_mode,
+                position_filter_settings,
+                gyro_calibration_file,
+            )
+        })
         .expect("failed to start USB reader thread");
 }
 
-fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPositionMode) {
+async fn servo_ipc_accept_loop(listener: UnixListener, state: AppState) {
+    let mut shutdown = state.shutdown.subscribe();
+    loop {
+        tokio::select! {
+            result = shutdown.changed() => {
+                if result.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+            result = listener.accept() => match result {
+                Ok((stream, _)) => {
+                    if let Err(error) = servo_ipc_connection(stream, state.clone()).await {
+                        eprintln!("MoveIt Servo IPC disconnected: {error:#}");
+                    }
+                    let controller = MoveItSimulationController::new(
+                        ArmModel::embedded().expect("invalid embedded Star Arm 102-FL profile"),
+                    );
+                    state.set_arm_simulation(controller.latest().clone());
+                }
+                Err(error) => {
+                    eprintln!("MoveIt Servo IPC accept failed: {error}");
+                    return;
+                }
+            },
+        }
+    }
+}
+
+async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()> {
+    let model = ArmModel::embedded()
+        .map_err(anyhow::Error::msg)
+        .context("invalid embedded Star Arm 102-FL profile")?;
+    let mut controller = MoveItSimulationController::new(model);
+    let teleop = state.teleop_intent.subscribe();
+    let mut shutdown = state.shutdown.subscribe();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut ticker = tokio::time::interval(ARM_SIM_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let start = Instant::now();
+    let mut previous_tick = start;
+    let mut latest_feedback: Option<(ServoFeedbackFrame, Instant)> = None;
+
+    loop {
+        tokio::select! {
+            result = shutdown.changed() => {
+                if result.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+            line = lines.next_line() => {
+                let Some(line) = line.context("failed reading Servo feedback")? else {
+                    bail!("peer closed the socket");
+                };
+                let feedback: ServoFeedbackFrame = serde_json::from_str(&line)
+                    .context("invalid Servo feedback frame")?;
+                latest_feedback = Some((feedback, Instant::now()));
+            }
+            _ = ticker.tick() => {
+                let now = Instant::now();
+                let dt = now.duration_since(previous_tick).as_secs_f64().clamp(0.000_001, 0.1);
+                previous_tick = now;
+                let intent = relative_intent(&teleop.borrow());
+                let feedback_age_ms = latest_feedback.as_ref().map(|(_, received)| {
+                    duration_ms(now.saturating_duration_since(*received))
+                });
+                let (command, snapshot) = controller.step(
+                    elapsed_ns(start),
+                    dt,
+                    intent,
+                    latest_feedback.as_ref().map(|(feedback, _)| feedback),
+                    feedback_age_ms,
+                );
+                state.set_arm_simulation(snapshot);
+                let mut encoded = serde_json::to_vec(&command)
+                    .context("failed serializing Servo command")?;
+                encoded.push(b'\n');
+                writer.write_all(&encoded).await.context("failed writing Servo command")?;
+            }
+        }
+    }
+}
+
+fn bind_servo_ipc(path: &FilePath) -> Result<UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed creating Servo IPC directory: {}", parent.display())
+        })?;
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            bail!(
+                "refusing to replace non-socket Servo IPC path: {}",
+                path.display()
+            );
+        }
+        std::fs::remove_file(path).with_context(|| {
+            format!("failed removing stale Servo IPC socket: {}", path.display())
+        })?;
+    }
+    UnixListener::bind(path)
+        .with_context(|| format!("failed binding Servo IPC socket: {}", path.display()))
+}
+
+fn remove_servo_socket(path: &FilePath) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed removing Servo IPC socket: {}", path.display())),
+    }
+}
+
+fn relative_intent(intent: &TeleopIntent) -> RelativeIntent {
+    RelativeIntent {
+        state: match intent.state {
+            nolo_usb_server::teleop::TeleopIntentState::Idle => RelativeIntentState::Idle,
+            nolo_usb_server::teleop::TeleopIntentState::Active => RelativeIntentState::Active,
+            nolo_usb_server::teleop::TeleopIntentState::Faulted => RelativeIntentState::Faulted,
+        },
+        receive_time_ns: intent.receive_time_ns,
+        sample_sequence: intent.sample_sequence,
+        relative_position_m: intent
+            .relative_position
+            .map(|position| position.map(f64::from)),
+        relative_orientation_xyzw: intent
+            .relative_orientation
+            .map(|orientation| orientation.map(f64::from)),
+        gripper_closed: intent.gripper_closed,
+    }
+}
+
+fn usb_reader_loop(
+    state: AppState,
+    controller_position_mode: ControllerPositionMode,
+    position_filter_settings: PositionFilterSettings,
+    gyro_calibration_file: PathBuf,
+) {
     let process_start = Instant::now();
+    let mut teleop = TeleopIntentMachine::new();
+    let mut gyro_bias_store = match GyroBiasStore::load(&gyro_calibration_file) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("陀螺仪零偏文件加载失败，将重新标定：{error:#}");
+            GyroBiasStore::default()
+        }
+    };
+    let mut gyro_bias_persisted_or_attempted =
+        std::array::from_fn(|source_id| gyro_bias_store.bias(source_id).is_some());
+    state.set_teleop_intent(teleop.latest().clone());
     loop {
         state.set_status("正在连接 NOLO USB…");
         let api = match HidApi::new() {
@@ -464,8 +676,10 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
         state.set_status(format!(
             "NOLO USB ({vid:04x}:{pid:04x}) 已连接，等待位姿数据"
         ));
-        let mut controllers: [ControllerState; 2] = std::array::from_fn(|_| ControllerState::new());
-        let mut hmd = HmdState::new();
+        let mut controllers: [ControllerState; 2] = std::array::from_fn(|source_id| {
+            ControllerState::new(position_filter_settings, gyro_bias_store.bias(source_id))
+        });
+        let mut hmd = HmdState::new(gyro_bias_store.bias(2));
         let mut report = [0_u8; REPORT_SIZE + 1];
         let mut last_usb_report = Instant::now();
 
@@ -475,10 +689,15 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
                     let now = Instant::now();
                     let silent = now.duration_since(last_usb_report);
                     if silent > SEQUENCE_STALE_AFTER {
-                        state.mark_all_offline(elapsed_ns(process_start), silent);
+                        let time_ns = elapsed_ns(process_start);
+                        state.mark_all_offline(time_ns, silent);
+                        state.set_teleop_intent(
+                            teleop.force_fault(time_ns, TeleopStopReason::CommunicationStale),
+                        );
                         hmd.published_online = false;
                         for controller in &mut controllers {
                             controller.published_online = false;
+                            controller.reset_position_filter();
                         }
                         state.set_status("NOLO USB 报告已超时，所有位姿均不可用");
                     }
@@ -486,6 +705,10 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
                 }
                 Ok(size) => size,
                 Err(error) => {
+                    let time_ns = elapsed_ns(process_start);
+                    state.set_teleop_intent(
+                        teleop.force_fault(time_ns, TeleopStopReason::UsbDisconnected),
+                    );
                     state.set_status(format!("NOLO USB 读取中断：{error}；2 秒后重连"));
                     break;
                 }
@@ -494,6 +717,10 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
                 REPORT_SIZE => &report[..REPORT_SIZE],
                 size if size == REPORT_SIZE + 1 && report[0] == 0 => &report[1..],
                 other => {
+                    let time_ns = elapsed_ns(process_start);
+                    state.set_teleop_intent(
+                        teleop.force_fault(time_ns, TeleopStopReason::InvalidUsbReport),
+                    );
                     state.set_status(format!("收到长度异常的 HID 报告：{other} 字节"));
                     continue;
                 }
@@ -501,8 +728,15 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
             last_usb_report = Instant::now();
             let raw = match decode_report(raw_report) {
                 Ok(Some(frame)) => frame,
+                // Other HID report types are not controller pose samples. They
+                // neither refresh nor invalidate Controller 0; its own sequence
+                // freshness remains the authoritative safety signal.
                 Ok(None) => continue,
                 Err(error) => {
+                    let time_ns = elapsed_ns(process_start);
+                    state.set_teleop_intent(
+                        teleop.force_fault(time_ns, TeleopStopReason::InvalidUsbReport),
+                    );
                     state.set_status(format!("NOLO 报告解析失败：{error}"));
                     continue;
                 }
@@ -517,9 +751,17 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
                 hmd.fusion.start_pose_calibration();
             } else if state.take_gyro_calibration_request(2) {
                 hmd.fusion.start_gyro_calibration();
+                gyro_bias_persisted_or_attempted[2] = false;
             }
             if hmd_sample.changed {
                 hmd.orientation = hmd.fusion.update(raw, now);
+                persist_completed_gyro_bias(
+                    2,
+                    hmd.fusion.completed_gyro_bias(),
+                    &mut gyro_bias_store,
+                    &mut gyro_bias_persisted_or_attempted,
+                    &gyro_calibration_file,
+                );
             }
             if hmd_sample.changed || (!hmd_sample.fresh && hmd.published_online) {
                 state.set_pose(hmd_pose(
@@ -536,25 +778,49 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
             let controller = &mut controllers[controller_id];
             let controller_sample = controller.samples.observe(raw.controller_sequence, now);
             if state.take_pose_calibration_request(controller_id) {
+                if !controller.fusion.diagnostics().gyro_calibration_complete {
+                    controller.reset_position_filter();
+                }
                 controller.fusion.start_pose_calibration();
             } else if state.take_gyro_calibration_request(controller_id) {
                 controller.fusion.start_gyro_calibration();
+                gyro_bias_persisted_or_attempted[controller_id] = false;
             }
             if controller_sample.changed {
                 controller.orientation = controller.fusion.update(raw, now);
+                persist_completed_gyro_bias(
+                    controller_id,
+                    controller.fusion.completed_gyro_bias(),
+                    &mut gyro_bias_store,
+                    &mut gyro_bias_persisted_or_attempted,
+                    &gyro_calibration_file,
+                );
+                let marker_position = raw.position;
+                let grip_position =
+                    estimated_grip_position(marker_position, controller.orientation);
+                let selected_position =
+                    controller_position_mode.select(marker_position, grip_position);
+                controller.filtered_position = controller
+                    .position_filter
+                    .update(selected_position, time_ns as f64 * 1.0e-9);
+            } else if !controller_sample.fresh && controller.published_online {
+                controller.reset_position_filter();
             }
             if controller_sample.changed
                 || (!controller_sample.fresh && controller.published_online)
             {
-                state.set_pose(controller_pose(
+                let pose = controller_pose(
                     raw,
-                    controller.orientation,
-                    controller.fusion.diagnostics(),
+                    controller,
                     controller_sample,
                     hmd_sample,
                     time_ns,
                     controller_position_mode,
-                ));
+                );
+                if controller_id == 0 {
+                    state.set_teleop_intent(teleop.update(teleop_sample(&pose)));
+                }
+                state.set_pose(pose);
                 controller.published_online = controller_sample.fresh;
             }
             for (other_id, other) in controllers.iter_mut().enumerate() {
@@ -563,6 +829,12 @@ fn usb_reader_loop(state: AppState, controller_position_mode: ControllerPosition
                 }
                 let other_sample = other.samples.status(now);
                 if !other_sample.fresh && other.published_online {
+                    other.reset_position_filter();
+                    if other_id == 0 {
+                        state.set_teleop_intent(
+                            teleop.force_fault(time_ns, TeleopStopReason::CommunicationStale),
+                        );
+                    }
                     state.mark_source_offline(other_id, time_ns, other_sample, hmd_sample);
                     other.published_online = false;
                 }
@@ -581,17 +853,34 @@ struct ControllerState {
     fusion: ControllerFusion,
     samples: SampleTracker,
     orientation: [f32; 4],
+    position_filter: PositionFilter,
+    filtered_position: Option<[f32; 3]>,
     published_online: bool,
 }
 
 impl ControllerState {
-    fn new() -> Self {
+    fn new(
+        position_filter_settings: PositionFilterSettings,
+        saved_gyro_bias: Option<[f32; 3]>,
+    ) -> Self {
+        let mut fusion = ControllerFusion::new();
+        if let Some(bias) = saved_gyro_bias {
+            let loaded = fusion.load_gyro_bias(bias);
+            debug_assert!(loaded);
+        }
         Self {
-            fusion: ControllerFusion::new(),
+            fusion,
             samples: SampleTracker::new(120.0, SEQUENCE_STALE_AFTER),
             orientation: [0.0, 0.0, 0.0, 1.0],
+            position_filter: PositionFilter::new(position_filter_settings),
+            filtered_position: None,
             published_online: false,
         }
+    }
+
+    fn reset_position_filter(&mut self) {
+        self.position_filter.reset();
+        self.filtered_position = None;
     }
 }
 
@@ -603,13 +892,45 @@ struct HmdState {
 }
 
 impl HmdState {
-    fn new() -> Self {
+    fn new(saved_gyro_bias: Option<[f32; 3]>) -> Self {
+        let mut fusion = HmdFusion::new();
+        if let Some(bias) = saved_gyro_bias {
+            let loaded = fusion.load_gyro_bias(bias);
+            debug_assert!(loaded);
+        }
         Self {
-            fusion: HmdFusion::new(),
+            fusion,
             samples: InterleavedSampleTracker::new(120.0, SEQUENCE_STALE_AFTER),
             orientation: [0.0, 0.0, 0.0, 1.0],
             published_online: false,
         }
+    }
+}
+
+fn persist_completed_gyro_bias(
+    source_id: usize,
+    bias: Option<[f32; 3]>,
+    store: &mut GyroBiasStore,
+    persisted_or_attempted: &mut [bool; SOURCE_COUNT],
+    path: &FilePath,
+) {
+    if persisted_or_attempted[source_id] {
+        return;
+    }
+    let Some(bias) = bias else {
+        return;
+    };
+    persisted_or_attempted[source_id] = true;
+    if let Err(error) = store
+        .set_bias(source_id, bias)
+        .and_then(|()| store.save(path))
+    {
+        eprintln!(
+            "设备 {source_id} 的陀螺仪零偏写入 {} 失败：{error:#}",
+            path.display()
+        );
+    } else {
+        eprintln!("设备 {source_id} 的陀螺仪零偏已保存到 {}", path.display());
     }
 }
 
@@ -629,6 +950,7 @@ fn hmd_pose(
         device: DEVICE_NAMES[2],
         flags: 0,
         position: raw.hmd_position,
+        filtered_position: None,
         marker_position: raw.hmd_position,
         grip_position: None,
         position_mode: "marker",
@@ -675,13 +997,14 @@ fn hmd_pose(
 
 fn controller_pose(
     raw: nolo_usb_server::protocol::RawFrame,
-    orientation: [f32; 4],
-    fusion: FusionDiagnostics,
+    controller: &ControllerState,
     sample: SampleObservation,
     hmd_sample: SampleObservation,
     time_ns: u64,
     position_mode: ControllerPositionMode,
 ) -> PoseFrame {
+    let orientation = controller.orientation;
+    let fusion = controller.fusion.diagnostics();
     let marker_position = raw.position;
     let grip_position = estimated_grip_position(marker_position, orientation);
     let position = position_mode.select(marker_position, grip_position);
@@ -695,6 +1018,7 @@ fn controller_pose(
         device: DEVICE_NAMES[usize::from(raw.controller_id)],
         flags: 0,
         position,
+        filtered_position: controller.filtered_position,
         marker_position,
         grip_position: Some(grip_position),
         position_mode: position_mode.name(),
@@ -739,6 +1063,25 @@ fn controller_pose(
     }
 }
 
+fn teleop_sample(frame: &PoseFrame) -> TeleopSample {
+    debug_assert_eq!(frame.source_id, 0);
+    TeleopSample {
+        receive_time_ns: frame.time_ns,
+        sample_sequence: frame.sample_sequence,
+        raw_position: frame.position,
+        filtered_position: frame.filtered_position,
+        orientation: frame.orientation,
+        communication_fresh: frame.communication_fresh,
+        sample_changed: frame.sample_changed,
+        pose_usable: frame.pose_usable,
+        optical_tracking_valid: frame.optical_tracking_valid,
+        fusion_initialising: frame.fusion_initialising,
+        gyro_calibration_active: frame.gyro_calibration_active,
+        trigger_pressed: frame.trigger_pressed,
+        squeeze_pressed: frame.squeeze_pressed,
+    }
+}
+
 fn elapsed_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -774,6 +1117,9 @@ struct Config {
     port: u16,
     static_dir: PathBuf,
     controller_position_mode: ControllerPositionMode,
+    position_filter_settings: PositionFilterSettings,
+    gyro_calibration_file: PathBuf,
+    servo_ipc_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -803,10 +1149,17 @@ impl Config {
     fn parse() -> Result<Self> {
         let default_static =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../controller-viewer/public");
+        let default_gyro_calibration_file =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../state/gyro-bias-v1.json");
+        let default_servo_ipc_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../state/moveit-servo.sock");
         let mut host = "127.0.0.1".parse().unwrap();
         let mut port = 8765;
         let mut static_dir = default_static;
         let mut controller_position_mode = ControllerPositionMode::default();
+        let mut position_filter_settings = PositionFilterSettings::default();
+        let mut gyro_calibration_file = default_gyro_calibration_file;
+        let mut servo_ipc_path = default_servo_ipc_path;
         for argument in std::env::args().skip(1) {
             if let Some(value) = argument.strip_prefix("--host=") {
                 host = value
@@ -824,9 +1177,23 @@ impl Config {
                     "grip" => ControllerPositionMode::Grip,
                     _ => bail!("invalid controller position mode: {value}; use marker or grip"),
                 };
+            } else if let Some(value) = argument.strip_prefix("--gyro-calibration-file=") {
+                gyro_calibration_file = PathBuf::from(value);
+            } else if let Some(value) = argument.strip_prefix("--servo-ipc=") {
+                servo_ipc_path = PathBuf::from(value);
+            } else if let Some(value) = argument.strip_prefix("--position-filter-min-cutoff=") {
+                position_filter_settings.min_cutoff_hz =
+                    parse_finite_f64(value, "position filter minimum cutoff")?;
+            } else if let Some(value) = argument.strip_prefix("--position-filter-beta=") {
+                position_filter_settings.beta = parse_finite_f64(value, "position filter beta")?;
+            } else if let Some(value) =
+                argument.strip_prefix("--position-filter-derivative-cutoff=")
+            {
+                position_filter_settings.derivative_cutoff_hz =
+                    parse_finite_f64(value, "position filter derivative cutoff")?;
             } else if matches!(argument.as_str(), "-h" | "--help") {
                 println!(
-                    "Usage: nolo-usb-server [--host=IP] [--port=PORT] [--static-dir=PATH] [--controller-position=marker|grip]"
+                    "Usage: nolo-usb-server [--host=IP] [--port=PORT] [--static-dir=PATH] [--controller-position=marker|grip] [--gyro-calibration-file=PATH] [--servo-ipc=PATH] [--position-filter-min-cutoff=HZ] [--position-filter-beta=VALUE] [--position-filter-derivative-cutoff=HZ]"
                 );
                 std::process::exit(0);
             } else {
@@ -839,18 +1206,86 @@ impl Config {
                 static_dir.display()
             );
         }
+        position_filter_settings = position_filter_settings
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid position filter settings: {error}"))?;
         Ok(Self {
             host,
             port,
             static_dir,
             controller_position_mode,
+            position_filter_settings,
+            gyro_calibration_file,
+            servo_ipc_path,
         })
     }
+}
+
+fn parse_finite_f64(value: &str, name: &str) -> Result<f64> {
+    let parsed: f64 = value
+        .parse()
+        .with_context(|| format!("invalid {name}: {value}"))?;
+    if !parsed.is_finite() {
+        bail!("invalid {name}: {value}");
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_policy_allows_only_same_origin_frames() {
+        assert!(CONTENT_SECURITY_POLICY.contains("frame-src 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'self'"));
+        assert!(!CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn status_payload_exposes_safe_initial_teleop_intent() {
+        let payload = AppState::new().payload();
+        assert_eq!(
+            payload.latest_teleop_intent.state,
+            nolo_usb_server::teleop::TeleopIntentState::Idle
+        );
+        assert!(!payload.latest_teleop_intent.enabled);
+        assert!(!payload.latest_teleop_intent.sample_valid);
+        assert_eq!(
+            payload.latest_teleop_intent.stop_reason,
+            Some(TeleopStopReason::NoSample)
+        );
+
+        let json = serde_json::to_value(payload).unwrap();
+        assert_eq!(json["latestTeleopIntent"]["state"], "idle");
+        assert_eq!(json["latestTeleopIntent"]["stop_reason"], "no_sample");
+        assert_eq!(json["latestTeleopIntent"]["squeeze_pressed"], false);
+        assert_eq!(
+            json["latestTeleopIntent"]["gripper_closed"],
+            serde_json::Value::Null
+        );
+        assert_eq!(json["latestArmSimulation"]["state"], "faulted");
+        assert_eq!(
+            json["latestArmSimulation"]["stop_reason"],
+            "servo_unavailable"
+        );
+        assert_eq!(json["latestArmSimulation"]["backend"], "moveit_servo");
+        assert_eq!(json["latestArmSimulation"]["simulation_only"], true);
+        assert_eq!(json["latestArmSimulation"]["gripper_closed"], true);
+        assert!(json["latestArmSimulation"]["gripper_rad"].is_number());
+        let model_joints = json["latestArmSimulation"]["model_joints_deg"]
+            .as_array()
+            .unwrap();
+        for (actual, expected) in model_joints.iter().zip([0.0; 6]) {
+            assert!((actual.as_f64().unwrap() - expected).abs() < 1.0e-9);
+        }
+        assert_eq!(
+            json["latestArmSimulation"]["model_id"],
+            "stararm102-fl-sim-v1"
+        );
+        assert!(json.get("latest_teleop_intent").is_none());
+        assert!(json.get("latest_arm_simulation").is_none());
+    }
 
     #[tokio::test]
     async fn shutdown_notification_reaches_existing_subscribers() {

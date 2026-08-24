@@ -1,0 +1,3 @@
+/src/stararm102-control/target/
+__pycache__/
+*.py[cod]

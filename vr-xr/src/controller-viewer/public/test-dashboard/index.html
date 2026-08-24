@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NOLO 与机械臂联合测试面板</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p>NOLO CV1 / STAR ARM 102-FL</p>
+        <h1>手柄与机械臂联合测试</h1>
+      </div>
+      <nav aria-label="独立页面">
+        <a href="/" target="_blank">单独打开手柄</a>
+        <a href="/arm-simulator/" target="_blank">单独打开机械臂</a>
+      </nav>
+    </header>
+
+    <main>
+      <section>
+        <div class="frame-title">
+          <div><span>输入</span><strong>NOLO 手柄位姿</strong></div>
+          <small>选择手柄 1；Squeeze 接管，Trigger 控制夹爪</small>
+        </div>
+        <iframe src="/" title="NOLO CV1 手柄位姿查看器"></iframe>
+      </section>
+
+      <section>
+        <div class="frame-title">
+          <div><span>输出</span><strong>Star Arm 102-FL 仿真</strong></div>
+          <small>越界目标会提示并丢弃；移回可达区域后自动继续</small>
+        </div>
+        <iframe
+          src="/arm-simulator/"
+          title="Star Arm 102-FL 只读仿真"
+        ></iframe>
+      </section>
+    </main>
+  </body>
+</html>
