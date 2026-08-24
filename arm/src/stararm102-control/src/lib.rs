@@ -11,7 +11,8 @@ pub mod simulation;
 
 pub use model::{ArmModel, ArmProfile, Pose};
 pub use servo::{
-    MoveItSimulationController, SERVO_IPC_SCHEMA_VERSION, ServoCommandFrame, ServoFeedbackFrame,
+    HomeRequestAction, HomeRequestFrame, HomeState, HomeStatusFrame, MoveItController,
+    SERVO_IPC_SCHEMA_VERSION, ServoCommandFrame, ServoFeedbackFrame,
 };
 pub use simulation::{
     RelativeIntent, RelativeIntentState, SimulationSnapshot, SimulationState, SimulationStopReason,

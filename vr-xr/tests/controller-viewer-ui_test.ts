@@ -52,19 +52,22 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
     throw new Error(JSON.stringify({ missing, duplicate }));
   }
   if (
-    !app.includes("frame.source_online") ||
+    !app.includes("frame.communication_fresh") ||
+    app.includes("frame.source_online") ||
     app.includes("frame.controller_online")
   ) {
     throw new Error("viewer source-online API contract is stale");
   }
-  if (!app.includes("frame.pose_usable === true")) {
+  if (
+    app.includes("frame.pose_usable") || app.includes("optical_tracking_valid")
+  ) {
     throw new Error(
-      "viewer still derives pose validity from compatibility flags",
+      "viewer still consumes removed speculative validity fields",
     );
   }
-  if (app.includes("(frame.flags & 0x0f)")) {
+  if (app.includes("frame.flags")) {
     throw new Error(
-      "viewer still treats compatibility flags as tracking flags",
+      "viewer still consumes the removed compatibility flags",
     );
   }
   if (!app.includes("frame.filtered_position")) {

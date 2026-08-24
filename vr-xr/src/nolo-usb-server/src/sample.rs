@@ -59,12 +59,10 @@ impl<const N: usize> InterleavedSampleTracker<N> {
     fn aggregate(&self, now: Instant, changed: bool, sequence_delta: u8) -> SampleObservation {
         let streams: [SampleObservation; N] =
             std::array::from_fn(|index| self.streams[index].status(now));
-        let (measured_rate_count, measured_rate_sum) = streams
+        let measured_rate_hz = streams
             .iter()
             .filter_map(|stream| stream.measured_rate_hz)
-            .fold((0_u8, 0.0_f32), |(count, sum), rate| {
-                (count + 1, sum + rate)
-            });
+            .reduce(|total, rate| total + rate);
         SampleObservation {
             changed,
             fresh: streams.iter().any(|stream| stream.fresh),
@@ -77,7 +75,7 @@ impl<const N: usize> InterleavedSampleTracker<N> {
             samples_received: streams.iter().map(|stream| stream.samples_received).sum(),
             samples_missed: streams.iter().map(|stream| stream.samples_missed).sum(),
             duplicate_reports: streams.iter().map(|stream| stream.duplicate_reports).sum(),
-            measured_rate_hz: (measured_rate_count > 0).then_some(measured_rate_sum),
+            measured_rate_hz,
             jitter_ms: streams
                 .iter()
                 .filter_map(|stream| stream.jitter_ms)

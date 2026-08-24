@@ -5,8 +5,13 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_param_builder import ParameterBuilder
-from moveit_configs_utils import MoveItConfigsBuilder
+
+from stararm102_teleop_moveit.launch_support import (
+    load_moveit_parameters,
+    move_group_node,
+    robot_state_publisher,
+    servo_node,
+)
 
 
 def generate_launch_description():
@@ -14,29 +19,10 @@ def generate_launch_description():
     vendor_share = get_package_share_directory("stararm102_moveit_config")
     ipc_path = LaunchConfiguration("ipc_path")
 
-    moveit_config = (
-        MoveItConfigsBuilder(
-            "stararm102_description", package_name="stararm102_moveit_config"
-        )
-        .robot_description(file_path="config/stararm102_description.urdf.xacro")
-        .robot_description_semantic(file_path="config/stararm102_description.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .to_moveit_configs()
-    )
-    servo_params = (
-        ParameterBuilder("stararm102_teleop_moveit")
-        .yaml("config/servo.yaml")
-        .to_dict()
-    )
+    moveit_config, servo_params, move_group_params = load_moveit_parameters()
     controllers = os.path.join(vendor_share, "config", "ros2_controllers.yaml")
 
-    robot_state_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        parameters=[moveit_config.robot_description],
-        output="screen",
-    )
+    state_publisher = robot_state_publisher(moveit_config)
     ros2_control = Node(
         package="controller_manager",
         executable="ros2_control_node",
@@ -61,21 +47,8 @@ def generate_launch_description():
         arguments=["hand_controller", "-c", "/controller_manager"],
         output="screen",
     )
-    servo = Node(
-        package="moveit_servo",
-        executable="servo_node",
-        name="servo_node",
-        parameters=[
-            servo_params,
-            {"update_period": 0.01},
-            {"planning_group_name": "arm"},
-            moveit_config.robot_description,
-            moveit_config.robot_description_semantic,
-            moveit_config.robot_description_kinematics,
-            moveit_config.joint_limits,
-        ],
-        output="screen",
-    )
+    servo = servo_node(moveit_config, servo_params)
+    move_group = move_group_node(move_group_params)
     bridge = Node(
         package="stararm102_teleop_moveit",
         executable="servo_ipc_bridge",
@@ -86,11 +59,12 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("ipc_path", default_value="/ipc/moveit-servo.sock"),
-            robot_state_publisher,
+            state_publisher,
             ros2_control,
             joint_state_spawner,
             arm_spawner,
             hand_spawner,
+            move_group,
             servo,
             bridge,
         ]

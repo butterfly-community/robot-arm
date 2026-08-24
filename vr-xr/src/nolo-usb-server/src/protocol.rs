@@ -41,10 +41,6 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    pub fn touchpad_pressed(self) -> bool {
-        self.buttons & (1 << 0) != 0
-    }
-
     pub fn trigger_pressed(self) -> bool {
         self.buttons & (1 << 1) != 0
     }
@@ -53,16 +49,8 @@ impl RawFrame {
         self.buttons & (1 << 2) != 0
     }
 
-    pub fn home_pressed(self) -> bool {
-        self.buttons & (1 << 3) != 0
-    }
-
     pub fn squeeze_pressed(self) -> bool {
         self.buttons & (1 << 4) != 0
-    }
-
-    pub fn touchpad_touched(self) -> bool {
-        self.buttons & (1 << 5) != 0
     }
 }
 

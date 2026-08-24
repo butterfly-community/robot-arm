@@ -86,14 +86,10 @@ export function averagePoseSamples(samples) {
 export function frameFacingBaseStation(
   position,
   basePosition = [0, 0, 0],
-  minimumHorizontalDistance = 0.5,
 ) {
   const toBase = subtract(basePosition, position);
   const horizontalToBase = [toBase[0], 0, toBase[2]];
   const distance = Math.hypot(horizontalToBase[0], horizontalToBase[2]);
-  if (distance < minimumHorizontalDistance) {
-    throw new Error("手柄离基站太近，无法稳定确定水平方向");
-  }
   const forward = unit(horizontalToBase);
   const up = [0, 1, 0];
   const right = unit(cross(forward, up));

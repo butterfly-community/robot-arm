@@ -315,15 +315,15 @@ report[59]：HMD/USB 中继采样序号
 24/59 **不能判断基站电源状态**。
 
 以下 Rust API 状态字段均由采样序号派生：`sample_sequence`、
-`communication_fresh`、兼容别名 `source_online`、`sample_changed`、
-`pose_usable` 和 `hmd_relay_online`。它们只表示采样新鲜度，不是光学 tracking
-valid/tracked 结论；`optical_tracking_valid` 在协议确认前固定为 `null`。旧
-`flags` 仅为结构兼容保留并固定为零。手柄帧的 `sample_sequence` 取
+`communication_fresh`、`sample_changed` 和 `hmd_relay_online`。
+它们只表示采样新鲜度，不是光学 tracking valid/tracked 结论。没有协议依据的
+`pose_usable`、`optical_tracking_valid`，以及迁移期的 `source_online` 和 `flags`
+均未保留。手柄帧的 `sample_sequence` 取
 `report[24]`，头部帧取 `report[59]`。
 
 Rust API 的 `filtered_position` 是后端对 `report[1..=6]` 换算结果执行 One Euro
-滤波得到的派生量，不对应 HID 报告中的额外字段。协议层的 `position` 和
-`marker_position` 始终保留上述原始换算值。
+滤波得到的派生量，不对应 HID 报告中的额外字段。协议层的 `position` 始终保留上述
+原始换算值；不再输出按姿态猜测的握持点位置。
 
 ## 未知字段处理原则
 

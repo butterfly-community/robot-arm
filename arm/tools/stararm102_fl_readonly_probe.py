@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Strictly read-only Star Arm 102-FL identification and feedback probe.
 
-The production Stararm102FL.connect() path is intentionally not used because
-it calls configure(), disables torque and resets multi-turn state.  This tool
-opens the audited upstream motor bus directly and exposes only connect, ping,
-Present_Position and disconnect(disable_torque=False).
+The production Stararm102FL and lerobot_motor_starai connect() paths are
+intentionally not used because they change torque and reset multi-turn state.
+This tool opens the official FashionStar port directly and exposes only open,
+ping, Present_Position and a non-torque-changing close.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ class ReadOnlyProbe:
             resolved_device=resolved_device,
             stable_device=stable_device,
             baudrate=baudrate,
-            backend="lerobot_motor_starai",
+            backend="fashionstar_uart_sdk",
             ping=ping,
             samples=samples,
             valid=valid,
@@ -168,22 +168,48 @@ def parse_positions(values: dict[str, float | None]) -> dict[str, float] | None:
 
 def make_bus(port: str, baudrate: int) -> MotorBus:
     try:
-        from lerobot_motor_starai.starai import (  # type: ignore[import-not-found]
-            StaraiMotorsBus,
-            build_stararm_motors,
+        from fashionstar_uart_sdk.uart_pocket_handler import (  # type: ignore[import-not-found]
+            PortHandler,
         )
     except ImportError as error:
         raise SystemExit(
-            "缺少 lerobot_motor_starai；请在独立 Python 环境安装上游 FL 插件声明的 "
-            "lerobot_motor_starai>=0.0.6"
+            "缺少 fashionstar_uart_sdk；请在独立 Python 环境安装 "
+            "fashionstar-uart-sdk==1.3.12"
         ) from error
-    return StaraiMotorsBus(
-        port=port,
-        motors=build_stararm_motors(JOINT_IDS),
-        calibration={},
-        baudrate=baudrate,
-        position_unit="degrees",
-    )
+
+    class ReadOnlyFashionStarBus:
+        def __init__(self) -> None:
+            self.port_handler = PortHandler(port, baudrate)
+
+        def connect(self) -> None:
+            if self.port_handler.is_open:
+                raise RuntimeError("Star Arm bus is already connected")
+            self.port_handler.openPort()
+            if not self.port_handler.is_open:
+                raise RuntimeError(f"failed to open Star Arm serial port: {port}")
+
+        def ping(self, motor_id: int) -> bool:
+            return bool(self.port_handler.ping(motor_id))
+
+        def sync_read(
+            self, register: str, motor_names: list[str], *, normalize: bool
+        ) -> dict[str, float | None]:
+            if register != PRESENT_POSITION or normalize:
+                raise ValueError("read-only probe only permits raw Present_Position")
+            ids = {name: JOINT_IDS[name] for name in motor_names}
+            values = self.port_handler.read_positions(ids)
+            return {
+                name: None if values.get(name) is None else float(values[name])
+                for name in motor_names
+            }
+
+        def disconnect(self, *, disable_torque: bool) -> None:
+            if disable_torque:
+                raise ValueError("read-only probe cannot change torque")
+            if self.port_handler.is_open:
+                self.port_handler.closePort()
+
+    return ReadOnlyFashionStarBus()
 
 
 def resolve_device(value: str) -> tuple[str, bool]:

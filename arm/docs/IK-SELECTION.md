@@ -7,25 +7,27 @@
 - Rust NOLO 进程只生成带时间戳的目标 TCP 位姿，通过 Unix socket 与薄 `rclpy` 桥接器
   对接标准 Servo Pose API；当前 TCP 由官方 `robot_state_publisher`/TF2 根据厂家 URDF
   计算并随反馈返回，Rust 不保存关节链，也不实现 FK。
-- 真实机械臂以后复用同一个 Servo 上游，只替换 `GenericSystem` 输出端。新品 FL 的零位、
-  方向、软限位、速度/加速度和急停未完成实机验收，因此真实后端仍是 TODO。
+- 真实机械臂复用同一个 Servo 上游，用标准 `JointTrajectoryController` 和官方
+  `JointStateTopicSystem` 替换 `GenericSystem` 输出端。新品 FL 的零位、
+  方向、软限位、速度/加速度和急停未完成实机验收，因此真实后端代码不得直接放行。
 
 这能把设备采集和机器人运动学分开：手柄链路负责“用户想让 TCP 怎样运动”，MoveIt
-负责“当前机械臂是否能安全地这样运动”。浏览器仍是只读显示，但实时关节状态来自 ROS
-仿真后端，不再独立计算 IK。
+负责“当前机械臂是否能安全地这样运动”。浏览器不计算 IK，也不直接访问串口；机械臂页
+只负责输出选择、标准回零请求和状态显示，实时关节状态来自对应 ROS 后端。
 
 ## 已核对的方案
 
-### MoveIt Servo：当前仿真已接入，真实后端待接
+### MoveIt Servo：双输出软件已接入，真实后端待现场验收
 
 [MoveIt Servo](https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html)
 原生接收 Pose、Twist 或 JointJog 命令，并提供关节位置/速度限制、奇异检查、碰撞检查、
 输入平滑和陈旧命令停止。这些正是通电示教需要由成熟框架统一处理的功能，比在本项目
 逐项补写 IK 和安全边界更合适。
 
-当前容器链路复用厂家 `stararm102_description`、SRDF、KDL、碰撞网格、
-`JointTrajectoryController` 和 `mock_components/GenericSystem`。本项目只保存必要补丁、
-Servo 参数、启动文件和 IPC 桥接器；厂家完整源码保持在 `~/Develop/temp`。
+两条容器链路复用厂家 `stararm102_description`、SRDF、KDL、碰撞网格和
+`JointTrajectoryController`；仿真使用 `mock_components/GenericSystem`，真机使用官方
+`JointStateTopicSystem` 加受限 SDK 薄适配。本项目只保存必要补丁、Servo 参数、启动文件
+和 IPC 桥接器；厂家完整源码保持在 `~/Develop/temp`。
 
 ### `openrr/k`：不替换当前 6R 求解器
 
@@ -62,8 +64,8 @@ NOLO USB + Fusion + 位置滤波
              ▼
 MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、超时停止）
              │
-             ├── GenericSystem + /joint_states + TF2 TCP → Rust/网页（已实现）
-             └── 102-FL 真实驱动与反馈（TODO）
+             ├── GenericSystem + /joint_states + TF2 TCP → Rust/网页（仿真）
+             └── JointStateTopicSystem + SDK 薄适配 + 反馈/急停（P3 待现场验收）
 ```
 
 硬件急停独立于以上软件链。MoveIt Servo 的输出仍需经过真实反馈新鲜度检查和驱动层

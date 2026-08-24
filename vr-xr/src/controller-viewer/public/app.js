@@ -12,8 +12,6 @@ import {
 const $ = (id) => document.getElementById(id);
 const HOLD_MS = 6000;
 const FUSION_CALIBRATION_DELAY_MS = 1000;
-const ORIGIN_WINDOW_MS = 1200;
-const MIN_ORIGIN_SAMPLES = 8;
 const MAX_SAMPLES = 400;
 const circumference = 2 * Math.PI * 49;
 
@@ -112,7 +110,7 @@ function loadViewState() {
 }
 
 function sourceId(frame) {
-  const value = Number(frame?.source_id ?? frame?.controller_id ?? 0);
+  const value = Number(frame?.source_id ?? 0);
   return Number.isInteger(value) && value >= 0 && value < 3 ? value : 0;
 }
 
@@ -191,8 +189,7 @@ function directionText(value, positive, negative) {
 }
 
 function validPose(frame) {
-  return frame && frame.pose_usable === true &&
-    frame.communication_fresh === true &&
+  return frame && frame.communication_fresh === true &&
     Array.isArray(frame.position) && frame.position.length === 3 &&
     Array.isArray(frame.orientation) && frame.orientation.length === 4 &&
     frame.position.every(Number.isFinite) &&
@@ -340,28 +337,14 @@ function completeOrigin() {
     menuWasLong = true;
     return;
   }
-  const cutoff = performance.now() - ORIGIN_WINDOW_MS;
-  let samples = originHoldSamples.filter((sample) =>
-    sample.capturedAt >= cutoff
-  );
-  if (samples.length < MIN_ORIGIN_SAMPLES) samples = [...originHoldSamples];
-  if (samples.length < MIN_ORIGIN_SAMPLES) {
-    setCalibrationMessage(
-      "原点采样不足",
-      `只收到 ${samples.length} 个有效样本，请松开后重新按住菜单键 6 秒。`,
-    );
-    menuWasLong = true;
-    return;
-  }
-
-  const averaged = averagePoseSamples(samples);
+  const averaged = averagePoseSamples(originHoldSamples);
   let baseFrame;
   try {
     baseFrame = frameFacingBaseStation(averaged.position);
   } catch {
     setCalibrationMessage(
-      "离基站太近，无法标定",
-      "请退到离基站至少 50 厘米处，人与手柄都正对基站后重新长按菜单键 6 秒。",
+      "无法确定基站方向",
+      "手柄位置与基站原点重合，请移动后重新长按菜单键 6 秒。",
     );
     $("calibration-state").textContent = "基站方向不可用";
     menuWasLong = true;
@@ -402,33 +385,16 @@ function updateFrame(frame, processMenu = true) {
   $("connection").textContent = valid ? "新采样已连接" : "采样不可用";
   $("connection").classList.toggle("waiting", !valid);
   $("device").textContent = localizedDeviceName(frame.device);
-  $("flags").textContent = `0x${
-    Number(frame.flags).toString(16).padStart(2, "0")
-  }（仅兼容保留）`;
   $("raw-position").textContent = fmt(frame.position);
   $("filtered-position").textContent = Array.isArray(frame.filtered_position)
     ? fmt(frame.filtered_position)
     : isHead
     ? "头部不适用"
     : "等待新的有效位置样本";
-  $("position-mode").textContent = frame.position_mode === "grip"
-    ? "估算握持点（实验）"
-    : "原始光学标记";
-  $("marker-position").textContent = Array.isArray(frame.marker_position)
-    ? fmt(frame.marker_position)
-    : "数据未提供";
-  $("grip-position").textContent = Array.isArray(frame.grip_position)
-    ? fmt(frame.grip_position)
-    : "头部不适用";
-  $("optical-valid").textContent = frame.optical_tracking_valid == null
-    ? "协议未识别，不能据此控制机械臂"
-    : frame.optical_tracking_valid
-    ? "有效"
-    : "无效";
   $("raw-orientation").textContent = fmt(frame.orientation);
   $("menu-state").textContent = isHead
     ? "头部无菜单键"
-    : !frame.menu_active
+    : !frame.communication_fresh
     ? "输入未激活"
     : frame.menu_pressed
     ? "按下"
@@ -437,7 +403,7 @@ function updateFrame(frame, processMenu = true) {
   $("pose-unchanged").textContent = Number.isFinite(unchangedMs)
     ? `${(unchangedMs / 1000).toFixed(1)} 秒`
     : "未知";
-  $("source-online").textContent = frame.source_online
+  $("source-online").textContent = frame.communication_fresh
     ? "序号持续更新"
     : "序号停止：关机、休眠或失联";
   $("hmd-relay-online").textContent = frame.hmd_relay_online
@@ -451,7 +417,7 @@ function updateFrame(frame, processMenu = true) {
     ? `— / ${Number(frame.hmd_sequence ?? 0)}（约 ${
       Number(frame.sample_rate_hz ?? 240)
     } Hz）`
-    : `${Number(frame.controller_sequence ?? frame.sample_sequence ?? 0)} / ${
+    : `${Number(frame.sample_sequence ?? 0)} / ${
       Number(frame.hmd_sequence ?? 0)
     }（约 ${Number(frame.sample_rate_hz ?? 120)} Hz）`;
   const measuredRate = Number(frame.measured_rate_hz);
@@ -487,11 +453,6 @@ function updateFrame(frame, processMenu = true) {
     : "控制器序号未变化";
   $("source-online-label").textContent = `${SOURCE_LABELS[selectedSource]}通信`;
   $("menu-state-label").textContent = isHead ? "输入" : "菜单键";
-  if (valid && unchangedMs >= 2000) {
-    $("connection").textContent = "位姿未变化：静止或数据冻结";
-    $("connection").classList.add("waiting");
-  }
-
   if (isHead) {
     setCalibrationMessage(
       "基站跟踪坐标",

@@ -45,14 +45,14 @@ Deno.test("official NOLO calibration points forward toward base station", () => 
   assertNear(dot(frame.forward, frame.right), 0);
 });
 
-Deno.test("base-station calibration rejects an unstable short baseline", () => {
+Deno.test("base-station origin cannot define a horizontal direction", () => {
   let rejected = false;
   try {
-    frameFacingBaseStation([0.1, 1.0, 0.2]);
+    frameFacingBaseStation([0.0, 1.0, 0.0]);
   } catch {
     rejected = true;
   }
-  assert(rejected, "position too close to the base station was accepted");
+  assert(rejected, "zero horizontal direction was accepted");
 });
 
 Deno.test("human position frame is right +X, up +Y, forward -Z", () => {

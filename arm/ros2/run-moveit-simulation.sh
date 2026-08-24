@@ -19,6 +19,7 @@ mkdir -p "${state_dir}"
 exec docker run --rm --network host \
   --name stararm102-moveit-simulation \
   --env ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  --env ROS_DOMAIN_ID=42 \
   --volume "${vendor_root}:/vendor:ro" \
   --volume "${repo_root}/arm/patches:/project-patches:ro" \
   --volume "${script_dir}/stararm102_teleop_moveit:/project-package:ro" \
@@ -31,8 +32,8 @@ exec docker run --rm --network host \
     cp -a /vendor/ROS2_HUMBLE/src/stararm102_moveit_config /tmp/vendor/ROS2_HUMBLE/src/
     cd /tmp/vendor
     git apply --ignore-space-change --ignore-whitespace \
-      /project-patches/star-arm-102-moveit-joint6-velocity.patch \
-      /project-patches/star-arm-102-fl-moveit-model.patch
+      /project-patches/star-arm-102-fl-moveit-model.patch \
+      /project-patches/star-arm-102-fl-moveit-dynamics.patch
     cp -a /tmp/vendor/ROS2_HUMBLE/src/stararm102_description /tmp/ws/src/
     cp -a /tmp/vendor/ROS2_HUMBLE/src/stararm102_moveit_config /tmp/ws/src/
     cp -a /project-package /tmp/ws/src/stararm102_teleop_moveit

@@ -77,6 +77,29 @@ h2 {
 
 .top-actions {
   gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.backend-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(5, 14, 21, 0.72);
+}
+.backend-switch button {
+  padding: 6px 12px;
+  border-color: transparent;
+  background: transparent;
+}
+.backend-switch button[aria-pressed="true"] {
+  border-color: rgba(71, 216, 235, 0.55);
+  background: rgba(24, 89, 103, 0.72);
+  color: #e8fbff;
+}
+.backend-switch button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 .back-link,
 button {
@@ -97,6 +120,16 @@ button:hover {
 }
 button:active {
   transform: translateY(1px);
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+.danger-action {
+  border-color: rgba(255, 155, 90, 0.65);
+  background: rgba(116, 52, 24, 0.72);
+  color: #ffe4d3;
 }
 
 .badge,
@@ -259,6 +292,53 @@ code {
 .telemetry {
   display: grid;
   gap: 16px;
+}
+.home-content {
+  display: grid;
+  gap: 12px;
+  padding: 14px 17px 17px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.home-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 0;
+}
+.home-summary div {
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(4, 13, 20, 0.48);
+}
+.home-preview {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(4, 13, 20, 0.4);
+}
+.home-preview[hidden] {
+  display: none;
+}
+.home-preview input {
+  width: 100%;
+  accent-color: var(--cyan);
+}
+.home-preview output {
+  color: #dceaf3;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.home-safety {
+  color: var(--yellow);
+  line-height: 1.45;
 }
 .panel-heading.compact {
   padding-bottom: 13px;

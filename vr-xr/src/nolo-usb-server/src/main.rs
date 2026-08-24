@@ -14,9 +14,8 @@ use axum::{
 use hidapi::HidApi;
 use nolo_usb_server::{
     fusion::{ControllerFusion, FusionDiagnostics, HmdFusion},
-    gyro_bias::GyroBiasStore,
-    pose::estimated_grip_position,
-    position_filter::{PositionFilter, PositionFilterSettings},
+    gyro_bias::{GyroBiasStore, SOURCE_COUNT},
+    position_filter::PositionFilter,
     protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report},
     sample::{InterleavedSampleTracker, SampleObservation, SampleTracker},
     simulator::{REPORT_PERIOD_SECONDS, VirtualNolo},
@@ -25,8 +24,8 @@ use nolo_usb_server::{
 use serde::Serialize;
 use serde_json::json;
 use stararm102_control::{
-    ArmModel, MoveItSimulationController, RelativeIntent, RelativeIntentState, ServoFeedbackFrame,
-    SimulationSnapshot,
+    ArmModel, HomeRequestAction, HomeRequestFrame, HomeState, HomeStatusFrame, MoveItController,
+    RelativeIntent, RelativeIntentState, ServoFeedbackFrame, SimulationSnapshot, SimulationState,
 };
 use std::{
     convert::Infallible,
@@ -34,7 +33,7 @@ use std::{
     path::{Path as FilePath, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -46,7 +45,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'";
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://esm.sh; style-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'";
 
 const DEVICE_NAMES: [&str; 3] = [
     "NOLO CV1: Controller 0 (USB)",
@@ -61,38 +60,57 @@ const VIRTUAL_DEVICE_NAMES: [&str; 3] = [
 const SEQUENCE_STALE_AFTER: Duration = Duration::from_millis(200);
 const SSE_MIN_INTERVAL: Duration = Duration::from_micros(16_667);
 const ARM_SIM_INTERVAL: Duration = Duration::from_millis(10);
-const SOURCE_COUNT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArmOutputBackend {
+    #[default]
+    Simulation,
+    Hardware,
+}
+
+impl ArmOutputBackend {
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "simulation" => Some(Self::Simulation),
+            "hardware" => Some(Self::Hardware),
+            _ => None,
+        }
+    }
+
+    fn simulation_only(self) -> bool {
+        self == Self::Simulation
+    }
+
+    fn controller_backend(self) -> &'static str {
+        match self {
+            Self::Simulation => "moveit_servo_simulation",
+            Self::Hardware => "moveit_servo_hardware",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct PoseFrame {
     time_ns: u64,
     source_id: u8,
-    source_kind: &'static str,
     sample_rate_hz: u16,
-    controller_id: Option<u8>,
     device: &'static str,
     simulated: bool,
-    /// Deprecated compatibility field. This is not an OpenXR tracking flag.
-    flags: u32,
     position: [f32; 3],
     filtered_position: Option<[f32; 3]>,
-    marker_position: [f32; 3],
-    grip_position: Option<[f32; 3]>,
-    position_mode: &'static str,
     orientation: [f32; 4],
     communication_fresh: bool,
     sample_changed: bool,
-    optical_tracking_valid: Option<bool>,
-    pose_usable: bool,
-    usb_silent_ms: u64,
     unchanged_ms: u64,
     hmd_unchanged_ms: u64,
-    source_online: bool,
     hmd_relay_online: bool,
     sample_sequence: u8,
-    controller_sequence: Option<u8>,
     hmd_sequence: u8,
-    sequence_delta: u8,
     samples_received: u64,
     samples_missed: u64,
     duplicate_reports: u64,
@@ -106,30 +124,28 @@ struct PoseFrame {
     gyro_calibration_active: bool,
     gyro_calibration_complete: bool,
     gyro_calibration_progress: f32,
-    menu_active: bool,
     menu_pressed: bool,
-    buttons_raw: u8,
-    touchpad_pressed: bool,
     trigger_pressed: bool,
-    home_pressed: bool,
     squeeze_pressed: bool,
-    touchpad_touched: bool,
-    touchpad: Option<[u8; 2]>,
-    accelerometer_raw: [i16; 3],
-    gyroscope_raw: [i16; 3],
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct StatusPayload {
     status: String,
-    #[serde(rename = "latestFrame")]
-    latest_frame: Option<PoseFrame>,
     #[serde(rename = "latestFrames")]
     latest_frames: [Option<PoseFrame>; SOURCE_COUNT],
     #[serde(rename = "latestTeleopIntent")]
     latest_teleop_intent: TeleopIntent,
     #[serde(rename = "latestArmSimulation")]
     latest_arm_simulation: SimulationSnapshot,
+    #[serde(rename = "latestArmHardware")]
+    latest_arm_hardware: SimulationSnapshot,
+    #[serde(rename = "armOutputBackend")]
+    arm_output_backend: ArmOutputBackend,
+    #[serde(rename = "armHomeSimulation")]
+    arm_home_simulation: HomeStatusFrame,
+    #[serde(rename = "armHomeHardware")]
+    arm_home_hardware: HomeStatusFrame,
     #[serde(rename = "simulationRequested")]
     simulation_requested: bool,
     #[serde(rename = "simulationActive")]
@@ -145,7 +161,6 @@ enum ServerEvent {
 #[derive(Debug)]
 struct Snapshot {
     status: String,
-    latest_frame: Option<PoseFrame>,
     latest_frames: [Option<PoseFrame>; SOURCE_COUNT],
 }
 
@@ -157,7 +172,12 @@ struct AppState {
     pose_calibration_requests: Arc<[AtomicBool; SOURCE_COUNT]>,
     last_sse_pose: Arc<Mutex<[Option<Instant>; SOURCE_COUNT]>>,
     teleop_intent: watch::Sender<TeleopIntent>,
-    arm_simulation: watch::Sender<SimulationSnapshot>,
+    arm_snapshots: [watch::Sender<SimulationSnapshot>; 2],
+    arm_output_backend: Arc<RwLock<ArmOutputBackend>>,
+    arm_output_generation: Arc<AtomicU64>,
+    arm_home_statuses: [watch::Sender<HomeStatusFrame>; 2],
+    arm_home_requests: [watch::Sender<Option<HomeRequestFrame>>; 2],
+    arm_home_request_id: Arc<AtomicU64>,
     shutdown: watch::Sender<bool>,
     simulation_requested: Arc<AtomicBool>,
     simulation_active: Arc<AtomicBool>,
@@ -168,17 +188,25 @@ impl AppState {
         let (events, _) = broadcast::channel(256);
         let initial_teleop_intent = TeleopIntentMachine::new().latest().clone();
         let (teleop_intent, _) = watch::channel(initial_teleop_intent);
-        let initial_arm_simulation = MoveItSimulationController::new(
+        let initial_arm_simulation =
+            MoveItController::new(ArmModel::embedded().expect("invalid embedded FL profile"))
+                .latest()
+                .clone();
+        let (arm_simulation, _) = watch::channel(initial_arm_simulation);
+        let initial_arm_hardware = MoveItController::new_for_backend(
             ArmModel::embedded().expect("invalid embedded FL profile"),
+            false,
+            ArmOutputBackend::Hardware.controller_backend(),
         )
         .latest()
         .clone();
-        let (arm_simulation, _) = watch::channel(initial_arm_simulation);
+        let (arm_hardware, _) = watch::channel(initial_arm_hardware);
+        let arm_home_statuses = std::array::from_fn(|_| watch::channel(Default::default()).0);
+        let arm_home_requests = std::array::from_fn(|_| watch::channel(None).0);
         let (shutdown, _) = watch::channel(false);
         Self {
             snapshot: Arc::new(RwLock::new(Snapshot {
                 status: "正在连接 NOLO USB…".to_owned(),
-                latest_frame: None,
                 latest_frames: std::array::from_fn(|_| None),
             })),
             events,
@@ -186,7 +214,12 @@ impl AppState {
             pose_calibration_requests: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
             last_sse_pose: Arc::new(Mutex::new(std::array::from_fn(|_| None))),
             teleop_intent,
-            arm_simulation,
+            arm_snapshots: [arm_simulation, arm_hardware],
+            arm_output_backend: Arc::new(RwLock::new(ArmOutputBackend::default())),
+            arm_output_generation: Arc::new(AtomicU64::new(0)),
+            arm_home_statuses,
+            arm_home_requests,
+            arm_home_request_id: Arc::new(AtomicU64::new(0)),
             shutdown,
             simulation_requested: Arc::new(AtomicBool::new(false)),
             simulation_active: Arc::new(AtomicBool::new(false)),
@@ -216,7 +249,6 @@ impl AppState {
             .as_ref()
             .map(|previous| previous.communication_fresh != pose.communication_fresh)
             .unwrap_or(true);
-        snapshot.latest_frame = Some(pose.clone());
         snapshot.latest_frames[source_id] = Some(pose.clone());
         drop(snapshot);
 
@@ -225,7 +257,7 @@ impl AppState {
         let interval_elapsed = last_sse_pose[source_id]
             .map(|previous| now.duration_since(previous) >= SSE_MIN_INTERVAL)
             .unwrap_or(true);
-        if freshness_changed || !pose.pose_usable || interval_elapsed {
+        if freshness_changed || !pose.communication_fresh || interval_elapsed {
             last_sse_pose[source_id] = Some(now);
             drop(last_sse_pose);
             let _ = self.events.send(ServerEvent::Pose(Box::new(pose)));
@@ -236,10 +268,13 @@ impl AppState {
         let snapshot = self.snapshot.read().unwrap();
         StatusPayload {
             status: snapshot.status.clone(),
-            latest_frame: snapshot.latest_frame.clone(),
             latest_frames: snapshot.latest_frames.clone(),
             latest_teleop_intent: self.teleop_intent.borrow().clone(),
-            latest_arm_simulation: self.arm_simulation.borrow().clone(),
+            latest_arm_simulation: self.arm_snapshot(ArmOutputBackend::Simulation),
+            latest_arm_hardware: self.arm_snapshot(ArmOutputBackend::Hardware),
+            arm_output_backend: self.arm_output_backend(),
+            arm_home_simulation: self.arm_home_status(ArmOutputBackend::Simulation),
+            arm_home_hardware: self.arm_home_status(ArmOutputBackend::Hardware),
             simulation_requested: self.simulation_requested.load(Ordering::Acquire),
             simulation_active: self.simulation_active.load(Ordering::Acquire),
         }
@@ -249,8 +284,75 @@ impl AppState {
         self.teleop_intent.send_replace(intent);
     }
 
-    fn set_arm_simulation(&self, snapshot: SimulationSnapshot) {
-        self.arm_simulation.send_replace(snapshot);
+    fn set_arm_snapshot(&self, backend: ArmOutputBackend, snapshot: SimulationSnapshot) {
+        self.arm_snapshots[backend.index()].send_replace(snapshot);
+    }
+
+    fn arm_snapshot(&self, backend: ArmOutputBackend) -> SimulationSnapshot {
+        self.arm_snapshots[backend.index()].borrow().clone()
+    }
+
+    fn arm_output_backend(&self) -> ArmOutputBackend {
+        *self.arm_output_backend.read().unwrap()
+    }
+
+    fn arm_home_status(&self, backend: ArmOutputBackend) -> HomeStatusFrame {
+        self.arm_home_statuses[backend.index()].borrow().clone()
+    }
+
+    fn set_arm_home_status(&self, backend: ArmOutputBackend, status: HomeStatusFrame) {
+        self.arm_home_statuses[backend.index()].send_replace(status);
+    }
+
+    fn arm_home_request(&self, backend: ArmOutputBackend) -> Option<HomeRequestFrame> {
+        self.arm_home_requests[backend.index()].borrow().clone()
+    }
+
+    fn send_arm_home_request(&self, backend: ArmOutputBackend, request: HomeRequestFrame) {
+        self.arm_home_requests[backend.index()].send_replace(Some(request));
+    }
+
+    fn acknowledge_arm_home_request(
+        &self,
+        backend: ArmOutputBackend,
+        request_id: u64,
+        action: Option<HomeRequestAction>,
+    ) {
+        let sender = &self.arm_home_requests[backend.index()];
+        let acknowledged = sender.borrow().as_ref().is_some_and(|request| {
+            request.request_id == request_id && Some(request.action) == action
+        });
+        if acknowledged {
+            sender.send_replace(None);
+        }
+    }
+
+    fn reset_arm_home_session(&self, backend: ArmOutputBackend) {
+        self.set_arm_home_status(backend, HomeStatusFrame::default());
+        self.arm_home_requests[backend.index()].send_replace(None);
+    }
+
+    fn next_arm_home_request_id(&self) -> u64 {
+        self.arm_home_request_id.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn arm_home_blocks_teleop(&self, backend: ArmOutputBackend) -> bool {
+        self.arm_home_status(backend).state.blocks_teleop()
+    }
+
+    fn select_arm_output(&self, backend: ArmOutputBackend) {
+        let changed = {
+            let mut selected = self.arm_output_backend.write().unwrap();
+            if *selected == backend {
+                false
+            } else {
+                *selected = backend;
+                true
+            }
+        };
+        if changed {
+            self.arm_output_generation.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn request_gyro_calibration(&self, source_id: usize) {
@@ -299,7 +401,7 @@ impl AppState {
     }
 
     fn mark_all_offline(&self, time_ns: u64, usb_silent: Duration) {
-        let usb_silent_ms = duration_ms(usb_silent);
+        let silent_ms = duration_ms(usb_silent);
         let changed_poses = {
             let mut snapshot = self.snapshot.write().unwrap();
             let mut changed = Vec::new();
@@ -308,22 +410,14 @@ impl AppState {
                     continue;
                 }
                 frame.time_ns = time_ns;
-                frame.flags = 0;
                 frame.communication_fresh = false;
                 frame.sample_changed = false;
-                frame.pose_usable = false;
                 frame.filtered_position = None;
-                frame.source_online = false;
                 frame.hmd_relay_online = false;
-                frame.menu_active = false;
                 frame.menu_pressed = false;
-                frame.usb_silent_ms = usb_silent_ms;
-                frame.unchanged_ms = frame.unchanged_ms.max(usb_silent_ms);
-                frame.hmd_unchanged_ms = frame.hmd_unchanged_ms.max(usb_silent_ms);
+                frame.unchanged_ms = frame.unchanged_ms.max(silent_ms);
+                frame.hmd_unchanged_ms = frame.hmd_unchanged_ms.max(silent_ms);
                 changed.push(frame.clone());
-            }
-            if let Some(last) = changed.last() {
-                snapshot.latest_frame = Some(last.clone());
             }
             changed
         };
@@ -348,16 +442,11 @@ impl AppState {
                 return;
             }
             frame.time_ns = time_ns;
-            frame.flags = 0;
             frame.communication_fresh = false;
             frame.sample_changed = false;
-            frame.pose_usable = false;
             frame.filtered_position = None;
-            frame.source_online = false;
-            frame.menu_active = false;
             frame.menu_pressed = false;
             frame.unchanged_ms = duration_ms(sample.unchanged);
-            frame.sequence_delta = 0;
             frame.samples_received = sample.samples_received;
             frame.samples_missed = sample.samples_missed;
             frame.duplicate_reports = sample.duplicate_reports;
@@ -365,9 +454,7 @@ impl AppState {
             frame.sample_jitter_ms = sample.jitter_ms;
             frame.hmd_relay_online = hmd_sample.fresh;
             frame.hmd_unchanged_ms = duration_ms(hmd_sample.unchanged);
-            let pose = frame.clone();
-            snapshot.latest_frame = Some(pose.clone());
-            pose
+            frame.clone()
         };
         let _ = self.events.send(ServerEvent::Pose(Box::new(pose)));
     }
@@ -383,14 +470,26 @@ async fn main() -> Result<()> {
     // Reserve both externally visible endpoints before touching USB.  A
     // second instance must fail without disrupting the running instance.
     let servo_listener = bind_servo_ipc(&config.servo_ipc_path)?;
+    let hardware_servo_listener = match bind_servo_ipc(&config.hardware_servo_ipc_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            drop(servo_listener);
+            remove_servo_socket(&config.servo_ipc_path)?;
+            return Err(error);
+        }
+    };
     let state = AppState::new();
-    spawn_usb_reader(
+    spawn_usb_reader(state.clone(), config.gyro_calibration_file);
+    let servo_task = tokio::spawn(servo_ipc_accept_loop(
+        servo_listener,
         state.clone(),
-        config.controller_position_mode,
-        config.position_filter_settings,
-        config.gyro_calibration_file,
-    );
-    let servo_task = tokio::spawn(servo_ipc_accept_loop(servo_listener, state.clone()));
+        ArmOutputBackend::Simulation,
+    ));
+    let hardware_servo_task = tokio::spawn(servo_ipc_accept_loop(
+        hardware_servo_listener,
+        state.clone(),
+        ArmOutputBackend::Hardware,
+    ));
 
     let static_files = ServeDir::new(&config.static_dir).append_index_html_on_directories(true);
     let app = Router::new()
@@ -406,6 +505,8 @@ async fn main() -> Result<()> {
         )
         .route("/api/simulation/start", post(start_simulation))
         .route("/api/simulation/stop", post(stop_simulation))
+        .route("/api/arm-output/{backend}", post(select_arm_output))
+        .route("/api/arm-home/{backend}/{action}", post(arm_home))
         .fallback_service(static_files)
         .layer(middleware::from_fn(security_headers))
         .with_state(state.clone());
@@ -417,7 +518,9 @@ async fn main() -> Result<()> {
         .await
         .context("web server failed");
     let _ = servo_task.await;
+    let _ = hardware_servo_task.await;
     remove_servo_socket(&config.servo_ipc_path)?;
+    remove_servo_socket(&config.hardware_servo_ipc_path)?;
     server_result
 }
 
@@ -446,6 +549,173 @@ async fn stop_simulation(State(state): State<AppState>) -> (StatusCode, Json<ser
             "simulation_requested": false
         })),
     )
+}
+
+async fn select_arm_output(
+    Path(backend): Path<String>,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(backend) = ArmOutputBackend::parse(&backend) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "backend must be simulation or hardware" })),
+        );
+    };
+    state.select_arm_output(backend);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "arm_output_backend": backend,
+            "instruction": "release Squeeze, then press it again to arm the selected output"
+        })),
+    )
+}
+
+async fn arm_home(
+    Path((backend, action)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(backend) = ArmOutputBackend::parse(&backend) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "backend must be simulation or hardware" })),
+        );
+    };
+    if state.arm_output_backend() != backend {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "只能操作网页当前选中的输出" })),
+        );
+    }
+    let current = state.arm_home_status(backend);
+    match action.as_str() {
+        "plan" => {
+            if current.state.blocks_teleop() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "已有回零操作正在进行" })),
+                );
+            }
+            let teleop = state.teleop_intent.borrow().clone();
+            if teleop.squeeze_pressed {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "请先松开 Squeeze，再规划回零" })),
+                );
+            }
+            if state.arm_snapshot(backend).state == SimulationState::Faulted {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "MoveIt 后端处于故障状态，不能回零" })),
+                );
+            }
+            let request_id = state.next_arm_home_request_id();
+            let auto_execute = backend == ArmOutputBackend::Simulation;
+            let status = HomeStatusFrame {
+                request_id,
+                state: HomeState::Planning,
+                message: if auto_execute {
+                    "正在规划仿真回零轨迹".to_owned()
+                } else {
+                    "正在规划真机回零轨迹；规划完成后仍需确认".to_owned()
+                },
+                ..HomeStatusFrame::default()
+            };
+            state.set_arm_home_status(backend, status);
+            state.send_arm_home_request(
+                backend,
+                HomeRequestFrame {
+                    request_id,
+                    action: HomeRequestAction::Plan,
+                },
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "request_id": request_id,
+                    "state": "planning",
+                    "auto_execute": auto_execute
+                })),
+            )
+        }
+        "execute" => {
+            if backend != ArmOutputBackend::Hardware {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "仿真规划完成后会自动执行" })),
+                );
+            }
+            if current.state != HomeState::Ready || current.request_id == 0 {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "没有可执行的已验证真机回零轨迹" })),
+                );
+            }
+            let teleop = state.teleop_intent.borrow().clone();
+            if teleop.squeeze_pressed {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "请保持 Squeeze 松开后再确认执行" })),
+                );
+            }
+            if state.arm_snapshot(backend).state == SimulationState::Faulted {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "MoveIt 后端处于故障状态，不能回零" })),
+                );
+            }
+            state.set_arm_home_status(
+                backend,
+                HomeStatusFrame {
+                    state: HomeState::Executing,
+                    message: "已确认，等待 MoveIt 执行真机回零轨迹".to_owned(),
+                    ..current.clone()
+                },
+            );
+            state.send_arm_home_request(
+                backend,
+                HomeRequestFrame {
+                    request_id: current.request_id,
+                    action: HomeRequestAction::Execute,
+                },
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "request_id": current.request_id, "state": "executing" })),
+            )
+        }
+        "cancel" => {
+            if current.request_id == 0 || !current.state.blocks_teleop() {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "state": "idle", "message": "没有活动的回零操作" })),
+                );
+            }
+            state.send_arm_home_request(
+                backend,
+                HomeRequestFrame {
+                    request_id: current.request_id,
+                    action: HomeRequestAction::Cancel,
+                },
+            );
+            state.set_arm_home_status(
+                backend,
+                HomeStatusFrame {
+                    state: HomeState::Cancelled,
+                    message: "正在取消回零操作".to_owned(),
+                    ..current.clone()
+                },
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "request_id": current.request_id, "state": "cancelled" })),
+            )
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "action must be plan, execute or cancel" })),
+        ),
+    }
 }
 
 async fn start_gyro_calibration(
@@ -546,26 +816,14 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     response
 }
 
-fn spawn_usb_reader(
-    state: AppState,
-    controller_position_mode: ControllerPositionMode,
-    position_filter_settings: PositionFilterSettings,
-    gyro_calibration_file: PathBuf,
-) {
+fn spawn_usb_reader(state: AppState, gyro_calibration_file: PathBuf) {
     thread::Builder::new()
         .name("nolo-usb-reader".to_owned())
-        .spawn(move || {
-            usb_reader_loop(
-                state,
-                controller_position_mode,
-                position_filter_settings,
-                gyro_calibration_file,
-            )
-        })
+        .spawn(move || usb_reader_loop(state, gyro_calibration_file))
         .expect("failed to start USB reader thread");
 }
 
-async fn servo_ipc_accept_loop(listener: UnixListener, state: AppState) {
+async fn servo_ipc_accept_loop(listener: UnixListener, state: AppState, backend: ArmOutputBackend) {
     let mut shutdown = state.shutdown.subscribe();
     loop {
         tokio::select! {
@@ -576,13 +834,17 @@ async fn servo_ipc_accept_loop(listener: UnixListener, state: AppState) {
             }
             result = listener.accept() => match result {
                 Ok((stream, _)) => {
-                    if let Err(error) = servo_ipc_connection(stream, state.clone()).await {
-                        eprintln!("MoveIt Servo IPC disconnected: {error:#}");
+                    state.reset_arm_home_session(backend);
+                    if let Err(error) = servo_ipc_connection(stream, state.clone(), backend).await {
+                        eprintln!("MoveIt Servo {backend:?} IPC disconnected: {error:#}");
                     }
-                    let controller = MoveItSimulationController::new(
+                    state.reset_arm_home_session(backend);
+                    let controller = MoveItController::new_for_backend(
                         ArmModel::embedded().expect("invalid embedded Star Arm 102-FL profile"),
+                        backend.simulation_only(),
+                        backend.controller_backend(),
                     );
-                    state.set_arm_simulation(controller.latest().clone());
+                    state.set_arm_snapshot(backend, controller.latest().clone());
                 }
                 Err(error) => {
                     eprintln!("MoveIt Servo IPC accept failed: {error}");
@@ -593,11 +855,19 @@ async fn servo_ipc_accept_loop(listener: UnixListener, state: AppState) {
     }
 }
 
-async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()> {
+async fn servo_ipc_connection(
+    stream: UnixStream,
+    state: AppState,
+    backend: ArmOutputBackend,
+) -> Result<()> {
     let model = ArmModel::embedded()
         .map_err(anyhow::Error::msg)
         .context("invalid embedded Star Arm 102-FL profile")?;
-    let mut controller = MoveItSimulationController::new(model);
+    let mut controller = MoveItController::new_for_backend(
+        model,
+        backend.simulation_only(),
+        backend.controller_backend(),
+    );
     let teleop = state.teleop_intent.subscribe();
     let mut shutdown = state.shutdown.subscribe();
     let (reader, mut writer) = stream.into_split();
@@ -605,9 +875,9 @@ async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()>
     let mut ticker = tokio::time::interval(ARM_SIM_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
-    let mut previous_tick = start;
     let mut latest_feedback: Option<(ServoFeedbackFrame, Instant)> = None;
     let mut last_feedback_sequence = None;
+    let mut output_generation = state.arm_output_generation.load(Ordering::Acquire);
 
     loop {
         tokio::select! {
@@ -623,24 +893,47 @@ async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()>
                 let feedback: ServoFeedbackFrame = serde_json::from_str(&line)
                     .context("invalid Servo feedback frame")?;
                 accept_feedback_sequence(&mut last_feedback_sequence, feedback.sequence)?;
+                if let Some(home_status) = feedback.home_status.clone() {
+                    let current = state.arm_home_status(backend);
+                    if home_status.request_id >= current.request_id {
+                        state.acknowledge_arm_home_request(
+                            backend,
+                            home_status.request_id,
+                            home_status.acknowledged_action,
+                        );
+                        state.set_arm_home_status(backend, home_status);
+                    }
+                }
                 latest_feedback = Some((feedback, Instant::now()));
             }
             _ = ticker.tick() => {
                 let now = Instant::now();
-                let dt = now.duration_since(previous_tick).as_secs_f64().clamp(0.000_001, 0.1);
-                previous_tick = now;
-                let intent = relative_intent(&teleop.borrow());
+                let generation = state.arm_output_generation.load(Ordering::Acquire);
+                if generation != output_generation {
+                    output_generation = generation;
+                    controller.require_rearm();
+                }
+                let mut intent = relative_intent(&teleop.borrow());
+                if state.arm_output_backend() != backend || state.arm_home_blocks_teleop(backend) {
+                    intent.state = RelativeIntentState::Idle;
+                }
+                if backend == ArmOutputBackend::Hardware {
+                    // The real gripper has no validated position/current
+                    // feedback or contact protection yet.  Do not animate or
+                    // forward the simulation-only Trigger state as hardware.
+                    intent.gripper_closed = None;
+                }
                 let feedback_age_ms = latest_feedback.as_ref().map(|(_, received)| {
                     duration_ms(now.saturating_duration_since(*received))
                 });
-                let (command, snapshot) = controller.step(
+                let (mut command, snapshot) = controller.step(
                     elapsed_ns(start),
-                    dt,
                     intent,
                     latest_feedback.as_ref().map(|(feedback, _)| feedback),
                     feedback_age_ms,
                 );
-                state.set_arm_simulation(snapshot);
+                command.home_request = state.arm_home_request(backend);
+                state.set_arm_snapshot(backend, snapshot);
                 let mut encoded = serde_json::to_vec(&command)
                     .context("failed serializing Servo command")?;
                 encoded.push(b'\n');
@@ -698,8 +991,6 @@ fn relative_intent(intent: &TeleopIntent) -> RelativeIntent {
             nolo_usb_server::teleop::TeleopIntentState::Active => RelativeIntentState::Active,
             nolo_usb_server::teleop::TeleopIntentState::Faulted => RelativeIntentState::Faulted,
         },
-        receive_time_ns: intent.receive_time_ns,
-        sample_sequence: intent.sample_sequence,
         relative_position_m: intent
             .relative_position
             .map(|position| position.map(f64::from)),
@@ -717,17 +1008,11 @@ struct TrackingSession {
     gyro_bias_store: GyroBiasStore,
     gyro_bias_persisted_or_attempted: [bool; SOURCE_COUNT],
     gyro_calibration_file: Option<PathBuf>,
-    controller_position_mode: ControllerPositionMode,
     simulated: bool,
 }
 
 impl TrackingSession {
-    fn physical(
-        state: &AppState,
-        controller_position_mode: ControllerPositionMode,
-        position_filter_settings: PositionFilterSettings,
-        gyro_calibration_file: PathBuf,
-    ) -> Self {
+    fn physical(state: &AppState, gyro_calibration_file: PathBuf) -> Self {
         let gyro_bias_store = match GyroBiasStore::load(&gyro_calibration_file) {
             Ok(store) => store,
             Err(error) => {
@@ -735,45 +1020,24 @@ impl TrackingSession {
                 GyroBiasStore::default()
             }
         };
-        Self::new(
-            state,
-            controller_position_mode,
-            position_filter_settings,
-            gyro_bias_store,
-            Some(gyro_calibration_file),
-            false,
-        )
+        Self::new(state, gyro_bias_store, Some(gyro_calibration_file), false)
     }
 
-    fn virtual_usb(
-        state: &AppState,
-        controller_position_mode: ControllerPositionMode,
-        position_filter_settings: PositionFilterSettings,
-    ) -> Self {
+    fn virtual_usb(state: &AppState) -> Self {
         // Never mix physical-device biases or persistence with deterministic
         // virtual IMU samples.  The six-second virtual Menu hold exercises the
         // ordinary calibration path from a clean Fusion state.
-        Self::new(
-            state,
-            controller_position_mode,
-            position_filter_settings,
-            GyroBiasStore::default(),
-            None,
-            true,
-        )
+        Self::new(state, GyroBiasStore::default(), None, true)
     }
 
     fn new(
         state: &AppState,
-        controller_position_mode: ControllerPositionMode,
-        position_filter_settings: PositionFilterSettings,
         gyro_bias_store: GyroBiasStore,
         gyro_calibration_file: Option<PathBuf>,
         simulated: bool,
     ) -> Self {
-        let controllers = std::array::from_fn(|source_id| {
-            ControllerState::new(position_filter_settings, gyro_bias_store.bias(source_id))
-        });
+        let controllers =
+            std::array::from_fn(|source_id| ControllerState::new(gyro_bias_store.bias(source_id)));
         let hmd = HmdState::new(gyro_bias_store.bias(2));
         let gyro_bias_persisted_or_attempted =
             std::array::from_fn(|source_id| gyro_bias_store.bias(source_id).is_some());
@@ -786,7 +1050,6 @@ impl TrackingSession {
             gyro_bias_store,
             gyro_bias_persisted_or_attempted,
             gyro_calibration_file,
-            controller_position_mode,
             simulated,
         }
     }
@@ -841,15 +1104,9 @@ impl TrackingSession {
             if controller_sample.changed {
                 controller.orientation = controller.fusion.update(raw, now);
                 completed_bias = controller.fusion.completed_gyro_bias();
-                let marker_position = raw.position;
-                let grip_position =
-                    estimated_grip_position(marker_position, controller.orientation);
-                let selected_position = self
-                    .controller_position_mode
-                    .select(marker_position, grip_position);
                 controller.filtered_position = controller
                     .position_filter
-                    .update(selected_position, time_ns as f64 * 1.0e-9);
+                    .update(raw.position, time_ns as f64 * 1.0e-9);
             } else if !controller_sample.fresh && controller.published_online {
                 controller.reset_position_filter();
             }
@@ -868,7 +1125,6 @@ impl TrackingSession {
                 controller_sample,
                 hmd_sample,
                 time_ns,
-                self.controller_position_mode,
                 self.simulated,
             );
             if controller_id == 0 {
@@ -929,21 +1185,11 @@ impl TrackingSession {
     }
 }
 
-fn usb_reader_loop(
-    state: AppState,
-    controller_position_mode: ControllerPositionMode,
-    position_filter_settings: PositionFilterSettings,
-    gyro_calibration_file: PathBuf,
-) {
+fn usb_reader_loop(state: AppState, gyro_calibration_file: PathBuf) {
     let process_start = Instant::now();
     loop {
         if state.simulation_requested() {
-            virtual_usb_loop(
-                &state,
-                process_start,
-                controller_position_mode,
-                position_filter_settings,
-            );
+            virtual_usb_loop(&state, process_start);
             continue;
         }
         state.set_simulation_active(false);
@@ -973,12 +1219,7 @@ fn usb_reader_loop(
         state.set_status(format!(
             "NOLO USB ({vid:04x}:{pid:04x}) 已连接，等待位姿数据"
         ));
-        let mut session = TrackingSession::physical(
-            &state,
-            controller_position_mode,
-            position_filter_settings,
-            gyro_calibration_file.clone(),
-        );
+        let mut session = TrackingSession::physical(&state, gyro_calibration_file.clone());
         let mut report = [0_u8; REPORT_SIZE + 1];
         let mut last_usb_report = Instant::now();
 
@@ -1042,17 +1283,11 @@ fn usb_reader_loop(
     }
 }
 
-fn virtual_usb_loop(
-    state: &AppState,
-    process_start: Instant,
-    controller_position_mode: ControllerPositionMode,
-    position_filter_settings: PositionFilterSettings,
-) {
+fn virtual_usb_loop(state: &AppState, process_start: Instant) {
     state.clear_calibration_requests();
     state.set_simulation_active(true);
     state.set_status("NOLO 虚拟 USB：自动标定（保持静止）");
-    let mut session =
-        TrackingSession::virtual_usb(state, controller_position_mode, position_filter_settings);
+    let mut session = TrackingSession::virtual_usb(state);
     let mut simulator = VirtualNolo::new();
     let period = Duration::from_secs_f64(REPORT_PERIOD_SECONDS);
     let started = Instant::now();
@@ -1110,10 +1345,7 @@ struct ControllerState {
 }
 
 impl ControllerState {
-    fn new(
-        position_filter_settings: PositionFilterSettings,
-        saved_gyro_bias: Option<[f32; 3]>,
-    ) -> Self {
+    fn new(saved_gyro_bias: Option<[f32; 3]>) -> Self {
         let mut fusion = ControllerFusion::new();
         if let Some(bias) = saved_gyro_bias {
             let loaded = fusion.load_gyro_bias(bias);
@@ -1123,7 +1355,7 @@ impl ControllerState {
             fusion,
             samples: SampleTracker::new(120.0, SEQUENCE_STALE_AFTER),
             orientation: [0.0, 0.0, 0.0, 1.0],
-            position_filter: PositionFilter::new(position_filter_settings),
+            position_filter: PositionFilter::default(),
             filtered_position: None,
             published_online: false,
         }
@@ -1196,35 +1428,23 @@ fn hmd_pose(
     PoseFrame {
         time_ns,
         source_id: 2,
-        source_kind: "head",
         sample_rate_hz: 240,
-        controller_id: None,
         device: if simulated {
             VIRTUAL_DEVICE_NAMES[2]
         } else {
             DEVICE_NAMES[2]
         },
         simulated,
-        flags: 0,
         position: raw.hmd_position,
         filtered_position: None,
-        marker_position: raw.hmd_position,
-        grip_position: None,
-        position_mode: "marker",
         orientation,
         communication_fresh: sample.fresh,
         sample_changed: sample.changed,
-        optical_tracking_valid: None,
-        pose_usable: sample.fresh && sample.changed,
-        usb_silent_ms: 0,
         unchanged_ms: duration_ms(sample.unchanged),
         hmd_unchanged_ms: duration_ms(sample.unchanged),
-        source_online: sample.fresh,
         hmd_relay_online: sample.fresh,
         sample_sequence: raw.hmd_sequence,
-        controller_sequence: None,
         hmd_sequence: raw.hmd_sequence,
-        sequence_delta: sample.sequence_delta,
         samples_received: sample.samples_received,
         samples_missed: sample.samples_missed,
         duplicate_reports: sample.duplicate_reports,
@@ -1238,17 +1458,9 @@ fn hmd_pose(
         gyro_calibration_active: fusion.gyro_calibration_active,
         gyro_calibration_complete: fusion.gyro_calibration_complete,
         gyro_calibration_progress: fusion.gyro_calibration_progress,
-        menu_active: false,
         menu_pressed: false,
-        buttons_raw: 0,
-        touchpad_pressed: false,
         trigger_pressed: false,
-        home_pressed: false,
         squeeze_pressed: false,
-        touchpad_touched: false,
-        touchpad: None,
-        accelerometer_raw: raw.hmd_accelerometer,
-        gyroscope_raw: raw.hmd_gyroscope,
     }
 }
 
@@ -1258,47 +1470,31 @@ fn controller_pose(
     sample: SampleObservation,
     hmd_sample: SampleObservation,
     time_ns: u64,
-    position_mode: ControllerPositionMode,
     simulated: bool,
 ) -> PoseFrame {
     let orientation = controller.orientation;
     let fusion = controller.fusion.diagnostics();
-    let marker_position = raw.position;
-    let grip_position = estimated_grip_position(marker_position, orientation);
-    let position = position_mode.select(marker_position, grip_position);
     let online = sample.fresh;
     PoseFrame {
         time_ns,
         source_id: raw.controller_id,
-        source_kind: "controller",
         sample_rate_hz: 120,
-        controller_id: Some(raw.controller_id),
         device: if simulated {
             VIRTUAL_DEVICE_NAMES[usize::from(raw.controller_id)]
         } else {
             DEVICE_NAMES[usize::from(raw.controller_id)]
         },
         simulated,
-        flags: 0,
-        position,
+        position: raw.position,
         filtered_position: controller.filtered_position,
-        marker_position,
-        grip_position: Some(grip_position),
-        position_mode: position_mode.name(),
         orientation,
         communication_fresh: online,
         sample_changed: sample.changed,
-        optical_tracking_valid: None,
-        pose_usable: online && sample.changed,
-        usb_silent_ms: 0,
         unchanged_ms: duration_ms(sample.unchanged),
         hmd_unchanged_ms: duration_ms(hmd_sample.unchanged),
-        source_online: online,
         hmd_relay_online: hmd_sample.fresh,
         sample_sequence: raw.controller_sequence,
-        controller_sequence: Some(raw.controller_sequence),
         hmd_sequence: raw.hmd_sequence,
-        sequence_delta: sample.sequence_delta,
         samples_received: sample.samples_received,
         samples_missed: sample.samples_missed,
         duplicate_reports: sample.duplicate_reports,
@@ -1312,17 +1508,9 @@ fn controller_pose(
         gyro_calibration_active: fusion.gyro_calibration_active,
         gyro_calibration_complete: fusion.gyro_calibration_complete,
         gyro_calibration_progress: fusion.gyro_calibration_progress,
-        menu_active: online,
         menu_pressed: online && raw.menu_pressed(),
-        buttons_raw: raw.buttons,
-        touchpad_pressed: raw.touchpad_pressed(),
         trigger_pressed: raw.trigger_pressed(),
-        home_pressed: raw.home_pressed(),
         squeeze_pressed: raw.squeeze_pressed(),
-        touchpad_touched: raw.touchpad_touched(),
-        touchpad: raw.touchpad,
-        accelerometer_raw: raw.accelerometer,
-        gyroscope_raw: raw.gyroscope,
     }
 }
 
@@ -1335,9 +1523,6 @@ fn teleop_sample(frame: &PoseFrame) -> TeleopSample {
         filtered_position: frame.filtered_position,
         orientation: frame.orientation,
         communication_fresh: frame.communication_fresh,
-        sample_changed: frame.sample_changed,
-        pose_usable: frame.pose_usable,
-        optical_tracking_valid: frame.optical_tracking_valid,
         fusion_initialising: frame.fusion_initialising,
         gyro_calibration_active: frame.gyro_calibration_active,
         trigger_pressed: frame.trigger_pressed,
@@ -1379,50 +1564,29 @@ struct Config {
     host: IpAddr,
     port: u16,
     static_dir: PathBuf,
-    controller_position_mode: ControllerPositionMode,
-    position_filter_settings: PositionFilterSettings,
     gyro_calibration_file: PathBuf,
     servo_ipc_path: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-enum ControllerPositionMode {
-    #[default]
-    Marker,
-    Grip,
-}
-
-impl ControllerPositionMode {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Marker => "marker",
-            Self::Grip => "grip",
-        }
-    }
-
-    fn select(self, marker: [f32; 3], grip: [f32; 3]) -> [f32; 3] {
-        match self {
-            Self::Marker => marker,
-            Self::Grip => grip,
-        }
-    }
+    hardware_servo_ipc_path: PathBuf,
 }
 
 impl Config {
     fn parse() -> Result<Self> {
-        let default_static =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../controller-viewer/public");
-        let default_gyro_calibration_file =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../state/gyro-bias-v1.json");
-        let default_servo_ipc_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../state/moveit-servo.sock");
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let vr_xr_root = manifest_dir
+            .parent()
+            .and_then(FilePath::parent)
+            .expect("nolo-usb-server manifest must be under vr-xr/src")
+            .to_path_buf();
+        let default_static = vr_xr_root.join("src/controller-viewer/public");
+        let default_gyro_calibration_file = vr_xr_root.join("state/gyro-bias-v1.json");
+        let default_servo_ipc_path = vr_xr_root.join("state/moveit-servo.sock");
+        let default_hardware_servo_ipc_path = vr_xr_root.join("state/moveit-servo-hardware.sock");
         let mut host = "127.0.0.1".parse().unwrap();
         let mut port = 8765;
         let mut static_dir = default_static;
-        let mut controller_position_mode = ControllerPositionMode::default();
-        let mut position_filter_settings = PositionFilterSettings::default();
         let mut gyro_calibration_file = default_gyro_calibration_file;
         let mut servo_ipc_path = default_servo_ipc_path;
+        let mut hardware_servo_ipc_path = default_hardware_servo_ipc_path;
         for argument in std::env::args().skip(1) {
             if let Some(value) = argument.strip_prefix("--host=") {
                 host = value
@@ -1434,29 +1598,15 @@ impl Config {
                     .with_context(|| format!("invalid port: {value}"))?;
             } else if let Some(value) = argument.strip_prefix("--static-dir=") {
                 static_dir = PathBuf::from(value);
-            } else if let Some(value) = argument.strip_prefix("--controller-position=") {
-                controller_position_mode = match value {
-                    "marker" => ControllerPositionMode::Marker,
-                    "grip" => ControllerPositionMode::Grip,
-                    _ => bail!("invalid controller position mode: {value}; use marker or grip"),
-                };
             } else if let Some(value) = argument.strip_prefix("--gyro-calibration-file=") {
                 gyro_calibration_file = PathBuf::from(value);
             } else if let Some(value) = argument.strip_prefix("--servo-ipc=") {
                 servo_ipc_path = PathBuf::from(value);
-            } else if let Some(value) = argument.strip_prefix("--position-filter-min-cutoff=") {
-                position_filter_settings.min_cutoff_hz =
-                    parse_finite_f64(value, "position filter minimum cutoff")?;
-            } else if let Some(value) = argument.strip_prefix("--position-filter-beta=") {
-                position_filter_settings.beta = parse_finite_f64(value, "position filter beta")?;
-            } else if let Some(value) =
-                argument.strip_prefix("--position-filter-derivative-cutoff=")
-            {
-                position_filter_settings.derivative_cutoff_hz =
-                    parse_finite_f64(value, "position filter derivative cutoff")?;
+            } else if let Some(value) = argument.strip_prefix("--hardware-servo-ipc=") {
+                hardware_servo_ipc_path = PathBuf::from(value);
             } else if matches!(argument.as_str(), "-h" | "--help") {
                 println!(
-                    "Usage: nolo-usb-server [--host=IP] [--port=PORT] [--static-dir=PATH] [--controller-position=marker|grip] [--gyro-calibration-file=PATH] [--servo-ipc=PATH] [--position-filter-min-cutoff=HZ] [--position-filter-beta=VALUE] [--position-filter-derivative-cutoff=HZ]"
+                    "Usage: nolo-usb-server [--host=IP] [--port=PORT] [--static-dir=PATH] [--gyro-calibration-file=PATH] [--servo-ipc=PATH] [--hardware-servo-ipc=PATH]"
                 );
                 std::process::exit(0);
             } else {
@@ -1469,29 +1619,18 @@ impl Config {
                 static_dir.display()
             );
         }
-        position_filter_settings = position_filter_settings
-            .validate()
-            .map_err(|error| anyhow::anyhow!("invalid position filter settings: {error}"))?;
+        if servo_ipc_path == hardware_servo_ipc_path {
+            bail!("simulation and hardware Servo IPC paths must differ");
+        }
         Ok(Self {
             host,
             port,
             static_dir,
-            controller_position_mode,
-            position_filter_settings,
             gyro_calibration_file,
             servo_ipc_path,
+            hardware_servo_ipc_path,
         })
     }
-}
-
-fn parse_finite_f64(value: &str, name: &str) -> Result<f64> {
-    let parsed: f64 = value
-        .parse()
-        .with_context(|| format!("invalid {name}: {value}"))?;
-    if !parsed.is_finite() {
-        bail!("invalid {name}: {value}");
-    }
-    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -1512,8 +1651,6 @@ mod tests {
             payload.latest_teleop_intent.state,
             nolo_usb_server::teleop::TeleopIntentState::Idle
         );
-        assert!(!payload.latest_teleop_intent.enabled);
-        assert!(!payload.latest_teleop_intent.sample_valid);
         assert_eq!(
             payload.latest_teleop_intent.stop_reason,
             Some(TeleopStopReason::NoSample)
@@ -1532,8 +1669,19 @@ mod tests {
             json["latestArmSimulation"]["stop_reason"],
             "servo_unavailable"
         );
-        assert_eq!(json["latestArmSimulation"]["backend"], "moveit_servo");
+        assert_eq!(
+            json["latestArmSimulation"]["backend"],
+            "moveit_servo_simulation"
+        );
         assert_eq!(json["latestArmSimulation"]["simulation_only"], true);
+        assert_eq!(
+            json["latestArmHardware"]["backend"],
+            "moveit_servo_hardware"
+        );
+        assert_eq!(json["latestArmHardware"]["simulation_only"], false);
+        assert_eq!(json["armOutputBackend"], "simulation");
+        assert_eq!(json["armHomeSimulation"]["state"], "idle");
+        assert_eq!(json["armHomeHardware"]["state"], "idle");
         assert_eq!(json["simulationRequested"], false);
         assert_eq!(json["simulationActive"], false);
         assert_eq!(json["latestArmSimulation"]["gripper_closed"], true);
@@ -1542,16 +1690,13 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(json["latestArmSimulation"]["gripper_rad"].is_number());
-        let model_joints = json["latestArmSimulation"]["model_joints_deg"]
+        let model_joints = json["latestArmSimulation"]["model_joints_rad"]
             .as_array()
             .unwrap();
         for (actual, expected) in model_joints.iter().zip([0.0; 6]) {
             assert!((actual.as_f64().unwrap() - expected).abs() < 1.0e-9);
         }
-        assert_eq!(
-            json["latestArmSimulation"]["model_id"],
-            "stararm102-fl-sim-v1"
-        );
+        assert_eq!(json["latestArmSimulation"]["model_id"], "stararm102-fl-v1");
         assert!(json.get("latest_teleop_intent").is_none());
         assert!(json.get("latest_arm_simulation").is_none());
         assert!(json.get("simulation_requested").is_none());
@@ -1580,6 +1725,174 @@ mod tests {
         assert!(!state.simulation_requested());
         assert_eq!(response["simulation_requested"], false);
         assert_eq!(response["status"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn arm_output_defaults_to_simulation_and_switches_explicitly() {
+        let state = AppState::new();
+        assert_eq!(state.arm_output_backend(), ArmOutputBackend::Simulation);
+        let generation = state.arm_output_generation.load(Ordering::Acquire);
+
+        let (status, Json(response)) =
+            select_arm_output(Path("hardware".to_owned()), State(state.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["arm_output_backend"], "hardware");
+        assert_eq!(state.arm_output_backend(), ArmOutputBackend::Hardware);
+        assert_eq!(
+            state.arm_output_generation.load(Ordering::Acquire),
+            generation + 1
+        );
+
+        let (status, _) = select_arm_output(Path("invalid".to_owned()), State(state.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(state.arm_output_backend(), ArmOutputBackend::Hardware);
+    }
+
+    #[tokio::test]
+    async fn simulation_home_plans_and_executes_only_after_fresh_feedback() {
+        let state = AppState::new();
+        let (status, Json(response)) = arm_home(
+            Path(("simulation".to_owned(), "plan".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response["error"].as_str().unwrap().contains("故障"));
+
+        let mut snapshot = state.arm_snapshot(ArmOutputBackend::Simulation);
+        snapshot.tcp_pose = Some(stararm102_control::Pose {
+            position_m: [0.2, 0.0, 0.2],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        });
+        snapshot.servo_feedback_age_ms = Some(0);
+        snapshot.servo_status_code = Some(0);
+        state.set_arm_snapshot(ArmOutputBackend::Simulation, snapshot.clone());
+        let (status, Json(response)) = arm_home(
+            Path(("simulation".to_owned(), "plan".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response["error"].as_str().unwrap().contains("故障"));
+
+        snapshot.state = SimulationState::Idle;
+        state.set_arm_snapshot(ArmOutputBackend::Simulation, snapshot);
+        let (status, Json(response)) = arm_home(
+            Path(("simulation".to_owned(), "plan".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response["auto_execute"], true);
+        assert_eq!(
+            state.arm_home_status(ArmOutputBackend::Simulation).state,
+            HomeState::Planning
+        );
+        let request = state
+            .arm_home_request(ArmOutputBackend::Simulation)
+            .unwrap();
+        assert_eq!(request.action, HomeRequestAction::Plan);
+    }
+
+    #[tokio::test]
+    async fn hardware_home_requires_plan_ready_before_separate_execute() {
+        let state = AppState::new();
+        state.select_arm_output(ArmOutputBackend::Hardware);
+        let mut snapshot = state.arm_snapshot(ArmOutputBackend::Hardware);
+        snapshot.tcp_pose = Some(stararm102_control::Pose {
+            position_m: [0.2, 0.0, 0.2],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        });
+        snapshot.servo_feedback_age_ms = Some(0);
+        snapshot.servo_status_code = Some(0);
+        snapshot.state = SimulationState::Idle;
+        state.set_arm_snapshot(ArmOutputBackend::Hardware, snapshot);
+        let (status, Json(response)) = arm_home(
+            Path(("hardware".to_owned(), "plan".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response["auto_execute"], false);
+        let request_id = response["request_id"].as_u64().unwrap();
+
+        state.set_arm_home_status(
+            ArmOutputBackend::Hardware,
+            HomeStatusFrame {
+                request_id,
+                state: HomeState::Ready,
+                message: "ready".to_owned(),
+                trajectory_points: 2,
+                duration_seconds: Some(1.0),
+                ..HomeStatusFrame::default()
+            },
+        );
+        let mut stale = state.arm_snapshot(ArmOutputBackend::Hardware);
+        stale.servo_feedback_age_ms = Some(101);
+        stale.state = SimulationState::Faulted;
+        state.set_arm_snapshot(ArmOutputBackend::Hardware, stale.clone());
+        let (status, Json(response)) = arm_home(
+            Path(("hardware".to_owned(), "execute".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response["error"].as_str().unwrap().contains("故障"));
+
+        stale.servo_feedback_age_ms = Some(0);
+        stale.state = SimulationState::Idle;
+        state.set_arm_snapshot(ArmOutputBackend::Hardware, stale);
+        let (status, _) = arm_home(
+            Path(("hardware".to_owned(), "execute".to_owned())),
+            State(state.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            state
+                .arm_home_request(ArmOutputBackend::Hardware)
+                .unwrap()
+                .action,
+            HomeRequestAction::Execute
+        );
+    }
+
+    #[test]
+    fn reconnect_clears_only_the_selected_backend_home_session() {
+        let state = AppState::new();
+        let simulation_status = HomeStatusFrame {
+            request_id: 7,
+            state: HomeState::Ready,
+            message: "simulation ready".to_owned(),
+            ..HomeStatusFrame::default()
+        };
+        let hardware_status = HomeStatusFrame {
+            request_id: 8,
+            state: HomeState::Executing,
+            message: "hardware executing".to_owned(),
+            ..HomeStatusFrame::default()
+        };
+        state.set_arm_home_status(ArmOutputBackend::Simulation, simulation_status.clone());
+        state.set_arm_home_status(ArmOutputBackend::Hardware, hardware_status);
+        state.send_arm_home_request(
+            ArmOutputBackend::Hardware,
+            HomeRequestFrame {
+                request_id: 8,
+                action: HomeRequestAction::Execute,
+            },
+        );
+
+        state.reset_arm_home_session(ArmOutputBackend::Hardware);
+
+        assert_eq!(
+            state.arm_home_status(ArmOutputBackend::Simulation),
+            simulation_status
+        );
+        assert_eq!(
+            state.arm_home_status(ArmOutputBackend::Hardware),
+            HomeStatusFrame::default()
+        );
+        assert!(state.arm_home_request(ArmOutputBackend::Hardware).is_none());
     }
 
     #[tokio::test]

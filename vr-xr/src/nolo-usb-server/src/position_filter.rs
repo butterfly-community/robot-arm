@@ -2,67 +2,21 @@
 
 use one_euro_filter::OneEuroFilter;
 
-/// The parameters used by the official Rust example in casiez/OneEuroFilter.
-///
-/// Only `nominal_rate_hz` is device-specific: each controller produces about
-/// 120 new position samples per second. The other values intentionally stay at
-/// the upstream reference values instead of being tuned locally without a
-/// measurement rig.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PositionFilterSettings {
-    pub nominal_rate_hz: f64,
-    pub min_cutoff_hz: f64,
-    pub beta: f64,
-    pub derivative_cutoff_hz: f64,
-}
-
-impl Default for PositionFilterSettings {
-    fn default() -> Self {
-        Self {
-            nominal_rate_hz: 120.0,
-            min_cutoff_hz: 1.0,
-            beta: 0.1,
-            derivative_cutoff_hz: 1.0,
-        }
-    }
-}
-
-impl PositionFilterSettings {
-    pub fn validate(self) -> Result<Self, &'static str> {
-        if !self.nominal_rate_hz.is_finite() || self.nominal_rate_hz <= 0.0 {
-            return Err("nominal rate must be finite and greater than zero");
-        }
-        if !self.min_cutoff_hz.is_finite() || self.min_cutoff_hz <= 0.0 {
-            return Err("minimum cutoff must be finite and greater than zero");
-        }
-        if !self.beta.is_finite() || self.beta < 0.0 {
-            return Err("beta must be finite and non-negative");
-        }
-        if !self.derivative_cutoff_hz.is_finite() || self.derivative_cutoff_hz <= 0.0 {
-            return Err("derivative cutoff must be finite and greater than zero");
-        }
-        Ok(self)
-    }
-}
-
 pub struct PositionFilter {
-    settings: PositionFilterSettings,
     axes: [OneEuroFilter; 3],
     last_timestamp_seconds: Option<f64>,
 }
 
-impl PositionFilter {
-    pub fn new(settings: PositionFilterSettings) -> Self {
-        let settings = settings
-            .validate()
-            .expect("position filter settings must be valid");
+impl Default for PositionFilter {
+    fn default() -> Self {
         Self {
-            settings,
-            axes: create_axes(settings),
+            axes: create_axes(),
             last_timestamp_seconds: None,
         }
     }
+}
 
+impl PositionFilter {
     /// Filters one complete XYZ sample using seconds on a monotonic clock.
     ///
     /// Invalid input clears filter history so it cannot contaminate the next
@@ -92,20 +46,16 @@ impl PositionFilter {
     }
 
     pub fn reset(&mut self) {
-        self.axes = create_axes(self.settings);
+        self.axes = create_axes();
         self.last_timestamp_seconds = None;
     }
 }
 
-fn create_axes(settings: PositionFilterSettings) -> [OneEuroFilter; 3] {
-    std::array::from_fn(|_| {
-        OneEuroFilter::new(
-            settings.nominal_rate_hz,
-            settings.min_cutoff_hz,
-            settings.beta,
-            settings.derivative_cutoff_hz,
-        )
-    })
+fn create_axes() -> [OneEuroFilter; 3] {
+    // NOLO controllers produce about 120 position samples per second. The
+    // remaining arguments are the unchanged casiez/OneEuroFilter Rust example
+    // values: min_cutoff=1.0, beta=0.1 and derivative_cutoff=1.0.
+    std::array::from_fn(|_| OneEuroFilter::new(120.0, 1.0, 0.1, 1.0))
 }
 
 #[cfg(test)]
@@ -118,14 +68,14 @@ mod tests {
 
     #[test]
     fn first_sample_passes_through() {
-        let mut filter = PositionFilter::new(PositionFilterSettings::default());
+        let mut filter = PositionFilter::default();
         let value = filter.update([1.0, -2.0, 3.0], 10.0).unwrap();
         assert_eq!(value, [1.0, -2.0, 3.0]);
     }
 
     #[test]
     fn filters_each_axis_independently() {
-        let mut filter = PositionFilter::new(PositionFilterSettings::default());
+        let mut filter = PositionFilter::default();
         filter.update([0.0, 0.0, 0.0], 0.0).unwrap();
         let value = filter.update([1.0, -2.0, 0.0], 1.0 / 120.0).unwrap();
         assert!(value[0] > 0.0 && value[0] < 1.0);
@@ -135,7 +85,7 @@ mod tests {
 
     #[test]
     fn reset_discards_previous_history() {
-        let mut filter = PositionFilter::new(PositionFilterSettings::default());
+        let mut filter = PositionFilter::default();
         filter.update([0.0; 3], 0.0).unwrap();
         filter.update([1.0; 3], 1.0 / 120.0).unwrap();
         filter.reset();
@@ -144,7 +94,7 @@ mod tests {
 
     #[test]
     fn invalid_sample_resets_and_is_not_published() {
-        let mut filter = PositionFilter::new(PositionFilterSettings::default());
+        let mut filter = PositionFilter::default();
         filter.update([0.0; 3], 0.0).unwrap();
         assert_eq!(filter.update([f32::NAN, 1.0, 2.0], 0.1), None);
         assert_eq!(filter.update([3.0, 4.0, 5.0], 0.2), Some([3.0, 4.0, 5.0]));
@@ -152,18 +102,9 @@ mod tests {
 
     #[test]
     fn non_monotonic_timestamp_resets_history() {
-        let mut filter = PositionFilter::new(PositionFilterSettings::default());
+        let mut filter = PositionFilter::default();
         filter.update([0.0; 3], 1.0).unwrap();
         assert_eq!(filter.update([1.0; 3], 0.5), None);
         assert_eq!(filter.update([2.0; 3], 2.0), Some([2.0; 3]));
-    }
-
-    #[test]
-    fn rejects_invalid_settings() {
-        let invalid = PositionFilterSettings {
-            min_cutoff_hz: 0.0,
-            ..PositionFilterSettings::default()
-        };
-        assert!(invalid.validate().is_err());
     }
 }

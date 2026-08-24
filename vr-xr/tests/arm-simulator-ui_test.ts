@@ -20,24 +20,57 @@ Deno.test("arm simulator is independent from the existing controller viewer", ()
   }
 });
 
-Deno.test("arm simulator uses pinned CDN modules and the read-only status API", () => {
+Deno.test("arm simulator uses pinned CDN modules and the guarded output selector", () => {
   const app = source("app.js");
   const model = source("urdf-model.js");
   for (const text of [app, model]) {
-    if (!text.includes("https://cdn.jsdelivr.net/npm/three@0.180.0/")) {
+    if (!text.includes("https://esm.sh/three@0.180.0")) {
       throw new Error("pinned Three.js CDN import is missing");
     }
+  }
+  if (!model.includes("urdf-loader@0.13.1?deps=three@0.180.0")) {
+    throw new Error("URDF loader or its Three.js peer is not pinned");
   }
   if (!app.includes('fetch("/api/status"')) {
     throw new Error("simulator does not read /api/status");
   }
-  for (const unsafeMethod of ["POST", "PUT", "PATCH", "DELETE"]) {
+  if (
+    !app.includes("fetch(`/api/arm-output/${backend}`") ||
+    !app.includes('method: "POST"')
+  ) {
+    throw new Error("simulator does not use the dedicated backend selector");
+  }
+  if (
+    !app.includes("`/api/arm-home/${selectedOutputBackend}/${action}`") ||
+    !app.includes('void requestHome("execute")') ||
+    !app.includes("globalThis.confirm")
+  ) {
+    throw new Error(
+      "simulator does not separate hardware home planning from confirmed execution",
+    );
+  }
+  if (
+    !app.includes("payload.armHomeSimulation") ||
+    !app.includes("payload.armHomeHardware") ||
+    !app.includes("trajectory_model_joints_rad")
+  ) {
+    throw new Error(
+      "simulator does not expose the planned home trajectory preview",
+    );
+  }
+  for (const unsafeMethod of ["PUT", "PATCH", "DELETE"]) {
     if (app.includes(`method: "${unsafeMethod}"`)) {
       throw new Error(`simulator unexpectedly contains ${unsafeMethod}`);
     }
   }
   if (!app.includes("payload.latestArmSimulation")) {
     throw new Error("simulator does not consume latestArmSimulation");
+  }
+  if (
+    !app.includes("payload.latestArmHardware") ||
+    !app.includes("payload.armOutputBackend")
+  ) {
+    throw new Error("simulator does not expose the selected hardware twin");
   }
   if (!app.includes("snapshot.gripper_rad") || !model.includes("setGripper")) {
     throw new Error("simulator does not consume the J7 gripper snapshot");

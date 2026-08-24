@@ -1,6 +1,5 @@
 use nalgebra::{Isometry3, Matrix3, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 const PROFILE_JSON: &str = include_str!("../../../config/stararm102-fl.v1.json");
 const ARM_DOF: usize = 6;
@@ -8,36 +7,16 @@ const ARM_DOF: usize = 6;
 #[derive(Clone, Debug, Deserialize)]
 pub struct ArmProfile {
     pub schema_version: u32,
-    pub profile_id: String,
-    pub hardware_variant: String,
     pub model_id: String,
-    pub simulation_only: bool,
-    pub transport: TransportProfile,
     pub joints: Vec<JointProfile>,
     pub moveit_interface: MoveItInterfaceProfile,
     pub teleoperation: TeleoperationProfile,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct TransportProfile {
-    pub backend: String,
-    pub minimum_backend_version: String,
-    pub baudrate: u32,
-    pub stable_device: Option<String>,
-    pub feedback_register: String,
-    pub feedback_unit: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 pub struct JointProfile {
     pub name: String,
-    pub servo_id: u8,
-    pub servo_model: String,
     pub direction: f64,
-    pub lower_deg: f64,
-    pub upper_deg: f64,
-    pub zero_offset_deg: Option<f64>,
-    pub firmware: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -54,10 +33,6 @@ pub struct TeleoperationProfile {
     pub translation_scale: f64,
     pub robot_from_nolo_position_axes: [[f64; 3]; 3],
     pub robot_from_controller_orientation_axes: [[f64; 3]; 3],
-    pub workspace_radius_m: [f64; 2],
-    pub workspace_z_m: [f64; 2],
-    pub max_joint_speed_rad_s: f64,
-    pub max_joint_acceleration_rad_s2: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -106,8 +81,6 @@ impl Pose {
 pub struct ArmModel {
     profile: ArmProfile,
     joint_model_scale: [f64; ARM_DOF],
-    lower_limits: [f64; ARM_DOF],
-    upper_limits: [f64; ARM_DOF],
     nominal_joints: [f64; ARM_DOF],
     robot_from_nolo_position: Matrix3<f64>,
     robot_from_controller_orientation: Matrix3<f64>,
@@ -123,10 +96,6 @@ impl ArmModel {
     pub fn from_profile(profile: ArmProfile) -> Result<Self, String> {
         validate_profile(&profile)?;
         let joint_model_scale = std::array::from_fn(|index| 1.0 / profile.joints[index].direction);
-        let lower_limits =
-            std::array::from_fn(|index| profile.joints[index].lower_deg.to_radians());
-        let upper_limits =
-            std::array::from_fn(|index| profile.joints[index].upper_deg.to_radians());
         let nominal_joints = std::array::from_fn(|index| {
             profile.moveit_interface.nominal_joints_deg[index].to_radians()
         });
@@ -149,8 +118,6 @@ impl ArmModel {
         Ok(Self {
             profile,
             joint_model_scale,
-            lower_limits,
-            upper_limits,
             nominal_joints,
             robot_from_nolo_position,
             robot_from_controller_orientation,
@@ -163,10 +130,6 @@ impl ArmModel {
 
     pub fn nominal_joints(&self) -> [f64; ARM_DOF] {
         self.nominal_joints
-    }
-
-    pub fn joint_limits(&self) -> ([f64; ARM_DOF], [f64; ARM_DOF]) {
-        (self.lower_limits, self.upper_limits)
     }
 
     /// Converts logical FL joint coordinates to the joint coordinates used by
@@ -189,35 +152,22 @@ impl ArmModel {
     pub fn robot_from_controller_orientation(&self) -> Matrix3<f64> {
         self.robot_from_controller_orientation
     }
-
-    pub fn workspace_contains(&self, position: [f64; 3]) -> bool {
-        if position.into_iter().any(|value| !value.is_finite()) {
-            return false;
-        }
-        let radius = Vector3::from(position).norm();
-        let [min_radius, max_radius] = self.profile.teleoperation.workspace_radius_m;
-        let [min_z, max_z] = self.profile.teleoperation.workspace_z_m;
-        (min_radius..=max_radius).contains(&radius) && (min_z..=max_z).contains(&position[2])
-    }
 }
 
 fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
-    if profile.schema_version != 1 || !profile.simulation_only {
-        return Err("profile must be schema v1 and explicitly simulation_only".to_owned());
+    if profile.schema_version != 1 {
+        return Err("profile must use schema v1".to_owned());
     }
     if profile.joints.len() != 7 || profile.moveit_interface.nominal_joints_deg.len() != ARM_DOF {
         return Err("profile must define six arm joints plus one gripper".to_owned());
     }
-    let ids: BTreeSet<_> = profile.joints.iter().map(|joint| joint.servo_id).collect();
-    if ids != BTreeSet::from([0, 1, 2, 3, 4, 5, 6]) {
-        return Err("servo IDs must be exactly 0..=6".to_owned());
-    }
-    let names: BTreeSet<_> = profile
-        .joints
-        .iter()
-        .map(|joint| joint.name.as_str())
-        .collect();
-    if names.len() != profile.joints.len() || names.iter().any(|name| name.is_empty()) {
+    if profile.joints.iter().any(|joint| joint.name.is_empty())
+        || profile.joints.iter().enumerate().any(|(index, joint)| {
+            profile.joints[..index]
+                .iter()
+                .any(|other| other.name == joint.name)
+        })
+    {
         return Err("joint names must be non-empty and unique".to_owned());
     }
     if profile.moveit_interface.base_frame.is_empty()
@@ -232,27 +182,17 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
         if joint.direction == 0.0
             || !joint.direction.is_finite()
             || !(1.0 / joint.direction).is_finite()
-            || !joint.lower_deg.is_finite()
-            || !joint.upper_deg.is_finite()
-            || joint.lower_deg >= joint.upper_deg
-            || joint
-                .zero_offset_deg
-                .is_some_and(|value| !value.is_finite())
         {
             return Err(format!("invalid joint profile: {}", joint.name));
         }
     }
-    for (index, value) in profile
+    if profile
         .moveit_interface
         .nominal_joints_deg
         .iter()
-        .copied()
-        .enumerate()
+        .any(|value| !value.is_finite())
     {
-        let joint = &profile.joints[index];
-        if !value.is_finite() || value < joint.lower_deg || value > joint.upper_deg {
-            return Err(format!("nominal pose exceeds {} limits", joint.name));
-        }
+        return Err("nominal pose must contain only finite values".to_owned());
     }
     for (name, values) in [
         (
@@ -275,23 +215,7 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
         }
     }
     let settings = &profile.teleoperation;
-    let positive = [
-        settings.translation_scale,
-        settings.max_joint_speed_rad_s,
-        settings.max_joint_acceleration_rad_s2,
-    ];
-    if positive
-        .into_iter()
-        .any(|value| !value.is_finite() || value <= 0.0)
-        || settings
-            .workspace_radius_m
-            .into_iter()
-            .chain(settings.workspace_z_m)
-            .any(|value| !value.is_finite())
-        || settings.workspace_radius_m[0] < 0.0
-        || settings.workspace_radius_m[0] >= settings.workspace_radius_m[1]
-        || settings.workspace_z_m[0] >= settings.workspace_z_m[1]
-    {
+    if !settings.translation_scale.is_finite() || settings.translation_scale <= 0.0 {
         return Err("invalid teleoperation settings".to_owned());
     }
     Ok(())
@@ -302,29 +226,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_profile_is_explicitly_simulation_only_and_complete() {
+    fn embedded_profile_is_complete() {
         let model = ArmModel::embedded().unwrap();
-        assert!(model.profile().simulation_only);
         assert_eq!(model.profile().joints.len(), 7);
-        assert_eq!(
-            model
-                .profile()
-                .joints
-                .iter()
-                .map(|joint| joint.servo_id)
-                .collect::<Vec<_>>(),
-            (0..=6).collect::<Vec<_>>()
-        );
-        assert_eq!(model.profile().transport.stable_device, None);
         assert_eq!(model.profile().moveit_interface.gripper_open_deg, 90.0);
         assert_eq!(model.profile().moveit_interface.gripper_closed_deg, 0.0);
-        assert!(
-            model
-                .profile()
-                .joints
-                .iter()
-                .all(|joint| joint.zero_offset_deg.is_none() && joint.firmware.is_none())
-        );
     }
 
     #[test]
@@ -390,9 +296,9 @@ mod tests {
         invalid_mapping.teleoperation.robot_from_nolo_position_axes[0][0] = f64::NAN;
         assert!(ArmModel::from_profile(invalid_mapping).is_err());
 
-        let mut invalid_workspace = profile();
-        invalid_workspace.teleoperation.workspace_z_m[1] = f64::NAN;
-        assert!(ArmModel::from_profile(invalid_workspace).is_err());
+        let mut invalid_scale = profile();
+        invalid_scale.teleoperation.translation_scale = f64::NAN;
+        assert!(ArmModel::from_profile(invalid_scale).is_err());
     }
 
     #[test]

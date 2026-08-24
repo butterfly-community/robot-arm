@@ -12,9 +12,6 @@ pub struct TeleopSample {
     /// Fusion quaternion in `[x, y, z, w]` order.
     pub orientation: [f32; 4],
     pub communication_fresh: bool,
-    pub sample_changed: bool,
-    pub pose_usable: bool,
-    pub optical_tracking_valid: Option<bool>,
     pub fusion_initialising: bool,
     pub gyro_calibration_active: bool,
     pub trigger_pressed: bool,
@@ -37,10 +34,7 @@ pub enum TeleopStopReason {
     AwaitingSqueezeRelease,
     SqueezeReleased,
     CommunicationStale,
-    NoNewSample,
-    PoseUnusable,
     CalibrationActive,
-    OpticalTrackingInvalid,
     FilteredPositionUnavailable,
     NonFinitePosition,
     InvalidOrientation,
@@ -51,22 +45,12 @@ pub enum TeleopStopReason {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TeleopIntent {
     pub state: TeleopIntentState,
-    pub enabled: bool,
-    pub sample_valid: bool,
     pub receive_time_ns: u64,
     pub sample_sequence: Option<u8>,
-    pub trigger_pressed: bool,
     pub squeeze_pressed: bool,
     pub gripper_closed: Option<bool>,
-    pub raw_position: Option<[f32; 3]>,
-    pub filtered_position: Option<[f32; 3]>,
-    pub orientation: Option<[f32; 4]>,
     pub relative_position: Option<[f32; 3]>,
     pub relative_orientation: Option<[f32; 4]>,
-    pub communication_fresh: bool,
-    pub sample_changed: bool,
-    pub pose_usable: bool,
-    pub optical_tracking_valid: Option<bool>,
     pub stop_reason: Option<TeleopStopReason>,
 }
 
@@ -93,22 +77,12 @@ impl TeleopIntentMachine {
             anchor_orientation: None,
             latest: TeleopIntent {
                 state: TeleopIntentState::Idle,
-                enabled: false,
-                sample_valid: false,
                 receive_time_ns: 0,
                 sample_sequence: None,
-                trigger_pressed: false,
                 squeeze_pressed: false,
                 gripper_closed: None,
-                raw_position: None,
-                filtered_position: None,
-                orientation: None,
                 relative_position: None,
                 relative_orientation: None,
-                communication_fresh: false,
-                sample_changed: false,
-                pose_usable: false,
-                optical_tracking_valid: None,
                 stop_reason: Some(TeleopStopReason::NoSample),
             },
         }
@@ -126,7 +100,6 @@ impl TeleopIntentMachine {
                 self.latest = intent_from_sample(
                     sample,
                     TeleopIntentState::Faulted,
-                    false,
                     None,
                     None,
                     Some(reason),
@@ -138,9 +111,8 @@ impl TeleopIntentMachine {
         match self.state {
             TeleopIntentState::Faulted => {
                 if sample.squeeze_pressed {
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Faulted,
                         None,
                         None,
@@ -149,9 +121,8 @@ impl TeleopIntentMachine {
                 } else {
                     self.state = TeleopIntentState::Idle;
                     self.release_observed = true;
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Idle,
                         None,
                         None,
@@ -163,9 +134,8 @@ impl TeleopIntentMachine {
                 if !sample.squeeze_pressed {
                     self.release_observed = true;
                     self.clear_anchor();
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Idle,
                         None,
                         None,
@@ -176,18 +146,16 @@ impl TeleopIntentMachine {
                     self.release_observed = false;
                     self.anchor_position = Some(validated.filtered_position);
                     self.anchor_orientation = Some(validated.orientation);
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Active,
                         Some([0.0; 3]),
                         Some([0.0, 0.0, 0.0, 1.0]),
                         None,
                     );
                 } else {
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Idle,
                         None,
                         None,
@@ -200,9 +168,8 @@ impl TeleopIntentMachine {
                     self.state = TeleopIntentState::Idle;
                     self.release_observed = true;
                     self.clear_anchor();
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Idle,
                         None,
                         None,
@@ -221,9 +188,8 @@ impl TeleopIntentMachine {
                     });
                     let relative_orientation =
                         quaternion_array(&(anchor_orientation.inverse() * validated.orientation));
-                    self.latest = intent_from_validated(
+                    self.latest = intent_from_sample(
                         sample,
-                        &validated,
                         TeleopIntentState::Active,
                         Some(relative_position),
                         Some(relative_orientation),
@@ -243,15 +209,10 @@ impl TeleopIntentMachine {
     pub fn force_fault(&mut self, receive_time_ns: u64, reason: TeleopStopReason) -> TeleopIntent {
         self.enter_fault();
         self.latest.state = TeleopIntentState::Faulted;
-        self.latest.enabled = false;
-        self.latest.sample_valid = false;
         self.latest.receive_time_ns = receive_time_ns;
         self.latest.relative_position = None;
         self.latest.relative_orientation = None;
         self.latest.gripper_closed = None;
-        self.latest.communication_fresh = false;
-        self.latest.sample_changed = false;
-        self.latest.pose_usable = false;
         self.latest.stop_reason = Some(reason);
         self.latest.clone()
     }
@@ -269,7 +230,6 @@ impl TeleopIntentMachine {
 }
 
 struct ValidatedSample {
-    raw_position: [f32; 3],
     filtered_position: [f32; 3],
     orientation: UnitQuaternion<f32>,
 }
@@ -278,17 +238,8 @@ fn validate_sample(sample: TeleopSample) -> Result<ValidatedSample, TeleopStopRe
     if !sample.communication_fresh {
         return Err(TeleopStopReason::CommunicationStale);
     }
-    if !sample.sample_changed {
-        return Err(TeleopStopReason::NoNewSample);
-    }
-    if !sample.pose_usable {
-        return Err(TeleopStopReason::PoseUnusable);
-    }
     if sample.fusion_initialising || sample.gyro_calibration_active {
         return Err(TeleopStopReason::CalibrationActive);
-    }
-    if sample.optical_tracking_valid == Some(false) {
-        return Err(TeleopStopReason::OpticalTrackingInvalid);
     }
     if !finite_vector(sample.raw_position) {
         return Err(TeleopStopReason::NonFinitePosition);
@@ -303,7 +254,6 @@ fn validate_sample(sample: TeleopSample) -> Result<ValidatedSample, TeleopStopRe
         unit_quaternion(sample.orientation).ok_or(TeleopStopReason::InvalidOrientation)?;
 
     Ok(ValidatedSample {
-        raw_position: sample.raw_position,
         filtered_position,
         orientation,
     })
@@ -336,64 +286,23 @@ fn quaternion_array(value: &UnitQuaternion<f32>) -> [f32; 4] {
     result
 }
 
-fn optional_finite_vector(value: [f32; 3]) -> Option<[f32; 3]> {
-    finite_vector(value).then_some(value)
-}
-
-fn optional_orientation(value: [f32; 4]) -> Option<[f32; 4]> {
-    unit_quaternion(value).map(|orientation| quaternion_array(&orientation))
-}
-
 fn intent_from_sample(
     sample: TeleopSample,
     state: TeleopIntentState,
-    sample_valid: bool,
     relative_position: Option<[f32; 3]>,
     relative_orientation: Option<[f32; 4]>,
     stop_reason: Option<TeleopStopReason>,
 ) -> TeleopIntent {
     TeleopIntent {
         state,
-        enabled: state == TeleopIntentState::Active,
-        sample_valid,
         receive_time_ns: sample.receive_time_ns,
         sample_sequence: Some(sample.sample_sequence),
-        trigger_pressed: sample.trigger_pressed,
         squeeze_pressed: sample.squeeze_pressed,
         gripper_closed: (state == TeleopIntentState::Active).then_some(sample.trigger_pressed),
-        raw_position: optional_finite_vector(sample.raw_position),
-        filtered_position: sample.filtered_position.and_then(optional_finite_vector),
-        orientation: optional_orientation(sample.orientation),
         relative_position,
         relative_orientation,
-        communication_fresh: sample.communication_fresh,
-        sample_changed: sample.sample_changed,
-        pose_usable: sample.pose_usable,
-        optical_tracking_valid: sample.optical_tracking_valid,
         stop_reason,
     }
-}
-
-fn intent_from_validated(
-    sample: TeleopSample,
-    validated: &ValidatedSample,
-    state: TeleopIntentState,
-    relative_position: Option<[f32; 3]>,
-    relative_orientation: Option<[f32; 4]>,
-    stop_reason: Option<TeleopStopReason>,
-) -> TeleopIntent {
-    let mut intent = intent_from_sample(
-        sample,
-        state,
-        true,
-        relative_position,
-        relative_orientation,
-        stop_reason,
-    );
-    intent.raw_position = Some(validated.raw_position);
-    intent.filtered_position = Some(validated.filtered_position);
-    intent.orientation = Some(quaternion_array(&validated.orientation));
-    intent
 }
 
 #[cfg(test)]
@@ -408,9 +317,6 @@ mod tests {
             filtered_position: Some([1.0, 2.0, 3.0]),
             orientation: [0.0, 0.0, 0.0, 1.0],
             communication_fresh: true,
-            sample_changed: true,
-            pose_usable: true,
-            optical_tracking_valid: None,
             fusion_initialising: false,
             gyro_calibration_active: false,
             trigger_pressed: false,
@@ -441,7 +347,6 @@ mod tests {
         let mut machine = TeleopIntentMachine::new();
         let held_at_startup = machine.update(sample(1, true));
         assert_eq!(held_at_startup.state, TeleopIntentState::Idle);
-        assert!(!held_at_startup.enabled);
         assert_eq!(
             held_at_startup.stop_reason,
             Some(TeleopStopReason::AwaitingSqueezeRelease)
@@ -450,7 +355,6 @@ mod tests {
         machine.update(sample(2, false));
         let active = machine.update(sample(3, true));
         assert_eq!(active.state, TeleopIntentState::Active);
-        assert!(active.enabled);
         assert_eq!(active.relative_position, Some([0.0; 3]));
         assert_eq!(active.relative_orientation, Some([0.0, 0.0, 0.0, 1.0]));
     }
@@ -502,7 +406,6 @@ mod tests {
         machine.update(sample(2, true));
         let idle = machine.update(sample(3, false));
         assert_eq!(idle.state, TeleopIntentState::Idle);
-        assert!(!idle.enabled);
         assert_eq!(idle.stop_reason, Some(TeleopStopReason::SqueezeReleased));
         assert_eq!(idle.relative_position, None);
     }
@@ -515,7 +418,6 @@ mod tests {
 
         let mut stale = sample(3, true);
         stale.communication_fresh = false;
-        stale.pose_usable = false;
         let fault = machine.update(stale);
         assert_eq!(fault.state, TeleopIntentState::Faulted);
         assert_eq!(
@@ -558,7 +460,6 @@ mod tests {
             position_fault.stop_reason,
             Some(TeleopStopReason::NonFinitePosition)
         );
-        assert_eq!(position_fault.raw_position, None);
 
         let mut orientation_machine = TeleopIntentMachine::new();
         let mut bad_orientation = sample(1, false);
@@ -568,7 +469,6 @@ mod tests {
             orientation_fault.stop_reason,
             Some(TeleopStopReason::InvalidOrientation)
         );
-        assert_eq!(orientation_fault.orientation, None);
     }
 
     #[test]
@@ -595,29 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_optical_state_is_preserved_but_explicit_false_faults() {
-        let mut machine = TeleopIntentMachine::new();
-        let unknown = machine.update(sample(1, false));
-        assert!(unknown.sample_valid);
-        assert_eq!(unknown.optical_tracking_valid, None);
-
-        let mut invalid = sample(2, false);
-        invalid.optical_tracking_valid = Some(false);
-        let fault = machine.update(invalid);
-        assert_eq!(
-            fault.stop_reason,
-            Some(TeleopStopReason::OpticalTrackingInvalid)
-        );
-    }
-
-    #[test]
     fn force_fault_clears_active_output_and_requires_release() {
         let mut machine = TeleopIntentMachine::new();
         prepare(&mut machine);
         machine.update(sample(2, true));
         let disconnected = machine.force_fault(3_000_000, TeleopStopReason::UsbDisconnected);
         assert_eq!(disconnected.state, TeleopIntentState::Faulted);
-        assert!(!disconnected.enabled);
         assert_eq!(disconnected.relative_position, None);
 
         assert_eq!(
@@ -627,25 +510,6 @@ mod tests {
         assert_eq!(
             machine.update(sample(5, false)).state,
             TeleopIntentState::Idle
-        );
-    }
-
-    #[test]
-    fn duplicate_or_unusable_samples_fault() {
-        let mut duplicate_machine = TeleopIntentMachine::new();
-        let mut duplicate = sample(1, false);
-        duplicate.sample_changed = false;
-        assert_eq!(
-            duplicate_machine.update(duplicate).stop_reason,
-            Some(TeleopStopReason::NoNewSample)
-        );
-
-        let mut unusable_machine = TeleopIntentMachine::new();
-        let mut unusable = sample(1, false);
-        unusable.pose_usable = false;
-        assert_eq!(
-            unusable_machine.update(unusable).stop_reason,
-            Some(TeleopStopReason::PoseUnusable)
         );
     }
 }

@@ -2,25 +2,29 @@
 <package format="3">
   <name>stararm102_teleop_moveit</name>
   <version>0.1.0</version>
-  <description>MoveIt Servo simulation bridge for NOLO teleoperation of Star Arm 102-FL.</description>
+  <description>MoveIt Servo simulation and guarded hardware bridges for NOLO teleoperation of Star Arm 102-FL.</description>
   <maintainer email="local@example.invalid">robot-arm project</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>joint_state_topic_hardware_interface</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_param_builder</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>mock_components</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_servo</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>stararm102_moveit_config</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>

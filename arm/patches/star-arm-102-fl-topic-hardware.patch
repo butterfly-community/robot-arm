@@ -1,0 +1,76 @@
+diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
+--- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
++++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
+@@ -2,7 +2,9 @@
+ <robot name="stararm102_description">
+   <ros2_control name="StarArm102System" type="system">
+     <hardware>
+-      <plugin>mock_components/GenericSystem</plugin>
++      <plugin>joint_state_topic_hardware_interface/JointStateTopicSystem</plugin>
++      <param name="joint_commands_topic">/stararm102_hardware/joint_commands</param>
++      <param name="joint_states_topic">/stararm102_hardware/joint_states</param>
+     </hardware>
+     <joint name="joint1">
+       <command_interface name="position">
+@@ -10,7 +13,6 @@
+         <param name="max">1.9198621772</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+     </joint>
+     <joint name="joint2">
+       <command_interface name="position">
+@@ -18,7 +20,6 @@
+         <param name="max">3.1415926536</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+     </joint>
+     <joint name="joint3">
+       <command_interface name="position">
+@@ -26,7 +27,6 @@
+         <param name="max">0</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+     </joint>
+     <joint name="joint4">
+       <command_interface name="position">
+@@ -34,7 +34,6 @@
+         <param name="max">1.5707963268</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+     </joint>
+     <joint name="joint5">
+       <command_interface name="position">
+@@ -42,7 +41,6 @@
+         <param name="max">1.1344640138</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+     </joint>
+     <joint name="joint6">
+       <command_interface name="position">
+@@ -50,21 +48,6 @@
+         <param name="max">2.6179938780</param>
+       </command_interface>
+       <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+-    </joint>
+-    <joint name="joint7_left">
+-      <command_interface name="position">
+-        <param name="min">0</param>
+-        <param name="max">1.57</param>
+-      </command_interface>
+-      <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+-    </joint>
+-    <joint name="joint7_right">
+-      <state_interface name="position"/>
+-      <state_interface name="velocity"/>
+-      <param name="mimic">joint7_left</param>
+-      <param name="multiplier">-1</param>
+     </joint>
+   </ros2_control>
+ </robot>

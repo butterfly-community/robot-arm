@@ -19,11 +19,12 @@ setup(
     zip_safe=True,
     maintainer="robot-arm project",
     maintainer_email="local@example.invalid",
-    description="MoveIt Servo simulation bridge for Star Arm 102-FL",
+    description="MoveIt Servo simulation and guarded hardware bridges for Star Arm 102-FL",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
             "servo_ipc_bridge = stararm102_teleop_moveit.servo_ipc_bridge:main",
+            "hardware_node = stararm102_teleop_moveit.hardware_node:main",
         ],
     },
 )

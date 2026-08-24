@@ -106,6 +106,11 @@
 | Fashion Star SDK | `fashionstar_uart_sdk >=1.3.12` |
 | 电机总线包 | `lerobot_motor_starai >=0.0.6` |
 
+上述是厂家 FL 插件的依赖关系，不是本项目真机连接选择。审计 `lerobot_motor_starai`
+0.0.6 和 0.0.7 后确认其 `connect()` 会释放力矩并广播 `ResetLoop(0xFF)`；本项目因此直接
+使用它底层的 `fashionstar_uart_sdk==1.3.12` 非配置式打开端口，并只复用官方 ping、
+位置读取和同步位置命令。
+
 Linux 的 `/dev/ttyUSB1` 只是示例，生产程序应根据 UC-01 的 USB 属性建立稳定 udev
 名称。同一串口只能由一个进程占用。
 
@@ -143,7 +148,8 @@ Linux 的 `/dev/ttyUSB1` 只是示例，生产程序应根据 UC-01 的 USB 属�
 
 当前 `Stararm102FL` 的实际行为是：
 
-- 连接后依次 ping ID 0–6。
+- `lerobot_motor_starai` 的总线 `connect()` 打开串口并依次 ping 后，会释放力矩并广播
+  `ResetLoop(0xFF)`；这一步早于 `Stararm102FL.configure()`，同样不是只读操作。
 - 没有标定文件且 `calibrate=True` 时，释放力矩，要求人工摆到零姿态并闭合夹爪，随后
   执行 `Set_Origin`、`Reset_Multi_Turn` 并记录全行程。
 - 即使使用 `connect(calibrate=False)`，后续 `configure()` 仍会释放全部关节力矩并执行
@@ -169,14 +175,15 @@ MoveIt Servo 完成仿真运动学和约束，不把手柄 XYZ、四元数或 Se
 - URDF 的 joint6 为 ±180°，产品表为 ±150°。
 - 上游 MoveIt 覆盖配置曾把 ROS `joint6`（第六旋转关节、舵机 ID 5，不是舵机 ID 6
   的夹爪）最大速度写成 `13.14 rad/s`。本项目通过
-  [`../patches/star-arm-102-moveit-joint6-velocity.patch`](../patches/star-arm-102-moveit-joint6-velocity.patch)
-  将其明确覆盖为与其余旋转关节一致的 `3.14 rad/s`；舵机 ID 6 的夹爪不受该补丁影响。
-  上游仍关闭了所有关节的加速度限制，真实硬件接入前需另外补充并验证保守加速度限制。
+  [`../patches/star-arm-102-fl-moveit-dynamics.patch`](../patches/star-arm-102-fl-moveit-dynamics.patch)
+  将 J1–J7 速度统一写成 `3.14 rad/s`，并依据 RA8-U25H-M 文档的 `200°/s`、`100 ms`
+  加速示例，为 J1–J6 补充向下取整后的 `30 rad/s²`。真实硬件接入前仍需验证这一保守
+  软件限制；J7 不参与机械臂 MoveGroup 回零规划，因此没有补充未经确认的加速度值。
 - ROS2 驱动默认启动会向零位运动，退出路径没有实现可靠停止。
 
 当前仿真复用其几何链、网格、SRDF、KDL、控制器配置和 `GenericSystem`，并在容器临时
 副本上通过项目补丁按新品产品表覆盖关节范围、添加 `tool0`、修正 Jazzy mimic 配置和
-J6 速度。上游惯量、effort 和真实驱动仍不视为新品 FL 已验证参数；补丁也只标记为仿真
+动力学限制。上游惯量、effort 和真实驱动仍不视为新品 FL 已验证参数；补丁也只标记为仿真
 候选，必须先与实物尺寸、零位和末端坐标核对才能进入真实后端。
 
 同理，历史 `Python_SDK/stararm102_ro.py` 虽然会向 follower 发送同步关节命令，但它的
@@ -191,8 +198,8 @@ J6 速度。上游惯量、effort 和真实驱动仍不视为新品 FL 已验证
 - 新品规格为 420 mm 臂展、500 g 建议负载、±0.5 mm 标称重复精度、12 V/10 A。
 - 当前明确的独立软件入口是新版 LeRobot `Stararm102FL`，通过单独串口以 1 Mbaud 读写
   七个关节。
-- MoveIt Servo 仿真链路已经完成；真实关节输出、反馈冻结、急停和通电安全控制仍属于
-  后续阶段。
+- MoveIt Servo 仿真与真机软件链路已经完成；真机仍未连接。真实零位/方向、反馈冻结、
+  独立硬件急停和分级通电行为仍属于 P3 现场验收，不能由软件测试代替。
 
 接入通电实物前必须确认：
 
@@ -209,7 +216,7 @@ J6 速度。上游惯量、effort 和真实驱动仍不视为新品 FL 已验证
 闭环运动。
 
 当前只读探针、版本化候选模型和仿真控制实现见
-[Star Arm 102-FL 接入与仿真](STAR-ARM-102-FL-INTEGRATION.md)。
+[Star Arm 102-FL 接入与双输出](STAR-ARM-102-FL-INTEGRATION.md)。
 
 ## 采用的上游文件
 
