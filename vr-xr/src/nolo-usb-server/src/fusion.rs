@@ -152,7 +152,14 @@ impl ImuFusion {
             -f32::from(accelerometer[2]),
         ) / self.accel_counts_per_g;
 
+        let calibration_was_active = self.manual_calibration.active;
         let manually_corrected_gyro = self.manual_calibration.correct(gyro);
+        if calibration_was_active && self.manual_calibration.complete {
+            // The explicit stationary-window average is now the sole persisted
+            // bias.  Do not retain a second estimate learned by Fusion Offset
+            // while that same window was being collected.
+            self.offset.reset();
+        }
         let corrected_gyro = self.offset.update(manually_corrected_gyro);
         self.ahrs
             .update_no_magnetometer(corrected_gyro, accelerometer, delta);
@@ -175,7 +182,13 @@ impl ImuFusion {
     }
 
     fn load_gyro_bias(&mut self, bias: [f32; 3]) -> bool {
-        self.manual_calibration.load_bias(bias)
+        let loaded = self.manual_calibration.load_bias(bias);
+        if loaded {
+            // A loaded manual bias and an old adaptive Offset estimate must
+            // never be applied at the same time.
+            self.offset.reset();
+        }
+        loaded
     }
 
     fn completed_gyro_bias(&self) -> Option<[f32; 3]> {
@@ -473,6 +486,7 @@ mod tests {
         assert!(!diagnostics.gyro_calibration_active);
         assert!(diagnostics.gyro_calibration_complete);
         assert_eq!(diagnostics.gyro_calibration_progress, 1.0);
+        assert_eq!(fusion.0.offset.offset(), Vector3::zeros());
         let expected = [-10.0, 20.0, 5.0].map(|value| value * GYRO_DEGREES_PER_SECOND_PER_COUNT);
         for (actual, expected) in diagnostics.gyro_bias_dps.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3);
@@ -552,5 +566,6 @@ mod tests {
         assert!(diagnostics.gyro_calibration_complete);
         assert!(!diagnostics.gyro_calibration_active);
         assert_eq!(fusion.completed_gyro_bias(), Some(saved));
+        assert_eq!(fusion.0.offset.offset(), Vector3::zeros());
     }
 }

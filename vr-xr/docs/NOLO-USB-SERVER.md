@@ -178,10 +178,14 @@ cargo build --release
 
 NOLO 进程在本机 Unix socket 上提供 100 Hz latest-value IPC。它读取唯一最新
 `TeleopIntent`，用 `stararm102-control` 完成坐标映射和目标 TCP，然后发送给 ROS 侧
-`servo_ipc_bridge`。桥接器只转换 JSON、`PoseStamped`、`JointState` 和 `ServoStatus`；
+`servo_ipc_bridge`。桥接器只转换 JSON、`PoseStamped`、`JointState`、`ServoStatus` 和
+TF2 位姿；
 运动学、限位、奇异、碰撞和平滑全部由 MoveIt Servo 完成。厂家 `GenericSystem` 的
-`/joint_states` 反馈经同一 socket 返回，Rust 校验 schema、六关节名称/长度/有限值、
-FL 方向和范围后生成 `/api/status.latestArmSimulation`。
+`/joint_states` 与官方 `robot_state_publisher` 生成的 `base_link -> tool0` 经同一 socket
+返回。Rust 校验 IPC schema v2、六关节名称/长度/有限值、TF2 TCP、FL 方向和范围后生成
+`/api/status.latestArmSimulation`；Rust 不保存 URDF 关节链，也不计算 FK。
+每条反馈还必须具有严格递增的 `sequence`；重复或倒退会断开该 IPC 会话，防止缓存或
+重放数据刷新反馈新鲜度。
 
 Squeeze 新接管时记录当前仿真 TCP；相对输入零对应当前末端，重新接管不会跳回旧目标。
 默认坐标映射为 NOLO 前 `-Z` → 机械臂前 `+X`、NOLO 右 `+X` → 机械臂右 `-Y`、
@@ -189,11 +193,22 @@ NOLO 上 `+Y` → 机械臂上 `+Z`。手柄自身姿态不复用位置矩阵，
 头部抬起（原始 `-X`）→ TCP `-Y`，向左侧倾（原始 `+Y`）→ TCP `-X`，向左转向
 （原始 `+Z`）→ TCP `+Z`。两组矩阵都由机械臂版本化配置提供并分别接受正交性检查。
 
+平移缩放由版本化配置的 `translation_scale=0.2` 唯一控制：
+
+```text
+robot_delta = robot_from_nolo_position × controller_delta × 0.2
+```
+
+因此手柄移动 5 cm，机械臂目标 TCP 移动 1 cm。该比例只作用于相对位置；相对四元数
+保持完整旋转角度，MoveIt Servo 的线速度和角速度限制也仍分别生效。
+
 输出包含六轴逻辑角 `joints_rad`、厂家 URDF 模型角 `model_joints_rad`、关节速度、
-当前/期望 TCP、Servo 状态/说明、反馈年龄和停止原因。`backend=moveit_servo`；IPC 缺失、
-反馈超过 100 ms 或反馈非法时不发布目标并进入 `faulted`。候选工作空间越界、MoveIt
-奇异、碰撞或关节边界显示为 `constrained`，后续目标仍继续发送，以允许移回安全区域。
-上游意图故障要求先松开 Squeeze 再接管。Trigger 在 active 状态控制网页 J7 在张开
+TF2 当前 TCP、期望 TCP、Servo 状态/说明、反馈年龄和停止原因。`backend=moveit_servo`；IPC 缺失、
+反馈超过 100 ms、反馈非法、Servo 状态缺失/停止/未知时不发布目标并进入 `faulted`。
+上述故障恢复时即使 Squeeze 一直按住也不会自动恢复输出，必须先松开再重新按下。
+候选工作空间越界、MoveIt 奇异、碰撞或关节边界显示为 `constrained`；越界目标只丢弃
+本帧，约束状态的后续目标继续处理，以允许移回安全区域。上游意图故障也要求先松开
+Squeeze 再接管。Trigger 在 active 状态控制网页 J7 在张开
 `45°` 与闭合 `0°` 之间限速移动；夹爪当前仍是 Rust 网页仿真状态，不发送 ROS 或硬件
 夹爪命令。`simulation_only` 永远为 `true`。
 
@@ -244,8 +259,9 @@ ROS 启动和补丁见 [MoveIt Servo 仿真链路](../../arm/ros2/README.md)，�
 原子覆盖文件中的对应来源。
 
 运行时 Fusion Offset 继续使用 `OffsetSettings::default()`，用于补偿保存零偏后的残余
-慢漂；Offset 的瞬时内部状态不写文件。网页会显示已加载/测得的零偏、进度、加速度
-拒绝和恢复状态。
+慢漂；Offset 的瞬时内部状态不写文件。显式零偏完成或从文件加载时会先清空 Offset，
+保证切换瞬间只应用一份零偏；随后 Offset 才从零开始估计残差。网页会显示已加载/测得
+的零偏、进度、加速度拒绝和恢复状态。
 
 AHRS 使用 `Ahrs::new()`，全部算法参数由当前 `fusion-ahrs` 版本的
 `AhrsSettings::default()` 提供，本工程不复制或覆盖默认值。NOLO 没有磁力计，因此

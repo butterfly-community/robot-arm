@@ -5,7 +5,8 @@
 - 仿真主路径已经采用 **ROS 2 Jazzy + MoveIt Servo** 管理 IK/Jacobian、奇异、关节限位、
   碰撞、平滑和停止；旧 `SimulationController` 已删除，不再维护第二套自写运行时 IK。
 - Rust NOLO 进程只生成带时间戳的目标 TCP 位姿，通过 Unix socket 与薄 `rclpy` 桥接器
-  对接标准 Servo Pose API；网页只消费 `GenericSystem` 的真实关节反馈快照。
+  对接标准 Servo Pose API；当前 TCP 由官方 `robot_state_publisher`/TF2 根据厂家 URDF
+  计算并随反馈返回，Rust 不保存关节链，也不实现 FK。
 - 真实机械臂以后复用同一个 Servo 上游，只替换 `GenericSystem` 输出端。新品 FL 的零位、
   方向、软限位、速度/加速度和急停未完成实机验收，因此真实后端仍是 TODO。
 
@@ -56,12 +57,12 @@ Servo 参数、启动文件和 IPC 桥接器；厂家完整源码保持在 `~/De
 NOLO USB + Fusion + 位置滤波
              │
              ▼
-标定后的 TCP Pose/Twist（latest-value、带时间戳）
+相对手柄位姿（平移 × 0.2、姿态不缩放、latest-value、带时间戳）
              │
              ▼
 MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、超时停止）
              │
-             ├── GenericSystem + /joint_states → 网页（已实现）
+             ├── GenericSystem + /joint_states + TF2 TCP → Rust/网页（已实现）
              └── 102-FL 真实驱动与反馈（TODO）
 ```
 

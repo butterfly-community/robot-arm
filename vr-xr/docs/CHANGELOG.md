@@ -6,8 +6,20 @@
 
 ## 2026-08-24：仿真主路径收敛到 MoveIt Servo
 
-- 删除自写 IK、Jacobian、DLS 参数和运行时 `SimulationController`；Rust 只保留目标 TCP
-  坐标映射、当前位姿只读 FK、IPC 契约、反馈校验、夹爪网页状态和诊断快照。
+- 删除 Rust 中自写 FK/IK、Jacobian、DLS 参数和运行时 `SimulationController`：设备配置
+  不再复制关节原点、关节轴和 TCP 变换；IPC 升级到 v2，由官方
+  `robot_state_publisher`/TF2 返回 `base_link -> tool0`，用于当前 TCP 显示和 Squeeze
+  接管原点。Rust 只保留目标 TCP 坐标映射、IPC 契约、反馈校验、夹爪网页状态和诊断快照。
+- 完整复审采集到 Servo 的算法边界：显式/持久化陀螺仪零偏切换时清空 Fusion Offset，
+  避免同一偏差重复应用；Servo 反馈序号必须递增，状态缺失、停止或未知均禁止输出。
+- IPC/反馈故障恢复后增加 Squeeze 松开再接管门槛，避免仍按住时用旧相对位移自动恢复；
+  工作空间越界仍只丢弃本帧，不锁死后续安全目标。
+- 服务启动先占用 HTTP 和 IPC 端点，再启动 USB；已有 IPC socket 一律拒绝覆盖，避免
+  第二个服务实例解除正在运行实例的 MoveIt 入口。
+- 回归测试覆盖 1:5 三轴平移、1:1 三轴局部旋转、故障恢复、越界恢复、非法配置和
+  溢出四元数。
+- 将示教平移比例从 1:1 调整为 1:5：手柄移动 5 cm，机械臂目标 TCP 移动 1 cm；姿态
+  映射不变。
 - 新增 `arm/ros2/stararm102_teleop_moveit`：通过标准 `PoseStamped`、`JointState`、
   `ServoStatus` 和 `ServoCommandType` 对接官方 Jazzy MoveIt Servo。
 - 复用厂家 URDF/SRDF、碰撞 STL、KDL、`JointTrajectoryController` 与
@@ -17,7 +29,8 @@
 - 网页改为显示 MoveIt 后端、Servo 状态和关节反馈年龄，不再展示已经无来源的自写 IK
   误差或最小奇异值。
 - 在官方 `moveit/moveit2:jazzy-release` 中完成三包构建和运行验证；模型、KDL、碰撞
-  监视、控制器、Pose 模式和 Rust↔ROS IPC 均正常，端到端检查反馈年龄约 6 ms。
+  监视、控制器、Pose 模式和 Rust↔ROS/TF2 IPC 均正常，三轮端到端检查反馈年龄约
+  0–9 ms。
 - 当前只运行仿真输出端；真实 102-FL `ros2_control`/驱动与夹爪输出保留为 TODO，不会
   因启动仿真而打开机械臂串口。
 
@@ -59,11 +72,11 @@
 - 新增严格只读探针，只允许 ID 0–6 `ping` 和 `Present_Position`，关闭总线时不释放
   力矩；缺失反馈直接无效，不沿用缓存。
 - 当时新增无执行器接口的 `stararm102-fl-sim-v1` 候选 URDF，以及独立 Rust
-  FK/Jacobian/DLS；当前已彻底删除 Jacobian/DLS，只保留显示当前 TCP 所需的只读 FK。
+  FK/Jacobian/DLS；当前已全部删除，当前 TCP 统一来自 ROS TF2。
 - NOLO 服务新增独立 100 Hz latest-value 仿真线程；Squeeze 接管当前 TCP，输出通过
   `/api/status.latestArmSimulation` 诊断，始终标记 `simulation_only=true`。
 - 新增独立 `/arm-simulator/` 只读页面：按厂家 URDF 构建关节树、加载 9 个厂家 STL，
-  用 `latestArmSimulation.joints_rad` 驱动 J1–J6，并显示当前、受限和目标 TCP；原有
+  用 `latestArmSimulation.model_joints_rad` 驱动 J1–J6，并显示当前、受限和目标 TCP；原有
   手柄查看器不加载该页面资源。
 - P1/P2 从 TODO 移除，真实总线反馈、安全状态、硬件急停和通电运动仍留在 P3。
 

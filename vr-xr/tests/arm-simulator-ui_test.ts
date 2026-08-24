@@ -58,6 +58,13 @@ Deno.test("arm simulator uses pinned CDN modules and the read-only status API", 
     );
   }
   if (
+    !app.includes('awaiting_intent_release: "反馈恢复后请松开 Squeeze 再接管"')
+  ) {
+    throw new Error(
+      "simulator does not explain the post-fault rearm requirement",
+    );
+  }
+  if (
     !app.includes("FRAMING_VERTICAL_OFFSET_RATIO = 0.18") ||
     !app.includes("framedTarget.z += sphere.radius")
   ) {

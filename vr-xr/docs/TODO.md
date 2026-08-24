@@ -2,7 +2,8 @@
 
 当前主线只使用 Controller 0。采集、单手柄相对意图、Star Arm 102-FL 版本化设备
 描述、MoveIt Servo 仿真和网页反馈已经形成稳定边界；除修复明确缺陷外，不再增加新的
-采样、滤波、Squeeze/Trigger 或自定义运动学状态层。
+采样、滤波、Squeeze/Trigger 或自定义运动学状态层。Rust 不维护 FK/IK；当前 TCP 来自
+ROS `robot_state_publisher`/TF2，目标求解与约束交给 MoveIt Servo。
 
 本文件只记录未完成的设计与实现。定量测量、长时间运行、故障注入和实机验收集中放在
 “可选验证”，不阻塞当前开发；但真实通电机械臂是否放行仍需单独评审。

@@ -12,10 +12,12 @@ from geometry_msgs.msg import PoseStamped
 from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ROS_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 MODEL_JOINT_NAMES = (
     "shoulder_pan",
@@ -53,6 +55,8 @@ class ServoIpcBridge(Node):
             ServoCommandType, "/servo_node/switch_command_type"
         )
         self._command_timer = self.create_timer(0.2, self._select_pose_commands)
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         self._command_request_pending = False
         self._pose_commands_selected = False
         self._status_code: int | None = None
@@ -113,6 +117,16 @@ class ServoIpcBridge(Node):
             velocities = [0.0] * len(ROS_JOINT_NAMES)
         if not _finite_vector(positions, 6) or not _finite_vector(velocities, 6):
             return
+        try:
+            transform = self._tf_buffer.lookup_transform("base_link", "tool0", Time())
+        except TransformException:
+            return
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        tcp_position = [translation.x, translation.y, translation.z]
+        tcp_orientation = [rotation.x, rotation.y, rotation.z, rotation.w]
+        if not _finite_vector(tcp_position, 3) or not _finite_vector(tcp_orientation, 4):
+            return
         self._sequence += 1
         feedback = {
             "schema_version": SCHEMA_VERSION,
@@ -120,6 +134,10 @@ class ServoIpcBridge(Node):
             "model_joint_names": list(MODEL_JOINT_NAMES),
             "model_joints_rad": positions,
             "model_joint_velocity_rad_s": velocities,
+            "tcp_pose": {
+                "position_m": tcp_position,
+                "orientation_xyzw": tcp_orientation,
+            },
             "servo_status_code": self._status_code,
             "servo_status_message": self._status_message,
         }
@@ -166,6 +184,8 @@ class ServoIpcBridge(Node):
             raise ValueError("不支持的 IPC schema_version")
         if not command.get("enabled"):
             return
+        if not self._pose_commands_selected:
+            return
         if command.get("base_frame") != "base_link" or command.get("tcp_link") != "tool0":
             raise ValueError("IPC 坐标系必须是 base_link -> tool0")
         target = command.get("target_pose")
@@ -176,7 +196,7 @@ class ServoIpcBridge(Node):
         if not _finite_vector(position, 3) or not _finite_vector(orientation, 4):
             raise ValueError("target_pose 含非法数值")
         norm = math.sqrt(sum(value * value for value in orientation))
-        if norm <= 1.0e-9:
+        if not math.isfinite(norm) or norm <= 1.0e-9:
             raise ValueError("target_pose 四元数为零")
 
         message = PoseStamped()

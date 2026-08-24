@@ -1,4 +1,4 @@
-use nalgebra::{Isometry3, Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Matrix3, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -14,7 +14,7 @@ pub struct ArmProfile {
     pub simulation_only: bool,
     pub transport: TransportProfile,
     pub joints: Vec<JointProfile>,
-    pub kinematics: KinematicsProfile,
+    pub moveit_interface: MoveItInterfaceProfile,
     pub teleoperation: TeleoperationProfile,
 }
 
@@ -41,26 +41,10 @@ pub struct JointProfile {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct KinematicsProfile {
-    pub base_link: String,
+pub struct MoveItInterfaceProfile {
+    pub base_frame: String,
     pub tcp_link: String,
-    pub geometry_source: String,
-    pub joint_origins: Vec<TransformProfile>,
-    pub tcp_origin: TcpTransformProfile,
     pub nominal_joints_deg: Vec<f64>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct TransformProfile {
-    pub xyz_m: [f64; 3],
-    pub rpy_rad: [f64; 3],
-    pub axis: [f64; 3],
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct TcpTransformProfile {
-    pub xyz_m: [f64; 3],
-    pub rpy_rad: [f64; 3],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -82,10 +66,6 @@ pub struct Pose {
 }
 
 impl Pose {
-    pub fn identity() -> Self {
-        Self::from_isometry(&Isometry3::identity())
-    }
-
     pub fn from_isometry(value: &Isometry3<f64>) -> Self {
         let quaternion = value.rotation.quaternion();
         let mut orientation = [quaternion.i, quaternion.j, quaternion.k, quaternion.w];
@@ -109,7 +89,8 @@ impl Pose {
         }
         let [x, y, z, w] = self.orientation_xyzw;
         let quaternion = nalgebra::Quaternion::new(w, x, y, z);
-        if quaternion.norm_squared() <= f64::EPSILON {
+        let norm_squared = quaternion.norm_squared();
+        if !norm_squared.is_finite() || norm_squared <= f64::EPSILON {
             return None;
         }
         Some(Isometry3::from_parts(
@@ -122,10 +103,7 @@ impl Pose {
 #[derive(Clone, Debug)]
 pub struct ArmModel {
     profile: ArmProfile,
-    joint_origins: [Isometry3<f64>; ARM_DOF],
-    joint_axes: [Unit<Vector3<f64>>; ARM_DOF],
     joint_model_scale: [f64; ARM_DOF],
-    tcp_origin: Isometry3<f64>,
     lower_limits: [f64; ARM_DOF],
     upper_limits: [f64; ARM_DOF],
     nominal_joints: [f64; ARM_DOF],
@@ -142,24 +120,14 @@ impl ArmModel {
 
     pub fn from_profile(profile: ArmProfile) -> Result<Self, String> {
         validate_profile(&profile)?;
-        let joint_origins = std::array::from_fn(|index| {
-            let origin = &profile.kinematics.joint_origins[index];
-            isometry(origin.xyz_m, origin.rpy_rad)
-        });
-        let joint_axes = std::array::from_fn(|index| {
-            Unit::new_normalize(Vector3::from(profile.kinematics.joint_origins[index].axis))
-        });
         let joint_model_scale = std::array::from_fn(|index| 1.0 / profile.joints[index].direction);
-        let tcp_origin = isometry(
-            profile.kinematics.tcp_origin.xyz_m,
-            profile.kinematics.tcp_origin.rpy_rad,
-        );
         let lower_limits =
             std::array::from_fn(|index| profile.joints[index].lower_deg.to_radians());
         let upper_limits =
             std::array::from_fn(|index| profile.joints[index].upper_deg.to_radians());
-        let nominal_joints =
-            std::array::from_fn(|index| profile.kinematics.nominal_joints_deg[index].to_radians());
+        let nominal_joints = std::array::from_fn(|index| {
+            profile.moveit_interface.nominal_joints_deg[index].to_radians()
+        });
         let robot_from_nolo_position = Matrix3::from_row_slice(
             &profile
                 .teleoperation
@@ -178,10 +146,7 @@ impl ArmModel {
         );
         Ok(Self {
             profile,
-            joint_origins,
-            joint_axes,
             joint_model_scale,
-            tcp_origin,
             lower_limits,
             upper_limits,
             nominal_joints,
@@ -223,19 +188,6 @@ impl ArmModel {
         self.robot_from_controller_orientation
     }
 
-    pub fn forward(&self, joints: [f64; ARM_DOF]) -> Pose {
-        let mut transform = Isometry3::identity();
-        let model_joints = self.model_joints(joints);
-        for (index, model_joint) in model_joints.into_iter().enumerate() {
-            transform *= self.joint_origins[index];
-            transform *= Isometry3::from_parts(
-                Translation3::identity(),
-                UnitQuaternion::from_axis_angle(&self.joint_axes[index], model_joint),
-            );
-        }
-        Pose::from_isometry(&(transform * self.tcp_origin))
-    }
-
     pub fn workspace_contains(&self, position: [f64; 3]) -> bool {
         if position.into_iter().any(|value| !value.is_finite()) {
             return false;
@@ -247,39 +199,46 @@ impl ArmModel {
     }
 }
 
-fn isometry(xyz: [f64; 3], rpy: [f64; 3]) -> Isometry3<f64> {
-    Isometry3::from_parts(
-        Translation3::from(Vector3::from(xyz)),
-        UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]),
-    )
-}
-
 fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
     if profile.schema_version != 1 || !profile.simulation_only {
         return Err("profile must be schema v1 and explicitly simulation_only".to_owned());
     }
-    if profile.joints.len() != 7
-        || profile.kinematics.joint_origins.len() != ARM_DOF
-        || profile.kinematics.nominal_joints_deg.len() != ARM_DOF
-    {
+    if profile.joints.len() != 7 || profile.moveit_interface.nominal_joints_deg.len() != ARM_DOF {
         return Err("profile must define six arm joints plus one gripper".to_owned());
     }
     let ids: BTreeSet<_> = profile.joints.iter().map(|joint| joint.servo_id).collect();
     if ids != BTreeSet::from([0, 1, 2, 3, 4, 5, 6]) {
         return Err("servo IDs must be exactly 0..=6".to_owned());
     }
+    let names: BTreeSet<_> = profile
+        .joints
+        .iter()
+        .map(|joint| joint.name.as_str())
+        .collect();
+    if names.len() != profile.joints.len() || names.iter().any(|name| name.is_empty()) {
+        return Err("joint names must be non-empty and unique".to_owned());
+    }
+    if profile.moveit_interface.base_frame.is_empty()
+        || profile.moveit_interface.tcp_link.is_empty()
+    {
+        return Err("MoveIt base_frame and tcp_link must be non-empty".to_owned());
+    }
     for joint in &profile.joints {
         if joint.direction == 0.0
             || !joint.direction.is_finite()
+            || !(1.0 / joint.direction).is_finite()
             || !joint.lower_deg.is_finite()
             || !joint.upper_deg.is_finite()
             || joint.lower_deg >= joint.upper_deg
+            || joint
+                .zero_offset_deg
+                .is_some_and(|value| !value.is_finite())
         {
             return Err(format!("invalid joint profile: {}", joint.name));
         }
     }
     for (index, value) in profile
-        .kinematics
+        .moveit_interface
         .nominal_joints_deg
         .iter()
         .copied()
@@ -288,18 +247,6 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
         let joint = &profile.joints[index];
         if !value.is_finite() || value < joint.lower_deg || value > joint.upper_deg {
             return Err(format!("nominal pose exceeds {} limits", joint.name));
-        }
-    }
-    for origin in &profile.kinematics.joint_origins {
-        if origin
-            .xyz_m
-            .into_iter()
-            .chain(origin.rpy_rad)
-            .chain(origin.axis)
-            .any(|value| !value.is_finite())
-            || Vector3::from(origin.axis).norm() <= f64::EPSILON
-        {
-            return Err("invalid kinematic transform".to_owned());
         }
     }
     for (name, values) in [
@@ -312,6 +259,9 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
             profile.teleoperation.robot_from_controller_orientation_axes,
         ),
     ] {
+        if values.into_iter().flatten().any(|value| !value.is_finite()) {
+            return Err(format!("{name} must contain only finite values"));
+        }
         let mapping = Matrix3::from_row_slice(&values.into_iter().flatten().collect::<Vec<_>>());
         if (mapping.transpose() * mapping - Matrix3::identity()).norm() > 1.0e-9
             || (mapping.determinant() - 1.0).abs() > 1.0e-9
@@ -328,6 +278,12 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
     if positive
         .into_iter()
         .any(|value| !value.is_finite() || value <= 0.0)
+        || settings
+            .workspace_radius_m
+            .into_iter()
+            .chain(settings.workspace_z_m)
+            .any(|value| !value.is_finite())
+        || settings.workspace_radius_m[0] < 0.0
         || settings.workspace_radius_m[0] >= settings.workspace_radius_m[1]
         || settings.workspace_z_m[0] >= settings.workspace_z_m[1]
     {
@@ -416,15 +372,28 @@ mod tests {
     }
 
     #[test]
-    fn forward_pose_is_finite() {
-        let model = ArmModel::embedded().unwrap();
-        let joints = model.nominal_joints();
-        let pose = model.forward(joints);
-        assert!(pose.position_m.into_iter().all(f64::is_finite));
-        assert!(
-            pose.position_m[2] > 0.0,
-            "nominal TCP must be above base plane"
-        );
-        assert!(pose.orientation_xyzw.into_iter().all(f64::is_finite));
+    fn profile_validation_rejects_non_finite_or_ambiguous_control_data() {
+        let profile = || serde_json::from_str::<ArmProfile>(PROFILE_JSON).unwrap();
+
+        let mut duplicate = profile();
+        duplicate.joints[1].name = duplicate.joints[0].name.clone();
+        assert!(ArmModel::from_profile(duplicate).is_err());
+
+        let mut invalid_mapping = profile();
+        invalid_mapping.teleoperation.robot_from_nolo_position_axes[0][0] = f64::NAN;
+        assert!(ArmModel::from_profile(invalid_mapping).is_err());
+
+        let mut invalid_workspace = profile();
+        invalid_workspace.teleoperation.workspace_z_m[1] = f64::NAN;
+        assert!(ArmModel::from_profile(invalid_workspace).is_err());
+    }
+
+    #[test]
+    fn pose_rejects_a_quaternion_whose_norm_overflows() {
+        let pose = Pose {
+            position_m: [0.0; 3],
+            orientation_xyzw: [f64::MAX, f64::MAX, 0.0, 0.0],
+        };
+        assert!(pose.to_isometry().is_none());
     }
 }

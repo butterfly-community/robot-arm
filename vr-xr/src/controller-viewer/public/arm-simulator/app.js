@@ -44,6 +44,7 @@ const stopReasonLabels = {
   servo_unavailable: "MoveIt Servo 未连接",
   servo_feedback_stale: "MoveIt 关节反馈超时",
   servo_invalid_feedback: "MoveIt 关节反馈非法",
+  awaiting_intent_release: "反馈恢复后请松开 Squeeze 再接管",
   servo_halt: "MoveIt Servo 已停止",
   servo_collision: "MoveIt：碰撞停止",
 };

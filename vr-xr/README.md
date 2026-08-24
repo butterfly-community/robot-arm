@@ -12,6 +12,7 @@ OpenHMD/Monado 链路已经
 | 默认数据链路   | Rust `nolo-usb-server` 直接独占读取 USB/HID      |
 | 姿态算法       | Rust `fusion-ahrs`，分别融合各设备的陀螺仪和加速度计 |
 | 空间位置       | 保留 NOLO 原始位置，并发布独立 One Euro 滤波位置 |
+| 示教平移比例   | 1:5；手柄移动 5 cm，机械臂目标移动 1 cm          |
 | Head Marker    | 发布位置和约 240 Hz IMU 融合姿态，同时承担 USB 中继 |
 | Controller 1   | 与 Controller 0 一样发布；网页按钮切换观察       |
 | 示教意图       | Controller 0 Squeeze 接管；Trigger 控制夹爪       |
@@ -23,13 +24,15 @@ OpenHMD/Monado 链路已经
 Controller 0 的采集帧还会在同一 Rust 进程内生成 `idle` / `active` / `faulted` 相对示教
 意图。右侧 Squeeze 键每次新按下都建立新的位置和姿态原点，松开即停止；活动期间
 Trigger 只控制夹爪开合，不再负责接管。断流、休眠或标定也会停止输出，故障恢复后
-不会自动重新使能。独立 100 Hz IPC 会把目标 TCP 交给 ROS 2 MoveIt Servo；厂家
+不会自动重新使能。手柄相对平移乘以 `0.2` 后再生成目标 TCP；相对旋转不缩放。独立
+100 Hz IPC 会把目标 TCP 交给 ROS 2 MoveIt Servo；厂家
 `GenericSystem` 的关节反馈再返回 Rust，形成网页仿真快照。运行时不再使用自写 IK，
 也没有串口或电机写入能力。详情见
 [后端说明](docs/NOLO-USB-SERVER.md#star-arm-102-fl-仿真输出)和
 [机械臂接入说明](../arm/docs/STAR-ARM-102-FL-INTEGRATION.md)。
 仿真遇到工作空间、奇异、碰撞或关节边界时会显示 MoveIt 状态并继续处理后续目标；
-只有采集/输入故障、IPC 断开或关节反馈失效才进入故障状态。
+只有采集/输入故障、IPC 断开、关节反馈或 Servo 状态失效才进入故障状态。故障恢复后
+必须先松开再重新按下 Squeeze，不会沿用旧的相对位移自动接管。
 
 同一服务还提供独立的 Star Arm 102-FL 只读仿真页：
 `http://<服务地址>:8765/arm-simulator/`。它根据厂家 URDF 建立关节层级、加载厂家 STL，

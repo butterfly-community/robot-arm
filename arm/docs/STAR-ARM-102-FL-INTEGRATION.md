@@ -10,7 +10,7 @@
 
 - 新品 FL 的 6R + 1 夹爪、舵机 ID 0–6、产品表型号、1 Mbaud 和 degrees 反馈单位；
 - 上游 FL 插件的逻辑方向，以及以该方向表达的产品表行程；
-- 模型版本、候选关节链、仿真工作空间、坐标映射和控制约束；
+- 模型版本、ROS 基座/TCP 帧名、仿真工作空间、坐标映射和控制约束；
 - 尚未从实物确认的稳定设备名、零偏和固件明确为 `null`，不使用猜测值。
 
 生产关节总线选择上游已经用于新品 FL 的 `lerobot_motor_starai>=0.0.6`。当前不采用旧
@@ -48,10 +48,11 @@ python3 arm/tools/stararm102_fl_readonly_probe.py \
 
 - 关节变换来自审核提交中的旧 Star Arm 102 ROS2 几何链；
 - 关节范围采用新品 FL 产品范围，并按当前 FL 插件逻辑符号表达；
-- `base_link`、六关节轴和 `tool0` 与 JSON 配置逐项一致；
-- Rust API 的 `joints_rad` 是 FL 驱动使用的逻辑角；只读 FK 显示会按厂家
-  `model_angle = logical_angle / direction` 转换到 URDF 关节角。仿真快照另外发布
-  `model_joints_rad`，网页不得把逻辑角直接写入 URDF；
+- `moveit_interface` 只保存 `base_link`、`tool0` 接口帧名和零反馈前的默认关节状态；
+  关节几何只保存在 ROS/URDF 模型，不再复制到 Rust 配置；
+- Rust API 的 `joints_rad` 是 FL 驱动使用的逻辑角；厂家反馈按
+  `logical_angle = model_angle * direction` 转换。仿真快照另外发布 `model_joints_rad`，
+  网页不得把逻辑角直接写入 URDF；
 - 没有 transmission、`ros2_control` 或执行器接口，不能被误用来驱动实物；
 - 力矩、惯量和实机速度没有可靠新品来源，因此没有伪造这些参数。
 
@@ -63,8 +64,9 @@ python3 arm/tools/stararm102_fl_readonly_probe.py \
 Rust 库 [`../src/stararm102-control/`](../src/stararm102-control/) 完全不依赖串口，只负责
 坐标映射、目标 TCP、IPC 契约、反馈校验和网页快照。NOLO 服务以 100 Hz 通过 Unix
 socket 发送唯一最新目标；ROS 侧薄桥接器把目标转换为标准 `PoseStamped`，MoveIt Servo
-完成 IK、限位、奇异、碰撞和平滑，厂家 `GenericSystem` 返回 `/joint_states`。旧自写
-`SimulationController` 已删除，网页不再走第二套 IK。
+完成 IK、限位、奇异、碰撞和平滑，厂家 `GenericSystem` 返回 `/joint_states`，官方
+`robot_state_publisher`/TF2 返回 `base_link -> tool0`。Rust 不保存关节链、不计算 FK/IK；
+旧自写 `SimulationController` 已删除。
 
 接管规则：
 
@@ -73,7 +75,9 @@ socket 发送唯一最新目标；ROS 侧薄桥接器把目标转换为标准 `P
 - 松开 Squeeze 后停止并清除接管原点；下次接管从当时机械臂位置重新开始；
 - Rust 候选工作空间越界时不发布该目标；MoveIt 的奇异、碰撞和关节边界状态显示为
   `constrained`，后续命令继续流动，以允许离开约束；
-- 上游意图故障、IPC 断开、反馈超过 100 ms 或反馈非法进入 `faulted`。
+- 上游意图故障、IPC 断开、反馈超过 100 ms、反馈序号未递增、反馈非法，以及 Servo
+  状态缺失、停止或未知都进入 `faulted`；反馈恢复时若 Squeeze 仍按住不会自动接管，
+  必须先松开再重新按下并建立新 TCP 原点。
 
 默认坐标约定是机械臂常用的 `base_link`：前 `+X`、左 `+Y`、上 `+Z`。NOLO 跟踪轴
 右 `+X`、上 `+Y`、前 `-Z` 映射为：
@@ -84,7 +88,8 @@ robot +Y = NOLO -X   （左）
 robot +Z = NOLO +Y   （上）
 ```
 
-平移默认 1:1。位置轴和手柄自身姿态轴是两个不同的设备坐标系，不能复用同一个矩阵。
+平移比例为 `0.2`，即手柄移动 5 cm，机械臂目标 TCP 移动 1 cm。位置轴和手柄自身
+姿态轴是两个不同的设备坐标系，不能复用同一个矩阵。
 姿态按已经确认的手柄人体动作映射为：
 
 ```text
@@ -111,7 +116,7 @@ robot +Z = NOLO +Y   （上）
 
 `GET /api/status` 的 `latestArmSimulation` 给出 `idle/active/constrained/faulted`、
 六轴逻辑关节角、
-对应 URDF 模型关节角、夹爪角度及开合命令、关节速度、当前/期望 TCP、Servo 状态、
+对应 URDF 模型关节角、夹爪角度及开合命令、关节速度、TF2 当前 TCP、期望 TCP、Servo 状态、
 反馈年龄和停止原因。`backend=moveit_servo` 明确表示数据来自 ROS 仿真反馈。
 夹爪张开 `45°`、闭合 `0°` 由厂家 FL 的 `[-270°, 0°] / direction=-6` 配置推导，
 并复用现有关节速度/加速度限制。字段始终包含
@@ -119,14 +124,17 @@ robot +Z = NOLO +Y   （上）
 
 ## 已自动验证
 
-- 配置 schema、ID 0–6、未知字段保持 `null` 和坐标矩阵正交性；
-- FK 和坐标映射有限、非法目标四元数、反馈顺序/方向和关节范围校验；
+- 配置 schema、ID 0–6、关节名唯一性、工作空间有限性、未知字段保持 `null`
+  和坐标矩阵正交性；
+- TF2 TCP 和坐标映射有限、非法目标四元数、反馈顺序/方向和关节范围校验；
 - 接管无跳变、重新接管、位置三轴映射和手柄三种人体旋转映射；
-- IPC 缺失、超时、非法反馈和 Servo 奇异/碰撞/关节边界状态；
+- IPC 缺失、超时、乱序/重复序号、非法反馈、Servo 状态缺失/未知，以及故障后必须松开
+  Squeeze 才能重新接管；
+- 工作空间目标只丢弃本帧且不会锁死后续恢复目标；
 - 只读探针的唯一总线调用集合，以及反馈缺失不复用缓存；
 - HTTP 状态字段、`simulation_only` 契约；
 - 官方 Jazzy MoveIt 容器中完成三个 ROS 包构建、模型/KDL/碰撞/控制器/Servo 启动，
-  以及 Rust↔ROS 端到端反馈验证（现场检查反馈年龄约 6 ms）。
+  以及 Rust↔ROS/TF2 端到端反馈验证（三轮现场检查反馈年龄约 0–9 ms）。
 
 启动方法见 [`../ros2/README.md`](../ros2/README.md)。真实机械臂输出端、反馈冻结检测、
 急停和通电验收属于 P3，不因仿真通过而自动放行。

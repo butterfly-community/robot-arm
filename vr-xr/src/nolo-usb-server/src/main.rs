@@ -335,6 +335,13 @@ impl AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::parse()?;
+    let address = SocketAddr::new(config.host, config.port);
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to listen on http://{address}/"))?;
+    // Reserve both externally visible endpoints before touching USB.  A
+    // second instance must fail without disrupting the running instance.
+    let servo_listener = bind_servo_ipc(&config.servo_ipc_path)?;
     let state = AppState::new();
     spawn_usb_reader(
         state.clone(),
@@ -342,7 +349,6 @@ async fn main() -> Result<()> {
         config.position_filter_settings,
         config.gyro_calibration_file,
     );
-    let servo_listener = bind_servo_ipc(&config.servo_ipc_path)?;
     let servo_task = tokio::spawn(servo_ipc_accept_loop(servo_listener, state.clone()));
 
     let static_files = ServeDir::new(&config.static_dir).append_index_html_on_directories(true);
@@ -361,10 +367,6 @@ async fn main() -> Result<()> {
         .layer(middleware::from_fn(security_headers))
         .with_state(state.clone());
 
-    let address = SocketAddr::new(config.host, config.port);
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .with_context(|| format!("failed to listen on http://{address}/"))?;
     println!("NOLO direct USB viewer: http://{address}/");
     println!("Static files: {}", config.static_dir.display());
     let server_result = axum::serve(listener, app)
@@ -539,6 +541,7 @@ async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()>
     let start = Instant::now();
     let mut previous_tick = start;
     let mut latest_feedback: Option<(ServoFeedbackFrame, Instant)> = None;
+    let mut last_feedback_sequence = None;
 
     loop {
         tokio::select! {
@@ -553,6 +556,7 @@ async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()>
                 };
                 let feedback: ServoFeedbackFrame = serde_json::from_str(&line)
                     .context("invalid Servo feedback frame")?;
+                accept_feedback_sequence(&mut last_feedback_sequence, feedback.sequence)?;
                 latest_feedback = Some((feedback, Instant::now()));
             }
             _ = ticker.tick() => {
@@ -580,6 +584,14 @@ async fn servo_ipc_connection(stream: UnixStream, state: AppState) -> Result<()>
     }
 }
 
+fn accept_feedback_sequence(last: &mut Option<u64>, sequence: u64) -> Result<()> {
+    if last.is_some_and(|previous| sequence <= previous) {
+        bail!("Servo feedback sequence must increase: previous={last:?}, current={sequence}");
+    }
+    *last = Some(sequence);
+    Ok(())
+}
+
 fn bind_servo_ipc(path: &FilePath) -> Result<UnixListener> {
     use std::os::unix::fs::FileTypeExt;
 
@@ -595,9 +607,10 @@ fn bind_servo_ipc(path: &FilePath) -> Result<UnixListener> {
                 path.display()
             );
         }
-        std::fs::remove_file(path).with_context(|| {
-            format!("failed removing stale Servo IPC socket: {}", path.display())
-        })?;
+        bail!(
+            "refusing to replace existing Servo IPC socket: {}; stop the owning server, or verify it is stale and remove it explicitly",
+            path.display()
+        );
     }
     UnixListener::bind(path)
         .with_context(|| format!("failed binding Servo IPC socket: {}", path.display()))
@@ -1272,6 +1285,10 @@ mod tests {
         assert_eq!(json["latestArmSimulation"]["backend"], "moveit_servo");
         assert_eq!(json["latestArmSimulation"]["simulation_only"], true);
         assert_eq!(json["latestArmSimulation"]["gripper_closed"], true);
+        assert_eq!(
+            json["latestArmSimulation"]["tcp_pose"],
+            serde_json::Value::Null
+        );
         assert!(json["latestArmSimulation"]["gripper_rad"].is_number());
         let model_joints = json["latestArmSimulation"]["model_joints_deg"]
             .as_array()
@@ -1296,5 +1313,45 @@ mod tests {
         state.notify_shutdown();
         shutdown.changed().await.unwrap();
         assert!(*shutdown.borrow());
+    }
+
+    #[test]
+    fn servo_feedback_sequence_must_strictly_increase() {
+        let mut last = None;
+        assert!(accept_feedback_sequence(&mut last, 1).is_ok());
+        assert!(accept_feedback_sequence(&mut last, 2).is_ok());
+        assert!(accept_feedback_sequence(&mut last, 2).is_err());
+        assert!(accept_feedback_sequence(&mut last, 1).is_err());
+        assert_eq!(last, Some(2));
+    }
+
+    #[tokio::test]
+    async fn servo_ipc_bind_never_replaces_an_existing_socket() {
+        let path = std::env::temp_dir().join(format!(
+            "nolo-usb-server-bind-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = match bind_servo_ipc(&path) {
+            Ok(listener) => listener,
+            Err(error)
+                if error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
+                // Some CI/sandbox seccomp profiles prohibit AF_UNIX bind.
+                // The same test is exercised in the host-side verification.
+                return;
+            }
+            Err(error) => panic!("first Servo IPC bind failed: {error:#}"),
+        };
+        let error = bind_servo_ipc(&path).unwrap_err();
+        assert!(error.to_string().contains("refusing to replace existing"));
+        drop(listener);
+        remove_servo_socket(&path).unwrap();
     }
 }

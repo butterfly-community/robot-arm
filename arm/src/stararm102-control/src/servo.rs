@@ -1,7 +1,8 @@
 //! MoveIt Servo IPC protocol and the simulation output sink.
 //!
 //! This module performs coordinate conversion and validates Servo feedback. It
-//! deliberately contains no inverse kinematics: joint targets come from MoveIt.
+//! deliberately contains no forward or inverse kinematics: current TCP comes
+//! from ROS TF2 and joint targets come from MoveIt.
 
 use crate::{
     model::{ArmModel, Pose},
@@ -13,7 +14,7 @@ use crate::{
 use nalgebra::{Quaternion, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 
-pub const SERVO_IPC_SCHEMA_VERSION: u32 = 1;
+pub const SERVO_IPC_SCHEMA_VERSION: u32 = 2;
 pub const ARM_DOF: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,6 +37,7 @@ pub struct ServoFeedbackFrame {
     pub model_joint_names: Vec<String>,
     pub model_joints_rad: Vec<f64>,
     pub model_joint_velocity_rad_s: Vec<f64>,
+    pub tcp_pose: Pose,
     pub servo_status_code: Option<i8>,
     pub servo_status_message: Option<String>,
 }
@@ -44,7 +46,9 @@ pub struct MoveItSimulationController {
     model: ArmModel,
     logical_joints: [f64; ARM_DOF],
     logical_joint_velocity: [f64; ARM_DOF],
+    current_tcp: Option<nalgebra::Isometry3<f64>>,
     anchor_tcp: Option<nalgebra::Isometry3<f64>>,
+    rearm_required: bool,
     gripper_closed: bool,
     gripper_rad: f64,
     gripper_open_rad: f64,
@@ -79,7 +83,7 @@ impl MoveItSimulationController {
             gripper_rad,
             gripper_deg: gripper_rad.to_degrees(),
             gripper_velocity_rad_s: 0.0,
-            tcp_pose: model.forward(logical_joints),
+            tcp_pose: None,
             desired_tcp_pose: None,
             servo_status_code: None,
             servo_status_message: None,
@@ -90,7 +94,9 @@ impl MoveItSimulationController {
             model,
             logical_joints,
             logical_joint_velocity: [0.0; ARM_DOF],
+            current_tcp: None,
             anchor_tcp: None,
+            rearm_required: true,
             gripper_closed: true,
             gripper_rad,
             gripper_open_rad,
@@ -123,15 +129,22 @@ impl MoveItSimulationController {
         } else {
             None
         };
+        let status_error = match feedback.and_then(|value| value.servo_status_code) {
+            None => Some(SimulationStopReason::ServoUnavailable),
+            Some(-1) => Some(SimulationStopReason::ServoHalt),
+            Some(0..=6) => None,
+            Some(_) => Some(SimulationStopReason::ServoInvalidFeedback),
+        };
 
         let mut state = SimulationState::Idle;
         let mut enabled = false;
         let mut desired_tcp_pose = None;
-        let mut stop_reason = feedback_error.or(freshness_error);
+        let mut stop_reason = feedback_error.or(freshness_error).or(status_error);
         let mut target_pose = None;
 
         if stop_reason.is_some() {
             state = SimulationState::Faulted;
+            self.rearm_required = true;
             self.anchor_tcp = None;
             self.stop_gripper();
         } else {
@@ -139,11 +152,19 @@ impl MoveItSimulationController {
                 RelativeIntentState::Faulted => {
                     state = SimulationState::Faulted;
                     stop_reason = Some(SimulationStopReason::IntentFaulted);
+                    self.rearm_required = true;
                     self.anchor_tcp = None;
                     self.stop_gripper();
                 }
                 RelativeIntentState::Idle => {
                     stop_reason = Some(SimulationStopReason::IntentIdle);
+                    self.rearm_required = false;
+                    self.anchor_tcp = None;
+                    self.stop_gripper();
+                }
+                RelativeIntentState::Active if self.rearm_required => {
+                    state = SimulationState::Faulted;
+                    stop_reason = Some(SimulationStopReason::AwaitingIntentRelease);
                     self.anchor_tcp = None;
                     self.stop_gripper();
                 }
@@ -174,6 +195,7 @@ impl MoveItSimulationController {
                     None => {
                         state = SimulationState::Faulted;
                         stop_reason = Some(SimulationStopReason::InvalidIntent);
+                        self.rearm_required = true;
                         self.anchor_tcp = None;
                         self.stop_gripper();
                     }
@@ -202,7 +224,7 @@ impl MoveItSimulationController {
             gripper_rad: self.gripper_rad,
             gripper_deg: self.gripper_rad.to_degrees(),
             gripper_velocity_rad_s: self.gripper_velocity,
-            tcp_pose: self.model.forward(self.logical_joints),
+            tcp_pose: self.current_tcp.as_ref().map(Pose::from_isometry),
             desired_tcp_pose,
             servo_status_code: status_code,
             servo_status_message: status_message,
@@ -210,16 +232,17 @@ impl MoveItSimulationController {
             stop_reason,
         };
 
+        let command_enabled = enabled && target_pose.is_some();
         let command = ServoCommandFrame {
             schema_version: SERVO_IPC_SCHEMA_VERSION,
             time_ns,
             intent_receive_time_ns: intent.receive_time_ns,
             intent_sample_sequence: intent.sample_sequence,
-            enabled: enabled && target_pose.is_some(),
-            base_frame: self.model.profile().kinematics.base_link.clone(),
-            tcp_link: self.model.profile().kinematics.tcp_link.clone(),
+            enabled: command_enabled,
+            base_frame: self.model.profile().moveit_interface.base_frame.clone(),
+            tcp_link: self.model.profile().moveit_interface.tcp_link.clone(),
             target_pose,
-            gripper_closed: enabled.then_some(self.gripper_closed),
+            gripper_closed: command_enabled.then_some(self.gripper_closed),
         };
         (command, self.latest.clone())
     }
@@ -251,6 +274,7 @@ impl MoveItSimulationController {
             return Err(());
         }
         let logical = self.model.logical_joints(model_joints);
+        let tcp = feedback.tcp_pose.to_isometry().ok_or(())?;
         let (lower, upper) = self.model.joint_limits();
         if logical
             .iter()
@@ -260,6 +284,7 @@ impl MoveItSimulationController {
             return Err(());
         }
         self.logical_joints = logical;
+        self.current_tcp = Some(tcp);
         self.logical_joint_velocity = std::array::from_fn(|index| {
             model_velocity[index] * self.model.profile().joints[index].direction
         });
@@ -285,16 +310,12 @@ impl MoveItSimulationController {
             relative_orientation[1],
             relative_orientation[2],
         );
-        if raw_quaternion.norm_squared() <= f64::EPSILON {
+        let norm_squared = raw_quaternion.norm_squared();
+        if !norm_squared.is_finite() || norm_squared <= f64::EPSILON {
             return None;
         }
         let relative_rotation = UnitQuaternion::new_normalize(raw_quaternion);
-        let anchor = *self.anchor_tcp.get_or_insert_with(|| {
-            self.model
-                .forward(self.logical_joints)
-                .to_isometry()
-                .expect("validated model FK must be finite")
-        });
+        let anchor = *self.anchor_tcp.get_or_insert(self.current_tcp?);
         let position_mapping = self.model.robot_from_nolo_position();
         let orientation_basis =
             UnitQuaternion::from_matrix(&self.model.robot_from_controller_orientation());
@@ -375,6 +396,10 @@ mod tests {
                 .collect(),
             model_joints_rad: vec![0.0; ARM_DOF],
             model_joint_velocity_rad_s: vec![0.0; ARM_DOF],
+            tcp_pose: Pose {
+                position_m: [0.2, 0.0, 0.2],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
             servo_status_code: Some(0),
             servo_status_message: Some("NO_WARNING".to_owned()),
         }
@@ -403,6 +428,7 @@ mod tests {
         );
         assert!(!command.enabled);
         assert_eq!(command.target_pose, None);
+        assert_eq!(snapshot.tcp_pose, None);
         assert_eq!(snapshot.state, SimulationState::Faulted);
         assert_eq!(
             snapshot.stop_reason,
@@ -411,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn active_target_uses_the_separate_position_mapping() {
+    fn active_target_maps_all_hand_axes_at_one_to_five_scale() {
         let model = ArmModel::embedded().unwrap();
         let feedback = feedback(&model);
         let mut controller = MoveItSimulationController::new(model);
@@ -422,17 +448,68 @@ mod tests {
             Some(&feedback),
             Some(0),
         );
-        let anchor = controller.latest().tcp_pose;
-        let (command, snapshot) = controller.step(
+        let anchor = controller.latest().tcp_pose.unwrap();
+        let (forward, snapshot) = controller.step(
             2,
             0.01,
-            intent(RelativeIntentState::Active, Some([0.0, 0.0, -0.02])),
+            intent(RelativeIntentState::Active, Some([0.0, 0.0, -0.05])),
             Some(&feedback),
             Some(0),
         );
-        let target = command.target_pose.unwrap();
-        assert!((target.position_m[0] - anchor.position_m[0] - 0.02).abs() < 1.0e-9);
+        let target = forward.target_pose.unwrap();
+        assert!((target.position_m[0] - anchor.position_m[0] - 0.01).abs() < 1.0e-9);
         assert_eq!(snapshot.backend, "moveit_servo");
+
+        let (right, _) = controller.step(
+            3,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.05, 0.0, 0.0])),
+            Some(&feedback),
+            Some(0),
+        );
+        let target = right.target_pose.unwrap();
+        assert!((target.position_m[1] - anchor.position_m[1] + 0.01).abs() < 1.0e-9);
+
+        let (up, _) = controller.step(
+            4,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.0, 0.05, 0.0])),
+            Some(&feedback),
+            Some(0),
+        );
+        let target = up.target_pose.unwrap();
+        assert!((target.position_m[2] - anchor.position_m[2] - 0.01).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn relative_hand_orientation_maps_one_to_one_in_tcp_local_frame() {
+        let model = ArmModel::embedded().unwrap();
+        let feedback = feedback(&model);
+        let mut controller = MoveItSimulationController::new(model);
+        controller.step(
+            1,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        let anchor = controller.latest().tcp_pose.unwrap().to_isometry().unwrap();
+        let angle = 0.2;
+        for (time_ns, raw_axis, expected_axis) in [
+            (2, -Vector3::x(), -Vector3::y()),
+            (3, Vector3::y(), -Vector3::x()),
+            (4, Vector3::z(), Vector3::z()),
+        ] {
+            let relative = UnitQuaternion::from_scaled_axis(raw_axis * angle);
+            let quaternion = relative.quaternion();
+            let mut value = intent(RelativeIntentState::Active, Some([0.0; 3]));
+            value.relative_orientation_xyzw =
+                Some([quaternion.i, quaternion.j, quaternion.k, quaternion.w]);
+            let (command, _) = controller.step(time_ns, 0.01, value, Some(&feedback), Some(0));
+            let target = command.target_pose.unwrap().to_isometry().unwrap();
+            let actual = (anchor.rotation.inverse() * target.rotation).scaled_axis();
+            assert!((actual - expected_axis * angle).norm() < 1.0e-9);
+        }
     }
 
     #[test]
@@ -451,6 +528,40 @@ mod tests {
         );
         assert!((snapshot.model_joints_rad[0] - 0.3).abs() < 1.0e-9);
         assert!((snapshot.joints_rad[0] + 0.3).abs() < 1.0e-9);
+        assert_eq!(snapshot.tcp_pose, Some(value.tcp_pose));
+    }
+
+    #[test]
+    fn feedback_requires_schema_v2_and_a_valid_ros_tcp_pose() {
+        for invalid in [
+            {
+                let model = ArmModel::embedded().unwrap();
+                let mut value = feedback(&model);
+                value.schema_version = 1;
+                value
+            },
+            {
+                let model = ArmModel::embedded().unwrap();
+                let mut value = feedback(&model);
+                value.tcp_pose.orientation_xyzw = [0.0; 4];
+                value
+            },
+        ] {
+            let mut controller = MoveItSimulationController::new(ArmModel::embedded().unwrap());
+            let (command, snapshot) = controller.step(
+                1,
+                0.01,
+                intent(RelativeIntentState::Active, Some([0.0; 3])),
+                Some(&invalid),
+                Some(0),
+            );
+            assert!(!command.enabled);
+            assert_eq!(command.target_pose, None);
+            assert_eq!(
+                snapshot.stop_reason,
+                Some(SimulationStopReason::ServoInvalidFeedback)
+            );
+        }
     }
 
     #[test]
@@ -487,11 +598,18 @@ mod tests {
     }
 
     #[test]
-    fn servo_halt_is_visible_but_recovery_commands_keep_flowing() {
+    fn servo_constraint_is_visible_but_recovery_commands_keep_flowing() {
         let model = ArmModel::embedded().unwrap();
         let mut value = feedback(&model);
         value.servo_status_code = Some(2);
         let mut controller = MoveItSimulationController::new(model);
+        controller.step(
+            0,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&value),
+            Some(0),
+        );
         let (command, snapshot) = controller.step(
             1,
             0.01,
@@ -539,8 +657,15 @@ mod tests {
     fn invalid_moveit_status_suppresses_the_target() {
         let model = ArmModel::embedded().unwrap();
         let mut value = feedback(&model);
-        value.servo_status_code = Some(-1);
         let mut controller = MoveItSimulationController::new(model);
+        controller.step(
+            0,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&value),
+            Some(0),
+        );
+        value.servo_status_code = Some(-1);
         let (command, snapshot) = controller.step(
             1,
             0.01,
@@ -552,5 +677,135 @@ mod tests {
         assert_eq!(command.target_pose, None);
         assert_eq!(snapshot.state, SimulationState::Faulted);
         assert_eq!(snapshot.stop_reason, Some(SimulationStopReason::ServoHalt));
+    }
+
+    #[test]
+    fn missing_or_unknown_moveit_status_suppresses_the_target() {
+        for code in [None, Some(7), Some(-2)] {
+            let model = ArmModel::embedded().unwrap();
+            let mut value = feedback(&model);
+            value.servo_status_code = code;
+            let mut controller = MoveItSimulationController::new(model);
+            let (command, snapshot) = controller.step(
+                1,
+                0.01,
+                intent(RelativeIntentState::Active, Some([0.0; 3])),
+                Some(&value),
+                Some(0),
+            );
+            assert!(!command.enabled);
+            assert_eq!(command.target_pose, None);
+            assert_eq!(snapshot.state, SimulationState::Faulted);
+            let expected = if code.is_none() {
+                SimulationStopReason::ServoUnavailable
+            } else {
+                SimulationStopReason::ServoInvalidFeedback
+            };
+            assert_eq!(snapshot.stop_reason, Some(expected));
+        }
+    }
+
+    #[test]
+    fn feedback_fault_requires_intent_release_before_rearming() {
+        let model = ArmModel::embedded().unwrap();
+        let feedback = feedback(&model);
+        let mut controller = MoveItSimulationController::new(model);
+        controller.step(
+            1,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        assert!(
+            controller
+                .step(
+                    2,
+                    0.01,
+                    intent(RelativeIntentState::Active, Some([0.0; 3])),
+                    Some(&feedback),
+                    Some(0),
+                )
+                .0
+                .enabled
+        );
+
+        controller.step(
+            3,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.01; 3])),
+            Some(&feedback),
+            Some(101),
+        );
+        let (held, snapshot) = controller.step(
+            4,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.01; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        assert!(!held.enabled);
+        assert_eq!(held.target_pose, None);
+        assert_eq!(
+            snapshot.stop_reason,
+            Some(SimulationStopReason::AwaitingIntentRelease)
+        );
+
+        controller.step(
+            5,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        let (rearmed, _) = controller.step(
+            6,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        assert!(rearmed.enabled);
+    }
+
+    #[test]
+    fn workspace_violation_discards_only_that_target_and_remains_recoverable() {
+        let model = ArmModel::embedded().unwrap();
+        let feedback = feedback(&model);
+        let mut controller = MoveItSimulationController::new(model);
+        controller.step(
+            1,
+            0.01,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+
+        let (discarded, snapshot) = controller.step(
+            2,
+            0.01,
+            intent(RelativeIntentState::Active, Some([10.0, 0.0, 0.0])),
+            Some(&feedback),
+            Some(0),
+        );
+        assert!(!discarded.enabled);
+        assert_eq!(discarded.target_pose, None);
+        assert_eq!(discarded.gripper_closed, None);
+        assert_eq!(snapshot.state, SimulationState::Constrained);
+        assert_eq!(
+            snapshot.stop_reason,
+            Some(SimulationStopReason::WorkspaceViolation)
+        );
+
+        let (recovered, snapshot) = controller.step(
+            3,
+            0.01,
+            intent(RelativeIntentState::Active, Some([0.0; 3])),
+            Some(&feedback),
+            Some(0),
+        );
+        assert!(recovered.enabled);
+        assert!(recovered.target_pose.is_some());
+        assert_eq!(snapshot.state, SimulationState::Active);
     }
 }
