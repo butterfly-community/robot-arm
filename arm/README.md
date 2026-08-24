@@ -12,8 +12,8 @@
   ID 0–6 `ping` 和 `Present_Position` 读取，关闭时不释放力矩。
 - [`src/stararm102-control/`](src/stararm102-control/)：完全不包含串口或电机写入的 Rust
   坐标映射、MoveIt IPC 契约和仿真反馈状态库；示教平移按 1:5 缩放，运行时不再执行
-  或保存 FK/IK。`moveit_interface` 只定义 IPC 帧名和默认状态，当前 TCP 统一来自 ROS
-  TF2。
+  或保存 FK/IK。`moveit_interface` 只定义 IPC 帧名、默认状态和已确认的 0～90° 夹爪
+  模型端点，当前 TCP 统一来自 ROS TF2。
 - [`ros2/`](ros2/)：复用厂家模型、`ros2_control` 和官方 MoveIt Servo 的容器化仿真
   后端；当前只加载 `GenericSystem`，真实 102-FL 后端明确保留为 TODO。
 

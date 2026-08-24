@@ -24,7 +24,9 @@
   "moveit_interface": {
     "base_frame": "base_link",
     "tcp_link": "tool0",
-    "nominal_joints_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    "nominal_joints_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "gripper_open_deg": 90.0,
+    "gripper_closed_deg": 0.0
   },
   "teleoperation": {
     "translation_scale": 0.2,

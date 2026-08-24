@@ -60,9 +60,18 @@ pub struct MoveItSimulationController {
 impl MoveItSimulationController {
     pub fn new(model: ArmModel) -> Self {
         let logical_joints = model.nominal_joints();
-        let gripper = &model.profile().joints[ARM_DOF];
-        let gripper_open_rad = (gripper.lower_deg / gripper.direction).to_radians();
-        let gripper_closed_rad = (gripper.upper_deg / gripper.direction).to_radians();
+        // The model opening angle is independent from the FL servo's logical
+        // multi-turn range and transmission direction.
+        let gripper_open_rad = model
+            .profile()
+            .moveit_interface
+            .gripper_open_deg
+            .to_radians();
+        let gripper_closed_rad = model
+            .profile()
+            .moveit_interface
+            .gripper_closed_deg
+            .to_radians();
         let gripper_rad = gripper_closed_rad;
         let model_joints = model.model_joints(logical_joints);
         let latest = SimulationSnapshot {
@@ -434,6 +443,14 @@ mod tests {
             snapshot.stop_reason,
             Some(SimulationStopReason::ServoUnavailable)
         );
+    }
+
+    #[test]
+    fn gripper_model_endpoints_are_independent_from_servo_transmission_units() {
+        let controller = MoveItSimulationController::new(ArmModel::embedded().unwrap());
+        assert!((controller.gripper_open_rad.to_degrees() - 90.0).abs() < 1.0e-12);
+        assert!(controller.gripper_closed_rad.abs() < 1.0e-12);
+        assert_eq!(controller.latest().gripper_deg, 0.0);
     }
 
     #[test]

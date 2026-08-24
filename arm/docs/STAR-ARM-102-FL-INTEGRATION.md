@@ -48,8 +48,9 @@ python3 arm/tools/stararm102_fl_readonly_probe.py \
 
 - 关节变换来自审核提交中的旧 Star Arm 102 ROS2 几何链；
 - 关节范围采用新品 FL 产品范围，并按当前 FL 插件逻辑符号表达；
-- `moveit_interface` 只保存 `base_link`、`tool0` 接口帧名和零反馈前的默认关节状态；
-  关节几何只保存在 ROS/URDF 模型，不再复制到 Rust 配置；
+- `moveit_interface` 只保存 `base_link`、`tool0` 接口帧名、零反馈前的默认关节状态和
+  已确认的夹爪模型端点 `0°～90°`；关节几何只保存在 ROS/URDF 模型，不再复制到
+  Rust 配置；
 - Rust API 的 `joints_rad` 是 FL 驱动使用的逻辑角；厂家反馈按
   `logical_angle = model_angle * direction` 转换。仿真快照另外发布 `model_joints_rad`，
   网页不得把逻辑角直接写入 URDF；
@@ -112,14 +113,15 @@ robot +Z = NOLO +Y   （上）
 
 现场通过仿真模型确认：J1–J7 全部 `0°` 是唯一默认姿态，也是示教启动姿态。配置不再
 区分回零姿态与工作姿态，也不会在开始示教前自动展开。J1–J6 以逻辑角和换算后的模型角
-全零初始化；J7 以闭合 `0°` 初始化，松开 Trigger 后才向张开 `45°` 限速运动。
+全零初始化；J7 以闭合 `0°` 初始化，松开 Trigger 后才向张开 `90°` 限速运动。
 
 `GET /api/status` 的 `latestArmSimulation` 给出 `idle/active/constrained/faulted`、
 六轴逻辑关节角、
 对应 URDF 模型关节角、夹爪角度及开合命令、关节速度、TF2 当前 TCP、期望 TCP、Servo 状态、
 反馈年龄和停止原因。`backend=moveit_servo` 明确表示数据来自 ROS 仿真反馈。
-夹爪张开 `45°`、闭合 `0°` 由厂家 FL 的 `[-270°, 0°] / direction=-6` 配置推导，
-并复用现有关节速度/加速度限制。字段始终包含
+夹爪模型张开 `90°`、闭合 `0°`，与厂家 FL 插件的舵机逻辑多圈量
+`[-270°, 0°] / direction=-6` 分开保存，不再用传动量推导模型角；网页运动继续复用
+现有关节速度/加速度限制。字段始终包含
 `simulation_only=true`；它不是电机命令接口。
 
 ## 已自动验证

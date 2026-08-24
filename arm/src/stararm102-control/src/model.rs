@@ -45,6 +45,8 @@ pub struct MoveItInterfaceProfile {
     pub base_frame: String,
     pub tcp_link: String,
     pub nominal_joints_deg: Vec<f64>,
+    pub gripper_open_deg: f64,
+    pub gripper_closed_deg: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -220,8 +222,11 @@ fn validate_profile(profile: &ArmProfile) -> Result<(), String> {
     }
     if profile.moveit_interface.base_frame.is_empty()
         || profile.moveit_interface.tcp_link.is_empty()
+        || !profile.moveit_interface.gripper_open_deg.is_finite()
+        || !profile.moveit_interface.gripper_closed_deg.is_finite()
+        || profile.moveit_interface.gripper_open_deg <= profile.moveit_interface.gripper_closed_deg
     {
-        return Err("MoveIt base_frame and tcp_link must be non-empty".to_owned());
+        return Err("invalid MoveIt interface profile".to_owned());
     }
     for joint in &profile.joints {
         if joint.direction == 0.0
@@ -311,6 +316,8 @@ mod tests {
             (0..=6).collect::<Vec<_>>()
         );
         assert_eq!(model.profile().transport.stable_device, None);
+        assert_eq!(model.profile().moveit_interface.gripper_open_deg, 90.0);
+        assert_eq!(model.profile().moveit_interface.gripper_closed_deg, 0.0);
         assert!(
             model
                 .profile()
