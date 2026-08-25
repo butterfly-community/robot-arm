@@ -14,7 +14,7 @@
 - 基站跟踪空间中的两只手柄和 Head Marker 位置；
 - 三个设备各自的 `[x, y, z, w]` 融合四元数；
 - Menu、Trigger 和 Squeeze 按键；
-- 采样序号、采样质量和 Fusion 状态诊断数据。
+- 采样序号、采样质量和 Fusion 状态诊断数据；
 - Controller 0 的 Squeeze 相对示教接管和 Trigger 夹爪意图；它们只作为后续控制层输入，
   不访问机械臂。
 
@@ -129,6 +129,8 @@ cargo build --release
   执行 `docker restart stararm102-moveit-simulation`，完成后由用户点击确认。
 - `POST /api/arm-output/simulation|hardware`：只切换机械臂目标路由；不会启动 ROS、打开
   串口或自行接管，切换后必须松开再按 Squeeze。
+- `POST /api/arm-home/simulation/plan|execute|cancel`：仿真专用回零；规划成功后自动执行。
+- `POST /api/arm-home/hardware/plan|execute|cancel`：真机专用回零；规划和确认执行分开。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `communication_fresh` 对三种设备
@@ -247,19 +249,19 @@ TF2 当前 TCP、期望 TCP、Servo 状态/说明、反馈年龄和停止原因�
 上述故障恢复时即使 Squeeze 一直按住也不会自动恢复输出，必须先松开再重新按下。
 MoveIt 奇异、碰撞或关节边界显示为 `constrained`；约束状态的后续目标继续处理，以允许
 移回可行区域。Rust 不再维护一套猜测的工作空间几何。上游意图故障也要求先松开
-Squeeze 再接管。Trigger 在 active 状态产生两态夹爪意图：Rust 快照让网页 J7 在张开
-`90°` 与闭合 `0°` 之间直接显示目标，ROS 桥同时向仿真的 `hand_controller/joint7_left`
-发送对应 `JointTrajectory`。同一个 `hand_controller/joint7_left` 通道也用于真机，底层
-只写厂家指定的 ID 6；真机快照额外显示位置、功率、电流、温度和原始状态字节。仿真
-快照的 `simulation_only=true`，真机快照为 `false`。真机启动前配置并回读校验 ID 6
-厂家模式二参数；接触门限不在软件中猜测。
+Squeeze 再接管。Trigger 在 active 状态产生两态夹爪意图：张开目标为 `90°`，闭合目标
+为 `0°`。ROS 桥通过 `hand_controller/joint7_left` 发送对应 `JointTrajectory`，仿真
+模型和快照显示该目标。同一标准控制通道也用于真机，底层只写厂家指定的 ID 6；真机
+链路另外读取并返回实际位置、功率、电流、温度和原始状态字节。仿真快照的
+`simulation_only=true`，真机快照为 `false`。真机启动前配置并回读校验 ID 6 厂家模式二
+参数；接触门限不在软件中猜测。
 
 服务启动时总是选择仿真。仿真与真机分别使用 `ROS_DOMAIN_ID=42/43` 和独立 socket，
 可以同时反馈；未选中的链路只收到 `enabled=false`。网页切换会使两个控制器丢弃旧接管
-原点，只有观察到 Squeeze 松开后才允许新后端接管。真机边界只检查 100 ms 反馈时效、
-有限值和产品关节范围；轨迹连续性、速度与加速度交给 MoveIt 和标准控制器。它不调用
-校准、原点、多圈重置或力矩
-切换，但仍不能替代硬件急停和分级通电验收。
+原点，只有观察到 Squeeze 松开后才允许新后端接管。真机启动要求 ID 0–6 全部响应且
+`Monitor` 返回完整有限位置；J1–J6 还检查 100 ms 反馈时效和产品关节范围，夹爪命令
+检查模型 `0°…90°` 范围。轨迹连续性、速度与加速度交给 MoveIt 和标准控制器。它不
+调用校准、原点、多圈重置或力矩切换，但仍不能替代硬件急停和分级通电验收。
 
 现场确认的唯一默认姿态和示教启动姿态都是 J1–J7 全部 `0°`。仿真启动时六轴逻辑角、
 URDF 模型角和闭合夹爪角均为零；没有单独的回零姿态、工作姿态或自动展开阶段。松开
@@ -353,8 +355,9 @@ NOLO CV1 手柄具有省电休眠/关机机制。手柄之前开过机，或者 
 其他 USB 读取程序，并按上一节确认两只手柄状态。
 
 ```bash
-cargo build --release --bin nolo-unknown-probe
-./target/release/nolo-unknown-probe 12
+cargo build --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml \
+  --bin nolo-unknown-probe
+./vr-xr/src/nolo-usb-server/target/release/nolo-unknown-probe 12
 ```
 
 参数是采样秒数，默认 10 秒。探针只打印统计结果，不保存原始抓包，也不修改设备。
@@ -363,10 +366,9 @@ cargo build --release --bin nolo-unknown-probe
 ## 测试
 
 ```bash
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-cd ../..
-deno test --allow-read tests
+cargo test --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml
+cargo clippy --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml -- -D warnings
+deno test --allow-read=vr-xr/src/controller-viewer/public vr-xr/tests
 ```
 
 测试不访问 USB；实机采样必须单独执行探针或启动后端。

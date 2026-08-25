@@ -8,9 +8,11 @@ TCP、MoveIt Servo IK、限位、奇异、碰撞和平滑；网页只选择最�
 NOLO USB Rust server
   -> 目标 TCP Pose
   -> MoveIt Servo
-     ├─ 仿真：JointTrajectoryController -> GenericSystem
-     └─ 真机：JointTrajectoryController -> JointStateTopicSystem
-                -> CommandSafetyGate -> fashionstar_uart_sdk -> Goal_Position
+     ├─ arm_controller：J1–J6
+     └─ hand_controller：joint7_left
+          ├─ 仿真：GenericSystem（joint7_right 由 URDF mimic）
+          └─ 真机：JointStateTopicSystem -> CommandSafetyGate
+                     -> fashionstar_uart_sdk -> ID 0–6 Goal_Position
   -> /joint_states -> robot_state_publisher / TF2
   -> Rust 状态 -> 网页数字孪生
 ```
@@ -18,8 +20,8 @@ NOLO USB Rust server
 MoveIt 不访问串口。MoveIt Servo 和回零都把 J1–J6 轨迹交给标准
 `JointTrajectoryController`；ros-controls 官方 `JointStateTopicSystem` 把当前单帧位置目标
 发给本项目 `hardware_node`。该节点完成最后一层检查和总线写入，只使用官方 SDK
-的打开端口、ping、
-位置读取和同步位置写入，没有校准、设置原点、重置多圈角或力矩接口。已审计的
+的打开端口、ping、`Monitor` 读取和同步位置写入，没有校准、设置原点、重置多圈角或
+力矩接口。已审计的
 `lerobot_motor_starai 0.0.6/0.0.7` 的 `connect()` 会改变力矩并广播 `ResetLoop(0xFF)`，
 因此本项目明确不调用该连接路径。
 启动前模式二配置器与连续控制节点隔离；它只复用厂家 `Python_SDK/set-param.py` 的公共
@@ -99,8 +101,9 @@ STAR_ARM_102_PORT=/dev/serial/by-id/<UC-01稳定名称> \
 ```
 
 脚本拒绝 `/dev/ttyUSB*` 作为用户输入，只把稳定名称解析后的单个设备映射到容器。启动
-真机 ROS 进程本身不会运动；还必须在网页选择“真机”，松开 Squeeze，再重新按下。网页
-滑块始终只改变浏览器模型，不会生成命令。
+真机 ROS 进程会打开串口、检查 ID 0–6 并确认夹爪模式二参数，但不会发送位置运动目标；
+还必须在网页选择“真机”，松开 Squeeze，再重新按下。网页滑块始终只改变浏览器模型，
+不会生成命令。
 
 启动器在 ROS 节点打开串口前确保夹爪 ID 6 使用厂家功率保护模式二：读取完整公开参数，
 仅在不匹配时将堵转失锁保护设为关闭、堵转功率上限 B 设为 `2000 mW`、功率保护值 A
@@ -111,7 +114,8 @@ STAR_ARM_102_PORT=/dev/serial/by-id/<UC-01稳定名称> \
 
 - 上电后 ping J1–J6 和夹爪（ID 0–6），一次 `Monitor` 读取返回七轴位置以及 ID 6 的
   功率、电流、温度和原始状态字节；
-- 只接受包含 J1–J6、反馈在 100 ms 内且处于新品 FL 产品行程内的有限目标；
+- 只接受包含 J1–J6、反馈在 100 ms 内且处于新品 FL 产品行程内的有限目标；夹爪命令
+  还必须处于模型 `0°…90°` 范围；
 - `hand_controller` 只命令 `joint7_left`，底层只写 ID 6；相同夹爪目标不重复写入，变化的
   夹爪目标与当帧 J1–J6 放在同一个同步写包中；
 - 轨迹插值、连续性、速度和加速度由 MoveIt 与 `JointTrajectoryController` 负责，不在
@@ -125,7 +129,7 @@ STAR_ARM_102_PORT=/dev/serial/by-id/<UC-01稳定名称> \
 
 仿真与真机共用 `hand_controller -> joint7_left`。仿真由 URDF 让 `joint7_right`
 反向 mimic；真机按照厂家驱动只写 ID 6。软件只显示厂家 Monitor 原始状态，不把状态位
-6 擅自改名为“夹持保持”。P3.4 仍须在实物上确认模式二回读结果、角度—开口关系，并用
+6 擅自改名为“夹持保持”。P3.4 仍须在实物上确认模式二实际回读、角度—开口关系，并用
 柔软物体验证夹持行为。
 
 ## 接口与故障规则
@@ -133,7 +137,9 @@ STAR_ARM_102_PORT=/dev/serial/by-id/<UC-01稳定名称> \
 仿真 IPC 保持 schema v2 和原路径兼容。`GET /api/status` 同时提供
 `latestArmSimulation`、`latestArmHardware` 与 `armOutputBackend`；
 `POST /api/arm-output/simulation|hardware` 只选择输出。两份快照都包含关节角、TF2
-`base_link -> tool0`、期望 TCP、Servo 状态和反馈年龄。
+`base_link -> tool0`、期望 TCP、Servo 状态和反馈年龄；真机快照还包含夹爪功率、电流、
+温度和原始状态字节。`POST /api/arm-home/<backend>/plan|execute|cancel` 是专用回零入口；
+仿真规划成功后自动执行，真机必须分开规划和确认执行。
 
 Rust 不维护 FK/IK。IPC 断开、反馈超过 100 ms、序号重复/倒退、非法 TF、Servo 停止、
 碰撞、奇异或关节边界均沿用现有 fail-closed 规则。平移比例仍为 `0.2`，即手柄移动

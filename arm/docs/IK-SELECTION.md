@@ -41,13 +41,13 @@
 
 核对 [rs-opw-kinematics](https://github.com/bourumir-wyngs/rs-opw-kinematics) 提交
 `fb51d85bd7a4504587e982387bd73e0059e23c0d`。它是成熟的纯 Rust OPW 解析解，但要求特定
-的平行基座和球形腕部。用其官方 URDF 参数提取器检查当前候选模型时，提取器因关节偏移
+的平行基座和球形腕部。用其官方 URDF 参数提取器检查当前修正模型时，提取器因关节偏移
 不满足 OPW 结构而拒绝；当前模型的腕部三轴也不共点。因此不能使用。
 
 ### IK-Geo：保留作模型确认后的解析解研究
 
 核对 [rpiRobotics/ik-geo](https://github.com/rpiRobotics/ik-geo) 提交
-`a3a1675e1f01ad6f8f15f2cc787fa01472082a11`。当前候选链的 J2/J3/J4 平行且 J5/J6 相交，
+`a3a1675e1f01ad6f8f15f2cc787fa01472082a11`。当前模型链的 J2/J3/J4 平行且 J5/J6 相交，
 落在其 `three_parallel_two_intersecting` 类别内；算法本身覆盖一般 6R，并有对应解析
 分解。不过官方 Rust 包仍为 `linear-subproblem-solutions-rust 0.1.0`，没有 URDF 导入和
 完整机器人模型层，需要人工推导 POE 参数。现阶段接入会把自写几何风险转移到参数转换，
@@ -64,8 +64,11 @@ NOLO USB + Fusion + 位置滤波
              ▼
 MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、超时停止）
              │
-             ├── GenericSystem + /joint_states + TF2 TCP → Rust/网页（仿真）
-             └── JointStateTopicSystem + SDK 薄适配 + 反馈/急停（P3 待现场验收）
+             ├── GenericSystem + arm/hand controllers（仿真）
+             └── JointStateTopicSystem + SDK 薄适配（J1–J6 + ID 6，待现场验收）
+                                      │
+                                      ▼
+                         /joint_states + TF2 TCP → Rust/网页
 ```
 
 硬件急停独立于以上软件链。MoveIt Servo 的输出仍需经过真实反馈新鲜度检查和驱动层
