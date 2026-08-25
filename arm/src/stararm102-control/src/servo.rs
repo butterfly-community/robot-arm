@@ -21,7 +21,6 @@ pub const ARM_DOF: usize = 6;
 #[serde(rename_all = "snake_case")]
 pub enum HomeRequestAction {
     Plan,
-    Execute,
     Cancel,
 }
 
@@ -37,7 +36,6 @@ pub enum HomeState {
     #[default]
     Idle,
     Planning,
-    Ready,
     Executing,
     Succeeded,
     Failed,
@@ -46,7 +44,7 @@ pub enum HomeState {
 
 impl HomeState {
     pub fn blocks_teleop(self) -> bool {
-        matches!(self, Self::Planning | Self::Ready | Self::Executing)
+        matches!(self, Self::Planning | Self::Executing)
     }
 }
 
@@ -107,7 +105,7 @@ pub struct MoveItController {
     logical_joints: [f64; ARM_DOF],
     current_tcp: Option<nalgebra::Isometry3<f64>>,
     anchor_tcp: Option<nalgebra::Isometry3<f64>>,
-    rearm_required: bool,
+    reanchor_required: bool,
     gripper_closed: bool,
     gripper_rad: f64,
     gripper_open_rad: f64,
@@ -170,7 +168,7 @@ impl MoveItController {
             logical_joints,
             current_tcp: None,
             anchor_tcp: None,
-            rearm_required: true,
+            reanchor_required: true,
             gripper_closed: true,
             gripper_rad,
             gripper_open_rad,
@@ -183,10 +181,10 @@ impl MoveItController {
         &self.latest
     }
 
-    /// Invalidate the current hand-to-TCP anchor.  A backend switch must not
-    /// reuse an active command from the previously selected output.
-    pub fn require_rearm(&mut self) {
-        self.rearm_required = true;
+    /// Re-anchor the next active command at the current TCP without requiring
+    /// the operator to release and press Squeeze again.
+    pub fn require_reanchor(&mut self) {
+        self.reanchor_required = true;
         self.anchor_tcp = None;
     }
 
@@ -201,13 +199,9 @@ impl MoveItController {
             Ok(_) => None,
             Err(()) => Some(SimulationStopReason::ServoInvalidFeedback),
         };
-        let freshness_error = if feedback.is_none() {
-            Some(SimulationStopReason::ServoUnavailable)
-        } else if feedback_age_ms.is_none_or(|age| age > 100) {
-            Some(SimulationStopReason::ServoFeedbackStale)
-        } else {
-            None
-        };
+        let availability_error = feedback
+            .is_none()
+            .then_some(SimulationStopReason::ServoUnavailable);
         let status_error = match feedback.and_then(|value| value.servo_status_code) {
             None => Some(SimulationStopReason::ServoUnavailable),
             Some(-1) => Some(SimulationStopReason::ServoHalt),
@@ -218,29 +212,24 @@ impl MoveItController {
         let mut state = SimulationState::Idle;
         let mut enabled = false;
         let mut desired_tcp_pose = None;
-        let mut stop_reason = feedback_error.or(freshness_error).or(status_error);
+        let mut stop_reason = feedback_error.or(availability_error).or(status_error);
         let mut target_pose = None;
 
         if stop_reason.is_some() {
             state = SimulationState::Faulted;
-            self.rearm_required = true;
+            self.reanchor_required = true;
             self.anchor_tcp = None;
         } else {
             match intent.state {
                 RelativeIntentState::Faulted => {
                     state = SimulationState::Faulted;
                     stop_reason = Some(SimulationStopReason::IntentFaulted);
-                    self.rearm_required = true;
+                    self.reanchor_required = true;
                     self.anchor_tcp = None;
                 }
                 RelativeIntentState::Idle => {
                     stop_reason = Some(SimulationStopReason::IntentIdle);
-                    self.rearm_required = false;
-                    self.anchor_tcp = None;
-                }
-                RelativeIntentState::Active if self.rearm_required => {
-                    state = SimulationState::Faulted;
-                    stop_reason = Some(SimulationStopReason::AwaitingIntentRelease);
+                    self.reanchor_required = false;
                     self.anchor_tcp = None;
                 }
                 RelativeIntentState::Active => match self.target_from_intent(intent) {
@@ -267,7 +256,7 @@ impl MoveItController {
                     None => {
                         state = SimulationState::Faulted;
                         stop_reason = Some(SimulationStopReason::InvalidIntent);
-                        self.rearm_required = true;
+                        self.reanchor_required = true;
                         self.anchor_tcp = None;
                     }
                 },
@@ -375,7 +364,6 @@ impl MoveItController {
             return None;
         }
         let relative_rotation = UnitQuaternion::new_normalize(raw_quaternion);
-        let anchor = *self.anchor_tcp.get_or_insert(self.current_tcp?);
         let position_mapping = self.model.robot_from_nolo_position();
         let orientation_basis =
             UnitQuaternion::from_matrix(&self.model.robot_from_controller_orientation());
@@ -383,6 +371,18 @@ impl MoveItController {
             * Vector3::from(relative_position)
             * self.model.profile().teleoperation.translation_scale;
         let rotation = orientation_basis * relative_rotation * orientation_basis.inverse();
+        let anchor = if self.reanchor_required {
+            let current = self.current_tcp?;
+            let anchor = nalgebra::Isometry3::from_parts(
+                Translation3::from(current.translation.vector - translation),
+                current.rotation * rotation.inverse(),
+            );
+            self.anchor_tcp = Some(anchor);
+            self.reanchor_required = false;
+            anchor
+        } else {
+            *self.anchor_tcp.get_or_insert(self.current_tcp?)
+        };
         Some(Pose::from_isometry(&nalgebra::Isometry3::from_parts(
             Translation3::from(anchor.translation.vector + translation),
             anchor.rotation * rotation,
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn active_target_maps_all_hand_axes_at_one_to_five_scale() {
+    fn active_target_maps_all_hand_axes_at_one_to_two_scale() {
         let model = ArmModel::embedded().unwrap();
         let feedback = feedback(&model);
         let mut controller = MoveItController::new(model);
@@ -514,7 +514,7 @@ mod tests {
             Some(0),
         );
         let target = forward.target_pose.unwrap();
-        assert!((target.position_m[0] - anchor.position_m[0] - 0.01).abs() < 1.0e-9);
+        assert!((target.position_m[0] - anchor.position_m[0] - 0.025).abs() < 1.0e-9);
         assert_eq!(snapshot.backend, "moveit_servo_simulation");
 
         let (right, _) = controller.step(
@@ -524,7 +524,7 @@ mod tests {
             Some(0),
         );
         let target = right.target_pose.unwrap();
-        assert!((target.position_m[1] - anchor.position_m[1] + 0.01).abs() < 1.0e-9);
+        assert!((target.position_m[1] - anchor.position_m[1] + 0.025).abs() < 1.0e-9);
 
         let (up, _) = controller.step(
             4,
@@ -533,7 +533,7 @@ mod tests {
             Some(0),
         );
         let target = up.target_pose.unwrap();
-        assert!((target.position_m[2] - anchor.position_m[2] - 0.01).abs() < 1.0e-9);
+        assert!((target.position_m[2] - anchor.position_m[2] - 0.025).abs() < 1.0e-9);
     }
 
     #[test]
@@ -617,21 +617,18 @@ mod tests {
     }
 
     #[test]
-    fn stale_or_invalid_feedback_disables_output() {
+    fn delayed_feedback_is_diagnostic_but_invalid_feedback_disables_output() {
         let model = ArmModel::embedded().unwrap();
         let mut value = feedback(&model);
         let mut controller = MoveItController::new(model);
-        let (stale, snapshot) = controller.step(
+        let (delayed, snapshot) = controller.step(
             1,
             intent(RelativeIntentState::Active, Some([0.0; 3])),
             Some(&value),
             Some(101),
         );
-        assert!(!stale.enabled);
-        assert_eq!(
-            snapshot.stop_reason,
-            Some(SimulationStopReason::ServoFeedbackStale)
-        );
+        assert!(delayed.enabled);
+        assert_eq!(snapshot.stop_reason, None);
 
         value.model_joint_names.pop();
         let (invalid, snapshot) = controller.step(
@@ -751,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn feedback_fault_requires_intent_release_before_rearming() {
+    fn feedback_recovery_reanchors_without_requiring_intent_release() {
         let model = ArmModel::embedded().unwrap();
         let feedback = feedback(&model);
         let mut controller = MoveItController::new(model);
@@ -773,11 +770,18 @@ mod tests {
                 .enabled
         );
 
-        controller.step(
-            3,
-            intent(RelativeIntentState::Active, Some([0.01; 3])),
-            Some(&feedback),
-            Some(101),
+        let mut invalid = feedback.clone();
+        invalid.model_joint_names.pop();
+        assert!(
+            !controller
+                .step(
+                    3,
+                    intent(RelativeIntentState::Active, Some([0.01; 3])),
+                    Some(&invalid),
+                    Some(0),
+                )
+                .0
+                .enabled
         );
         let (held, snapshot) = controller.step(
             4,
@@ -785,25 +789,17 @@ mod tests {
             Some(&feedback),
             Some(0),
         );
-        assert!(!held.enabled);
-        assert_eq!(held.target_pose, None);
-        assert_eq!(
-            snapshot.stop_reason,
-            Some(SimulationStopReason::AwaitingIntentRelease)
-        );
-
-        controller.step(
-            5,
-            intent(RelativeIntentState::Idle, Some([0.0; 3])),
-            Some(&feedback),
-            Some(0),
-        );
-        let (rearmed, _) = controller.step(
-            6,
-            intent(RelativeIntentState::Active, Some([0.0; 3])),
-            Some(&feedback),
-            Some(0),
-        );
-        assert!(rearmed.enabled);
+        assert!(held.enabled);
+        assert_eq!(snapshot.stop_reason, None);
+        let target = held.target_pose.unwrap();
+        for axis in 0..3 {
+            assert!((target.position_m[axis] - feedback.tcp_pose.position_m[axis]).abs() < 1.0e-12);
+        }
+        for axis in 0..4 {
+            assert!(
+                (target.orientation_xyzw[axis] - feedback.tcp_pose.orientation_xyzw[axis]).abs()
+                    < 1.0e-12
+            );
+        }
     }
 }

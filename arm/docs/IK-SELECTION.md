@@ -8,11 +8,11 @@
   对接标准 Servo Pose API；当前 TCP 由官方 `robot_state_publisher`/TF2 根据厂家 URDF
   计算并随反馈返回，Rust 不保存关节链，也不实现 FK。
 - 真实机械臂复用同一个 Servo 上游，用标准 `JointTrajectoryController` 和官方
-  `JointStateTopicSystem` 替换 `GenericSystem` 输出端。新品 FL 的零位、
-  方向、软限位、速度/加速度和急停未完成实机验收，因此真实后端代码不得直接放行。
+  `JointStateTopicSystem` 替换 `GenericSystem` 输出端。新品 FL 的零位、方向和实际动态表现
+  仍需接机测量。
 
 这能把设备采集和机器人运动学分开：手柄链路负责“用户想让 TCP 怎样运动”，MoveIt
-负责“当前机械臂是否能安全地这样运动”。浏览器不计算 IK，也不直接访问串口；机械臂页
+负责“当前机械臂如何实现这个目标”。浏览器不计算 IK，也不直接访问串口；机械臂页
 只负责输出选择、标准回零请求和状态显示，实时关节状态来自对应 ROS 后端。
 
 ## 已核对的方案
@@ -26,7 +26,7 @@
 
 两条容器链路复用厂家 `stararm102_description`、SRDF、KDL、碰撞网格和
 `JointTrajectoryController`；仿真使用 `mock_components/GenericSystem`，真机使用官方
-`JointStateTopicSystem` 加受限 SDK 薄适配。本项目只保存必要补丁、Servo 参数、启动文件
+`JointStateTopicSystem` 加 SDK 薄适配。本项目只保存必要补丁、Servo 参数、启动文件
 和 IPC 桥接器；厂家完整源码保持在 `~/Develop/temp`。
 
 ### `openrr/k`：不替换当前 6R 求解器
@@ -59,7 +59,7 @@
 NOLO USB + Fusion + 位置滤波
              │
              ▼
-相对手柄位姿（平移 × 0.2、姿态不缩放、latest-value、带时间戳）
+相对手柄位姿（平移 × 0.5、姿态不缩放、latest-value、带时间戳）
              │
              ▼
 MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、超时停止）
@@ -71,6 +71,6 @@ MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、
                          /joint_states + TF2 TCP → Rust/网页
 ```
 
-硬件急停独立于以上软件链。MoveIt Servo 的输出仍需经过真实反馈新鲜度检查和驱动层
-保守限制；仿真通过不会替代通电安全验收。运行与补丁说明见
+真机尚未完成实测；MoveIt、ros2_control 和厂家驱动自身的行为不由项目重复实现。运行与
+补丁说明见
 [`../ros2/README.md`](../ros2/README.md)。

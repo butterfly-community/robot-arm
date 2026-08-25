@@ -1,4 +1,4 @@
-"""Shared MoveIt launch construction for simulation and guarded hardware."""
+"""Shared MoveIt launch construction for simulation and hardware."""
 
 from launch_ros.actions import Node
 from launch_param_builder import ParameterBuilder
@@ -34,6 +34,44 @@ def robot_state_publisher(moveit_config: object) -> Node:
         package="robot_state_publisher",
         executable="robot_state_publisher",
         parameters=[moveit_config.robot_description],
+        output="screen",
+    )
+
+
+def control_nodes(
+    moveit_config: object, servo_params: dict, controllers: str
+) -> list[Node]:
+    nodes = [
+        robot_state_publisher(moveit_config),
+        Node(
+            package="controller_manager",
+            executable="ros2_control_node",
+            parameters=[moveit_config.robot_description, controllers],
+            output="screen",
+        ),
+    ]
+    nodes.extend(
+        Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[controller, "-c", "/controller_manager"],
+            output="screen",
+        )
+        for controller in (
+            "joint_state_broadcaster",
+            "arm_controller",
+            "hand_controller",
+        )
+    )
+    nodes.append(servo_node(moveit_config, servo_params))
+    return nodes
+
+
+def bridge_node(ipc_path: object, simulation_only: bool = True) -> Node:
+    return Node(
+        package="stararm102_teleop_moveit",
+        executable="servo_ipc_bridge",
+        parameters=[{"ipc_path": ipc_path, "simulation_only": simulation_only}],
         output="screen",
     )
 

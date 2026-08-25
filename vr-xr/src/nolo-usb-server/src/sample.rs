@@ -1,8 +1,6 @@
-//! Sampling sequence freshness and quality statistics.
+//! Sampling sequence activity and quality statistics.
 
 use std::time::{Duration, Instant};
-
-const RATE_EMA_ALPHA: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SampleObservation {
@@ -22,7 +20,6 @@ pub struct SampleTracker {
     previous_sequence: Option<u8>,
     last_change: Option<Instant>,
     nominal_period: Duration,
-    stale_after: Duration,
     samples_received: u64,
     samples_missed: u64,
     duplicate_reports: u64,
@@ -40,10 +37,10 @@ pub struct InterleavedSampleTracker<const N: usize> {
 }
 
 impl<const N: usize> InterleavedSampleTracker<N> {
-    pub fn new(per_stream_rate_hz: f32, stale_after: Duration) -> Self {
+    pub fn new(per_stream_rate_hz: f32) -> Self {
         assert!(N > 0);
         Self {
-            streams: std::array::from_fn(|_| SampleTracker::new(per_stream_rate_hz, stale_after)),
+            streams: std::array::from_fn(|_| SampleTracker::new(per_stream_rate_hz)),
         }
     }
 
@@ -85,13 +82,12 @@ impl<const N: usize> InterleavedSampleTracker<N> {
 }
 
 impl SampleTracker {
-    pub fn new(nominal_rate_hz: f32, stale_after: Duration) -> Self {
+    pub fn new(nominal_rate_hz: f32) -> Self {
         assert!(nominal_rate_hz.is_finite() && nominal_rate_hz > 0.0);
         Self {
             previous_sequence: None,
             last_change: None,
             nominal_period: Duration::from_secs_f32(1.0 / nominal_rate_hz),
-            stale_after,
             samples_received: 0,
             samples_missed: 0,
             duplicate_reports: 0,
@@ -111,9 +107,9 @@ impl SampleTracker {
             if let Some(previous_change) = self.last_change {
                 let interval = now.duration_since(previous_change).as_secs_f32();
                 let per_sample = interval / f32::from(delta);
-                self.period_ema_seconds = Some(ema(self.period_ema_seconds, per_sample));
+                self.period_ema_seconds = Some(per_sample);
                 let jitter = (per_sample - self.nominal_period.as_secs_f32()).abs();
-                self.jitter_ema_seconds = Some(ema(self.jitter_ema_seconds, jitter));
+                self.jitter_ema_seconds = Some(jitter);
             }
             self.samples_received = self.samples_received.saturating_add(1);
             self.samples_missed = self
@@ -139,7 +135,7 @@ impl SampleTracker {
             .unwrap_or(Duration::MAX);
         SampleObservation {
             changed,
-            fresh: self.last_change.is_some() && unchanged <= self.stale_after,
+            fresh: self.last_change.is_some(),
             unchanged,
             sequence_delta,
             samples_received: self.samples_received,
@@ -154,22 +150,14 @@ impl SampleTracker {
     }
 }
 
-fn ema(previous: Option<f32>, value: f32) -> f32 {
-    previous
-        .map(|previous| previous + RATE_EMA_ALPHA * (value - previous))
-        .unwrap_or(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const STALE: Duration = Duration::from_millis(200);
-
     #[test]
-    fn duplicate_does_not_become_a_new_sample_and_eventually_goes_stale() {
+    fn duplicate_does_not_become_a_new_sample() {
         let start = Instant::now();
-        let mut tracker = SampleTracker::new(120.0, STALE);
+        let mut tracker = SampleTracker::new(120.0);
         assert!(tracker.observe(10, start).changed);
 
         let duplicate = tracker.observe(10, start + Duration::from_millis(50));
@@ -177,15 +165,15 @@ mod tests {
         assert!(duplicate.fresh);
         assert_eq!(duplicate.duplicate_reports, 1);
 
-        let stale = tracker.status(start + Duration::from_millis(201));
-        assert!(!stale.fresh);
-        assert_eq!(stale.samples_received, 1);
+        let unchanged = tracker.status(start + Duration::from_millis(201));
+        assert!(unchanged.fresh);
+        assert_eq!(unchanged.samples_received, 1);
     }
 
     #[test]
     fn wrapping_sequence_does_not_report_a_drop() {
         let start = Instant::now();
-        let mut tracker = SampleTracker::new(120.0, STALE);
+        let mut tracker = SampleTracker::new(120.0);
         tracker.observe(255, start);
         let wrapped = tracker.observe(0, start + Duration::from_millis(8));
         assert_eq!(wrapped.sequence_delta, 1);
@@ -195,7 +183,7 @@ mod tests {
     #[test]
     fn sequence_gap_counts_missing_samples_and_estimates_source_rate() {
         let start = Instant::now();
-        let mut tracker = SampleTracker::new(120.0, STALE);
+        let mut tracker = SampleTracker::new(120.0);
         tracker.observe(40, start);
         let observation = tracker.observe(43, start + Duration::from_millis(25));
         assert_eq!(observation.sequence_delta, 3);
@@ -206,7 +194,7 @@ mod tests {
     #[test]
     fn interleaved_sequence_streams_do_not_create_false_hmd_drops() {
         let start = Instant::now();
-        let mut tracker = InterleavedSampleTracker::<2>::new(120.0, STALE);
+        let mut tracker = InterleavedSampleTracker::<2>::new(120.0);
         tracker.observe(0, 52, start);
         tracker.observe(1, 61, start + Duration::from_micros(4_167));
         tracker.observe(0, 53, start + Duration::from_micros(8_333));

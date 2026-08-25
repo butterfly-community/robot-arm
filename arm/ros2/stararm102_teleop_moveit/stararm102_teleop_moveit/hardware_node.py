@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-import time
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import String
 
 from .hardware_bus import (
-    CommandSafetyGate,
+    HardwareBus,
     HardwareFeedback,
-    SafeHardwareBus,
     make_bus,
 )
 
@@ -29,9 +26,6 @@ class StarArm102HardwareNode(Node):
 
     def __init__(self) -> None:
         super().__init__("stararm102_fl_hardware")
-        self._gate = CommandSafetyGate()
-        self._teleop_authorized = False
-        self._home_authorized = False
         self._last_feedback_error: str | None = None
         self._last_command_error: str | None = None
         self._last_gripper_target: float | None = None
@@ -45,7 +39,7 @@ class StarArm102HardwareNode(Node):
         if baudrate <= 0:
             raise RuntimeError("baudrate 必须为正数")
 
-        self._bus = SafeHardwareBus(make_bus(port, baudrate))
+        self._bus = HardwareBus(make_bus(port, baudrate))
         self._state_publisher = self.create_publisher(JointState, STATE_TOPIC, 10)
         self._status_publisher = self.create_publisher(
             String, "/stararm102_hardware/status", 10
@@ -59,23 +53,8 @@ class StarArm102HardwareNode(Node):
             self._command_callback,
             10,
         )
-        self._enable_subscription = self.create_subscription(
-            Bool,
-            "/stararm102_hardware/enable",
-            self._enable_callback,
-            10,
-        )
-        self._home_authorization_subscription = self.create_subscription(
-            Bool,
-            "/stararm102_hardware/home_authorized",
-            self._home_authorization_callback,
-            10,
-        )
-
         try:
             initial = self._bus.connect()
-            now = time.monotonic()
-            self._gate.update_feedback(initial.arm_positions_rad, now)
             self._publish_feedback(initial)
         except Exception:
             try:
@@ -90,45 +69,22 @@ class StarArm102HardwareNode(Node):
         )
 
     def destroy_node(self) -> bool:
-        self._gate.set_enabled(False)
         try:
             self._bus.disconnect()
         except Exception as error:
             self.get_logger().error(f"关闭真机串口失败：{error}")
         return super().destroy_node()
 
-    def _enable_callback(self, message: Bool) -> None:
-        self._teleop_authorized = bool(message.data)
-        self._update_authorization()
-
-    def _home_authorization_callback(self, message: Bool) -> None:
-        self._home_authorized = bool(message.data)
-        self._update_authorization()
-
-    def _update_authorization(self) -> None:
-        authorized = self._teleop_authorized or self._home_authorized
-        was_enabled = self._gate.enabled
-        self._gate.set_enabled(authorized)
-        if self._gate.enabled:
-            self._publish_status("homing" if self._home_authorized else "armed")
-            if not was_enabled:
-                self.get_logger().warning("真机输出已接管；外部急停必须保持可用")
-        else:
-            status = "ready" if self._gate.fault is None else f"fault:{self._gate.fault}"
-            self._publish_status(status)
-            if was_enabled:
-                self.get_logger().info("真机输出已解除接管")
-
     def _read_feedback(self) -> None:
         try:
             feedback = self._bus.read_feedback()
-            now = time.monotonic()
-            self._gate.update_feedback(feedback.arm_positions_rad, now)
             self._publish_feedback(feedback)
-            self._last_feedback_error = None
+            if self._last_feedback_error is not None:
+                self._last_feedback_error = None
+                if self._last_command_error is None:
+                    self._publish_status("ready")
         except Exception as error:
             reason = f"读取真机关节反馈失败：{error}"
-            self._gate.trip(reason)
             self._publish_status(f"fault:{reason}")
             if reason != self._last_feedback_error:
                 self.get_logger().error(reason)
@@ -163,14 +119,9 @@ class StarArm102HardwareNode(Node):
         if len(message.position) != len(message.name) or any(
             name not in indices for name in ROS_JOINT_NAMES
         ):
-            self._trip_once("ros2_control 输出缺少 J1--J6")
+            self._report_command_error("ros2_control 输出缺少 J1--J6")
             return
         target = [float(message.position[indices[name]]) for name in ROS_JOINT_NAMES]
-        accepted = self._gate.accept_target(target, time.monotonic())
-        if accepted is None:
-            if self._gate.fault:
-                self._trip_once(self._gate.fault)
-            return
         try:
             gripper_target = None
             gripper_index = indices.get(GRIPPER_JOINT_NAME)
@@ -178,18 +129,20 @@ class StarArm102HardwareNode(Node):
                 gripper_position = float(message.position[gripper_index])
                 if gripper_position != self._last_gripper_target:
                     gripper_target = gripper_position
-            self._bus.write_positions(accepted, gripper_target)
+            self._bus.write_positions(target, gripper_target)
             if gripper_target is not None:
                 self._last_gripper_target = gripper_target
-            self._last_command_error = None
+            if self._last_command_error is not None:
+                self._last_command_error = None
+                if self._last_feedback_error is None:
+                    self._publish_status("ready")
         except Exception as error:
-            self._trip_once(f"写入真机关节目标失败：{error}")
+            self._report_command_error(f"写入真机关节目标失败：{error}")
 
-    def _trip_once(self, reason: str) -> None:
-        self._gate.trip(reason)
+    def _report_command_error(self, reason: str) -> None:
         self._publish_status(f"fault:{reason}")
         if reason != self._last_command_error:
-            self.get_logger().error(f"真机输出已闭锁：{reason}；释放授权后重试")
+            self.get_logger().error(reason)
             self._last_command_error = reason
 
     def _publish_status(self, status: str) -> None:

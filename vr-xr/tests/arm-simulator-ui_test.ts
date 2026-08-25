@@ -20,7 +20,7 @@ Deno.test("arm simulator is independent from the existing controller viewer", ()
   }
 });
 
-Deno.test("arm simulator uses pinned CDN modules and the guarded output selector", () => {
+Deno.test("arm simulator uses pinned CDN modules and the direct output selector", () => {
   const app = source("app.js");
   const model = source("urdf-model.js");
   for (const text of [app, model]) {
@@ -42,21 +42,36 @@ Deno.test("arm simulator uses pinned CDN modules and the guarded output selector
   }
   if (
     !app.includes("`/api/arm-home/${selectedOutputBackend}/${action}`") ||
-    !app.includes('void requestHome("execute")') ||
-    !app.includes("globalThis.confirm")
+    !app.includes('void requestHome("plan")') ||
+    app.includes('requestHome("execute")') ||
+    app.includes("globalThis.confirm")
   ) {
     throw new Error(
-      "simulator does not separate hardware home planning from confirmed execution",
+      "simulator does not use the single-step home path",
     );
   }
   if (
     !app.includes("payload.armHomeSimulation") ||
     !app.includes("payload.armHomeHardware") ||
-    !app.includes("trajectory_model_joints_rad")
+    !app.includes("trajectory_model_joints_rad") ||
+    !app.includes("showHomePreviewPoint(0, false)")
   ) {
     throw new Error(
       "simulator does not expose the planned home trajectory preview",
     );
+  }
+  if (!model.includes("await geometryLoaded")) {
+    throw new Error(
+      "model colors are applied before asynchronous STL loading completes",
+    );
+  }
+  if (
+    !app.includes('document.addEventListener("selectstart"') ||
+    !app.includes('document.addEventListener("selectionchange"') ||
+    !app.includes("if (textSelectionActive) return") ||
+    !source("style.css").includes("user-select: text")
+  ) {
+    throw new Error("live status repaint still clears selected text");
   }
   for (const unsafeMethod of ["PUT", "PATCH", "DELETE"]) {
     if (app.includes(`method: "${unsafeMethod}"`)) {
@@ -85,24 +100,23 @@ Deno.test("arm simulator uses pinned CDN modules and the guarded output selector
   if (!app.includes("snapshot.model_joints_rad")) {
     throw new Error("simulator feeds logical angles directly into the URDF");
   }
-  if (!app.includes('constrained: "本次目标已丢弃，继续采样"')) {
+  if (!app.includes('constrained: "MoveIt 正在约束运动"')) {
     throw new Error(
       "simulator does not distinguish a recoverable constraint from a fault",
     );
   }
-  if (
-    !app.includes('awaiting_intent_release: "反馈恢复后请松开 Squeeze 再接管"')
-  ) {
+  if (app.includes("awaiting_intent_release")) {
     throw new Error(
-      "simulator does not explain the post-fault rearm requirement",
+      "simulator still exposes the removed release-to-rearm path",
     );
   }
   if (
-    !app.includes("FRAMING_VERTICAL_OFFSET_RATIO = 0.18") ||
-    !app.includes("framedTarget.z += sphere.radius")
+    !app.includes("FRAMING_VERTICAL_OFFSET_RATIO = 0.55") ||
+    !app.includes("framedTarget.z += sphere.radius") ||
+    !app.includes("if (robotModel) fitModel()")
   ) {
     throw new Error(
-      "simulator does not keep the ground plane near the vertical center",
+      "simulator does not keep the model and ground plane low in every view",
     );
   }
   if (!app.includes("floor.position.z = -0.001")) {

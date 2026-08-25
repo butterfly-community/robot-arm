@@ -136,7 +136,7 @@ impl ImuFusion {
             .previous_update
             .replace(now)
             .map(|previous| now.duration_since(previous).as_secs_f32())
-            .filter(|delta| *delta > 0.0 && *delta < 0.1)
+            .filter(|delta| *delta > 0.0)
             .unwrap_or(1.0 / self.sample_rate_hz);
 
         // The axis reflection was verified on the physical Controller 0.  The
@@ -176,9 +176,9 @@ impl ImuFusion {
     fn start_pose_calibration(&mut self) {
         if !self.manual_calibration.complete {
             self.start_gyro_calibration();
-            self.ahrs.initialise();
-            self.previous_update = None;
         }
+        self.ahrs.initialise();
+        self.previous_update = None;
     }
 
     fn load_gyro_bias(&mut self, bias: [f32; 3]) -> bool {
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn first_pose_calibration_collects_bias_but_later_requests_reuse_it() {
+    fn pose_calibration_reuses_completed_bias_and_reinitialises_attitude() {
         let frame = RawFrame {
             controller_id: 0,
             position: [0.0; 3],
@@ -549,20 +549,21 @@ mod tests {
         let saved_bias = fusion.completed_gyro_bias().unwrap();
         fusion.start_pose_calibration();
         let reused = fusion.diagnostics();
-        assert!(!reused.initialising);
+        assert!(reused.initialising);
         assert!(!reused.gyro_calibration_active);
         assert!(reused.gyro_calibration_complete);
         assert_eq!(fusion.completed_gyro_bias(), Some(saved_bias));
     }
 
     #[test]
-    fn loaded_bias_skips_pose_calibration() {
+    fn loaded_bias_is_reused_during_pose_calibration() {
         let mut fusion = ControllerFusion::new();
         let saved = [0.1, -0.2, 0.3];
         assert!(fusion.load_gyro_bias(saved));
         fusion.start_pose_calibration();
 
         let diagnostics = fusion.diagnostics();
+        assert!(diagnostics.initialising);
         assert!(diagnostics.gyro_calibration_complete);
         assert!(!diagnostics.gyro_calibration_active);
         assert_eq!(fusion.completed_gyro_bias(), Some(saved));

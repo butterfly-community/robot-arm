@@ -16,7 +16,6 @@ const MAX_SAMPLES = 400;
 const circumference = 2 * Math.PI * 49;
 
 let latest = null;
-let lastPoseAt = 0;
 let reference = null;
 let positionFrame = null;
 let menuDownAt = null;
@@ -46,7 +45,6 @@ function createViewState(sourceId) {
   const head = sourceId === 2;
   return {
     latest: null,
-    lastPoseAt: 0,
     reference: head
       ? { position: [0, 0, 0], orientation: [0, 0, 0, 1], timeNs: 0 }
       : null,
@@ -73,7 +71,6 @@ const viewStates = Array.from(
 function saveViewState() {
   Object.assign(viewStates[selectedSource], {
     latest,
-    lastPoseAt,
     reference,
     positionFrame,
     menuDownAt,
@@ -93,7 +90,6 @@ function saveViewState() {
 function loadViewState() {
   const state = viewStates[selectedSource];
   latest = state.latest;
-  lastPoseAt = state.lastPoseAt;
   reference = state.reference;
   positionFrame = state.positionFrame;
   menuDownAt = state.menuDownAt;
@@ -379,7 +375,6 @@ function completeOrigin() {
 
 function updateFrame(frame, processMenu = true) {
   latest = frame;
-  lastPoseAt = performance.now();
   const isHead = selectedSource === 2;
   const valid = validPose(frame);
   $("connection").textContent = valid ? "新采样已连接" : "采样不可用";
@@ -512,7 +507,6 @@ function receiveFrame(frame) {
     setSimulationState(false, false);
   }
   viewStates[id].latest = frame;
-  viewStates[id].lastPoseAt = performance.now();
   if (id === selectedSource) updateFrame(frame);
 }
 
@@ -531,7 +525,7 @@ function resetForAutomaticSimulationCalibration() {
   loadViewState();
   setCalibrationMessage(
     "模拟数据自动标定中",
-    "虚拟手柄会保持静止并自动长按 Menu 6 秒；无需操作真实手柄。标定和接管门槛完成后会先预抬升 20 厘米，再开始循环。",
+    "虚拟手柄会保持静止并自动长按 Menu 6 秒；无需操作真实手柄。标定和接管门槛完成后会先预抬升 10 厘米，再开始循环。",
   );
   $("calibration-state").textContent = "等待虚拟 Menu 长按";
   $("position-lr").textContent = "自动标定中";
@@ -573,8 +567,6 @@ $("simulation-toggle").addEventListener("click", async () => {
     setSimulationState(start, false);
     if (start) {
       resetForAutomaticSimulationCalibration();
-    } else {
-      $("moveit-restart-dialog").showModal();
     }
     await refreshSimulationState();
   } catch (error) {
@@ -631,13 +623,6 @@ $("gyro-calibrate").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
-
-setInterval(() => {
-  if (lastPoseAt && performance.now() - lastPoseAt > 500) {
-    $("connection").textContent = "姿态数据超时";
-    $("connection").classList.add("waiting");
-  }
-}, 250);
 
 function animateHold(now) {
   if (selectedSource === 2) {

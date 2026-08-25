@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Star Arm 102-FL 示教输出</title>
-    <link rel="stylesheet" href="./style.css?v=20260824-4" />
+    <link rel="stylesheet" href="./style.css?v=20260825-1" />
   </head>
   <body>
     <main>
@@ -25,10 +25,10 @@
         </div>
       </header>
 
-      <section class="safety-note" aria-label="输出安全边界">
+      <section class="output-note" aria-label="输出说明">
         <strong id="output-warning">当前为仿真输出</strong>
         <span
-          id="output-help">按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪。切换输出后必须松开再按 Squeeze；J1–J7 滑块始终只修改浏览器模型。</span>
+          id="output-help">按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪；J1–J7 滑块始终只修改浏览器模型。</span>
       </section>
 
       <section class="workspace">
@@ -113,7 +113,7 @@
             </dl>
           </section>
 
-          <section class="panel home-panel" aria-label="安全回零">
+          <section class="panel home-panel" aria-label="专用回零">
             <div class="panel-heading compact">
               <div>
                 <p class="eyebrow">独立维护动作 / J1–J6 全零</p>
@@ -143,13 +143,11 @@
               </div>
               <div class="home-actions">
                 <button id="home-start" type="button">规划并回零</button>
-                <button id="home-execute" class="danger-action" type="button"
-                  hidden>确认真机执行</button>
                 <button id="home-cancel" type="button"
                   hidden>停止 / 取消</button>
               </div>
-              <p id="home-safety"
-                class="home-safety">仿真会在规划通过后自动执行。</p>
+              <p id="home-note"
+                class="home-note">MoveIt 规划通过后自动执行。</p>
             </div>
           </section>
 
@@ -202,6 +200,6 @@
         </aside>
       </section>
     </main>
-    <script type="module" src="./app.js?v=20260824-12"></script>
+    <script type="module" src="./app.js?v=20260825-3"></script>
   </body>
 </html>

@@ -12,8 +12,8 @@ pub const REPORT_RATE_HZ: f64 = 240.0;
 pub const REPORT_PERIOD_SECONDS: f64 = 1.0 / REPORT_RATE_HZ;
 // The browser may request the three-second Fusion calibration only after it
 // has received a valid virtual frame and observed one second of Menu hold.
-// Keep Controller 0 released until ten seconds so calibration completion and
-// the mandatory post-fault Squeeze release are deterministic before pre-lift.
+// Keep Controller 0 released until ten seconds so calibration finishes before
+// the deterministic pre-lift phase begins.
 pub const CALIBRATION_SECONDS: f64 = 10.0;
 pub const STARTUP_LIFT_SECONDS: f64 = 3.0;
 pub const MOTION_START_SECONDS: f64 = CALIBRATION_SECONDS + STARTUP_LIFT_SECONDS;
@@ -23,11 +23,11 @@ pub const LOOP_SECONDS: f64 = ACTION_SECONDS * ACTION_COUNT as f64;
 pub const DEFAULT_REPORT_COUNT: u64 =
     ((MOTION_START_SECONDS + LOOP_SECONDS) * REPORT_RATE_HZ) as u64;
 
-const POSITION_AMPLITUDE_METERS: f64 = 0.10;
-const STARTUP_LIFT_METERS: f64 = 0.20;
+const POSITION_AMPLITUDE_METERS: f64 = 0.05;
+const STARTUP_LIFT_METERS: f64 = 0.10;
 const CONTROLLER_HEAD_TO_TAIL_METERS: f64 = 0.205;
-const HEAD_DISPLACEMENT_METERS: f64 = 0.03;
-const TURN_HEAD_DISPLACEMENT_METERS: f64 = 0.05;
+const HEAD_DISPLACEMENT_METERS: f64 = 0.015;
+const TURN_HEAD_DISPLACEMENT_METERS: f64 = 0.025;
 const GYRO_DPS_PER_COUNT: f64 = 2000.0 / 32768.0;
 const CONTROLLER_ACCEL_COUNTS_PER_G: f64 = 1024.0;
 
@@ -131,7 +131,7 @@ fn controller_zero_motion(elapsed_seconds: f64) -> ([f64; 3], [f64; 4], [f64; 3]
             position,
             [0.0, 0.0, 0.0, 1.0],
             [0.0; 3],
-            "启动：向上抬起 20 cm",
+            "启动：向上抬起 10 cm",
         );
     }
 
@@ -150,64 +150,64 @@ fn controller_zero_motion(elapsed_seconds: f64) -> ([f64; 3], [f64; 4], [f64; 3]
     let phase = match action {
         0 => {
             position[1] += POSITION_AMPLITUDE_METERS * amount;
-            "向上移动 10 cm"
+            "向上移动 5 cm"
         }
         1 => {
             position[1] += POSITION_AMPLITUDE_METERS * (1.0 - amount);
-            "向下移动 10 cm"
+            "向下移动 5 cm"
         }
         2 => {
             position[0] -= POSITION_AMPLITUDE_METERS * amount;
-            "向左移动 10 cm"
+            "向左移动 5 cm"
         }
         3 => {
             position[0] -= POSITION_AMPLITUDE_METERS * (1.0 - amount);
-            "向右移动 10 cm"
+            "向右移动 5 cm"
         }
         4 => {
             // At [0, 1, +1], facing the base-station origin means forward -Z.
             position[2] -= POSITION_AMPLITUDE_METERS * amount;
-            "向前移动 10 cm"
+            "向前移动 5 cm"
         }
         5 => {
             position[2] -= POSITION_AMPLITUDE_METERS * (1.0 - amount);
-            "向后移动 10 cm"
+            "向后移动 5 cm"
         }
         6 => {
             axis = [-1.0, 0.0, 0.0];
             angle = orientation_amplitude * amount;
             angle_rate = orientation_amplitude * rate;
-            "手柄头部抬起 3 cm"
+            "手柄头部抬起 1.5 cm"
         }
         7 => {
             axis = [-1.0, 0.0, 0.0];
             angle = orientation_amplitude * (1.0 - amount);
             angle_rate = -orientation_amplitude * rate;
-            "手柄头部下压 3 cm"
+            "手柄头部下压 1.5 cm"
         }
         8 => {
             axis = [0.0, -1.0, 0.0];
             angle = orientation_amplitude * amount;
             angle_rate = orientation_amplitude * rate;
-            "手柄向右侧倾 3 cm"
+            "手柄向右侧倾 1.5 cm"
         }
         9 => {
             axis = [0.0, -1.0, 0.0];
             angle = orientation_amplitude * (1.0 - amount);
             angle_rate = -orientation_amplitude * rate;
-            "手柄向左侧倾 3 cm"
+            "手柄向左侧倾 1.5 cm"
         }
         10 => {
             axis = [0.0, 0.0, 1.0];
             angle = turn_amplitude * amount;
             angle_rate = turn_amplitude * rate;
-            "手柄向左旋转 5 cm"
+            "手柄向左旋转 2.5 cm"
         }
         11 => {
             axis = [0.0, 0.0, 1.0];
             angle = turn_amplitude * (1.0 - amount);
             angle_rate = -turn_amplitude * rate;
-            "手柄向右旋转 5 cm"
+            "手柄向右旋转 2.5 cm"
         }
         _ => unreachable!("action index must be smaller than ACTION_COUNT"),
     };
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_continuously_lifts_twenty_centimetres_into_the_loop() {
+    fn startup_continuously_lifts_ten_centimetres_into_the_loop() {
         let mut generator = VirtualNolo::new();
         let lifted = controller_zero_at(
             &mut generator,
@@ -336,14 +336,14 @@ mod tests {
         );
         let motion = controller_zero_at(&mut generator, MOTION_START_SECONDS);
 
-        assert!((lifted.frame.position[1] - 1.2).abs() < 1.0e-4);
+        assert!((lifted.frame.position[1] - 1.1).abs() < 1.0e-4);
         assert!(lifted.frame.squeeze_pressed());
         assert!(motion.frame.squeeze_pressed());
-        assert!((motion.frame.position[1] - 1.2).abs() < 1.0e-5);
+        assert!((motion.frame.position[1] - 1.1).abs() < 1.0e-5);
     }
 
     #[test]
-    fn position_actions_follow_requested_ten_centimetre_order() {
+    fn position_actions_follow_requested_five_centimetre_order() {
         let mut generator = VirtualNolo::new();
         let endpoint = ACTION_SECONDS - 0.01;
         let up = controller_zero_at(&mut generator, MOTION_START_SECONDS + endpoint);
@@ -367,16 +367,16 @@ mod tests {
             &mut generator,
             MOTION_START_SECONDS + 5.0 * ACTION_SECONDS + endpoint,
         );
-        assert!((up.frame.position[1] - 1.3).abs() < 1.0e-5);
-        assert!((down.frame.position[1] - 1.2).abs() < 1.0e-5);
-        assert!((left.frame.position[0] + 0.1).abs() < 1.0e-5);
+        assert!((up.frame.position[1] - 1.15).abs() < 1.0e-5);
+        assert!((down.frame.position[1] - 1.1).abs() < 1.0e-5);
+        assert!((left.frame.position[0] + 0.05).abs() < 1.0e-5);
         assert!(right.frame.position[0].abs() < 1.0e-5);
-        assert!((forward.frame.position[2] - 0.9).abs() < 1.0e-5);
+        assert!((forward.frame.position[2] - 0.95).abs() < 1.0e-5);
         assert!((backward.frame.position[2] - 1.0).abs() < 1.0e-5);
     }
 
     #[test]
-    fn loop_up_down_pair_stays_twenty_centimetres_above_original_zero() {
+    fn loop_up_down_pair_stays_ten_centimetres_above_original_zero() {
         let mut generator = VirtualNolo::new();
         let end = MOTION_START_SECONDS + 2.0 * ACTION_SECONDS;
         loop {
@@ -385,7 +385,7 @@ mod tests {
                 break;
             }
             if sample.frame.controller_id == 0 && sample.elapsed_seconds >= MOTION_START_SECONDS {
-                assert!(sample.frame.position[1] >= 1.2 - 1.0e-5);
+                assert!(sample.frame.position[1] >= 1.1 - 1.0e-5);
             }
         }
     }
@@ -438,7 +438,7 @@ mod tests {
 
         assert!(calibration_started);
         assert!(active_pre_lift_seen);
-        assert!(final_pre_lift_relative_y.is_some_and(|value| value > 0.19));
+        assert!(final_pre_lift_relative_y.is_some_and(|value| value > 0.095));
     }
 
     #[test]
@@ -446,12 +446,12 @@ mod tests {
         let expected = (HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
         let displacement = expected.sin() * CONTROLLER_HEAD_TO_TAIL_METERS;
         assert!((displacement - HEAD_DISPLACEMENT_METERS).abs() < 2.0e-4);
-        assert!((expected.to_degrees() - 8.415).abs() < 0.001);
+        assert!((expected.to_degrees() - 4.196).abs() < 0.001);
 
         let expected_turn = (TURN_HEAD_DISPLACEMENT_METERS / CONTROLLER_HEAD_TO_TAIL_METERS).asin();
         let turn_displacement = expected_turn.sin() * CONTROLLER_HEAD_TO_TAIL_METERS;
         assert!((turn_displacement - TURN_HEAD_DISPLACEMENT_METERS).abs() < 2.0e-4);
-        assert!((expected_turn.to_degrees() - 14.117).abs() < 0.001);
+        assert!((expected_turn.to_degrees() - 7.005).abs() < 0.001);
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         let head_up_peak = MOTION_START_SECONDS + 7.0 * ACTION_SECONDS - 0.01;
         let right_tilt_peak = MOTION_START_SECONDS + 9.0 * ACTION_SECONDS - 0.01;
         let left_turn_peak = MOTION_START_SECONDS + 11.0 * ACTION_SECONDS - 0.01;
-        let right_turn_end = MOTION_START_SECONDS + 12.0 * ACTION_SECONDS - 0.01;
+        let right_turn_end = MOTION_START_SECONDS + 12.0 * ACTION_SECONDS;
         let mut head_up = None;
         let mut right_tilt = None;
         let mut left_turn = None;
@@ -494,11 +494,11 @@ mod tests {
         let left_turn = left_turn.expect("missing left-turn peak");
         let right_turn = right_turn.expect("missing right-turn endpoint");
         assert!(
-            head_up[0] < -0.04,
+            head_up[0] < -0.02,
             "unexpected head-up quaternion: {head_up:?}"
         );
         assert!(
-            right_tilt[1] < -0.04,
+            right_tilt[1] < -0.02,
             "unexpected right-tilt quaternion: {right_tilt:?}"
         );
         let expected_turn_z =
@@ -508,7 +508,7 @@ mod tests {
             "unexpected left-turn quaternion: {left_turn:?}"
         );
         assert!(
-            right_turn[2].abs() < 0.01,
+            right_turn[2].abs() < 0.011,
             "right turn did not return to neutral: {right_turn:?}"
         );
         for orientation in [head_up, right_tilt, left_turn, right_turn] {

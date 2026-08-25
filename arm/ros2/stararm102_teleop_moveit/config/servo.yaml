@@ -1,49 +1,18 @@
 moveit_servo:
-  publish_period: 0.01
-  max_expected_latency: 0.1
   move_group_name: arm
 
-  pose_command_in_topic: ~/pose_target_cmds
-  cartesian_command_in_topic: ~/delta_twist_cmds
-  joint_command_in_topic: ~/delta_joint_cmds
   command_in_type: speed_units
-  scale:
-    linear: 0.08
-    rotational: 0.8
-    joint: 0.5
-  incoming_command_timeout: 0.1
-  pose_tracking:
-    linear_tolerance: 0.001
-    angular_tolerance: 0.0174532925
 
-  status_topic: ~/status
   command_out_topic: /arm_controller/joint_trajectory
-  command_out_type: trajectory_msgs/JointTrajectory
-  publish_joint_positions: true
   # The manufacturer's JointTrajectoryController rejects a one-point stream
   # whose final point carries a non-zero velocity. Let it interpolate position
   # commands and keep velocity as feedback-only state.
   publish_joint_velocities: false
-  publish_joint_accelerations: false
 
-  joint_topic: /joint_states
-  is_primary_planning_scene_monitor: true
-  check_octomap_collisions: false
-  use_smoothing: true
-  smoothing_filter_plugin_name: online_signal_smoothing::ButterworthFilterPlugin
-
-  check_collisions: true
-  collision_check_rate: 10.0
   # The folded FL zero pose has 2.464 mm clearance between link1 and link4.
-  # Keep collision checking enabled while avoiding a false slowdown at zero.
+  # Override MoveIt's 10 mm default to avoid a false slowdown at zero.
   self_collision_proximity_threshold: 0.002
-  scene_collision_proximity_threshold: 0.02
-  # This small arm has a condition number of 112.27 at its valid zero pose.
-  # Offline sampling of 4,547 collision-free states put 300 near the 90th
-  # percentile, so scale above 120 and reserve the hard stop for >= 300.
-  lower_singularity_threshold: 120.0
-  hard_stop_singularity_threshold: 300.0
-  leaving_singularity_threshold_multiplier: 2.0
-  joint_limit_margins: [0.05]
-  halt_all_joints_in_cartesian_mode: true
-  override_velocity_scaling_factor: 0.0
+  # MoveIt Servo 2.12.4 zeros every Cartesian command above a finite hard-stop
+  # threshold, including commands that would leave the singularity. Keep its
+  # status reporting but remove that unrecoverable finite hard stop.
+  hard_stop_singularity_threshold: .inf

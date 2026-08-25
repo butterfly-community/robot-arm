@@ -28,7 +28,7 @@
     "gripper_closed_deg": 0.0
   },
   "teleoperation": {
-    "translation_scale": 0.2,
+    "translation_scale": 0.5,
     "robot_from_nolo_position_axes": [
       [0.0, 0.0, -1.0],
       [-1.0, 0.0, 0.0],

@@ -498,38 +498,6 @@ dd {
   line-height: 1.65;
 }
 
-.restart-dialog {
-  width: min(520px, calc(100% - 32px));
-  border: 1px solid rgba(75, 216, 220, 0.35);
-  border-radius: 16px;
-  padding: 0;
-  color: var(--text);
-  background: #10191f;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.65);
-}
-.restart-dialog::backdrop {
-  background: rgba(2, 7, 10, 0.78);
-}
-.restart-dialog form {
-  padding: 26px;
-}
-.restart-dialog h2 {
-  margin-bottom: 16px;
-}
-.restart-dialog p {
-  color: var(--muted);
-  line-height: 1.65;
-}
-.restart-dialog pre {
-  margin: 0 0 16px;
-  padding: 14px 16px;
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--cyan);
-  background: #081015;
-}
-
 @media (max-width: 760px) {
   main {
     width: min(100% - 20px, 1180px);

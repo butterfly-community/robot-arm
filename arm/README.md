@@ -8,27 +8,26 @@
 
 当前阶段已经完成设备描述、严格只读探针、NOLO 到 TCP 的坐标映射、官方 MoveIt Servo
 双输出、TF2 反馈和网页数字孪生。真机 J1–J6 与夹爪 ID 6 的软件输出链均已实现，但尚未
-进行实物通电验收；真机启动前会配置并校验 ID 6 的厂家模式二参数。服务默认仿真；
-下一阶段只处理实测参数、硬件急停、夹爪保护现场确认和分级验收。
+进行实物通电测试。服务默认仿真；真机启动不会自动修改舵机参数。
 
 当前代码分为三条严格隔离的链路：
 
 - [`tools/stararm102_fl_readonly_probe.py`](tools/stararm102_fl_readonly_probe.py)：只执行
   ID 0–6 `ping` 和 `Present_Position` 读取，关闭时不释放力矩。
 - [`src/stararm102-control/`](src/stararm102-control/)：完全不包含串口或电机写入的 Rust
-  坐标映射、MoveIt IPC 契约和仿真反馈状态库；示教平移按 1:5 缩放，运行时不再执行
+  坐标映射、MoveIt IPC 契约和仿真反馈状态库；示教平移按 1:2 缩放，运行时不再执行
   或保存 FK/IK。`moveit_interface` 只定义 IPC 帧名、默认状态和已确认的 0～90° 夹爪
   模型端点，当前 TCP 统一来自 ROS TF2。
 - [`ros2/`](ros2/)：复用厂家模型和官方 MoveIt Servo；仿真输出到 `GenericSystem`，真机
-  输出经标准 `JointTrajectoryController`、官方 `JointStateTopicSystem` 和受限
+  输出经标准 `JointTrajectoryController`、官方 `JointStateTopicSystem` 和
   FashionStar SDK 薄适配层写 J1–J6 与夹爪 ID 6。两路独立运行，网页显式选择且默认
   仿真。
 
 Trigger 在两种后端都通过 ROS `hand_controller` 命令 `joint7_left`；仿真中的
 `joint7_right` 由 URDF mimic 反向联动，真机只写厂家指定的 ID 6。真机同时读取位置、
 功率、电流、温度和原始状态字节，但不猜测接触门限。真机启动器先读取完整公开参数；
-仅当不匹配时，把 ID 6 的堵转失锁保护关闭、B 设为 `2000 mW`、A 设为 `4000 mW`，保留
-其他字段并回读校验。首次夹持仍须完成低风险实物验收。
+不会改写堵转、功率、电流、原点、多圈或力矩配置。厂家推荐参数只作为资料记录，不进入
+启动链。
 
 三维数字孪生位于
 [`../vr-xr/src/controller-viewer/public/arm-simulator/`](../vr-xr/src/controller-viewer/public/arm-simulator/)；

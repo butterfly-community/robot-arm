@@ -224,16 +224,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--port",
         required=True,
-        help="UC-01 stable path, preferably /dev/serial/by-id/...",
+        help="串口设备路径，例如 /dev/ttyUSB0 或 /dev/serial/by-id/...",
     )
     parser.add_argument("--baudrate", type=int, default=1_000_000)
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--interval-ms", type=float, default=50.0)
-    parser.add_argument(
-        "--allow-unstable-device",
-        action="store_true",
-        help="Allow /dev/ttyUSB* only for initial discovery; result remains marked unstable",
-    )
     args = parser.parse_args()
     if args.baudrate <= 0 or args.cycles <= 0 or args.interval_ms < 0:
         parser.error("baudrate/cycles must be positive and interval-ms non-negative")
@@ -243,11 +238,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     resolved_device, stable_device = resolve_device(args.port)
-    if not stable_device and not args.allow_unstable_device:
-        raise SystemExit(
-            "拒绝不稳定设备名；请使用 /dev/serial/by-id/...，或仅在发现阶段显式添加 "
-            "--allow-unstable-device"
-        )
     result = ReadOnlyProbe(make_bus(resolved_device, args.baudrate)).run(
         requested_device=args.port,
         resolved_device=resolved_device,

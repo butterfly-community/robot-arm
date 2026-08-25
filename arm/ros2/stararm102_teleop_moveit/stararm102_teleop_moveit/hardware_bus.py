@@ -1,10 +1,9 @@
-"""Audited Star Arm 102-FL bus adapter and command safety gate.
+"""Star Arm 102-FL bus adapter for the official FashionStar SDK.
 
 This module uses only the official FashionStar SDK's port, ping, monitor read
-and synchronized position write operations.  It deliberately does not expose
-calibration, origin, multi-turn or torque operations.  MoveIt joint coordinates
-are the raw FL bus angles for J1--J6; logical direction conversion cancels at
-the URDF boundary.
+and synchronized position write operations. MoveIt joint coordinates are the
+raw FL bus angles for J1--J6; logical direction conversion cancels at the URDF
+boundary.
 """
 
 from __future__ import annotations
@@ -26,14 +25,6 @@ ARM_MOTOR_NAMES = tuple(MOTOR_IDS)
 GRIPPER_NAME = "gripper"
 GRIPPER_ID = 6
 PRODUCTION_MOTOR_IDS = {**MOTOR_IDS, GRIPPER_NAME: GRIPPER_ID}
-MODEL_LIMITS_RAD = (
-    (math.radians(-110.0), math.radians(110.0)),
-    (math.radians(0.0), math.radians(180.0)),
-    (math.radians(-270.0), math.radians(0.0)),
-    (math.radians(-90.0), math.radians(90.0)),
-    (math.radians(-65.0), math.radians(65.0)),
-    (math.radians(-150.0), math.radians(150.0)),
-)
 # Exact lerobot_motor_starai 0.0.7 Goal_Position defaults.  They are repeated
 # here only because this adapter deliberately bypasses that package's
 # state-changing connect() path while preserving its normal command encoding.
@@ -66,7 +57,7 @@ class MotorBus(Protocol):
     def sync_write(
         self, register: str, values: dict[str, float], *, normalize: bool
     ) -> None: ...
-    def disconnect(self, *, disable_torque: bool) -> None: ...
+    def disconnect(self) -> None: ...
 
 
 def make_bus(port: str, baudrate: int) -> MotorBus:
@@ -117,17 +108,15 @@ def make_bus(port: str, baudrate: int) -> MotorBus:
             }
             self.port_handler.sync_write["Goal_Position"](commands)
 
-        def disconnect(self, *, disable_torque: bool) -> None:
-            if disable_torque:
-                raise ValueError("真机安全适配层不允许切换力矩")
+        def disconnect(self) -> None:
             if self.port_handler.is_open:
                 self.port_handler.closePort()
 
     return FashionStarBus()
 
 
-class SafeHardwareBus:
-    """Narrow production facade around the official FashionStar SDK adapter."""
+class HardwareBus:
+    """Typed facade around the official FashionStar SDK adapter."""
 
     def __init__(self, bus: MotorBus):
         self.__bus = bus
@@ -144,7 +133,7 @@ class SafeHardwareBus:
                 raise RuntimeError(f"舵机无响应：{', '.join(missing)}")
             return self.read_feedback()
         except Exception:
-            self.__bus.disconnect(disable_torque=False)
+            self.__bus.disconnect()
             raise
 
     def read_feedback(self) -> HardwareFeedback:
@@ -202,11 +191,8 @@ class SafeHardwareBus:
             not math.isfinite(value) for value in positions_rad
         ):
             raise ValueError("机械臂目标必须是六个有限弧度值")
-        if gripper_position_rad is not None and (
-            not math.isfinite(gripper_position_rad)
-            or not 0.0 <= gripper_position_rad <= math.pi / 2.0
-        ):
-            raise ValueError("夹爪目标必须在 joint7_left 的 0°--90° 产品范围内")
+        if gripper_position_rad is not None and not math.isfinite(gripper_position_rad):
+            raise ValueError("夹爪目标必须是有限弧度值")
         targets = {
             name: math.degrees(float(positions_rad[index]))
             for index, name in enumerate(ARM_MOTOR_NAMES)
@@ -220,71 +206,4 @@ class SafeHardwareBus:
         )
 
     def disconnect(self) -> None:
-        # Shutdown must not unexpectedly release an arm that may be carrying a load.
-        self.__bus.disconnect(disable_torque=False)
-
-
-class CommandSafetyGate:
-    """Authorize fresh, finite ros2_control targets within product limits.
-
-    Trajectory interpolation, velocity and acceleration limits belong to
-    MoveIt and JointTrajectoryController. Reimplementing them here with
-    guessed per-message jump thresholds can reject valid trajectories.
-    """
-
-    FEEDBACK_TIMEOUT_S = 0.1
-
-    def __init__(self) -> None:
-        self.enabled = False
-        self.fault: str | None = None
-        self._release_seen = True
-        self._feedback: tuple[float, ...] | None = None
-        self._feedback_time = 0.0
-
-    def update_feedback(self, positions: Sequence[float], now: float) -> None:
-        parsed = self._validate_positions(positions)
-        self._feedback = parsed
-        self._feedback_time = now
-
-    def set_enabled(self, enabled: bool) -> None:
-        if not enabled:
-            self.enabled = False
-            self._release_seen = True
-            return
-        if self.enabled:
-            return
-        if self.fault is not None and not self._release_seen:
-            return
-        self.fault = None
-        self._release_seen = False
-        self.enabled = True
-
-    def trip(self, reason: str) -> None:
-        self.enabled = False
-        self.fault = reason
-        self._release_seen = False
-
-    def accept_target(self, positions: Sequence[float], now: float) -> tuple[float, ...] | None:
-        if not self.enabled or self.fault is not None:
-            return None
-        if self._feedback is None or now - self._feedback_time > self.FEEDBACK_TIMEOUT_S:
-            self.trip("关节反馈超过 100 ms")
-            return None
-        try:
-            target = self._validate_positions(positions)
-        except ValueError as error:
-            self.trip(str(error))
-            return None
-        return target
-
-    @staticmethod
-    def _validate_positions(positions: Sequence[float]) -> tuple[float, ...]:
-        if len(positions) != 6:
-            raise ValueError("MoveIt 目标必须包含 J1--J6")
-        parsed = tuple(float(value) for value in positions)
-        if any(not math.isfinite(value) for value in parsed):
-            raise ValueError("MoveIt 目标含非有限值")
-        for index, (value, limits) in enumerate(zip(parsed, MODEL_LIMITS_RAD, strict=True)):
-            if not limits[0] <= value <= limits[1]:
-                raise ValueError(f"J{index + 1} 超出新品 FL 产品行程")
-        return parsed
+        self.__bus.disconnect()

@@ -1,12 +1,12 @@
 import * as THREE from "https://esm.sh/three@0.180.0?target=es2022";
 import { OrbitControls } from "https://esm.sh/three@0.180.0/examples/jsm/controls/OrbitControls.js?target=es2022";
-import { loadStarArmModel } from "./urdf-model.js";
+import { loadStarArmModel } from "./urdf-model.js?v=20260825-1";
 
 const $ = (id) => document.getElementById(id);
 const JOINT_COUNT = 6;
 const DISPLAY_JOINT_COUNT = 7;
 const POLL_INTERVAL_MS = 33;
-const FRAMING_VERTICAL_OFFSET_RATIO = 0.18;
+const FRAMING_VERTICAL_OFFSET_RATIO = 0.55;
 const MODEL_JOINT_LIMITS_DEG = [
   [-110, 110],
   [0, 180],
@@ -21,7 +21,6 @@ const liveModelJointDegrees = new Float64Array(DISPLAY_JOINT_COUNT);
 const manualModelJointDegrees = new Float64Array(DISPLAY_JOINT_COUNT);
 const jointRows = [];
 let robotModel = null;
-let lastSnapshotAt = 0;
 let latestSnapshot = null;
 let pollPending = false;
 let fittedOnce = false;
@@ -31,11 +30,13 @@ let selectedOutputBackend = "simulation";
 let backendSwitchPending = false;
 let latestHomeStatus = null;
 let homeRequestPending = false;
+let textSelectionActive = false;
+let textSelectionPointerDown = false;
 
 const stateLabels = {
   idle: "待机",
   active: "示教中",
-  constrained: "本次目标已丢弃，继续采样",
+  constrained: "MoveIt 正在约束运动",
   faulted: "输出已停止",
 };
 const stopReasonLabels = {
@@ -45,16 +46,13 @@ const stopReasonLabels = {
   singularity: "MoveIt：接近奇异位形",
   joint_limit: "MoveIt：达到关节限位",
   servo_unavailable: "MoveIt Servo 未连接",
-  servo_feedback_stale: "MoveIt 关节反馈超时",
   servo_invalid_feedback: "MoveIt 关节反馈非法",
-  awaiting_intent_release: "反馈恢复后请松开 Squeeze 再接管",
   servo_halt: "MoveIt Servo 已停止",
   servo_collision: "MoveIt：碰撞停止",
 };
 const homeStateLabels = {
   idle: "尚未请求",
   planning: "正在规划",
-  ready: "等待确认",
   executing: "正在回零",
   succeeded: "回零完成",
   failed: "回零失败",
@@ -258,7 +256,6 @@ function updateSnapshot(snapshot) {
   liveModelJointDegrees[JOINT_COUNT] = THREE.MathUtils.radToDeg(
     snapshot.gripper_rad,
   );
-  lastSnapshotAt = performance.now();
   const state = stateLabels[snapshot.state] ?? snapshot.state ?? "未知";
   $("simulation-state").textContent = manualOverride ? "手动调整关节" : state;
   $("model-id").textContent = snapshot.model_id ?? "—";
@@ -355,12 +352,10 @@ function updateBackendUi() {
     ? "当前为仿真输出（默认）"
     : "当前为真机输出";
   $("output-help").textContent = simulation
-    ? "按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪。切换输出后必须松开再按 Squeeze；J1–J7 滑块始终只修改浏览器模型。"
-    : "目标将发送给真机 MoveIt Servo 链路；Trigger 通过 hand_controller 控制 ID 6，启动时校验厂家功率保护模式二。J1–J7 滑块不会发送命令。";
-  $("home-start").textContent = simulation ? "规划并回零" : "规划回零";
-  $("home-safety").textContent = simulation
-    ? "仿真会在 MoveIt 碰撞规划通过后自动执行；执行中可随时停止。"
-    : "真机只规划不自动运动。检查轨迹预览、清空工作区并准备好外部急停后，再单独确认执行。";
+    ? "按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪；J1–J7 滑块始终只修改浏览器模型。"
+    : "目标将发送给真机 MoveIt Servo 链路；Trigger 通过 hand_controller 控制 ID 6，J1–J7 滑块不会发送命令。";
+  $("home-start").textContent = "规划并回零";
+  $("home-note").textContent = "MoveIt 规划通过后自动执行；执行中可随时停止。";
 }
 
 function updateHomeStatus(status) {
@@ -373,7 +368,7 @@ function updateHomeStatus(status) {
     trajectory_model_joints_rad: [],
   };
   const state = latestHomeStatus.state ?? "idle";
-  const busy = ["planning", "ready", "executing"].includes(state);
+  const busy = ["planning", "executing"].includes(state);
   const trajectory = Array.isArray(
       latestHomeStatus.trajectory_model_joints_rad,
     )
@@ -394,21 +389,17 @@ function updateHomeStatus(status) {
     ? `${latestHomeStatus.duration_seconds.toFixed(1)} 秒`
     : "—";
   $("home-start").disabled = homeRequestPending || busy;
-  $("home-execute").hidden = !(
-    selectedOutputBackend === "hardware" && state === "ready"
-  );
-  $("home-execute").disabled = homeRequestPending;
   $("home-cancel").hidden = !busy;
   $("home-cancel").disabled = homeRequestPending;
   $("home-preview").hidden = trajectory.length === 0;
   $("home-preview-slider").max = String(Math.max(0, trajectory.length - 1));
   $("home-preview-slider").dataset.trajectory = JSON.stringify(trajectory);
   if (trajectory.length > 0 && $("home-preview-values").textContent === "—") {
-    showHomePreviewPoint(0);
+    showHomePreviewPoint(0, false);
   }
 }
 
-function showHomePreviewPoint(index) {
+function showHomePreviewPoint(index, applyToModel = true) {
   let trajectory = [];
   try {
     trajectory = JSON.parse(
@@ -420,11 +411,13 @@ function showHomePreviewPoint(index) {
   const point = trajectory[index];
   if (!finiteArray(point, JOINT_COUNT)) return;
   const degrees = point.map(THREE.MathUtils.radToDeg);
-  const display = [...degrees, liveModelJointDegrees[JOINT_COUNT]];
-  manualModelJointDegrees.set(display);
-  manualOverride = true;
-  applyVisualJointDegrees(manualModelJointDegrees, null);
-  updateManualModeUi();
+  if (applyToModel) {
+    const display = [...degrees, liveModelJointDegrees[JOINT_COUNT]];
+    manualModelJointDegrees.set(display);
+    manualOverride = true;
+    applyVisualJointDegrees(manualModelJointDegrees, null);
+    updateManualModeUi();
+  }
   $("home-preview-values").textContent = `${index + 1}/${trajectory.length} · ${
     jointValuesText(degrees)
   }`;
@@ -432,12 +425,6 @@ function showHomePreviewPoint(index) {
 
 async function requestHome(action) {
   if (homeRequestPending) return;
-  if (action === "execute") {
-    const confirmed = globalThis.confirm(
-      "确认工作区无人员和障碍物、机械臂未携带未知负载，并且外部急停可用。是否执行已经通过 MoveIt 碰撞检查的真机低速回零轨迹？",
-    );
-    if (!confirmed) return;
-  }
   homeRequestPending = true;
   updateHomeStatus(latestHomeStatus);
   try {
@@ -497,17 +484,16 @@ async function pollStatus() {
     selectedOutputBackend = payload.armOutputBackend === "hardware"
       ? "hardware"
       : "simulation";
+    latestSnapshot = selectedOutputBackend === "hardware"
+      ? payload.latestArmHardware
+      : payload.latestArmSimulation;
+    latestHomeStatus = selectedOutputBackend === "hardware"
+      ? payload.armHomeHardware
+      : payload.armHomeSimulation;
+    if (textSelectionActive) return;
     updateBackendUi();
-    updateSnapshot(
-      selectedOutputBackend === "hardware"
-        ? payload.latestArmHardware
-        : payload.latestArmSimulation,
-    );
-    updateHomeStatus(
-      selectedOutputBackend === "hardware"
-        ? payload.armHomeHardware
-        : payload.armHomeSimulation,
-    );
+    updateSnapshot(latestSnapshot);
+    updateHomeStatus(latestHomeStatus);
   } catch (error) {
     const connection = $("connection-state");
     connection.textContent = "数据连接失败";
@@ -516,6 +502,24 @@ async function pollStatus() {
   } finally {
     pollPending = false;
   }
+}
+
+function selectedTextExists() {
+  const selection = globalThis.getSelection();
+  return Boolean(selection && !selection.isCollapsed && selection.toString());
+}
+
+function refreshAfterTextSelection() {
+  updateBackendUi();
+  if (latestSnapshot) updateSnapshot(latestSnapshot);
+  updateHomeStatus(latestHomeStatus);
+}
+
+function finishTextSelection() {
+  const remainsSelected = selectedTextExists();
+  const wasActive = textSelectionActive;
+  textSelectionActive = remainsSelected;
+  if (wasActive && !remainsSelected) refreshAfterTextSelection();
 }
 
 function setView(name) {
@@ -530,6 +534,7 @@ function setView(name) {
   camera.position.copy(positions[name] ?? positions.iso);
   camera.up.set(0, name === "top" ? 1 : 0, name === "top" ? 0 : 1);
   controls.update();
+  if (robotModel) fitModel();
 }
 
 function fitModel() {
@@ -558,12 +563,7 @@ function resize() {
   camera.updateProjectionMatrix();
 }
 
-function animate(now) {
-  if (lastSnapshotAt && now - lastSnapshotAt > 1200) {
-    const connection = $("connection-state");
-    connection.textContent = "数据已暂停";
-    connection.className = "badge waiting";
-  }
+function animate() {
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
@@ -572,6 +572,23 @@ function animate(now) {
 createJointRows();
 setView("iso");
 new ResizeObserver(resize).observe(viewport);
+document.addEventListener("selectstart", () => {
+  textSelectionActive = true;
+});
+document.addEventListener("selectionchange", () => {
+  if (selectedTextExists()) textSelectionActive = true;
+  else if (!textSelectionPointerDown) finishTextSelection();
+});
+document.addEventListener("pointerdown", (event) => {
+  textSelectionPointerDown = !event.target.closest(
+    "button, a, input, canvas",
+  );
+  if (textSelectionPointerDown) textSelectionActive = true;
+});
+globalThis.addEventListener("pointerup", () => {
+  textSelectionPointerDown = false;
+  requestAnimationFrame(finishTextSelection);
+});
 document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
@@ -584,9 +601,6 @@ $("select-hardware").addEventListener("click", () => {
 });
 $("home-start").addEventListener("click", () => {
   void requestHome("plan");
-});
-$("home-execute").addEventListener("click", () => {
-  void requestHome("execute");
 });
 $("home-cancel").addEventListener("click", () => {
   void requestHome("cancel");

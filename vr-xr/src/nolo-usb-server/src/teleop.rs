@@ -31,9 +31,7 @@ pub enum TeleopIntentState {
 pub enum TeleopStopReason {
     NoSample,
     AwaitingSqueeze,
-    AwaitingSqueezeRelease,
     SqueezeReleased,
-    CommunicationStale,
     CalibrationActive,
     FilteredPositionUnavailable,
     NonFinitePosition,
@@ -56,7 +54,6 @@ pub struct TeleopIntent {
 
 pub struct TeleopIntentMachine {
     state: TeleopIntentState,
-    release_observed: bool,
     anchor_position: Option<[f32; 3]>,
     anchor_orientation: Option<UnitQuaternion<f32>>,
     latest: TeleopIntent,
@@ -72,7 +69,6 @@ impl TeleopIntentMachine {
     pub fn new() -> Self {
         Self {
             state: TeleopIntentState::Idle,
-            release_observed: false,
             anchor_position: None,
             anchor_orientation: None,
             latest: TeleopIntent {
@@ -111,16 +107,18 @@ impl TeleopIntentMachine {
         match self.state {
             TeleopIntentState::Faulted => {
                 if sample.squeeze_pressed {
+                    self.state = TeleopIntentState::Active;
+                    self.anchor_position = Some(validated.filtered_position);
+                    self.anchor_orientation = Some(validated.orientation);
                     self.latest = intent_from_sample(
                         sample,
-                        TeleopIntentState::Faulted,
+                        TeleopIntentState::Active,
+                        Some([0.0; 3]),
+                        Some([0.0, 0.0, 0.0, 1.0]),
                         None,
-                        None,
-                        Some(TeleopStopReason::AwaitingSqueezeRelease),
                     );
                 } else {
                     self.state = TeleopIntentState::Idle;
-                    self.release_observed = true;
                     self.latest = intent_from_sample(
                         sample,
                         TeleopIntentState::Idle,
@@ -132,7 +130,6 @@ impl TeleopIntentMachine {
             }
             TeleopIntentState::Idle => {
                 if !sample.squeeze_pressed {
-                    self.release_observed = true;
                     self.clear_anchor();
                     self.latest = intent_from_sample(
                         sample,
@@ -141,9 +138,8 @@ impl TeleopIntentMachine {
                         None,
                         Some(TeleopStopReason::AwaitingSqueeze),
                     );
-                } else if self.release_observed {
+                } else {
                     self.state = TeleopIntentState::Active;
-                    self.release_observed = false;
                     self.anchor_position = Some(validated.filtered_position);
                     self.anchor_orientation = Some(validated.orientation);
                     self.latest = intent_from_sample(
@@ -153,20 +149,11 @@ impl TeleopIntentMachine {
                         Some([0.0, 0.0, 0.0, 1.0]),
                         None,
                     );
-                } else {
-                    self.latest = intent_from_sample(
-                        sample,
-                        TeleopIntentState::Idle,
-                        None,
-                        None,
-                        Some(TeleopStopReason::AwaitingSqueezeRelease),
-                    );
                 }
             }
             TeleopIntentState::Active => {
                 if !sample.squeeze_pressed {
                     self.state = TeleopIntentState::Idle;
-                    self.release_observed = true;
                     self.clear_anchor();
                     self.latest = intent_from_sample(
                         sample,
@@ -204,8 +191,7 @@ impl TeleopIntentMachine {
 
     /// Immediately invalidates an active or recoverable intent when no
     /// controller sample exists to carry the failure (for example a USB read
-    /// error). A valid released sample is required before activation can occur
-    /// again.
+    /// error). The next valid sample re-anchors immediately.
     pub fn force_fault(&mut self, receive_time_ns: u64, reason: TeleopStopReason) -> TeleopIntent {
         self.enter_fault();
         self.latest.state = TeleopIntentState::Faulted;
@@ -217,9 +203,21 @@ impl TeleopIntentMachine {
         self.latest.clone()
     }
 
+    pub fn stop(&mut self, receive_time_ns: u64) -> TeleopIntent {
+        self.state = TeleopIntentState::Idle;
+        self.clear_anchor();
+        self.latest.state = TeleopIntentState::Idle;
+        self.latest.receive_time_ns = receive_time_ns;
+        self.latest.squeeze_pressed = false;
+        self.latest.gripper_closed = None;
+        self.latest.relative_position = None;
+        self.latest.relative_orientation = None;
+        self.latest.stop_reason = Some(TeleopStopReason::NoSample);
+        self.latest.clone()
+    }
+
     fn enter_fault(&mut self) {
         self.state = TeleopIntentState::Faulted;
-        self.release_observed = false;
         self.clear_anchor();
     }
 
@@ -235,9 +233,6 @@ struct ValidatedSample {
 }
 
 fn validate_sample(sample: TeleopSample) -> Result<ValidatedSample, TeleopStopReason> {
-    if !sample.communication_fresh {
-        return Err(TeleopStopReason::CommunicationStale);
-    }
     if sample.fusion_initialising || sample.gyro_calibration_active {
         return Err(TeleopStopReason::CalibrationActive);
     }
@@ -343,20 +338,15 @@ mod tests {
     }
 
     #[test]
-    fn requires_an_observed_release_before_first_activation() {
+    fn held_squeeze_activates_immediately_at_a_zero_relative_anchor() {
         let mut machine = TeleopIntentMachine::new();
         let held_at_startup = machine.update(sample(1, true));
-        assert_eq!(held_at_startup.state, TeleopIntentState::Idle);
+        assert_eq!(held_at_startup.state, TeleopIntentState::Active);
+        assert_eq!(held_at_startup.relative_position, Some([0.0; 3]));
         assert_eq!(
-            held_at_startup.stop_reason,
-            Some(TeleopStopReason::AwaitingSqueezeRelease)
+            held_at_startup.relative_orientation,
+            Some([0.0, 0.0, 0.0, 1.0])
         );
-
-        machine.update(sample(2, false));
-        let active = machine.update(sample(3, true));
-        assert_eq!(active.state, TeleopIntentState::Active);
-        assert_eq!(active.relative_position, Some([0.0; 3]));
-        assert_eq!(active.relative_orientation, Some([0.0, 0.0, 0.0, 1.0]));
     }
 
     #[test]
@@ -411,31 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn stale_data_faults_and_recovery_cannot_auto_reenable() {
+    fn sequence_freshness_is_diagnostic_and_does_not_gate_control() {
         let mut machine = TeleopIntentMachine::new();
         prepare(&mut machine);
         machine.update(sample(2, true));
 
         let mut stale = sample(3, true);
         stale.communication_fresh = false;
-        let fault = machine.update(stale);
-        assert_eq!(fault.state, TeleopIntentState::Faulted);
-        assert_eq!(
-            fault.stop_reason,
-            Some(TeleopStopReason::CommunicationStale)
-        );
-
-        let still_held = machine.update(sample(4, true));
-        assert_eq!(still_held.state, TeleopIntentState::Faulted);
-        assert_eq!(
-            still_held.stop_reason,
-            Some(TeleopStopReason::AwaitingSqueezeRelease)
-        );
-        let released = machine.update(sample(5, false));
-        assert_eq!(released.state, TeleopIntentState::Idle);
-        let active = machine.update(sample(6, true));
+        let active = machine.update(stale);
         assert_eq!(active.state, TeleopIntentState::Active);
-        assert_eq!(active.relative_position, Some([0.0; 3]));
+        assert_eq!(active.stop_reason, None);
     }
 
     #[test]
@@ -448,6 +423,9 @@ mod tests {
         let fault = machine.update(calibrating);
         assert_eq!(fault.state, TeleopIntentState::Faulted);
         assert_eq!(fault.stop_reason, Some(TeleopStopReason::CalibrationActive));
+        let recovered = machine.update(sample(4, true));
+        assert_eq!(recovered.state, TeleopIntentState::Active);
+        assert_eq!(recovered.relative_position, Some([0.0; 3]));
     }
 
     #[test]
@@ -495,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn force_fault_clears_active_output_and_requires_release() {
+    fn force_fault_clears_output_and_next_valid_sample_reanchors() {
         let mut machine = TeleopIntentMachine::new();
         prepare(&mut machine);
         machine.update(sample(2, true));
@@ -503,13 +481,20 @@ mod tests {
         assert_eq!(disconnected.state, TeleopIntentState::Faulted);
         assert_eq!(disconnected.relative_position, None);
 
-        assert_eq!(
-            machine.update(sample(4, true)).state,
-            TeleopIntentState::Faulted
-        );
-        assert_eq!(
-            machine.update(sample(5, false)).state,
-            TeleopIntentState::Idle
-        );
+        let recovered = machine.update(sample(4, true));
+        assert_eq!(recovered.state, TeleopIntentState::Active);
+        assert_eq!(recovered.relative_position, Some([0.0; 3]));
+    }
+
+    #[test]
+    fn stopping_input_returns_to_idle() {
+        let mut machine = TeleopIntentMachine::new();
+        prepare(&mut machine);
+
+        let stopped = machine.stop(3_000_000);
+
+        assert_eq!(stopped.state, TeleopIntentState::Idle);
+        assert_eq!(stopped.stop_reason, Some(TeleopStopReason::NoSample));
+        assert_eq!(stopped.relative_position, None);
     }
 }

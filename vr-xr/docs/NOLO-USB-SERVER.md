@@ -19,23 +19,23 @@
   不访问机械臂。
 
 后端只在对应设备采样序号发生变化时更新 Fusion 和发布新姿态。重复的旧负载不会再次
-积分；USB 完全静默超过 200 ms 时，所有已发布来源都会转为不可用。
+积分；实际 USB 读取错误或设备未打开时，已发布来源转为不可用。
 
 状态字段的准确含义：
 
 - `sample_sequence`：当前设备采样序号；手柄取 `report[24]`，Head Marker 取
   `report[59]`。
 - `unchanged_ms`：当前设备的 `sample_sequence` 多久没有变化。
-- `communication_fresh`：上述时长不超过 200 ms。
+- `communication_fresh`：当前 USB 会话已经收到过该设备的新样本；实际断开时为 false。
 - `sample_changed`：这一帧是否来自新的设备采样序号。
 - `hmd_unchanged_ms`：`report[59]` HMD/USB 中继采样序号多久没有变化。
-- `hmd_relay_online`：上述时长不超过 200 ms。
+- `hmd_relay_online`：当前 USB 会话已经收到过 HMD 新样本；实际断开时为 false。
 - `samples_received`、`samples_missed`、`duplicate_reports`：序号连续性累计统计；序号按
   `u8` 回绕处理。
-- `measured_rate_hz`、`sample_jitter_ms`：按新样本间隔计算的指数移动统计。
+- `measured_rate_hz`、`sample_jitter_ms`：按最近两个新样本的间隔计算。
 - `simulated`：该帧是否来自内置虚拟 64 字节报告源；真实 HID 始终为 `false`。
 
-这些字段只判断通信/采样新鲜度。它们不能判断基站是否开机，不能判断光学位置是否
+这些字段只描述通信/采样。它们不能判断基站是否开机，不能判断光学位置是否
 有效。没有协议依据的 `pose_usable` 和 `optical_tracking_valid`，以及迁移期的
 `source_online` 和 `flags` 均已移除。当前 API 不再伪装 OpenXR tracking flags。`time_ns`
 是后端进程启动后的单调时间，不是设备硬件时间戳。
@@ -122,15 +122,14 @@ cargo build --release
   `armOutputBackend` 是当前唯一有效输出且启动默认 `simulation`；`simulationRequested` 和
   `simulationActive` 分别表示网页切换请求与虚拟报告线程实际状态。
 - `POST /api/gyro-calibration/0|1|2`：开始对应设备的显式陀螺仪零偏标定。
-- `POST /api/pose-calibration/0|1|2`：仅当该设备没有已加载或已完成的零偏时，初始化
-  Fusion 并开始首次零偏标定；已有零偏时为空操作。
+- `POST /api/pose-calibration/0|1|2`：重新初始化对应设备的 Fusion；已有零偏时直接复用，
+  没有零偏时同时开始首次零偏标定。
 - `POST /api/simulation/start`：暂停真实 HID 读取并启动确定性的虚拟 USB 报告循环。
-- `POST /api/simulation/stop`：只停止虚拟报告并重新尝试连接真实 HID。网页随后提示手工
-  执行 `docker restart stararm102-moveit-simulation`，完成后由用户点击确认。
+- `POST /api/simulation/stop`：只停止虚拟报告并重新尝试连接真实 HID；不联动回零，回零
+  由独立的机械臂专用回零接口控制。
 - `POST /api/arm-output/simulation|hardware`：只切换机械臂目标路由；不会启动 ROS、打开
-  串口或自行接管，切换后必须松开再按 Squeeze。
-- `POST /api/arm-home/simulation/plan|execute|cancel`：仿真专用回零；规划成功后自动执行。
-- `POST /api/arm-home/hardware/plan|execute|cancel`：真机专用回零；规划和确认执行分开。
+  串口或自行接管；Squeeze 已按住时会在新后端当前 TCP 自动重新锚定。
+- `POST /api/arm-home/{simulation|hardware}/{plan|cancel}`：专用回零；规划成功后自动执行。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `communication_fresh` 对三种设备
@@ -146,25 +145,25 @@ Squeeze Teleop 和 SSE 路径。它不会绕过采集链路直接写网页 JSON�
 
 启动模拟会临时释放真实 HID，并让网页切到 Controller 0。前 6.25 秒虚拟 Menu 保持
 按下，位置和 IMU 保持静止，网页按原有流程从第二秒开始完成 Fusion 零偏并记录原点、
-零姿态和朝向基站的人体前方。虚拟源保持静止到第 10 秒，确保 Fusion 标定和标定故障
-后的 Squeeze 松开门槛都已完成；随后自动按住 Squeeze，在 3 秒内连续上升 20 cm 并
+零姿态和朝向基站的人体前方。虚拟源保持静止到第 10 秒，随后自动按住 Squeeze，在
+3 秒内连续上升 10 cm 并
 直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，36 秒一轮
 并持续循环：
 
-1. 从工作高度再向上 10 cm，到达相对原始零点 `+30 cm`；随后向下 10 cm，返回
-   `+20 cm` 工作高度，不回到零点；
-2. 向左 10 cm 后向右 10 cm、向前 10 cm 后向后 10 cm，分别回到工作中心；
-3. 手柄头部抬起 3 cm 后下压 3 cm、向右侧倾 3 cm 后向左侧倾 3 cm，分别回到工作
+1. 从工作高度再向上 5 cm，到达相对原始零点 `+15 cm`；随后向下 5 cm，返回
+   `+10 cm` 工作高度，不回到零点；
+2. 向左 5 cm 后向右 5 cm、向前 5 cm 后向后 5 cm，分别回到工作中心；
+3. 手柄头部抬起 1.5 cm 后下压 1.5 cm、向右侧倾 1.5 cm 后向左侧倾 1.5 cm，分别回到工作
    姿态；
-4. 手柄向左旋转 5 cm 后向右旋转 5 cm，回到工作姿态。
+4. 手柄向左旋转 2.5 cm 后向右旋转 2.5 cm，回到工作姿态。
 
-姿态的“cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算：抬起和侧倾 3 cm
-等价峰值角约 8.415°，左右旋转 5 cm 等价峰值角约 14.117°。模拟平移进入机械臂链路
-后仍会应用 1:5 比例，因此手柄空间移动 10 cm 对应目标 TCP 2 cm；姿态不应用该比例。
+姿态的“cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算：抬起和侧倾 1.5 cm
+等价峰值角约 4.196°，左右旋转 2.5 cm 等价峰值角约 7.005°。模拟平移进入机械臂链路
+后仍会应用 1:2 比例，因此手柄空间移动 5 cm 对应目标 TCP 2.5 cm；姿态不应用该比例。
 Controller 1 和 Head Marker 在该循环中保持静止，但仍按各自名义频率输出。
 
 同一生成器也提供独立程序 `nolo-cv1-simulator`，默认向标准输出写出一次完整的
-49 秒数据（10 秒标定与接管准备、3 秒预抬升 20 cm 和一轮动作），
+49 秒数据（10 秒标定与接管准备、3 秒预抬升 10 cm 和一轮动作），
 格式是连续拼接的加密 64 字节报告：
 
 ```bash
@@ -185,11 +184,10 @@ root、USB gadget 控制器或专用硬件，且不会提高当前采集到机�
 
 状态语义：
 
-- `idle`：没有活动意图，等待观察到 Squeeze 松开后的新按下沿。
+- `idle`：Squeeze 未按下，没有活动意图。
 - `active`：Squeeze 保持按下，输出相对位置、相对姿态和 Trigger 夹爪开合命令，
   其余层可直接由状态判断是否接管。
-- `faulted`：采样、USB 或标定使当前意图失效。恢复后仍保持锁定；必须先松开 Squeeze，
-  再重新按下才能建立新原点。Trigger 不会解除故障或启动接管。
+- `faulted`：USB、标定或输入数据使当前意图失效；下一份有效样本会在当前位姿重新锚定。
 
 接管时记录当前 `filtered_position` 和 Fusion 四元数。`relative_position` 是当前滤波位置
 减接管位置，仍处于 NOLO 跟踪空间轴；人体到机械臂坐标映射留给后续运动学层。
@@ -201,14 +199,13 @@ root、USB gadget 控制器或专用硬件，且不会提高当前采集到机�
 
 下列情况会使意图进入 `faulted` 并清除相对输出：
 
-- Controller 0 通信超时；重复报告不产生新意图，直到序号超时才进入故障；
 - USB 读取中断、长度异常或解码失败；其他 HID 报告类型由解码器忽略，不会误伤正在
-  工作的 Controller 0，是否断流仍以其自身采样序号为准；
+  工作的 Controller 0；
 - Fusion 初始化或陀螺仪标定正在进行；
 - 原始/滤波位置非有限、滤波位置缺失或四元数不可用；
 
-后端启动时不会把已经按住的 Squeeze 当成新按下沿；必须先观察到一次有效松开。活动
-期间 `gripper_closed=true` 表示 Trigger 按下，`false` 表示 Trigger 松开；idle/faulted
+后端启动时如果 Squeeze 已经按住，会立即以当前有效位姿建立零相对锚点。活动期间
+`gripper_closed=true` 表示 Trigger 按下，`false` 表示 Trigger 松开；idle/faulted
 时该字段为 `null`，避免夹爪命令越过接管边界。状态机不打开 Star Arm 串口、不运行
 逆运动学，也不直接产生关节目标。
 
@@ -218,14 +215,15 @@ NOLO 进程在两个独立 Unix socket 上提供 100 Hz latest-value IPC。它�
 `TeleopIntent`，用 `stararm102-control` 完成坐标映射和目标 TCP，然后发送给 ROS 侧
 `servo_ipc_bridge`。示教路径只转换 JSON、`PoseStamped`、`JointState`、`ServoStatus` 和
 TF2 位姿；维护回零则调用标准 MoveGroup/ExecuteTrajectory。运动学、限位、奇异、碰撞、
-平滑和轨迹时间参数全部由 MoveIt 完成。仿真链路输出到厂家 `GenericSystem`；真机链路经
-标准 `JointTrajectoryController` 和官方 `JointStateTopicSystem` 到受限
+平滑、路径规划和时间参数化由 MoveIt 完成。动力学补丁使用用户此前根据官方
+`200°/s、100 ms` 示例换算后明确选定的 `30 rad/s²`，供官方 TOTG 生成回零轨迹时间。
+仿真链路输出到厂家 `GenericSystem`；真机链路经
+标准 `JointTrajectoryController` 和官方 `JointStateTopicSystem` 到
 `fashionstar_uart_sdk` 适配层。两边的
 `/joint_states` 与官方 `robot_state_publisher` 生成的 `base_link -> tool0` 经各自 socket
 返回。Rust 校验 IPC schema v2、六关节名称/长度/有限值、TF2 TCP 和 FL 方向后生成
-两份状态快照；Rust 不保存 URDF 关节链，也不计算 FK。
-每条反馈还必须具有严格递增的 `sequence`；重复或倒退会断开该 IPC 会话，防止缓存或
-重放数据刷新反馈新鲜度。
+两份状态快照；Rust 不保存 URDF 关节链，也不计算 FK。反馈 `sequence` 和年龄用于展示，
+不再形成项目拒绝条件。
 
 Squeeze 新接管时记录所选后端的当前 TCP；相对输入零对应当前末端，重新接管不会跳回旧目标。
 默认坐标映射为 NOLO 前 `-Z` → 机械臂前 `+X`、NOLO 右 `+X` → 机械臂右 `-Y`、
@@ -233,35 +231,35 @@ NOLO 上 `+Y` → 机械臂上 `+Z`。手柄自身姿态不复用位置矩阵，
 头部抬起（原始 `-X`）→ TCP `-Y`，向左侧倾（原始 `+Y`）→ TCP `-X`，向左转向
 （原始 `+Z`）→ TCP `+Z`。两组矩阵都由机械臂版本化配置提供并分别接受正交性检查。
 
-平移缩放由版本化配置的 `translation_scale=0.2` 唯一控制：
+平移缩放由版本化配置的 `translation_scale=0.5` 唯一控制：
 
 ```text
-robot_delta = robot_from_nolo_position × controller_delta × 0.2
+robot_delta = robot_from_nolo_position × controller_delta × 0.5
 ```
 
-因此手柄移动 5 cm，机械臂目标 TCP 移动 1 cm。该比例只作用于相对位置；相对四元数
+因此手柄移动 2 cm，机械臂目标 TCP 移动 1 cm。该比例只作用于相对位置；相对四元数
 保持完整旋转角度，MoveIt Servo 的线速度和角速度限制也仍分别生效。
 
 输出包含六轴逻辑角 `joints_rad`、厂家 URDF 模型角 `model_joints_rad`、
 TF2 当前 TCP、期望 TCP、Servo 状态/说明、反馈年龄和停止原因。两条链路分别标记
 `backend=moveit_servo_simulation|moveit_servo_hardware`；IPC 缺失、
-反馈超过 100 ms、反馈非法、Servo 状态缺失/停止/未知时不发布目标并进入 `faulted`。
-上述故障恢复时即使 Squeeze 一直按住也不会自动恢复输出，必须先松开再重新按下。
+反馈非法、Servo 状态缺失/停止/未知时不发布目标并进入 `faulted`；反馈年龄只作诊断。
+有效反馈恢复后，即使 Squeeze 一直按住也会自动重新锚定并恢复输出。
 MoveIt 奇异、碰撞或关节边界显示为 `constrained`；约束状态的后续目标继续处理，以允许
-移回可行区域。Rust 不再维护一套猜测的工作空间几何。上游意图故障也要求先松开
-Squeeze 再接管。Trigger 在 active 状态产生两态夹爪意图：张开目标为 `90°`，闭合目标
+移回可行区域。Servo 不使用有限奇异点硬停值，避免代码 `2` 将离开奇异点的命令也永久
+乘为零。Rust 不再维护一套猜测的工作空间几何。Trigger 在 active 状态产生两态夹爪
+意图：张开目标为 `90°`，闭合目标
 为 `0°`。ROS 桥通过 `hand_controller/joint7_left` 发送对应 `JointTrajectory`，仿真
 模型和快照显示该目标。同一标准控制通道也用于真机，底层只写厂家指定的 ID 6；真机
 链路另外读取并返回实际位置、功率、电流、温度和原始状态字节。仿真快照的
-`simulation_only=true`，真机快照为 `false`。真机启动前配置并回读校验 ID 6 厂家模式二
-参数；接触门限不在软件中猜测。
+`simulation_only=true`，真机快照为 `false`。真机启动不修改 ID 6 参数；接触门限不在
+软件中猜测。
 
 服务启动时总是选择仿真。仿真与真机分别使用 `ROS_DOMAIN_ID=42/43` 和独立 socket，
-可以同时反馈；未选中的链路只收到 `enabled=false`。网页切换会使两个控制器丢弃旧接管
-原点，只有观察到 Squeeze 松开后才允许新后端接管。真机启动要求 ID 0–6 全部响应且
-`Monitor` 返回完整有限位置；J1–J6 还检查 100 ms 反馈时效和产品关节范围，夹爪命令
-检查模型 `0°…90°` 范围。轨迹连续性、速度与加速度交给 MoveIt 和标准控制器。它不
-调用校准、原点、多圈重置或力矩切换，但仍不能替代硬件急停和分级通电验收。
+可以同时反馈；未选中的链路只收到 `enabled=false`。网页切换会使控制器在新后端当前
+TCP 重新锚定。真机启动 ping ID 0–6 并要求 `Monitor` 返回可编码的有限位置；项目不再
+重复关节行程、反馈时效、授权或故障闭锁。轨迹连续性与动态由 MoveIt 和标准控制器负责，
+适配器不调用校准、原点、多圈重置或力矩切换。
 
 现场确认的唯一默认姿态和示教启动姿态都是 J1–J7 全部 `0°`。仿真启动时六轴逻辑角、
 URDF 模型角和闭合夹爪角均为零；没有单独的回零姿态、工作姿态或自动展开阶段。松开
@@ -270,12 +268,15 @@ Trigger 后，J7 才从闭合 `0°` 切换为张开 `90°`。该模型角与 FL 
 
 这里的“仿真启动”是 ROS `GenericSystem` 进程启动，不是网页“启动模拟”按钮。网页按钮
 只切换真实/虚拟 NOLO 输入；停止后机械臂保持当前位置，不会自动回零。机械臂页另有独立
-“专用回零”：使用 MoveGroup/OMPL 正常碰撞规划到严格 J1–J6 全零，官方 TOTG 生成轨迹
+“专用回零”：使用 MoveGroup/OMPL 碰撞规划到 J1–J6 全零，并由官方 TOTG 生成轨迹
 时间；仿真和真机都通过标准 `ExecuteTrajectory -> JointTrajectoryController`
-执行。真机额外要求规划预览后再次确认；ros-controls 官方
+执行。执行前暂停 Servo 连续输出；动作完成后必须收到更新的关节反馈且每轴均在 `±1°`
+内，才报告成功并恢复 Servo。仿真和真机都在一次请求中规划并自动执行；ros-controls 官方
 `JointStateTopicSystem` 在 ros2_control 和 Python 厂家 SDK 薄适配器之间传递单帧关节状态/目标。
 Python 不实现 `FollowJointTrajectory`、轨迹插值或路径规划。该动作不修改舵机原点、
-多圈状态或力矩，也不关闭碰撞检查。项目没有 3D 传感器，所以只能检查模型自碰撞，
+多圈状态或力矩。若起始状态已经自碰撞，标准规划失败后会通过 MoveIt 状态有效性服务取得
+当前碰撞对，读取完整 ACM，并仅在本次 MoveGroup 请求中临时放行这些碰撞对后强制重新
+规划；不存在控制器直发或自造轨迹旁路，其他碰撞检查保持启用。项目没有 3D 传感器，所以只能检查模型自碰撞，
 不能感知工作区中的临时外部障碍物。
 
 `/arm-simulator/` 每 33 ms 读取一次所选后端快照，用 `model_joints_rad` 的 J1–J6 驱动从厂家
@@ -293,10 +294,8 @@ J1–J7 行提供模型角滑块；拖动后只在当前浏览器暂停实时
 ROS 启动和补丁见 [MoveIt Servo 双输出链路](../../arm/ros2/README.md)，方案边界见
 [IK 与实时笛卡尔伺服选型](../../arm/docs/IK-SELECTION.md)。
 
-内部解码、Fusion 和 `/api/status` 快照保持设备原生更新率。面向查看器的 SSE 对每个
-来源限制为最高约 60 Hz，离线/恢复转换会立即发送，以免网页 JSON 序列化和网络传输
-积压。机械臂控制不得使用 SSE；仿真和真机都使用本机 `watch` + Unix socket
-latest-value 边界，不能改为无界队列。
+内部解码、Fusion、`/api/status` 快照和 SSE 都按设备新样本更新。机械臂控制使用本机
+`watch` + Unix socket latest-value 边界，不经过网页 SSE。
 
 收到 Ctrl-C 或 SIGTERM 时，后端会通知现有 SSE 流结束，再退出进程并释放 USB。
 

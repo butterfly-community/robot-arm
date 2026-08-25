@@ -35,10 +35,14 @@ function containingLinkName(object) {
 export async function loadStarArmModel(onProgress = () => {}) {
   const manager = new THREE.LoadingManager();
   manager.onProgress = (_url, loaded, total) => onProgress(loaded, total);
+  const geometryLoaded = new Promise((resolve) => {
+    manager.onLoad = resolve;
+  });
   const loader = new URDFLoader(manager);
   loader.packages = { stararm102_description: PACKAGE_ROOT };
   loader.fetchOptions = { cache: "no-store" };
   const root = await loader.loadAsync(URDF_URL.href);
+  await geometryLoaded;
 
   let meshCount = 0;
   root.traverse((object) => {

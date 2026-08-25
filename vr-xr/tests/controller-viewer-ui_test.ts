@@ -96,18 +96,20 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
     }
   }
   if (
-    !html.includes('id="moveit-restart-dialog"') ||
-    !html.includes("docker restart stararm102-moveit-simulation") ||
-    !app.includes('$("moveit-restart-dialog").showModal()')
+    html.includes('id="moveit-restart-dialog"') ||
+    html.includes("docker restart stararm102-moveit-simulation") ||
+    app.includes('$("moveit-restart-dialog").showModal()')
   ) {
-    throw new Error("stopping simulation does not show the manual MoveIt step");
+    throw new Error(
+      "stopping simulation still shows the removed manual restart step",
+    );
   }
   if (!app.includes("button.disabled = false")) {
     throw new Error("viewer does not restore the simulation control");
   }
   if (
     !app.includes("resetForAutomaticSimulationCalibration") ||
-    !app.includes("先预抬升 20 厘米，再开始循环")
+    !app.includes("先预抬升 10 厘米，再开始循环")
   ) {
     throw new Error("virtual NOLO does not reset and explain auto calibration");
   }

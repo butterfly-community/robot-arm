@@ -12,11 +12,9 @@ PACKAGE_ROOT = pathlib.Path(__file__).parents[1] / "ros2" / "stararm102_teleop_m
 PROJECT_ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT))
 from stararm102_teleop_moveit.hardware_bus import (  # noqa: E402
-    CommandSafetyGate,
     GRIPPER_NAME,
-    MOTOR_IDS,
+    HardwareBus,
     PRODUCTION_MOTOR_IDS,
-    SafeHardwareBus,
     make_bus,
 )
 
@@ -58,11 +56,11 @@ class FakeBus:
     def sync_write(self, register, values, *, normalize):
         self.calls.append(("sync_write", register, dict(values), normalize))
 
-    def disconnect(self, *, disable_torque):
-        self.calls.append(("disconnect", disable_torque))
+    def disconnect(self):
+        self.calls.append(("disconnect",))
 
 
-class SafeHardwareBusTests(unittest.TestCase):
+class HardwareBusTests(unittest.TestCase):
     def test_official_sdk_adapter_opens_without_reset_or_torque_command(self):
         class FakeOptions:
             def __init__(self, *values):
@@ -115,7 +113,7 @@ class SafeHardwareBusTests(unittest.TestCase):
             self.assertTrue(bus.ping(0))
             bus.sync_read("Monitor", ["shoulder_pan"], normalize=False)
             bus.sync_write("Goal_Position", {"shoulder_pan": 1.0}, normalize=False)
-            bus.disconnect(disable_torque=False)
+            bus.disconnect()
 
         calls = FakePortHandler.last.calls
         self.assertEqual(calls[0], ("open",))
@@ -129,7 +127,7 @@ class SafeHardwareBusTests(unittest.TestCase):
 
     def test_connect_reads_all_feedback_without_configuration_or_torque_writes(self):
         raw = FakeBus()
-        bus = SafeHardwareBus(raw)
+        bus = HardwareBus(raw)
         feedback = bus.connect()
         self.assertEqual(feedback.arm_positions_rad, (0.0,) * 6)
         self.assertEqual(feedback.gripper.position_rad, 0.0)
@@ -147,7 +145,7 @@ class SafeHardwareBusTests(unittest.TestCase):
         self.assertEqual(write[2]["shoulder_pan"], 0.0)
         self.assertAlmostEqual(write[2]["wrist_roll"], 5.0)
         self.assertEqual(write[2][GRIPPER_NAME], -90.0)
-        self.assertEqual(raw.calls[-1], ("disconnect", False))
+        self.assertEqual(raw.calls[-1], ("disconnect",))
 
     def test_gripper_monitor_uses_sdk_units_and_manufacturer_joint_mapping(self):
         raw = FakeBus()
@@ -158,7 +156,7 @@ class SafeHardwareBusTests(unittest.TestCase):
             temperature=31.5,
             status=1 << 6,
         )
-        feedback = SafeHardwareBus(raw).connect().gripper
+        feedback = HardwareBus(raw).connect().gripper
         self.assertAlmostEqual(feedback.position_rad, math.pi / 4.0)
         self.assertEqual(feedback.power_w, 2.0)
         self.assertEqual(feedback.current_a, 0.75)
@@ -170,61 +168,20 @@ class SafeHardwareBusTests(unittest.TestCase):
         raw.monitors[GRIPPER_NAME].status = True
 
         with self.assertRaisesRegex(RuntimeError, "Monitor 状态无效"):
-            SafeHardwareBus(raw).connect()
+            HardwareBus(raw).connect()
 
-    def test_gripper_rejects_targets_outside_confirmed_model_range(self):
+    def test_gripper_adapter_does_not_duplicate_urdf_range_checks(self):
         raw = FakeBus()
-        bus = SafeHardwareBus(raw)
-        bus.write_positions([0.0] * 6, math.pi / 2.0)
-        self.assertEqual(raw.calls[-1][2][GRIPPER_NAME], -90.0)
-        writes_before_invalid_target = len(raw.calls)
-        with self.assertRaises(ValueError):
-            bus.write_positions([0.0] * 6, math.radians(91.0))
-        self.assertEqual(len(raw.calls), writes_before_invalid_target)
+        bus = HardwareBus(raw)
+        bus.write_positions([0.0] * 6, math.radians(91.0))
+        self.assertEqual(raw.calls[-1][2][GRIPPER_NAME], -91.0)
 
     def test_missing_motor_closes_without_disabling_torque(self):
         raw = FakeBus()
         raw.missing_id = 4
         with self.assertRaises(RuntimeError):
-            SafeHardwareBus(raw).connect()
-        self.assertEqual(raw.calls[-1], ("disconnect", False))
-
-class CommandSafetyGateTests(unittest.TestCase):
-    def setUp(self):
-        self.gate = CommandSafetyGate()
-        self.gate.update_feedback([0.0] * 6, 1.0)
-        self.gate.set_enabled(True)
-
-    def test_small_fresh_target_is_accepted(self):
-        target = [math.radians(1.0), 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.assertEqual(self.gate.accept_target(target, 1.01), tuple(target))
-        self.assertIsNone(self.gate.fault)
-
-    def test_standard_controller_owns_jump_and_rate_limits(self):
-        target = [math.radians(90.0), 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.assertEqual(self.gate.accept_target(target, 1.01), tuple(target))
-        self.assertIsNone(self.gate.fault)
-
-    def test_fault_latches_until_release_and_repress(self):
-        self.gate.trip("test fault")
-        self.gate.set_enabled(True)
-        self.assertFalse(self.gate.enabled)
-        self.gate.set_enabled(False)
-        self.gate.update_feedback([0.0] * 6, 1.02)
-        self.gate.set_enabled(True)
-        self.assertEqual(self.gate.accept_target([0.0] * 6, 1.03), (0.0,) * 6)
-
-    def test_stale_feedback_and_joint_limit_fail_closed(self):
-        self.assertIsNone(self.gate.accept_target([0.0] * 6, 1.2))
-        self.assertIn("100 ms", self.gate.fault)
-
-        gate = CommandSafetyGate()
-        gate.update_feedback([0.0] * 6, 2.0)
-        gate.set_enabled(True)
-        target = [0.0] * 6
-        target[4] = math.radians(66.0)
-        self.assertIsNone(gate.accept_target(target, 2.01))
-        self.assertIn("J5", gate.fault)
+            HardwareBus(raw).connect()
+        self.assertEqual(raw.calls[-1], ("disconnect",))
 
 
 class StandardControlPathTests(unittest.TestCase):
@@ -234,7 +191,12 @@ class StandardControlPathTests(unittest.TestCase):
             PACKAGE_ROOT / "stararm102_teleop_moveit" / "servo_ipc_bridge.py"
         ).read_text()
         launch = (PACKAGE_ROOT / "launch" / "hardware.launch.py").read_text()
+        launch_support = (
+            PACKAGE_ROOT / "stararm102_teleop_moveit" / "launch_support.py"
+        ).read_text()
+        launched = launch + launch_support
         controllers = (PACKAGE_ROOT / "config" / "hardware_controllers.yaml").read_text()
+        servo_config = (PACKAGE_ROOT / "config" / "servo.yaml").read_text()
         hardware_patch = (
             PROJECT_ROOT / "patches" / "star-arm-102-fl-topic-hardware.patch"
         ).read_text()
@@ -245,11 +207,30 @@ class StandardControlPathTests(unittest.TestCase):
         self.assertNotIn("FollowJointTrajectory", node)
         self.assertNotIn("positions_at", node)
         self.assertIn('self, ExecuteTrajectory, "/execute_trajectory"', bridge)
+        self.assertIn('SetBool, "/servo_node/pause_servo"', bridge)
+        self.assertIn("HOME_ZERO_TOLERANCE_RAD = math.radians(1.0)", bridge)
+        self.assertIn("request.data = True", bridge)
+        self.assertIn("request.data = False", bridge)
+        self.assertIn('GetStateValidity, "/check_state_validity"', bridge)
+        self.assertIn('GetPlanningScene, "/get_planning_scene"', bridge)
+        self.assertIn("scene.allowed_collision_matrix = allowed_collision_matrix", bridge)
+        dynamics_patch = (
+            PROJECT_ROOT / "patches" / "star-arm-102-fl-moveit-dynamics.patch"
+        ).read_text()
+        self.assertIn("max_acceleration: 30.0", dynamics_patch)
+        for script in ("run-moveit-simulation.sh", "run-moveit-hardware.sh"):
+            self.assertIn(
+                "star-arm-102-fl-moveit-dynamics.patch",
+                (PROJECT_ROOT / "ros2" / script).read_text(),
+            )
+        self.assertNotIn('"/arm_controller/joint_trajectory"', bridge)
         self.assertIn('goal.controller_names = ["arm_controller"]', bridge)
-        self.assertIn('executable="ros2_control_node"', launch)
-        self.assertIn('arguments=["arm_controller"', launch)
-        self.assertIn('arguments=["hand_controller"', launch)
+        self.assertIn('executable="ros2_control_node"', launched)
+        self.assertIn('"arm_controller"', launched)
+        self.assertIn('"hand_controller"', launched)
         self.assertIn("joint_trajectory_controller/JointTrajectoryController", controllers)
+        self.assertIn("hard_stop_singularity_threshold: .inf", servo_config)
+        self.assertNotIn("hard_stop_singularity_threshold: 300.0", servo_config)
         self.assertIn("joints: [joint7_left]", controllers)
         self.assertIn(
             "joint_state_topic_hardware_interface/JointStateTopicSystem",

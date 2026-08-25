@@ -10,11 +10,7 @@ image="${STAR_ARM_102_HARDWARE_IMAGE:-stararm102-moveit-hardware:jazzy}"
 requested_port="${STAR_ARM_102_PORT:-}"
 
 if [[ -z "${requested_port}" ]]; then
-  echo "必须设置 STAR_ARM_102_PORT=/dev/serial/by-id/<UC-01稳定名称>" >&2
-  exit 1
-fi
-if [[ "${requested_port}" != /dev/serial/by-id/* ]]; then
-  echo "拒绝不稳定设备名：${requested_port}；真机只接受 /dev/serial/by-id/..." >&2
+  echo "必须设置 STAR_ARM_102_PORT，例如 /dev/ttyUSB0" >&2
   exit 1
 fi
 if [[ ! -e "${requested_port}" ]]; then
@@ -22,10 +18,6 @@ if [[ ! -e "${requested_port}" ]]; then
   exit 1
 fi
 resolved_port="$(realpath "${requested_port}")"
-if [[ "${resolved_port}" != /dev/ttyUSB* && "${resolved_port}" != /dev/ttyACM* ]]; then
-  echo "稳定设备名解析到了非串口设备：${resolved_port}" >&2
-  exit 1
-fi
 if [[ ! -d "${vendor_root}/.git" ]]; then
   echo "缺少厂家源码：${vendor_root}" >&2
   exit 1
@@ -72,8 +64,6 @@ exec docker run --rm --network host \
       stararm102_description stararm102_moveit_config stararm102_teleop_moveit \
       --event-handlers console_direct+
     source /tmp/ws/install/setup.bash
-    ros2 run stararm102_teleop_moveit configure_gripper_power_mode \
-      --port /dev/stararm102
     set -u
     exec ros2 launch stararm102_teleop_moveit hardware.launch.py \
       port:=/dev/stararm102 baudrate:=1000000 \
