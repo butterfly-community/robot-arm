@@ -134,15 +134,18 @@ Linux 的 `/dev/ttyUSB1` 只是示例，生产程序应根据 UC-01 的 USB 属�
 
 ### 夹爪执行器保护边界
 
-厂家 RA8-U35H-M 资料声明支持堵转、功率和电流保护：根据配置可在过载时限功率或释放
-力矩，并通过状态标志查询保护原因。但保护效果取决于实际参数，阈值过高会使保护失效。
-本机夹爪的保护开关、阈值、状态寄存器响应和接触电流尚未读取验证，因此不能假设出厂
-保护足以承受持续完全闭合命令。
+厂家明确建议夹爪使用功率保护模式二：关闭堵转失锁保护，功率达到保护值 A 后由舵机
+自动降到较低的堵转功率上限 B 保持夹持，且要求 `B < A`。厂家 Star Arm 参数脚本为
+ID 6 给出 `stall_protection=0`、`stall_power_limit=2000 mW`、
+`power_protection=4000 mW`、`current_protection=6000 mA` 的模板，但这不能证明当前实物
+已配置为这些数值。
 
-当前 Trigger 的 `0°/90°` 只用于 `GenericSystem` 仿真。真实接入必须使用位置、
-电流/功率和保护标志反馈，慢速闭合并在接触、堵转或超时后停止继续收紧；首次测试使用
-柔软物体和可立即断电的低风险环境。厂家保护说明见
-[RA8-U35H-M 技术文档](https://fashionstar.com.hk/wiki/servo/uart/datasheet/ra8-u35h-m/)。
+当前代码统一用 `hand_controller` 控制仿真与真机，只向真机 ID 6 发送位置目标，并读取
+位置、功率、电流、温度和原始状态字节。真机启动前读取完整公开参数，仅在不匹配时写入
+上述三个厂家模式二字段，保留其他字段并回读校验；状态位 6 不被推断成“正常保持”。
+首次夹持仍须用柔软物体低风险验证。厂家依据见
+[功率保护参数说明](https://fashionstar.com.hk/wiki/zh/documents/servo/setting-protection-parameters/)，
+项目参数模板见上游 `Python_SDK/set-param.py` 的 ID 6 配置。
 
 ### FL 连接、标定和读写行为
 

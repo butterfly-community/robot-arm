@@ -290,9 +290,24 @@ function updateSnapshot(snapshot) {
     )
     ? `${snapshot.servo_feedback_age_ms} ms`
     : "—";
-  $("gripper-state").textContent = snapshot.simulation_only
-    ? snapshot.gripper_closed ? "扳机按下 / 闭合" : "扳机松开 / 张开"
-    : "真机夹爪未启用";
+  $("gripper-state").textContent = snapshot.gripper_closed
+    ? "扳机按下 / 闭合"
+    : "扳机松开 / 张开";
+  $("gripper-load").textContent = Number.isFinite(snapshot.gripper_power_w) &&
+      Number.isFinite(snapshot.gripper_current_a)
+    ? `${snapshot.gripper_power_w.toFixed(3)} W / ${
+      snapshot.gripper_current_a.toFixed(3)
+    } A`
+    : snapshot.simulation_only
+    ? "仿真不产生负载数据"
+    : "暂无真机负载数据";
+  $("gripper-status").textContent = Number.isFinite(
+      snapshot.gripper_temperature_c,
+    ) && Number.isInteger(snapshot.gripper_status)
+    ? `${snapshot.gripper_temperature_c.toFixed(1)} °C / 0x${
+      snapshot.gripper_status.toString(16).padStart(2, "0")
+    }`
+    : "—";
   $("tcp-position").textContent = vectorText(snapshot.tcp_pose?.position_m);
   $("tcp-orientation").textContent = quaternionText(
     snapshot.tcp_pose?.orientation_xyzw,
@@ -341,7 +356,7 @@ function updateBackendUi() {
     : "当前为真机输出";
   $("output-help").textContent = simulation
     ? "按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪。切换输出后必须松开再按 Squeeze；J1–J7 滑块始终只修改浏览器模型。"
-    : "目标将发送给真机 MoveIt Servo 链路；切换后必须先松开、再按 Squeeze 才会接管。真机夹爪在保护参数确认前保持禁用，J1–J7 滑块不会发送命令。";
+    : "目标将发送给真机 MoveIt Servo 链路；Trigger 通过 hand_controller 控制 ID 6，启动时校验厂家功率保护模式二。J1–J7 滑块不会发送命令。";
   $("home-start").textContent = simulation ? "规划并回零" : "规划回零";
   $("home-safety").textContent = simulation
     ? "仿真会在 MoveIt 碰撞规划通过后自动执行；执行中可随时停止。"

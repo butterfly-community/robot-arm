@@ -249,8 +249,10 @@ MoveIt 奇异、碰撞或关节边界显示为 `constrained`；约束状态的�
 移回可行区域。Rust 不再维护一套猜测的工作空间几何。上游意图故障也要求先松开
 Squeeze 再接管。Trigger 在 active 状态产生两态夹爪意图：Rust 快照让网页 J7 在张开
 `90°` 与闭合 `0°` 之间直接显示目标，ROS 桥同时向仿真的 `hand_controller/joint7_left`
-发送对应 `JointTrajectory`。仿真快照的 `simulation_only=true`。真机快照为 `false`，
-但真机桥当前明确忽略 Trigger/夹爪命令，直到位置、电流/功率和堵转保护完成验证。
+发送对应 `JointTrajectory`。同一个 `hand_controller/joint7_left` 通道也用于真机，底层
+只写厂家指定的 ID 6；真机快照额外显示位置、功率、电流、温度和原始状态字节。仿真
+快照的 `simulation_only=true`，真机快照为 `false`。真机启动前配置并回读校验 ID 6
+厂家模式二参数；接触门限不在软件中猜测。
 
 服务启动时总是选择仿真。仿真与真机分别使用 `ROS_DOMAIN_ID=42/43` 和独立 socket，
 可以同时反馈；未选中的链路只收到 `enabled=false`。网页切换会使两个控制器丢弃旧接管

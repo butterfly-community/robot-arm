@@ -1,4 +1,5 @@
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
+index 5ca046c..4b6705b 100644
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
 +++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
 @@ -2,7 +2,9 @@
@@ -12,7 +13,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </hardware>
      <joint name="joint1">
        <command_interface name="position">
-@@ -10,7 +13,6 @@
+@@ -10,7 +12,6 @@
          <param name="max">1.9198621772</param>
        </command_interface>
        <state_interface name="position"/>
@@ -20,7 +21,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </joint>
      <joint name="joint2">
        <command_interface name="position">
-@@ -18,7 +20,6 @@
+@@ -18,7 +19,6 @@
          <param name="max">3.1415926536</param>
        </command_interface>
        <state_interface name="position"/>
@@ -28,7 +29,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </joint>
      <joint name="joint3">
        <command_interface name="position">
-@@ -26,7 +27,6 @@
+@@ -26,7 +26,6 @@
          <param name="max">0</param>
        </command_interface>
        <state_interface name="position"/>
@@ -36,7 +37,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </joint>
      <joint name="joint4">
        <command_interface name="position">
-@@ -34,7 +34,6 @@
+@@ -34,7 +33,6 @@
          <param name="max">1.5707963268</param>
        </command_interface>
        <state_interface name="position"/>
@@ -44,7 +45,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </joint>
      <joint name="joint5">
        <command_interface name="position">
-@@ -42,7 +41,6 @@
+@@ -42,7 +40,6 @@
          <param name="max">1.1344640138</param>
        </command_interface>
        <state_interface name="position"/>
@@ -52,18 +53,18 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
      </joint>
      <joint name="joint6">
        <command_interface name="position">
-@@ -50,21 +48,6 @@
+@@ -50,7 +47,6 @@
          <param name="max">2.6179938780</param>
        </command_interface>
        <state_interface name="position"/>
 -      <state_interface name="velocity"/>
--    </joint>
--    <joint name="joint7_left">
--      <command_interface name="position">
--        <param name="min">0</param>
--        <param name="max">1.57</param>
--      </command_interface>
--      <state_interface name="position"/>
+     </joint>
+     <joint name="joint7_left">
+       <command_interface name="position">
+@@ -58,13 +54,6 @@
+         <param name="max">1.5707963268</param>
+       </command_interface>
+       <state_interface name="position"/>
 -      <state_interface name="velocity"/>
 -    </joint>
 -    <joint name="joint7_right">

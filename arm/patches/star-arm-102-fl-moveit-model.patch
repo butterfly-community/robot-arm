@@ -48,7 +48,23 @@ index 4e86e48..07ac438 100644
 +      upper="2.6179938780"
        effort="100"
        velocity="1" />
-@@ -518,4 +518,12 @@
+@@ -455,7 +455,7 @@
+       xyz="0 0 -1" />
+     <limit
+       lower="0"
+-      upper="1.57"
++      upper="1.5707963268"
+       effort="5"
+       velocity="3.14" />
+   </joint>
+@@ -512,10 +512,18 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+-      lower="-1.57"
++      lower="-1.5707963268"
+       upper="0"
+       effort="5"
        velocity="3.14" />
      <mimic joint="joint7_left" multiplier="-1" />
    </joint>
@@ -119,6 +135,15 @@ index 409326d..60a6e6a 100644
 +        <param name="min">-2.6179938780</param>
 +        <param name="max">2.6179938780</param>
        </command_interface>
+@@ -55,7 +55,7 @@
+     <joint name="joint7_left">
+       <command_interface name="position">
+         <param name="min">0</param>
+-        <param name="max">1.57</param>
++        <param name="max">1.5707963268</param>
+       </command_interface>
+       <state_interface name="position"/>
+       <state_interface name="velocity"/>
 @@ -63,8 +63,4 @@
      <joint name="joint7_right">
 -      <command_interface name="position">

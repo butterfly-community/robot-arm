@@ -13,16 +13,35 @@ PROJECT_ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT))
 from stararm102_teleop_moveit.hardware_bus import (  # noqa: E402
     CommandSafetyGate,
+    GRIPPER_NAME,
     MOTOR_IDS,
+    PRODUCTION_MOTOR_IDS,
     SafeHardwareBus,
     make_bus,
 )
 
 
+class FakeMonitor:
+    def __init__(
+        self,
+        position=0.0,
+        *,
+        power=0,
+        current=0,
+        temperature=25.0,
+        status=0,
+    ) -> None:
+        self.current_position = position
+        self.power = power
+        self.current = current
+        self.temperature = temperature
+        self.status = status
+
+
 class FakeBus:
     def __init__(self) -> None:
         self.calls = []
-        self.positions = {name: 0.0 for name in MOTOR_IDS}
+        self.monitors = {name: FakeMonitor() for name in PRODUCTION_MOTOR_IDS}
         self.missing_id = None
 
     def connect(self):
@@ -34,7 +53,7 @@ class FakeBus:
 
     def sync_read(self, register, names, *, normalize):
         self.calls.append(("sync_read", register, tuple(names), normalize))
-        return self.positions
+        return {name: self.monitors[name] for name in names}
 
     def sync_write(self, register, values, *, normalize):
         self.calls.append(("sync_write", register, dict(values), normalize))
@@ -57,6 +76,7 @@ class SafeHardwareBusTests(unittest.TestCase):
                 self.baudrate = baudrate
                 self.is_open = False
                 self.calls = []
+                self.sync_read = {"Monitor": self._monitor}
                 self.sync_write = {"Goal_Position": self._write}
                 FakePortHandler.last = self
 
@@ -72,9 +92,9 @@ class SafeHardwareBusTests(unittest.TestCase):
                 self.calls.append(("ping", motor_id))
                 return True
 
-            def read_positions(self, ids):
-                self.calls.append(("read_positions", dict(ids)))
-                return {name: 0.0 for name in ids}
+            def _monitor(self, ids, *, realtime):
+                self.calls.append(("monitor", dict(ids), realtime))
+                return {name: FakeMonitor() for name in ids}
 
             def _write(self, commands):
                 self.calls.append(("write_positions", dict(commands)))
@@ -93,7 +113,7 @@ class SafeHardwareBusTests(unittest.TestCase):
             bus = make_bus("/dev/stararm102", 1_000_000)
             bus.connect()
             self.assertTrue(bus.ping(0))
-            bus.sync_read("Present_Position", ["shoulder_pan"], normalize=False)
+            bus.sync_read("Monitor", ["shoulder_pan"], normalize=False)
             bus.sync_write("Goal_Position", {"shoulder_pan": 1.0}, normalize=False)
             bus.disconnect(disable_torque=False)
 
@@ -102,7 +122,7 @@ class SafeHardwareBusTests(unittest.TestCase):
         self.assertEqual(calls[-1], ("close",))
         self.assertEqual(
             [call[0] for call in calls],
-            ["open", "ping", "read_positions", "write_positions", "close"],
+            ["open", "ping", "monitor", "write_positions", "close"],
         )
         command = calls[3][1]["shoulder_pan"]
         self.assertEqual(command.values, (0, 10, 350, 0, 50, 50))
@@ -110,19 +130,57 @@ class SafeHardwareBusTests(unittest.TestCase):
     def test_connect_reads_all_feedback_without_configuration_or_torque_writes(self):
         raw = FakeBus()
         bus = SafeHardwareBus(raw)
-        self.assertEqual(bus.connect(), (0.0,) * 6)
-        bus.write_arm_positions([math.radians(index) for index in range(6)])
+        feedback = bus.connect()
+        self.assertEqual(feedback.arm_positions_rad, (0.0,) * 6)
+        self.assertEqual(feedback.gripper.position_rad, 0.0)
+        bus.write_positions(
+            [math.radians(index) for index in range(6)],
+            math.pi / 2.0,
+        )
         bus.disconnect()
 
         self.assertEqual(raw.calls[0], ("connect",))
-        self.assertEqual(raw.calls[1:7], [("ping", index) for index in range(6)])
-        self.assertEqual(raw.calls[7][0:2], ("sync_read", "Present_Position"))
-        write = raw.calls[8]
+        self.assertEqual(raw.calls[1:8], [("ping", index) for index in range(7)])
+        self.assertEqual(raw.calls[8][0:2], ("sync_read", "Monitor"))
+        write = raw.calls[9]
         self.assertEqual(write[0:2], ("sync_write", "Goal_Position"))
         self.assertEqual(write[2]["shoulder_pan"], 0.0)
         self.assertAlmostEqual(write[2]["wrist_roll"], 5.0)
+        self.assertEqual(write[2][GRIPPER_NAME], -90.0)
         self.assertEqual(raw.calls[-1], ("disconnect", False))
-        self.assertNotIn("gripper", write[2])
+
+    def test_gripper_monitor_uses_sdk_units_and_manufacturer_joint_mapping(self):
+        raw = FakeBus()
+        raw.monitors[GRIPPER_NAME] = FakeMonitor(
+            -45.0,
+            power=2000,
+            current=750,
+            temperature=31.5,
+            status=1 << 6,
+        )
+        feedback = SafeHardwareBus(raw).connect().gripper
+        self.assertAlmostEqual(feedback.position_rad, math.pi / 4.0)
+        self.assertEqual(feedback.power_w, 2.0)
+        self.assertEqual(feedback.current_a, 0.75)
+        self.assertEqual(feedback.temperature_c, 31.5)
+        self.assertEqual(feedback.status, 1 << 6)
+
+    def test_gripper_monitor_rejects_boolean_status(self):
+        raw = FakeBus()
+        raw.monitors[GRIPPER_NAME].status = True
+
+        with self.assertRaisesRegex(RuntimeError, "Monitor 状态无效"):
+            SafeHardwareBus(raw).connect()
+
+    def test_gripper_rejects_targets_outside_confirmed_model_range(self):
+        raw = FakeBus()
+        bus = SafeHardwareBus(raw)
+        bus.write_positions([0.0] * 6, math.pi / 2.0)
+        self.assertEqual(raw.calls[-1][2][GRIPPER_NAME], -90.0)
+        writes_before_invalid_target = len(raw.calls)
+        with self.assertRaises(ValueError):
+            bus.write_positions([0.0] * 6, math.radians(91.0))
+        self.assertEqual(len(raw.calls), writes_before_invalid_target)
 
     def test_missing_motor_closes_without_disabling_torque(self):
         raw = FakeBus()
@@ -180,6 +238,9 @@ class StandardControlPathTests(unittest.TestCase):
         hardware_patch = (
             PROJECT_ROOT / "patches" / "star-arm-102-fl-topic-hardware.patch"
         ).read_text()
+        model_patch = (
+            PROJECT_ROOT / "patches" / "star-arm-102-fl-moveit-model.patch"
+        ).read_text()
 
         self.assertNotIn("FollowJointTrajectory", node)
         self.assertNotIn("positions_at", node)
@@ -187,13 +248,18 @@ class StandardControlPathTests(unittest.TestCase):
         self.assertIn('goal.controller_names = ["arm_controller"]', bridge)
         self.assertIn('executable="ros2_control_node"', launch)
         self.assertIn('arguments=["arm_controller"', launch)
+        self.assertIn('arguments=["hand_controller"', launch)
         self.assertIn("joint_trajectory_controller/JointTrajectoryController", controllers)
+        self.assertIn("joints: [joint7_left]", controllers)
         self.assertIn(
             "joint_state_topic_hardware_interface/JointStateTopicSystem",
             hardware_patch,
         )
         self.assertIn('-      <state_interface name="velocity"/>', hardware_patch)
-        self.assertIn('-    <joint name="joint7_left">', hardware_patch)
+        self.assertNotIn('-    <joint name="joint7_left">', hardware_patch)
+        self.assertIn('-    <joint name="joint7_right">', hardware_patch)
+        self.assertIn('+      upper="1.5707963268"', model_patch)
+        self.assertIn('+        <param name="max">1.5707963268</param>', model_patch)
 
 
 if __name__ == "__main__":

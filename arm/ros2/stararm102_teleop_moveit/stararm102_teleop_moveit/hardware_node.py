@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import rclpy
@@ -9,10 +10,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
 
-from .hardware_bus import CommandSafetyGate, SafeHardwareBus, make_bus
+from .hardware_bus import (
+    CommandSafetyGate,
+    HardwareFeedback,
+    SafeHardwareBus,
+    make_bus,
+)
 
 
 ROS_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+GRIPPER_JOINT_NAME = "joint7_left"
 STATE_TOPIC = "/stararm102_hardware/joint_states"
 COMMAND_TOPIC = "/stararm102_hardware/joint_commands"
 
@@ -27,6 +34,7 @@ class StarArm102HardwareNode(Node):
         self._home_authorized = False
         self._last_feedback_error: str | None = None
         self._last_command_error: str | None = None
+        self._last_gripper_target: float | None = None
 
         self.declare_parameter("port", "")
         self.declare_parameter("baudrate", 1_000_000)
@@ -41,6 +49,9 @@ class StarArm102HardwareNode(Node):
         self._state_publisher = self.create_publisher(JointState, STATE_TOPIC, 10)
         self._status_publisher = self.create_publisher(
             String, "/stararm102_hardware/status", 10
+        )
+        self._gripper_status_publisher = self.create_publisher(
+            String, "/stararm102_hardware/gripper_status", 10
         )
         self._command_subscription = self.create_subscription(
             JointState,
@@ -64,7 +75,7 @@ class StarArm102HardwareNode(Node):
         try:
             initial = self._bus.connect()
             now = time.monotonic()
-            self._gate.update_feedback(initial, now)
+            self._gate.update_feedback(initial.arm_positions_rad, now)
             self._publish_feedback(initial)
         except Exception:
             try:
@@ -72,9 +83,7 @@ class StarArm102HardwareNode(Node):
             except Exception:
                 pass
             raise
-        self._feedback_timer = self.create_timer(
-            0.01, self._read_feedback
-        )
+        self._feedback_timer = self.create_timer(0.01, self._read_feedback)
         self._publish_status("ready")
         self.get_logger().info(
             "Star Arm 102-FL 已连接；轨迹由 ros2_control JointTrajectoryController 执行"
@@ -112,10 +121,10 @@ class StarArm102HardwareNode(Node):
 
     def _read_feedback(self) -> None:
         try:
-            positions = self._bus.read_arm_positions()
+            feedback = self._bus.read_feedback()
             now = time.monotonic()
-            self._gate.update_feedback(positions, now)
-            self._publish_feedback(positions)
+            self._gate.update_feedback(feedback.arm_positions_rad, now)
+            self._publish_feedback(feedback)
             self._last_feedback_error = None
         except Exception as error:
             reason = f"读取真机关节反馈失败：{error}"
@@ -125,14 +134,29 @@ class StarArm102HardwareNode(Node):
                 self.get_logger().error(reason)
                 self._last_feedback_error = reason
 
-    def _publish_feedback(self, positions: tuple[float, ...]) -> None:
+    def _publish_feedback(self, feedback: HardwareFeedback) -> None:
         message = JointState()
         message.header.stamp = self.get_clock().now().to_msg()
-        message.name = list(ROS_JOINT_NAMES)
-        message.position = list(positions)
-        # Present_Position has no trustworthy velocity sample.
+        message.name = [*ROS_JOINT_NAMES, GRIPPER_JOINT_NAME]
+        message.position = [
+            *feedback.arm_positions_rad,
+            feedback.gripper.position_rad,
+        ]
+        # Monitor has no trustworthy velocity sample.
         message.velocity = []
         self._state_publisher.publish(message)
+        status = String()
+        status.data = json.dumps(
+            {
+                "position_rad": feedback.gripper.position_rad,
+                "power_w": feedback.gripper.power_w,
+                "current_a": feedback.gripper.current_a,
+                "temperature_c": feedback.gripper.temperature_c,
+                "status": feedback.gripper.status,
+            },
+            separators=(",", ":"),
+        )
+        self._gripper_status_publisher.publish(status)
 
     def _command_callback(self, message: JointState) -> None:
         indices = {name: index for index, name in enumerate(message.name)}
@@ -148,7 +172,15 @@ class StarArm102HardwareNode(Node):
                 self._trip_once(self._gate.fault)
             return
         try:
-            self._bus.write_arm_positions(accepted)
+            gripper_target = None
+            gripper_index = indices.get(GRIPPER_JOINT_NAME)
+            if gripper_index is not None:
+                gripper_position = float(message.position[gripper_index])
+                if gripper_position != self._last_gripper_target:
+                    gripper_target = gripper_position
+            self._bus.write_positions(accepted, gripper_target)
+            if gripper_target is not None:
+                self._last_gripper_target = gripper_target
             self._last_command_error = None
         except Exception as error:
             self._trip_once(f"写入真机关节目标失败：{error}")

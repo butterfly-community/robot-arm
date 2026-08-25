@@ -917,12 +917,6 @@ async fn servo_ipc_connection(
                 if state.arm_output_backend() != backend || state.arm_home_blocks_teleop(backend) {
                     intent.state = RelativeIntentState::Idle;
                 }
-                if backend == ArmOutputBackend::Hardware {
-                    // The real gripper has no validated position/current
-                    // feedback or contact protection yet.  Do not animate or
-                    // forward the simulation-only Trigger state as hardware.
-                    intent.gripper_closed = None;
-                }
                 let feedback_age_ms = latest_feedback.as_ref().map(|(_, received)| {
                     duration_ms(now.saturating_duration_since(*received))
                 });

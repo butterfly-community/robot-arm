@@ -61,6 +61,12 @@ def generate_launch_description():
                 arguments=["arm_controller", "-c", "/controller_manager"],
                 output="screen",
             ),
+            Node(
+                package="controller_manager",
+                executable="spawner",
+                arguments=["hand_controller", "-c", "/controller_manager"],
+                output="screen",
+            ),
             servo_node(moveit_config, servo_params),
             move_group,
             Node(

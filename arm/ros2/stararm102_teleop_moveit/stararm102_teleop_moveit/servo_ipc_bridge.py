@@ -57,7 +57,7 @@ class ServoIpcBridge(Node):
         )
         self._hand_publisher = self.create_publisher(
             JointTrajectory, "/hand_controller/joint_trajectory", 1
-        ) if self._simulation_only else None
+        )
         self._hardware_enable_publisher = self.create_publisher(
             Bool, "/stararm102_hardware/enable", 10
         ) if not self._simulation_only else None
@@ -66,6 +66,12 @@ class ServoIpcBridge(Node):
         ) if not self._simulation_only else None
         self._hardware_status_subscription = self.create_subscription(
             String, "/stararm102_hardware/status", self._hardware_status_callback, 10
+        ) if not self._simulation_only else None
+        self._gripper_status_subscription = self.create_subscription(
+            String,
+            "/stararm102_hardware/gripper_status",
+            self._gripper_status_callback,
+            10,
         ) if not self._simulation_only else None
         self._joint_subscription = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
@@ -88,6 +94,7 @@ class ServoIpcBridge(Node):
         self._status_code: int | None = None
         self._status_message: str | None = None
         self._hardware_fault: str | None = None
+        self._latest_gripper_feedback: dict[str, Any] | None = None
         self._latest_joint_positions: list[float] | None = None
         self._latest_joint_time = 0.0
         self._home_status: dict[str, Any] = {
@@ -153,6 +160,28 @@ class ServoIpcBridge(Node):
             else None
         )
 
+    def _gripper_status_callback(self, message: String) -> None:
+        try:
+            value = json.loads(message.data)
+        except json.JSONDecodeError:
+            return
+        if (
+            isinstance(value, dict)
+            and _finite_vector(
+                [
+                    value.get("position_rad"),
+                    value.get("power_w"),
+                    value.get("current_a"),
+                    value.get("temperature_c"),
+                ],
+                4,
+            )
+            and isinstance(value.get("status"), int)
+            and not isinstance(value.get("status"), bool)
+            and 0 <= value["status"] <= 0xFF
+        ):
+            self._latest_gripper_feedback = value
+
     def _joint_state_callback(self, message: JointState) -> None:
         indices = {name: index for index, name in enumerate(message.name)}
         if len(message.position) != len(message.name) or any(
@@ -186,6 +215,7 @@ class ServoIpcBridge(Node):
             },
             "servo_status_code": -1 if self._hardware_fault else self._status_code,
             "servo_status_message": self._hardware_fault or self._status_message,
+            "gripper_feedback": self._latest_gripper_feedback,
             "home_status": self._home_status,
         }
         self._send_feedback(feedback)
@@ -268,8 +298,7 @@ class ServoIpcBridge(Node):
         self._pose_publisher.publish(message)
         gripper_closed = command.get("gripper_closed")
         if (
-            self._hand_publisher is not None
-            and isinstance(gripper_closed, bool)
+            isinstance(gripper_closed, bool)
             and gripper_closed != self._last_gripper_closed
         ):
             self._publish_gripper(0.0 if gripper_closed else math.pi / 2.0)
@@ -555,8 +584,6 @@ class ServoIpcBridge(Node):
         }
 
     def _publish_gripper(self, position: float) -> None:
-        if self._hand_publisher is None:
-            return
         trajectory = JointTrajectory()
         trajectory.joint_names = ["joint7_left"]
         point = JointTrajectoryPoint()
@@ -622,6 +649,7 @@ class ServoIpcBridge(Node):
         self._home_plan_goal_handle = None
         self._home_execute_goal_handle = None
         self._last_home_command = None
+        self._last_gripper_closed = None
         self._home_status = {
             "request_id": 0,
             "state": "idle",

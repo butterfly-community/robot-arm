@@ -85,7 +85,18 @@ pub struct ServoFeedbackFrame {
     pub servo_status_code: Option<i8>,
     pub servo_status_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper_feedback: Option<GripperFeedbackFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_status: Option<HomeStatusFrame>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GripperFeedbackFrame {
+    pub position_rad: f64,
+    pub power_w: f64,
+    pub current_a: f64,
+    pub temperature_c: f64,
+    pub status: u8,
 }
 
 /// Backend-neutral hand-to-MoveIt command mapper and feedback state.
@@ -141,6 +152,10 @@ impl MoveItController {
             model_joints_rad: model_joints,
             gripper_closed: true,
             gripper_rad,
+            gripper_power_w: None,
+            gripper_current_a: None,
+            gripper_temperature_c: None,
+            gripper_status: None,
             tcp_pose: None,
             desired_tcp_pose: None,
             servo_status_code: None,
@@ -261,6 +276,7 @@ impl MoveItController {
 
         let status_code = feedback.and_then(|value| value.servo_status_code);
         let status_message = feedback.and_then(|value| value.servo_status_message.clone());
+        let gripper_feedback = feedback.and_then(|value| value.gripper_feedback);
         let model_joints = self.model.model_joints(self.logical_joints);
         self.latest = SimulationSnapshot {
             model_id: self.model.profile().model_id.clone(),
@@ -273,6 +289,10 @@ impl MoveItController {
             model_joints_rad: model_joints,
             gripper_closed: self.gripper_closed,
             gripper_rad: self.gripper_rad,
+            gripper_power_w: gripper_feedback.map(|item| item.power_w),
+            gripper_current_a: gripper_feedback.map(|item| item.current_a),
+            gripper_temperature_c: gripper_feedback.map(|item| item.temperature_c),
+            gripper_status: gripper_feedback.map(|item| item.status),
             tcp_pose: self.current_tcp.as_ref().map(Pose::from_isometry),
             desired_tcp_pose,
             servo_status_code: status_code,
@@ -316,6 +336,16 @@ impl MoveItController {
         }
         let logical = self.model.logical_joints(model_joints);
         let tcp = feedback.tcp_pose.to_isometry().ok_or(())?;
+        if let Some(gripper) = feedback.gripper_feedback {
+            if !gripper.position_rad.is_finite()
+                || !gripper.power_w.is_finite()
+                || !gripper.current_a.is_finite()
+                || !gripper.temperature_c.is_finite()
+            {
+                return Err(());
+            }
+            self.gripper_rad = gripper.position_rad;
+        }
         self.logical_joints = logical;
         self.current_tcp = Some(tcp);
         Ok(())
@@ -397,6 +427,7 @@ mod tests {
             },
             servo_status_code: Some(0),
             servo_status_message: Some("NO_WARNING".to_owned()),
+            gripper_feedback: None,
             home_status: None,
         }
     }
@@ -435,6 +466,33 @@ mod tests {
         assert!((controller.gripper_open_rad.to_degrees() - 90.0).abs() < 1.0e-12);
         assert!(controller.gripper_closed_rad.abs() < 1.0e-12);
         assert_eq!(controller.latest().gripper_rad, 0.0);
+    }
+
+    #[test]
+    fn hardware_gripper_feedback_is_exposed_without_interpreting_status_bits() {
+        let model = ArmModel::embedded().unwrap();
+        let mut value = feedback(&model);
+        value.gripper_feedback = Some(GripperFeedbackFrame {
+            position_rad: 0.4,
+            power_w: 2.0,
+            current_a: 0.75,
+            temperature_c: 31.5,
+            status: 1 << 6,
+        });
+        let mut controller =
+            MoveItController::new_for_backend(model, false, "moveit_servo_hardware");
+        let (_, snapshot) = controller.step(
+            1,
+            intent(RelativeIntentState::Idle, Some([0.0; 3])),
+            Some(&value),
+            Some(0),
+        );
+        assert_eq!(snapshot.gripper_rad, 0.4);
+        assert_eq!(snapshot.gripper_power_w, Some(2.0));
+        assert_eq!(snapshot.gripper_current_a, Some(0.75));
+        assert_eq!(snapshot.gripper_temperature_c, Some(31.5));
+        assert_eq!(snapshot.gripper_status, Some(1 << 6));
+        assert!(!snapshot.simulation_only);
     }
 
     #[test]

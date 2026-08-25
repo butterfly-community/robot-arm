@@ -23,6 +23,7 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
+            "configure_gripper_power_mode = stararm102_teleop_moveit.gripper_power_mode:main",
             "servo_ipc_bridge = stararm102_teleop_moveit.servo_ipc_bridge:main",
             "hardware_node = stararm102_teleop_moveit.hardware_node:main",
         ],

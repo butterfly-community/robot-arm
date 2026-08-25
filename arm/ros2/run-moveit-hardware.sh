@@ -72,6 +72,8 @@ exec docker run --rm --network host \
       stararm102_description stararm102_moveit_config stararm102_teleop_moveit \
       --event-handlers console_direct+
     source /tmp/ws/install/setup.bash
+    ros2 run stararm102_teleop_moveit configure_gripper_power_mode \
+      --port /dev/stararm102
     set -u
     exec ros2 launch stararm102_teleop_moveit hardware.launch.py \
       port:=/dev/stararm102 baudrate:=1000000 \

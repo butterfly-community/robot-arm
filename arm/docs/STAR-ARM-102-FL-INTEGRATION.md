@@ -28,7 +28,9 @@ P1/P2 已完成并冻结：项目已具备严格只读设备探针、版本化�
 `lerobot_motor_starai 0.0.6/0.0.7` 在 `connect()` 内改变力矩并广播
 `ResetLoop(0xFF)`，因此不能作为无状态连接入口。当前也不采用旧 ROS2 驱动：旧模型没有
 标注新品 FL，启动/退出路径不满足本项目安全要求。项目只调用官方 SDK 已有的端口、ping、
-位置同步读写，不重写串口协议。
+Monitor 和位置同步写入。唯一例外是启动前的 ID 6 模式二配置：SDK 1.3.12 没有公开参数
+高级接口，因此直接复用厂家 `Python_SDK/set-param.py` 已给出的公共参数读写帧，只修改
+三个模式二字段并回读校验，不维护另一套通用舵机协议。
 
 严格只读探针是
 [`../tools/stararm102_fl_readonly_probe.py`](../tools/stararm102_fl_readonly_probe.py)。它不实例化
@@ -148,18 +150,20 @@ ROS 控制器负责。
 ROS 控制器的速度/加速度限制。仿真字段包含 `simulation_only=true`，真机字段为 `false`。
 网页 J1–J7 滑块始终只是本地模型操作，不会写入任一后端。
 
-仿真中的 Trigger 是两态显示，不是可直接复用的真机夹持算法。当前真机桥明确忽略夹爪
-命令。真实 RA8-U35H-M 夹爪
-需要读取位置、电流/功率和保护状态，使用受限速度闭合，并在接触、堵转或超时后停止
-继续收紧；在验证保护阈值和开口映射前，不得持续命令完全闭合角。
+Trigger 在仿真和真机都发送两态 `JointTrajectory`，统一经过
+`hand_controller -> joint7_left`。仿真由 URDF mimic 驱动右夹爪；真机只把模型角反向
+换算后写入厂家指定的 ID 6。真机 Monitor 的位置、功率、电流、温度和原始状态进入网页，
+但代码不猜接触阈值，也不解释保护状态语义。真机启动前配置器只修改厂家模式二需要的
+三个字段：堵转失锁保护关闭、`B=2000 mW`、`A=4000 mW`，保留其余公开参数并回读校验。
+角度—开口关系和夹持效果仍须接机确认。
 
 ## P3 真机输出软件边界
 
 真机 ROS 链路继续采用 MoveIt Servo 求解，并与回零共用标准
 `JointTrajectoryController`。ros-controls 官方 `JointStateTopicSystem` 提供 ros2_control
 SystemInterface，本项目 `hardware_node` 只负责 topic 与官方
-`fashionstar_uart_sdk==1.3.12` 之间的单帧状态/目标转发。它读取 `Present_Position`、写入
-`Goal_Position`；MoveIt 本身不访问串口。节点只有 ping、位置读写和
+`fashionstar_uart_sdk==1.3.12` 之间的单帧状态/目标转发。它读取 `Monitor`、写入
+`Goal_Position`；MoveIt 本身不访问串口。节点只有 ping、监控读取、位置写入和
 `disconnect(disable_torque=false)` 能力，不调用 `Set_Origin`、`Reset_Multi_Turn`、
 校准或力矩切换。单帧 `Goal_Position` 编码沿用已审计的
 `lerobot_motor_starai 0.0.7` 默认值（运动时间 350 ms、加/减速时间各 50 ms），不是本项目
@@ -172,7 +176,7 @@ SystemInterface，本项目 `hardware_node` 只负责 topic 与官方
 真机边界检查 J1–J6 完整反馈、100 ms 时效、有限值和新品 FL 产品行程；轨迹插值、速度、
 加速度和连续性由 MoveIt 与 `JointTrajectoryController` 负责，不再用猜测的每包跳变门限
 重复判定。任何边界失败停止新写入并要求释放后重接管。它是软件保护，不替代
-硬件急停。当前代码没有经过这台实物的单关节和整臂通电验收，夹爪也保持禁用。
+硬件急停。当前代码没有经过这台实物的单关节、夹爪和整臂通电验收。
 
 ## 已自动验证
 
@@ -183,11 +187,10 @@ SystemInterface，本项目 `hardware_node` 只负责 topic 与官方
   Squeeze 才能重新接管；
 - 只读探针的唯一总线调用集合，以及反馈缺失不复用缓存；
 - HTTP 双后端状态、默认仿真、显式切换及 `simulation_only` 契约；
-- 真机适配层只对 J1–J6 使用 ping、`Present_Position`、`Goal_Position` 和非失能关闭；
-  反馈缺失、超时、非有限值或产品行程越界均 fail closed；未启用的真机夹爪不会阻断六轴
-  主线启动；
+- 真机适配层只对 ID 0–6 使用 ping、`Monitor`、`Goal_Position` 和非失能关闭；夹爪
+  只命令 ID 6，并透传厂家功率、电流、温度和原始状态；
 - 官方 Jazzy MoveIt 容器中完成三个 ROS 包构建、模型/KDL/碰撞/控制器/Servo 启动，
   以及 Rust↔ROS/TF2 端到端反馈验证（三轮现场检查反馈年龄约 0–9 ms）。
 
 启动方法见 [`../ros2/README.md`](../ros2/README.md)。真实机械臂的实测参数、硬件急停、
-夹爪闭环和分级通电验收仍属于 P3，不因真机输出代码或仿真通过而自动放行。
+夹爪保护配置和分级通电验收仍属于 P3，不因真机输出代码或仿真通过而自动放行。
