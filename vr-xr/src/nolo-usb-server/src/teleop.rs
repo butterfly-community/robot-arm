@@ -15,7 +15,7 @@ pub struct TeleopSample {
     pub fusion_initialising: bool,
     pub gyro_calibration_active: bool,
     pub trigger_pressed: bool,
-    pub squeeze_pressed: bool,
+    pub menu_pressed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -30,8 +30,8 @@ pub enum TeleopIntentState {
 #[serde(rename_all = "snake_case")]
 pub enum TeleopStopReason {
     NoSample,
-    AwaitingSqueeze,
-    SqueezeReleased,
+    AwaitingTrigger,
+    TriggerReleased,
     CalibrationActive,
     FilteredPositionUnavailable,
     NonFinitePosition,
@@ -45,8 +45,8 @@ pub struct TeleopIntent {
     pub state: TeleopIntentState,
     pub receive_time_ns: u64,
     pub sample_sequence: Option<u8>,
-    pub squeeze_pressed: bool,
-    pub gripper_closed: Option<bool>,
+    pub control_pressed: bool,
+    pub gripper_pressed: Option<bool>,
     pub relative_position: Option<[f32; 3]>,
     pub relative_orientation: Option<[f32; 4]>,
     pub stop_reason: Option<TeleopStopReason>,
@@ -75,8 +75,8 @@ impl TeleopIntentMachine {
                 state: TeleopIntentState::Idle,
                 receive_time_ns: 0,
                 sample_sequence: None,
-                squeeze_pressed: false,
-                gripper_closed: None,
+                control_pressed: false,
+                gripper_pressed: None,
                 relative_position: None,
                 relative_orientation: None,
                 stop_reason: Some(TeleopStopReason::NoSample),
@@ -106,7 +106,7 @@ impl TeleopIntentMachine {
 
         match self.state {
             TeleopIntentState::Faulted => {
-                if sample.squeeze_pressed {
+                if sample.trigger_pressed {
                     self.state = TeleopIntentState::Active;
                     self.anchor_position = Some(validated.filtered_position);
                     self.anchor_orientation = Some(validated.orientation);
@@ -124,19 +124,19 @@ impl TeleopIntentMachine {
                         TeleopIntentState::Idle,
                         None,
                         None,
-                        Some(TeleopStopReason::AwaitingSqueeze),
+                        Some(TeleopStopReason::AwaitingTrigger),
                     );
                 }
             }
             TeleopIntentState::Idle => {
-                if !sample.squeeze_pressed {
+                if !sample.trigger_pressed {
                     self.clear_anchor();
                     self.latest = intent_from_sample(
                         sample,
                         TeleopIntentState::Idle,
                         None,
                         None,
-                        Some(TeleopStopReason::AwaitingSqueeze),
+                        Some(TeleopStopReason::AwaitingTrigger),
                     );
                 } else {
                     self.state = TeleopIntentState::Active;
@@ -152,7 +152,7 @@ impl TeleopIntentMachine {
                 }
             }
             TeleopIntentState::Active => {
-                if !sample.squeeze_pressed {
+                if !sample.trigger_pressed {
                     self.state = TeleopIntentState::Idle;
                     self.clear_anchor();
                     self.latest = intent_from_sample(
@@ -160,7 +160,7 @@ impl TeleopIntentMachine {
                         TeleopIntentState::Idle,
                         None,
                         None,
-                        Some(TeleopStopReason::SqueezeReleased),
+                        Some(TeleopStopReason::TriggerReleased),
                     );
                 } else {
                     let anchor_position = self
@@ -198,7 +198,7 @@ impl TeleopIntentMachine {
         self.latest.receive_time_ns = receive_time_ns;
         self.latest.relative_position = None;
         self.latest.relative_orientation = None;
-        self.latest.gripper_closed = None;
+        self.latest.gripper_pressed = None;
         self.latest.stop_reason = Some(reason);
         self.latest.clone()
     }
@@ -208,8 +208,8 @@ impl TeleopIntentMachine {
         self.clear_anchor();
         self.latest.state = TeleopIntentState::Idle;
         self.latest.receive_time_ns = receive_time_ns;
-        self.latest.squeeze_pressed = false;
-        self.latest.gripper_closed = None;
+        self.latest.control_pressed = false;
+        self.latest.gripper_pressed = None;
         self.latest.relative_position = None;
         self.latest.relative_orientation = None;
         self.latest.stop_reason = Some(TeleopStopReason::NoSample);
@@ -292,8 +292,8 @@ fn intent_from_sample(
         state,
         receive_time_ns: sample.receive_time_ns,
         sample_sequence: Some(sample.sample_sequence),
-        squeeze_pressed: sample.squeeze_pressed,
-        gripper_closed: (state == TeleopIntentState::Active).then_some(sample.trigger_pressed),
+        control_pressed: sample.trigger_pressed,
+        gripper_pressed: (state == TeleopIntentState::Active).then_some(sample.menu_pressed),
         relative_position,
         relative_orientation,
         stop_reason,
@@ -304,7 +304,7 @@ fn intent_from_sample(
 mod tests {
     use super::*;
 
-    fn sample(sequence: u8, squeeze_pressed: bool) -> TeleopSample {
+    fn sample(sequence: u8, trigger_pressed: bool) -> TeleopSample {
         TeleopSample {
             receive_time_ns: u64::from(sequence) * 1_000_000,
             sample_sequence: sequence,
@@ -314,8 +314,8 @@ mod tests {
             communication_fresh: true,
             fusion_initialising: false,
             gyro_calibration_active: false,
-            trigger_pressed: false,
-            squeeze_pressed,
+            trigger_pressed,
+            menu_pressed: false,
         }
     }
 
@@ -334,11 +334,11 @@ mod tests {
     fn prepare(machine: &mut TeleopIntentMachine) {
         let idle = machine.update(sample(1, false));
         assert_eq!(idle.state, TeleopIntentState::Idle);
-        assert_eq!(idle.stop_reason, Some(TeleopStopReason::AwaitingSqueeze));
+        assert_eq!(idle.stop_reason, Some(TeleopStopReason::AwaitingTrigger));
     }
 
     #[test]
-    fn held_squeeze_activates_immediately_at_a_zero_relative_anchor() {
+    fn held_trigger_activates_immediately_at_a_zero_relative_anchor() {
         let mut machine = TeleopIntentMachine::new();
         let held_at_startup = machine.update(sample(1, true));
         assert_eq!(held_at_startup.state, TeleopIntentState::Active);
@@ -370,33 +370,33 @@ mod tests {
     }
 
     #[test]
-    fn trigger_controls_gripper_without_controlling_activation() {
+    fn menu_controls_gripper_without_controlling_activation() {
         let mut machine = TeleopIntentMachine::new();
-        let mut trigger_only = sample(1, false);
-        trigger_only.trigger_pressed = true;
-        let idle = machine.update(trigger_only);
+        let mut menu_only = sample(1, false);
+        menu_only.menu_pressed = true;
+        let idle = machine.update(menu_only);
         assert_eq!(idle.state, TeleopIntentState::Idle);
-        assert_eq!(idle.gripper_closed, None);
+        assert_eq!(idle.gripper_pressed, None);
 
         let open = machine.update(sample(2, true));
         assert_eq!(open.state, TeleopIntentState::Active);
-        assert_eq!(open.gripper_closed, Some(false));
+        assert_eq!(open.gripper_pressed, Some(false));
 
         let mut closed_sample = sample(3, true);
-        closed_sample.trigger_pressed = true;
+        closed_sample.menu_pressed = true;
         let closed = machine.update(closed_sample);
         assert_eq!(closed.state, TeleopIntentState::Active);
-        assert_eq!(closed.gripper_closed, Some(true));
+        assert_eq!(closed.gripper_pressed, Some(true));
     }
 
     #[test]
-    fn squeeze_release_ends_the_intent() {
+    fn trigger_release_ends_the_intent() {
         let mut machine = TeleopIntentMachine::new();
         prepare(&mut machine);
         machine.update(sample(2, true));
         let idle = machine.update(sample(3, false));
         assert_eq!(idle.state, TeleopIntentState::Idle);
-        assert_eq!(idle.stop_reason, Some(TeleopStopReason::SqueezeReleased));
+        assert_eq!(idle.stop_reason, Some(TeleopStopReason::TriggerReleased));
         assert_eq!(idle.relative_position, None);
     }
 

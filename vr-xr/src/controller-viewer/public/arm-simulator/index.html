@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Star Arm 102-FL 示教输出</title>
-    <link rel="stylesheet" href="./style.css?v=20260825-1" />
+    <link rel="stylesheet" href="./style.css?v=20260826-2" />
   </head>
   <body>
     <main>
@@ -14,21 +14,15 @@
           <h1>Star Arm 102-FL 输出</h1>
         </div>
         <div class="top-actions">
-          <div class="backend-switch" role="group" aria-label="机械臂输出选择">
-            <button id="select-simulation" type="button"
-              aria-pressed="true">仿真</button>
-            <button id="select-hardware" type="button"
-              aria-pressed="false">真机</button>
-          </div>
           <a class="back-link" href="/">返回手柄查看器</a>
           <span id="connection-state" class="badge waiting">正在连接</span>
         </div>
       </header>
 
       <section class="output-note" aria-label="输出说明">
-        <strong id="output-warning">当前为仿真输出</strong>
+        <strong id="output-warning">软件反馈</strong>
         <span
-          id="output-help">按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪；J1–J7 滑块始终只修改浏览器模型。</span>
+          id="output-help">未连接串口时使用软件反馈；连接串口后同一控制链显示 Monitor 实测反馈。</span>
       </section>
 
       <section class="workspace">
@@ -56,6 +50,10 @@
             <button type="button" data-view="side">侧视图</button>
             <button type="button" data-view="top">俯视图</button>
             <button id="fit-model" type="button">适应模型</button>
+            <label class="view-toggle">
+              <input id="joint-labels-toggle" type="checkbox" checked>
+              <span>显示关节 ID / PID</span>
+            </label>
           </div>
           <div class="legend" aria-label="空间标记说明">
             <span><i class="actual"></i>当前 TCP</span>
@@ -68,10 +66,10 @@
           <section class="panel state-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">所选输出状态</p>
-                <h2 id="simulation-state">等待数据</h2>
+                <p class="eyebrow">统一反馈状态</p>
+                <h2 id="arm-state">等待数据</h2>
               </div>
-              <span id="simulation-mode" class="simulation-mode">SIM ONLY</span>
+              <span id="feedback-mode" class="feedback-mode">SOFTWARE</span>
             </div>
             <dl class="summary-grid">
               <div>
@@ -79,15 +77,15 @@
                 <dd id="model-id">—</dd>
               </div>
               <div>
-                <dt>后端</dt>
-                <dd id="backend-name">—</dd>
+                <dt>反馈来源</dt>
+                <dd id="feedback-source">—</dd>
               </div>
               <div>
                 <dt>接管</dt>
                 <dd id="enabled-state">—</dd>
               </div>
               <div>
-                <dt>提示 / 停止原因</dt>
+                <dt>停止原因</dt>
                 <dd id="stop-reason">—</dd>
               </div>
               <div>
@@ -99,75 +97,114 @@
                 <dd id="feedback-age">—</dd>
               </div>
               <div>
-                <dt>夹爪命令</dt>
-                <dd id="gripper-state">—</dd>
-              </div>
-              <div>
-                <dt>夹爪功率 / 电流</dt>
-                <dd id="gripper-load">—</dd>
-              </div>
-              <div>
-                <dt>夹爪温度 / 状态</dt>
-                <dd id="gripper-status">—</dd>
+                <dt>夹爪角度</dt>
+                <dd id="gripper-angle">—</dd>
               </div>
             </dl>
           </section>
 
-          <section class="panel home-panel" aria-label="专用回零">
+          <section class="panel motion-panel" aria-label="普通关节运动">
             <div class="panel-heading compact">
               <div>
-                <p class="eyebrow">独立维护动作 / J1–J6 全零</p>
-                <h2>专用回零</h2>
+                <p class="eyebrow">MoveGroup / J1–J6</p>
+                <h2>普通关节运动</h2>
               </div>
-              <span id="home-state">尚未请求</span>
+              <span id="motion-state">尚未请求</span>
             </div>
-            <div class="home-content">
+            <div class="motion-content">
               <p
-                id="home-message">回零独立于示教并保持 MoveIt 碰撞检查；不会修改舵机原点或多圈状态。</p>
-              <dl class="home-summary">
+                id="motion-message">起始位与手动关节目标使用完全相同的规划路径。</p>
+              <dl class="motion-summary">
                 <div>
                   <dt>轨迹点</dt>
-                  <dd id="home-points">—</dd>
+                  <dd id="motion-points">—</dd>
                 </div>
                 <div>
                   <dt>预计时间</dt>
-                  <dd id="home-duration">—</dd>
+                  <dd id="motion-duration">—</dd>
                 </div>
               </dl>
-              <div id="home-preview" class="home-preview" hidden>
-                <label
-                  for="home-preview-slider">轨迹关节预览（仅浏览器模型）</label>
-                <input id="home-preview-slider" type="range" min="0" max="0"
-                  step="1" value="0">
-                <output id="home-preview-values">—</output>
-              </div>
-              <div class="home-actions">
-                <button id="home-start" type="button">规划并回零</button>
-                <button id="home-cancel" type="button"
+              <div class="motion-actions">
+                <button id="start-position-arm"
+                  type="button">J1–J6 起始位</button>
+                <button id="cancel-motion" type="button"
                   hidden>停止 / 取消</button>
               </div>
-              <p id="home-note"
-                class="home-note">MoveIt 规划通过后自动执行。</p>
+              <p
+                class="motion-note">起始位运动保持夹爪当前角度，不写舵机原点。</p>
             </div>
           </section>
 
           <section class="panel">
             <div class="panel-heading compact">
               <div>
-                <p class="eyebrow">可拖动模型角</p>
-                <h2>J1–J7</h2>
+                <p class="eyebrow">手柄 → MoveIt</p>
+                <h2>采集分量</h2>
               </div>
-              <div class="joint-tools">
-                <span id="joint-mode">实时跟随</span>
-                <button id="resume-live" type="button" hidden>恢复实时</button>
+              <span>独立开关</span>
+            </div>
+            <div class="teleop-components">
+              <label>
+                <input id="teleop-position" type="checkbox" checked>
+                <span>空间位置移动</span>
+              </label>
+              <label>
+                <input id="teleop-pitch" type="checkbox" checked>
+                <span>前部抬起 / 前部往下</span>
+              </label>
+              <label>
+                <input id="teleop-turn" type="checkbox" checked>
+                <span>左旋（俯视夹爪尖端逆时针）/ 右旋（顺时针）</span>
+              </label>
+              <p
+                id="teleop-components-message">未勾选的分量不进入机械臂目标。</p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">目标预览 / 松开提交</p>
+                <h2>手动控制</h2>
+              </div>
+              <div class="control-mode" role="group" aria-label="控制方式">
+                <button id="mode-teleop" type="button"
+                  aria-pressed="true">手柄</button>
+                <button id="mode-manual" type="button"
+                  aria-pressed="false">手动</button>
               </div>
             </div>
             <div id="joint-list" class="joint-list"></div>
             <output id="manual-joint-values" class="manual-joint-values">
-              模型角 [0.0°, 0.0°, 0.0°, 0.0°, 0.0°, 0.0°, 0.0°]
+              目标预览 [0.0°, 0.0°, -3.0°, 0.0°, 0.0°, 0.0°, 1.0°]
             </output>
-            <p
-              class="joint-help">拖动任一滑块即暂停模型的实时跟随；请把上面的七个模型角告诉我。</p>
+            <p id="joint-help"
+              class="joint-help">切换到手动控制后，滑块从最新反馈初始化；拖动只预览，松开才提交。</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">Rust ArmJointIo</p>
+                <h2>真机串口</h2>
+              </div>
+              <span id="serial-state">未连接</span>
+            </div>
+            <div class="serial-content">
+              <div id="serial-connect-controls">
+                <label for="serial-port">串口路径</label>
+                <input id="serial-port" type="text" value="/dev/ttyUSB0"
+                  autocomplete="off" spellcheck="false">
+                <button id="serial-connect" type="button">连接</button>
+              </div>
+              <div id="serial-connected-info" hidden>
+                <span>已连接设备</span>
+                <code id="serial-connected-port">—</code>
+                <span>J1–J6 与夹爪命令发送到舵机 ID 0–6</span>
+                <button id="serial-disconnect" type="button">断开</button>
+              </div>
+              <p id="serial-error">—</p>
+            </div>
           </section>
 
           <section class="panel">
@@ -200,6 +237,6 @@
         </aside>
       </section>
     </main>
-    <script type="module" src="./app.js?v=20260825-3"></script>
+    <script type="module" src="./app.js?v=20260826-9"></script>
   </body>
 </html>

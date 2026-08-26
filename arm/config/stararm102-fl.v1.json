@@ -4,28 +4,29 @@
   "hardware_variant": "Star Arm 102-FL",
   "model_id": "stararm102-fl-v1",
   "transport": {
-    "backend": "fashionstar_uart_sdk",
-    "minimum_backend_version": "1.3.12",
+    "protocol": "fashionstar_uart",
     "baudrate": 1000000,
     "stable_device": null,
-    "feedback_register": "Present_Position",
+    "runtime_feedback": "Monitor",
+    "readonly_probe_feedback": "Present_Position",
     "feedback_unit": "degrees"
   },
   "joints": [
-    { "name": "shoulder_pan",  "servo_id": 0, "servo_model": "RA8-U35H-M",      "direction": -1.0, "lower_deg": -110.0, "upper_deg": 110.0, "zero_offset_deg": null, "firmware": null },
-    { "name": "shoulder_lift", "servo_id": 1, "servo_model": "RX8-U50H-M",      "direction": -1.0, "lower_deg": -180.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null },
-    { "name": "elbow_flex",   "servo_id": 2, "servo_model": "RX8-U50H-M",      "direction": 1.0,  "lower_deg": -270.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null },
-    { "name": "wrist_flex",   "servo_id": 3, "servo_model": "RA8-U35H-M",      "direction": 1.0,  "lower_deg": -90.0,  "upper_deg": 90.0,  "zero_offset_deg": null, "firmware": null },
-    { "name": "wrist_yaw",    "servo_id": 4, "servo_model": "RA8-U27H-M-C005", "direction": 1.0,  "lower_deg": -65.0,  "upper_deg": 65.0,  "zero_offset_deg": null, "firmware": null },
-    { "name": "wrist_roll",   "servo_id": 5, "servo_model": "RA8-U35H-M-C047", "direction": -1.0, "lower_deg": -150.0, "upper_deg": 150.0, "zero_offset_deg": null, "firmware": null },
-    { "name": "gripper",      "servo_id": 6, "servo_model": "RA8-U35H-M",      "direction": -6.0, "lower_deg": -270.0, "upper_deg": 0.0,   "zero_offset_deg": null, "firmware": null }
+    { "name": "shoulder_pan",  "servo_id": 0, "servo_model": "RA8-U35H-M",      "direction": -1.0, "zero_offset_deg": null, "firmware": null },
+    { "name": "shoulder_lift", "servo_id": 1, "servo_model": "RX8-U50H-M",      "direction": -1.0, "zero_offset_deg": null, "firmware": null },
+    { "name": "elbow_flex",   "servo_id": 2, "servo_model": "RX8-U50H-M",      "direction": 1.0,  "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_flex",   "servo_id": 3, "servo_model": "RA8-U35H-M",      "direction": 1.0,  "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_yaw",    "servo_id": 4, "servo_model": "RA8-U27H-M-C005", "direction": 1.0,  "zero_offset_deg": null, "firmware": null },
+    { "name": "wrist_roll",   "servo_id": 5, "servo_model": "RA8-U35H-M-C047", "direction": -1.0, "zero_offset_deg": null, "firmware": null },
+    { "name": "gripper",      "servo_id": 6, "servo_model": "RA8-U35H-M",      "direction": -6.0, "zero_offset_deg": null, "firmware": null }
   ],
   "moveit_interface": {
     "base_frame": "base_link",
-    "tcp_link": "tool0",
-    "nominal_joints_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "tcp_link": "link6",
+    "gripper_pivot_to_tcp_m": [0.0, 0.0, 0.07313],
+    "default_model_joints_deg": [0.0, 0.0, -3.0, 0.0, 0.0, 0.0],
     "gripper_open_deg": 90.0,
-    "gripper_closed_deg": 0.0
+    "gripper_closed_deg": 1.0
   },
   "teleoperation": {
     "translation_scale": 0.5,
@@ -33,11 +34,6 @@
       [0.0, 0.0, -1.0],
       [-1.0, 0.0, 0.0],
       [0.0, 1.0, 0.0]
-    ],
-    "robot_from_controller_orientation_axes": [
-      [0.0, -1.0, 0.0],
-      [1.0, 0.0, 0.0],
-      [0.0, 0.0, 1.0]
     ]
   }
 }

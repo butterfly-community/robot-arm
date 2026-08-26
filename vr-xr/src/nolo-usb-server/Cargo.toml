@@ -11,6 +11,7 @@ anyhow = "1.0"
 async-stream = "0.3"
 axum = "0.8"
 fusion-ahrs = "0.7"
+fashionstar-uart = { path = "../../../arm/src/fashionstar-uart" }
 futures-core = "0.3"
 hidapi = { version = "2.6", default-features = false, features = ["linux-static-libusb"] }
 nalgebra = "0.35"

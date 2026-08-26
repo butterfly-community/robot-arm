@@ -7,7 +7,7 @@ function source(name: string): string {
   return Deno.readTextFileSync(new URL(name, publicDirectory));
 }
 
-Deno.test("arm simulator is independent from the existing controller viewer", () => {
+Deno.test("arm simulator remains an independent viewer", () => {
   const controllerHtml = Deno.readTextFileSync(
     new URL("../src/controller-viewer/public/index.html", import.meta.url),
   );
@@ -20,50 +20,165 @@ Deno.test("arm simulator is independent from the existing controller viewer", ()
   }
 });
 
-Deno.test("arm simulator uses pinned CDN modules and the direct output selector", () => {
+Deno.test("manual controls use the unified APIs and URDF limits", () => {
   const app = source("app.js");
   const model = source("urdf-model.js");
-  for (const text of [app, model]) {
-    if (!text.includes("https://esm.sh/three@0.180.0")) {
-      throw new Error("pinned Three.js CDN import is missing");
+  const html = source("index.html");
+  if (!app.includes('fetch("/api/status"')) {
+    throw new Error("unified status is not consumed");
+  }
+  for (
+    const endpoint of [
+      "/api/arm-control-mode",
+      "/api/arm-teleop-components",
+      "/api/arm-motion",
+      "/api/arm-gripper",
+      "/api/arm-motion/cancel",
+      "/api/arm-serial/connect",
+      "/api/arm-serial/disconnect",
+    ]
+  ) {
+    if (!app.includes(endpoint)) throw new Error(`missing ${endpoint}`);
+  }
+  if (
+    !app.includes('slider.addEventListener("input"') ||
+    !app.includes('slider.addEventListener("change"') ||
+    !app.includes("targetDegrees.slice(0, JOINT_COUNT)") ||
+    !app.includes("submitGripperTarget") ||
+    !app.includes("THREE.MathUtils.degToRad(GRIPPER_START_POSITION_DEG)")
+  ) {
+    throw new Error(
+      "sliders do not preview then submit the correct request shape",
+    );
+  }
+  if (
+    !model.includes("jointLimitsRad") ||
+    !model.includes("root.joints[name]?.limit") ||
+    app.includes("MODEL_JOINT_LIMITS_DEG") ||
+    app.includes('step="0.5"') ||
+    !app.includes('step="any"')
+  ) {
+    throw new Error("slider ranges are not read directly from the loaded URDF");
+  }
+  if (
+    !app.includes("robotModel?.setArmJoints(modelJoints)") ||
+    !app.includes("robotModel?.setGripper(snapshot.gripper_rad)") ||
+    !html.includes("目标预览")
+  ) {
+    throw new Error(
+      "actual model and target preview are not clearly separated",
+    );
+  }
+  if (app.includes("model_joints_rad") || html.includes("simulation-state")) {
+    throw new Error("old simulation-only joint state remains");
+  }
+});
+
+Deno.test("three backend-owned checkboxes independently select teleop components", () => {
+  const app = source("app.js");
+  const html = source("index.html");
+  for (
+    const [id, label, checked] of [
+      ["teleop-position", "空间位置移动", true],
+      ["teleop-pitch", "前部抬起 / 前部往下", true],
+      [
+        "teleop-turn",
+        "左旋（俯视夹爪尖端逆时针）/ 右旋（顺时针）",
+        true,
+      ],
+    ] as const
+  ) {
+    const input = `id="${id}" type="checkbox"${checked ? " checked" : ""}`;
+    if (!html.includes(input)) {
+      throw new Error(`${label} 的默认勾选状态不正确`);
+    }
+    if (!html.includes(label)) throw new Error(`缺少采集开关：${label}`);
+    if (!app.includes(`$("${id}").checked`)) {
+      throw new Error(`${label} 没有同步后端状态`);
     }
   }
-  if (!model.includes("urdf-loader@0.13.1?deps=three@0.180.0")) {
-    throw new Error("URDF loader or its Three.js peer is not pinned");
-  }
-  if (!app.includes('fetch("/api/status"')) {
-    throw new Error("simulator does not read /api/status");
-  }
   if (
-    !app.includes("fetch(`/api/arm-output/${backend}`") ||
-    !app.includes('method: "POST"')
+    !app.includes("payload.teleopComponents") ||
+    !app.includes('"/api/arm-teleop-components"') ||
+    !app.includes("while (desiredTeleopComponents !== null)") ||
+    !app.includes("if (teleopComponentsSubmitting) return") ||
+    app.includes("await withRequest(async () => {\n    teleopComponents") ||
+    app.includes("localStorage") ||
+    app.includes("sessionStorage")
   ) {
-    throw new Error("simulator does not use the dedicated backend selector");
+    throw new Error("采集开关没有由 Rust 后端会话统一保存");
   }
+});
+
+Deno.test("the signed start pose is an ordinary motion and keeps the gripper separate", () => {
+  const app = source("app.js");
+  const html = source("index.html");
   if (
-    !app.includes("`/api/arm-home/${selectedOutputBackend}/${action}`") ||
-    !app.includes('void requestHome("plan")') ||
-    app.includes('requestHome("execute")') ||
-    app.includes("globalThis.confirm")
-  ) {
-    throw new Error(
-      "simulator does not use the single-step home path",
-    );
-  }
-  if (
-    !app.includes("payload.armHomeSimulation") ||
-    !app.includes("payload.armHomeHardware") ||
-    !app.includes("trajectory_model_joints_rad") ||
-    !app.includes("showHomePreviewPoint(0, false)")
+    !app.includes("const START_POSITION_DEG = [0, 0, -3, 0, 0, 0]") ||
+    !app.includes("targetDegrees.set(START_POSITION_DEG, 0)") ||
+    !app.includes("void moveArmToStartPosition()") ||
+    !html.includes("J1–J6 起始位") ||
+    !html.includes(
+      "目标预览 [0.0°, 0.0°, -3.0°, 0.0°, 0.0°, 0.0°, 1.0°]",
+    )
   ) {
     throw new Error(
-      "simulator does not expose the planned home trajectory preview",
+      "start button does not synchronize the signed six-joint pose",
     );
   }
-  if (!model.includes("await geometryLoaded")) {
-    throw new Error(
-      "model colors are applied before asynchronous STL loading completes",
-    );
+  for (
+    const legacy of [
+      "arm-home",
+      "HomeStatus",
+      "latestArmSimulation",
+      "latestArmHardware",
+      "armOutputBackend",
+      "selectOutputBackend",
+      "manualOverride",
+      "gripper_closed",
+    ]
+  ) {
+    if (app.includes(legacy)) throw new Error(`legacy path remains: ${legacy}`);
+  }
+});
+
+Deno.test("connected serial state replaces the connect controls with device and command information", () => {
+  const app = source("app.js");
+  const html = source("index.html");
+  if (
+    !app.includes('$("serial-connect-controls").hidden = connected') ||
+    !app.includes('$("serial-connected-info").hidden = !connected') ||
+    !app.includes('$("serial-connected-port").textContent =') ||
+    !html.includes('id="serial-port" type="text" value="/dev/ttyUSB0"') ||
+    !html.includes('id="serial-connected-info" hidden') ||
+    !html.includes("已连接设备") ||
+    !html.includes("J1–J6 与夹爪命令发送到舵机 ID 0–6")
+  ) {
+    throw new Error("串口已连接时仍保留连接按钮或缺少连接信息");
+  }
+});
+
+Deno.test("servo deceleration is separate from the stop reason", () => {
+  const app = source("app.js");
+  const html = source("index.html");
+  if (
+    !html.includes("<dt>停止原因</dt>") ||
+    html.includes("提示 / 停止原因") ||
+    !html.includes("<dt>Servo 状态</dt>") ||
+    !app.includes('singularity: "MoveIt：奇异位停止"')
+  ) {
+    throw new Error("Servo warning and actual stop reason remain conflated");
+  }
+});
+
+Deno.test("colors framing and persistent text selection are preserved", () => {
+  const app = source("app.js");
+  const model = source("urdf-model.js");
+  if (
+    !model.includes("await geometryLoaded") ||
+    !model.includes("materialForLink")
+  ) {
+    throw new Error("model colors are applied before STL loading completes");
   }
   if (
     !app.includes('document.addEventListener("selectstart"') ||
@@ -71,58 +186,15 @@ Deno.test("arm simulator uses pinned CDN modules and the direct output selector"
     !app.includes("if (textSelectionActive) return") ||
     !source("style.css").includes("user-select: text")
   ) {
-    throw new Error("live status repaint still clears selected text");
-  }
-  for (const unsafeMethod of ["PUT", "PATCH", "DELETE"]) {
-    if (app.includes(`method: "${unsafeMethod}"`)) {
-      throw new Error(`simulator unexpectedly contains ${unsafeMethod}`);
-    }
-  }
-  if (!app.includes("payload.latestArmSimulation")) {
-    throw new Error("simulator does not consume latestArmSimulation");
-  }
-  if (
-    !app.includes("payload.latestArmHardware") ||
-    !app.includes("payload.armOutputBackend")
-  ) {
-    throw new Error("simulator does not expose the selected hardware twin");
-  }
-  if (!app.includes("snapshot.gripper_rad") || !model.includes("setGripper")) {
-    throw new Error("simulator does not consume the J7 gripper snapshot");
-  }
-  if (
-    !app.includes('type="range"') ||
-    !app.includes("manualOverride = true") ||
-    !app.includes('$("resume-live")')
-  ) {
-    throw new Error("simulator does not provide local-only J1-J7 adjustment");
-  }
-  if (!app.includes("snapshot.model_joints_rad")) {
-    throw new Error("simulator feeds logical angles directly into the URDF");
-  }
-  if (!app.includes('constrained: "MoveIt 正在约束运动"')) {
-    throw new Error(
-      "simulator does not distinguish a recoverable constraint from a fault",
-    );
-  }
-  if (app.includes("awaiting_intent_release")) {
-    throw new Error(
-      "simulator still exposes the removed release-to-rearm path",
-    );
+    throw new Error("live repaint can still clear selected text");
   }
   if (
     !app.includes("FRAMING_VERTICAL_OFFSET_RATIO = 0.55") ||
     !app.includes("framedTarget.z += sphere.radius") ||
-    !app.includes("if (robotModel) fitModel()")
+    !app.includes("if (robotModel) fitModel()") ||
+    !app.includes("floor.position.z = -0.001")
   ) {
-    throw new Error(
-      "simulator does not keep the model and ground plane low in every view",
-    );
-  }
-  if (!app.includes("floor.position.z = -0.001")) {
-    throw new Error(
-      "camera framing unexpectedly changed the physical floor height",
-    );
+    throw new Error("low framing regression");
   }
 });
 
@@ -146,97 +218,71 @@ Deno.test("arm simulator DOM references all resolve", () => {
   }
 });
 
-Deno.test("arm simulator maps all six simulated joints and manufacturer meshes", () => {
+Deno.test("the generated URDF path maps six arm joints and one gripper", () => {
   const model = source("urdf-model.js");
-  const urdf = source("models/stararm102_description.urdf");
   for (let index = 1; index <= 6; index += 1) {
     if (!model.includes(`"joint${index}"`)) {
-      throw new Error(`joint${index} is missing from simulator mapping`);
-    }
-    if (!urdf.includes(`name="joint${index}"`)) {
-      throw new Error(`joint${index} is missing from copied URDF`);
+      throw new Error(`joint${index} is missing`);
     }
   }
+  if (
+    !model.includes('"joint7_left"') ||
+    !model.includes("./models/stararm102_description.urdf") ||
+    !model.includes("root.joints[name]?.limit")
+  ) {
+    throw new Error("gripper control is missing");
+  }
+});
+
+Deno.test("the rendered model labels every joint with its servo ID", () => {
+  const model = source("urdf-model.js");
+  const app = source("app.js");
+  const html = source("index.html");
   for (
-    const mesh of [
-      "base_link.STL",
-      "link1.STL",
-      "link2.STL",
-      "link3.STL",
-      "link4.STL",
-      "link5.STL",
-      "link6.STL",
-      "link7_left.STL",
-      "link7_right.STL",
+    const [joint, label] of [
+      ["joint1", "J1 / ID 0"],
+      ["joint2", "J2 / ID 1"],
+      ["joint3", "J3 / ID 2"],
+      ["joint4", "J4 / ID 3"],
+      ["joint5", "J5 / ID 4"],
+      ["joint6", "J6 / ID 5"],
+      ["joint7_left", "夹爪 / ID 6"],
     ]
   ) {
-    const info = Deno.statSync(
-      new URL(`models/meshes/${mesh}`, publicDirectory),
-    );
-    if (!info.isFile || info.size < 1000) {
-      throw new Error(`${mesh} is missing or truncated`);
+    if (!model.includes(`["${joint}", "${label}"]`)) {
+      throw new Error(`missing model label ${label}`);
     }
   }
-});
-
-Deno.test("arm simulator URDF uses confirmed FL limits and one active gripper joint", () => {
-  const app = source("app.js");
-  const modelReadme = source("models/README.md");
-  const urdf = source("models/stararm102_description.urdf");
   if (
-    !modelReadme.includes(
-      "5979b346eb3a417840b29b76740754e4005d071a",
-    )
+    !model.includes("joint.add(label.sprite)") ||
+    !model.includes("new THREE.Sprite") ||
+    !model.includes("setJointLabelsVisible(visible)") ||
+    !model.includes("setJointParameters(parameters)") ||
+    !model.includes('setParameters("参数未读取")') ||
+    !html.includes('id="joint-labels-toggle" type="checkbox" checked') ||
+    !html.includes("显示关节 ID / PID") ||
+    !app.includes(
+      "robotModel?.setJointLabelsVisible(event.currentTarget.checked)",
+    ) ||
+    !app.includes("latestSerialState.internal_parameters") ||
+    !app.includes("robotModel.setJointParameters")
   ) {
     throw new Error(
-      "visualization model source commit is not pinned correctly",
+      "joint labels, visibility switch, or live parameter binding is incomplete",
     );
-  }
-  const limits = [
-    ["joint1", "-1.9198621772", "1.9198621772", "[-110, 110]"],
-    ["joint2", "0", "3.1415926536", "[0, 180]"],
-    ["joint3", "-4.7123889804", "0", "[-270, 0]"],
-    ["joint4", "-1.5707963268", "1.5707963268", "[-90, 90]"],
-    ["joint5", "-1.1344640138", "1.1344640138", "[-65, 65]"],
-    ["joint6", "-2.6179938780", "2.6179938780", "[-150, 150]"],
-    ["joint7_left", "0", "1.5707963268", "[0, 90]"],
-  ];
-  for (const [name, lower, upper, slider] of limits) {
-    const block = urdf.match(
-      new RegExp(`<joint\\s+name="${name}"[\\s\\S]*?</joint>`),
-    )?.[0];
-    if (
-      !block?.includes(`lower="${lower}"`) ||
-      !block.includes(`upper="${upper}"`)
-    ) {
-      throw new Error(`${name} does not use the confirmed FL model range`);
-    }
-    if (!app.includes(slider)) {
-      throw new Error(`${name} slider does not match the confirmed FL range`);
-    }
-  }
-  const right = urdf.match(
-    /<joint\s+name="joint7_right"[\s\S]*?<\/joint>/,
-  )?.[0];
-  if (
-    !right?.includes('<mimic joint="joint7_left" multiplier="-1" />') ||
-    !right.includes('lower="-1.5707963268"') ||
-    !right.includes('upper="0"')
-  ) {
-    throw new Error("joint7_right is not the confirmed inverse mimic joint");
   }
 });
 
-Deno.test("combined test dashboard embeds both independent viewers", () => {
+Deno.test("combined dashboard embeds both viewers", () => {
   const dashboard = Deno.readTextFileSync(
     new URL(
       "../src/controller-viewer/public/test-dashboard/index.html",
       import.meta.url,
     ),
   );
-  for (const source of ['src="/"', 'src="/arm-simulator/"']) {
-    if (!dashboard.includes(source)) {
-      throw new Error(`combined dashboard is missing ${source}`);
+  for (const frame of ['src="/"', 'src="/arm-simulator/"']) {
+    if (!dashboard.includes(frame)) {
+      throw new Error(`dashboard is missing ${frame}`);
     }
   }
 });

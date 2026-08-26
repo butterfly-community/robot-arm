@@ -1,0 +1,39 @@
+name: stararm102
+
+services:
+  nolo-usb-server:
+    build:
+      context: .
+      dockerfile: vr-xr/src/nolo-usb-server/Dockerfile
+      additional_contexts:
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+    privileged: true
+    ports:
+      - 192.168.100.10:8765:8765
+    volumes:
+      - /dev:/dev
+      - ./vr-xr/state:/state
+      - servo-ipc:/ipc
+    command:
+      - --host=0.0.0.0
+      - --port=8765
+      - --static-dir=/srv/controller-viewer
+      - --gyro-calibration-file=/state/gyro-bias-v1.json
+      - --servo-ipc=/ipc/moveit-servo.sock
+
+  moveit:
+    build:
+      context: .
+      dockerfile: arm/ros2/Dockerfile
+      additional_contexts:
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+    depends_on:
+      - nolo-usb-server
+    environment:
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+      ROS_DOMAIN_ID: "42"
+    volumes:
+      - servo-ipc:/ipc
+
+volumes:
+  servo-ipc:

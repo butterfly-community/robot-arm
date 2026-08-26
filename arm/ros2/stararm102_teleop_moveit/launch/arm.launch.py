@@ -1,3 +1,5 @@
+"""Single ROS path for software feedback and optional Rust serial I/O."""
+
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -14,12 +16,10 @@ from stararm102_teleop_moveit.launch_support import (
 
 
 def generate_launch_description():
-    vendor_share = get_package_share_directory("stararm102_moveit_config")
+    package_share = get_package_share_directory("stararm102_teleop_moveit")
     ipc_path = LaunchConfiguration("ipc_path")
-
     moveit_config, servo_params, move_group_params = load_moveit_parameters()
-    controllers = os.path.join(vendor_share, "config", "ros2_controllers.yaml")
-
+    controllers = os.path.join(package_share, "config", "controllers.yaml")
     return LaunchDescription(
         [
             DeclareLaunchArgument("ipc_path", default_value="/ipc/moveit-servo.sock"),

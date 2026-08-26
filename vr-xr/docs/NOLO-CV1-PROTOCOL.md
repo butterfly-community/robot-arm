@@ -310,7 +310,7 @@ report[59]：HMD/USB 中继采样序号
 24/59 **不能判断基站电源状态**。
 
 以下 Rust API 状态字段均由采样序号派生：`sample_sequence`、
-`communication_fresh`、`sample_changed` 和 `hmd_relay_online`。
+`communication_fresh` 和 `hmd_relay_online`。
 它们只表示采样新鲜度，不是光学 tracking valid/tracked 结论。没有协议依据的
 `pose_usable`、`optical_tracking_valid`，以及迁移期的 `source_online` 和 `flags`
 均未保留。手柄帧的 `sample_sequence` 取

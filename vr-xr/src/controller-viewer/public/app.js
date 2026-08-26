@@ -7,7 +7,7 @@ import {
   relativeQuaternionToModel,
   subtract,
   transformPosition,
-} from "./pose-math.js";
+} from "./pose-math.js?v=20260826-1";
 
 const $ = (id) => document.getElementById(id);
 const HOLD_MS = 6000;
@@ -18,9 +18,9 @@ const circumference = 2 * Math.PI * 49;
 let latest = null;
 let reference = null;
 let positionFrame = null;
-let menuDownAt = null;
-let menuWasLong = false;
-let previousMenuPressed = false;
+let calibrationDownAt = null;
+let calibrationWasLong = false;
+let previousCalibrationPressed = false;
 let originHoldSamples = [];
 let originFusionCalibrationStatus = "idle";
 let originFusionCalibrationAttempt = 0;
@@ -32,6 +32,7 @@ let lastTrailAt = 0;
 let selectedSource = 0;
 let simulationRequested = false;
 let simulationActive = false;
+let latestBackendStatus = null;
 
 const SOURCE_LABELS = ["手柄 1", "手柄 2", "头部"];
 const BASE_STATION_FRAME = {
@@ -49,9 +50,9 @@ function createViewState(sourceId) {
       ? { position: [0, 0, 0], orientation: [0, 0, 0, 1], timeNs: 0 }
       : null,
     positionFrame: head ? BASE_STATION_FRAME : null,
-    menuDownAt: null,
-    menuWasLong: false,
-    previousMenuPressed: false,
+    calibrationDownAt: null,
+    calibrationWasLong: false,
+    previousCalibrationPressed: false,
     originHoldSamples: [],
     originFusionCalibrationStatus: "idle",
     originFusionCalibrationAttempt: 0,
@@ -73,9 +74,9 @@ function saveViewState() {
     latest,
     reference,
     positionFrame,
-    menuDownAt,
-    menuWasLong,
-    previousMenuPressed,
+    calibrationDownAt,
+    calibrationWasLong,
+    previousCalibrationPressed,
     originHoldSamples,
     originFusionCalibrationStatus,
     originFusionCalibrationAttempt,
@@ -92,9 +93,9 @@ function loadViewState() {
   latest = state.latest;
   reference = state.reference;
   positionFrame = state.positionFrame;
-  menuDownAt = state.menuDownAt;
-  menuWasLong = state.menuWasLong;
-  previousMenuPressed = state.previousMenuPressed;
+  calibrationDownAt = state.calibrationDownAt;
+  calibrationWasLong = state.calibrationWasLong;
+  previousCalibrationPressed = state.previousCalibrationPressed;
   originHoldSamples = state.originHoldSamples;
   originFusionCalibrationStatus = state.originFusionCalibrationStatus;
   originFusionCalibrationAttempt = state.originFusionCalibrationAttempt;
@@ -112,15 +113,15 @@ function sourceId(frame) {
 
 function cancelCalibrationHold() {
   if (
-    menuDownAt !== null ||
+    calibrationDownAt !== null ||
     originFusionCalibrationStatus === "waiting" ||
     originFusionCalibrationStatus === "pending"
   ) {
     originFusionCalibrationAttempt += 1;
   }
-  menuDownAt = null;
-  menuWasLong = false;
-  previousMenuPressed = false;
+  calibrationDownAt = null;
+  calibrationWasLong = false;
+  previousCalibrationPressed = false;
   originHoldSamples = [];
   originFusionCalibrationStatus = "idle";
 }
@@ -154,8 +155,8 @@ function selectSource(nextSource) {
     setCalibrationMessage(
       positionFrame ? "标定已保留" : "记录原点和零姿态",
       positionFrame
-        ? "当前手柄的独立标定仍然有效；连续按住菜单键 6 秒可重新标定。"
-        : "人和手柄正对基站，触摸板朝上、手柄头部指向基站，静止长按菜单键 6 秒。",
+        ? "当前手柄的独立标定仍然有效；连续按住右侧键 6 秒可重新标定。"
+        : "人和手柄正对基站，触摸板朝上、手柄头部指向基站，静止长按右侧键 6 秒。",
     );
     $("calibration-state").textContent = positionFrame ? "已完成" : "未开始";
   }
@@ -165,6 +166,7 @@ function selectSource(nextSource) {
     $("connection").textContent = `等待${SOURCE_LABELS[selectedSource]}数据`;
     $("connection").classList.add("waiting");
   }
+  if (latestBackendStatus) restoreViewFromBackend(latestBackendStatus);
 }
 
 document.querySelectorAll(".source-button").forEach((button) => {
@@ -224,7 +226,7 @@ async function requestOriginFusionCalibration(sourceId, attempt) {
     ) {
       setCalibrationMessage(
         "Fusion 标定启动失败",
-        `后端请求失败：${error.message}。请松开菜单键后重试。`,
+        `后端请求失败：${error.message}。请松开右侧键后重试。`,
       );
     }
   }
@@ -237,6 +239,22 @@ async function requestOriginFusionCalibration(sourceId, attempt) {
     sourceId === selectedSource && attempt === originFusionCalibrationAttempt
   ) {
     originFusionCalibrationStatus = status;
+  }
+}
+
+async function storeHumanReference(sourceId, value) {
+  try {
+    const response = await fetch(`/api/human-reference/${sourceId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch (error) {
+    setCalibrationMessage(
+      "标定已在当前页面完成",
+      `后端保存人体参考失败：${error.message}。刷新前请重新标定。`,
+    );
   }
 }
 
@@ -327,10 +345,10 @@ function completeOrigin() {
       : "Fusion 标定状态无效";
     setCalibrationMessage(
       "本次标定未完成",
-      `${reason}；请松开菜单键，保持手柄静止后重新长按 6 秒。`,
+      `${reason}；请松开右侧键，保持手柄静止后重新长按 6 秒。`,
     );
     $("calibration-state").textContent = "Fusion 标定未完成";
-    menuWasLong = true;
+    calibrationWasLong = true;
     return;
   }
   const averaged = averagePoseSamples(originHoldSamples);
@@ -340,10 +358,10 @@ function completeOrigin() {
   } catch {
     setCalibrationMessage(
       "无法确定基站方向",
-      "手柄位置与基站原点重合，请移动后重新长按菜单键 6 秒。",
+      "手柄位置与基站原点重合，请移动后重新长按右侧键 6 秒。",
     );
     $("calibration-state").textContent = "基站方向不可用";
-    menuWasLong = true;
+    calibrationWasLong = true;
     return;
   }
   reference = {
@@ -351,11 +369,17 @@ function completeOrigin() {
     orientation: averaged.orientation,
     timeNs: latest.time_ns,
   };
+  void storeHumanReference(selectedSource, {
+    position: reference.position,
+    orientation: reference.orientation,
+    time_ns: reference.timeNs,
+    simulated: latest.simulated === true,
+  });
   positionFrame = baseFrame;
   positionTrail = [[0, 0, 0]];
   positionTrailRevision++;
   lastTrailAt = 0;
-  menuWasLong = true;
+  calibrationWasLong = true;
   $("origin-samples").textContent = String(averaged.sampleCount);
   $("origin-jitter").textContent = `${
     (averaged.rmsMeters * 1000).toFixed(1)
@@ -367,13 +391,13 @@ function completeOrigin() {
   } / 前 ${fmt(baseFrame.forward, 3)}`;
   setCalibrationMessage(
     "标定完成",
-    "已将朝向基站定义为前方，并记录原点和零姿态；已有陀螺仪零偏继续复用。现在可以松开菜单键。",
+    "已将朝向基站定义为前方，并记录原点和零姿态；已有陀螺仪零偏继续复用。现在可以松开右侧键。",
   );
   $("calibration-state").textContent = "已完成（正对基站）";
   updateRelative(latest);
 }
 
-function updateFrame(frame, processMenu = true) {
+function updateFrame(frame, processCalibrationButton = true) {
   latest = frame;
   const isHead = selectedSource === 2;
   const valid = validPose(frame);
@@ -387,8 +411,22 @@ function updateFrame(frame, processMenu = true) {
     ? "头部不适用"
     : "等待新的有效位置样本";
   $("raw-orientation").textContent = fmt(frame.orientation);
+  $("trigger-state").textContent = isHead
+    ? "头部无按键"
+    : !frame.communication_fresh
+    ? "输入未激活"
+    : frame.trigger_pressed
+    ? "按下"
+    : "松开";
+  $("squeeze-state").textContent = isHead
+    ? "头部无按键"
+    : !frame.communication_fresh
+    ? "输入未激活"
+    : frame.squeeze_pressed
+    ? "按下"
+    : "松开";
   $("menu-state").textContent = isHead
-    ? "头部无菜单键"
+    ? "头部无按键"
     : !frame.communication_fresh
     ? "输入未激活"
     : frame.menu_pressed
@@ -447,11 +485,13 @@ function updateFrame(frame, processMenu = true) {
     ? "头部序号未变化"
     : "控制器序号未变化";
   $("source-online-label").textContent = `${SOURCE_LABELS[selectedSource]}通信`;
-  $("menu-state-label").textContent = isHead ? "输入" : "菜单键";
+  $("trigger-state-label").textContent = isHead ? "输入" : "Trigger（接管）";
+  $("squeeze-state-label").textContent = isHead ? "输入" : "右侧键（标定）";
+  $("menu-state-label").textContent = isHead ? "输入" : "Menu（夹爪）";
   if (isHead) {
     setCalibrationMessage(
       "基站跟踪坐标",
-      "头部没有菜单键；当前位置直接按 NOLO 基站坐标显示，姿态零点为后端启动时的 Fusion 初始状态。",
+      "头部没有手柄按键；当前位置直接按 NOLO 基站坐标显示，姿态零点为后端启动时的 Fusion 初始状态。",
     );
     $("calibration-state").textContent = "基站坐标（未做人类前方重置）";
     $("forward-source").textContent = "NOLO 基站跟踪轴";
@@ -461,15 +501,15 @@ function updateFrame(frame, processMenu = true) {
     $("forward-fit").textContent = "不适用";
   }
 
-  const pressed = !isHead && valid && frame.menu_pressed;
+  const pressed = !isHead && valid && frame.squeeze_pressed;
   if (!valid) {
     cancelCalibrationHold();
-  } else if (processMenu && !isHead) {
+  } else if (processCalibrationButton && !isHead) {
     const sample = poseSample(frame);
     if (pressed) appendBounded(originHoldSamples, sample);
-    if (pressed && !previousMenuPressed) {
-      menuDownAt = performance.now();
-      menuWasLong = false;
+    if (pressed && !previousCalibrationPressed) {
+      calibrationDownAt = performance.now();
+      calibrationWasLong = false;
       originHoldSamples = [sample];
       originFusionCalibrationAttempt += 1;
       originFusionCalibrationStatus = "waiting";
@@ -482,18 +522,18 @@ function updateFrame(frame, processMenu = true) {
           ? "陀螺仪零偏已从文件加载或此前完成，本次只重新记录原点和零姿态。"
           : "尚无零偏文件；第一秒用于摆稳，随后只在本次完成零偏并写入文件，最后约 1.2 秒记录原点和零姿态。",
       );
-    } else if (!pressed && previousMenuPressed) {
-      if (!menuWasLong) {
+    } else if (!pressed && previousCalibrationPressed) {
+      if (!calibrationWasLong) {
         setCalibrationMessage(
           positionFrame ? "标定保持不变" : "按住时间不足",
           `短按不会改变标定；${
             positionFrame ? "重新标定" : "开始标定"
-          }请连续按住菜单键 6 秒。`,
+          }请连续按住右侧键 6 秒。`,
         );
       }
       cancelCalibrationHold();
     }
-    previousMenuPressed = pressed;
+    previousCalibrationPressed = pressed;
   }
   if (valid) updateRelative(frame);
 }
@@ -519,15 +559,73 @@ function setSimulationState(requested, active) {
   button.setAttribute("aria-pressed", String(active));
 }
 
+function restoreViewFromBackend(payload) {
+  const statusFrame = payload.latestFrames?.find((candidate) =>
+    sourceId(candidate) === selectedSource
+  );
+  const frame = viewStates[selectedSource].latest ?? statusFrame;
+  if (!validPose(frame)) return;
+  const storedReference = payload.humanReferences?.[selectedSource];
+  if (
+    !storedReference ||
+    storedReference.simulated !== (frame.simulated === true) ||
+    !Array.isArray(storedReference.position) ||
+    storedReference.position.length !== 3 ||
+    !storedReference.position.every(Number.isFinite) ||
+    !Array.isArray(storedReference.orientation) ||
+    storedReference.orientation.length !== 4 ||
+    !storedReference.orientation.every(Number.isFinite)
+  ) return;
+  const currentPosition = frame.position;
+  const restoredReference = {
+    position: [...storedReference.position],
+    orientation: normalizeQuaternion([...storedReference.orientation]),
+  };
+  let restoredFrame;
+  try {
+    restoredFrame = frameFacingBaseStation(restoredReference.position);
+  } catch {
+    return;
+  }
+  const restoredPosition = transformPosition(
+    currentPosition,
+    restoredReference.position,
+    restoredFrame,
+  );
+  Object.assign(viewStates[selectedSource], {
+    latest: frame,
+    reference: { ...restoredReference, timeNs: frame.time_ns },
+    positionFrame: restoredFrame,
+    calibrationWasLong: frame.squeeze_pressed === true,
+    previousCalibrationPressed: frame.squeeze_pressed === true,
+    originFusionCalibrationStatus: "accepted",
+    relativePosition: restoredPosition,
+    relativeOrientation: relativeQuaternionToModel(
+      restoredReference.orientation,
+      frame.orientation,
+    ),
+    positionTrail: [restoredPosition],
+    positionTrailRevision: viewStates[selectedSource].positionTrailRevision + 1,
+    lastTrailAt: 0,
+  });
+  loadViewState();
+  updateFrame(frame, false);
+  setCalibrationMessage(
+    "已从后端会话恢复",
+    "人体坐标原点和姿态参考由后端保存，刷新页面不会重新标定。",
+  );
+  $("calibration-state").textContent = "已完成（后端会话）";
+}
+
 function resetForAutomaticSimulationCalibration() {
   if (selectedSource !== 0) selectSource(0);
   viewStates[0] = createViewState(0);
   loadViewState();
   setCalibrationMessage(
     "模拟数据自动标定中",
-    "虚拟手柄会保持静止并自动长按 Menu 6 秒；无需操作真实手柄。标定和接管门槛完成后会先预抬升 10 厘米，再开始循环。",
+    "虚拟手柄会保持静止并自动长按右侧键 6 秒；无需操作真实手柄。标定完成后按住 Trigger，先预抬升 10 厘米，再开始循环。",
   );
-  $("calibration-state").textContent = "等待虚拟 Menu 长按";
+  $("calibration-state").textContent = "等待虚拟右侧键长按";
   $("position-lr").textContent = "自动标定中";
   $("position-ud").textContent = "自动标定中";
   $("position-fb").textContent = "自动标定中";
@@ -539,10 +637,12 @@ async function refreshSimulationState() {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
+    latestBackendStatus = payload;
     setSimulationState(
       payload.simulationRequested === true,
       payload.simulationActive === true,
     );
+    restoreViewFromBackend(payload);
   } catch {
     // SSE connection state already reports server availability.
   }
@@ -629,7 +729,9 @@ function animateHold(now) {
     requestAnimationFrame(animateHold);
     return;
   }
-  let held = menuDownAt === null ? 0 : Math.min(HOLD_MS, now - menuDownAt);
+  let held = calibrationDownAt === null
+    ? 0
+    : Math.min(HOLD_MS, now - calibrationDownAt);
   if (
     held >= FUSION_CALIBRATION_DELAY_MS &&
     originFusionCalibrationStatus === "waiting"
@@ -649,8 +751,8 @@ function animateHold(now) {
       );
     }
   }
-  if (held >= HOLD_MS && !menuWasLong) completeOrigin();
-  if (menuWasLong && latest?.menu_pressed) held = HOLD_MS;
+  if (held >= HOLD_MS && !calibrationWasLong) completeOrigin();
+  if (calibrationWasLong && latest?.squeeze_pressed) held = HOLD_MS;
   const ratio = held / HOLD_MS;
   $("hold-seconds").textContent = (held / 1000).toFixed(1);
   $("meter-progress").style.strokeDashoffset = String(

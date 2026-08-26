@@ -1,158 +1,62 @@
-diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
-index 4e86e48..07ac438 100644
---- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
-+++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
-@@ -106,7 +106,7 @@
-     <axis
-       xyz="0 0 -1" />
-     <limit
--      lower="-2.27"
--      upper="2.27"
-+      lower="-1.9198621772"
-+      upper="1.9198621772"
-       effort="100"
-       velocity="1" />
-@@ -222,7 +222,7 @@
-     <axis
-       xyz="0 0 -1" />
-    <limit
--      lower="-3.14"
-+      lower="-4.7123889804"
-       upper="0"
-       effort="100"
-       velocity="1" />
-@@ -281,6 +281,6 @@
-       xyz="0 0 -1" />
-     <limit
--      lower="-1.57"
--      upper="2.2"
-+      lower="-1.5707963268"
-+      upper="1.5707963268"
-       effort="100"
-       velocity="1" />
-@@ -339,6 +339,6 @@
-       xyz="0 0 -1" />
-     <limit
--      lower="-1.2"
--      upper="1.2"
-+      lower="-1.1344640138"
-+      upper="1.1344640138"
-       effort="100"
-       velocity="1" />
-@@ -397,6 +397,6 @@
-       xyz="0 0 -1" />
-     <limit
--      lower="-3.14"
--      upper="3.14"
-+      lower="-2.6179938780"
-+      upper="2.6179938780"
-       effort="100"
-       velocity="1" />
-@@ -455,7 +455,7 @@
-       xyz="0 0 -1" />
-     <limit
-       lower="0"
--      upper="1.57"
-+      upper="1.5707963268"
-       effort="5"
-       velocity="3.14" />
-   </joint>
-@@ -512,10 +512,18 @@
-     <axis
-       xyz="0 0 -1" />
-     <limit
--      lower="-1.57"
-+      lower="-1.5707963268"
-       upper="0"
-       effort="5"
-       velocity="3.14" />
-     <mimic joint="joint7_left" multiplier="-1" />
-   </joint>
-+  <link name="tool0" />
-+  <joint name="tool0_fixed" type="fixed">
-+    <origin
-+      xyz="0.012325 0 -0.07313"
-+      rpy="1.5708 -1.5708 0" />
-+    <parent link="link6" />
-+    <child link="tool0" />
-+  </joint>
- </robot>
-diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
-index 409326d..60a6e6a 100644
---- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
-+++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.ros2_control.xacro
-@@ -6,6 +6,6 @@
-     </hardware>
-     <joint name="joint1">
-       <command_interface name="position">
--        <param name="min">-2.27</param>
--        <param name="max">2.27</param>
-+        <param name="min">-1.9198621772</param>
-+        <param name="max">1.9198621772</param>
-       </command_interface>
-@@ -14,6 +14,6 @@
-     </joint>
-     <joint name="joint2">
-       <command_interface name="position">
--        <param name="min">-1.57</param>
--        <param name="max">1.57</param>
-+        <param name="min">0</param>
-+        <param name="max">3.1415926536</param>
-       </command_interface>
-@@ -22,6 +22,6 @@
-     </joint>
-     <joint name="joint3">
-       <command_interface name="position">
--        <param name="min">-1.57</param>
--        <param name="max">1.57</param>
-+        <param name="min">-4.7123889804</param>
-+        <param name="max">0</param>
-       </command_interface>
-@@ -30,6 +30,6 @@
-     </joint>
-     <joint name="joint4">
-       <command_interface name="position">
--        <param name="min">-1.57</param>
--        <param name="max">1.57</param>
-+        <param name="min">-1.5707963268</param>
-+        <param name="max">1.5707963268</param>
-       </command_interface>
-@@ -38,6 +38,6 @@
-     </joint>
-     <joint name="joint5">
-       <command_interface name="position">
--        <param name="min">-1.57</param>
--        <param name="max">1.57</param>
-+        <param name="min">-1.1344640138</param>
-+        <param name="max">1.1344640138</param>
-       </command_interface>
-@@ -46,6 +46,6 @@
-     </joint>
-     <joint name="joint6">
-       <command_interface name="position">
--        <param name="min">-2.27</param>
--        <param name="max">2.27</param>
-+        <param name="min">-2.6179938780</param>
-+        <param name="max">2.6179938780</param>
-       </command_interface>
-@@ -55,7 +55,7 @@
-     <joint name="joint7_left">
-       <command_interface name="position">
-         <param name="min">0</param>
--        <param name="max">1.57</param>
-+        <param name="max">1.5707963268</param>
-       </command_interface>
-       <state_interface name="position"/>
-       <state_interface name="velocity"/>
-@@ -63,8 +63,4 @@
-     <joint name="joint7_right">
--      <command_interface name="position">
--        <param name="min">-1.57</param>
--        <param name="max">0</param>
--      </command_interface>
-       <state_interface name="position"/>
-       <state_interface name="velocity"/>
-       <param name="mimic">joint7_left</param>
+diff --git a/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt b/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
+--- a/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
++++ b/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
+@@ -1,14 +1,7 @@
+-cmake_minimum_required(VERSION 2.8.3)
+-
+-project(stararm102_description)
+-
+-find_package(catkin REQUIRED)
+-
+-catkin_package()
+-
+-find_package(roslaunch)
+-
+-foreach(dir config launch meshes urdf)
+-	install(DIRECTORY ${dir}/
+-		DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/${dir})
+-endforeach(dir)
++cmake_minimum_required(VERSION 3.22)
++project(stararm102_description)
++
++find_package(ament_cmake REQUIRED)
++
++install(DIRECTORY meshes urdf DESTINATION share/${PROJECT_NAME})
++ament_package()
+diff --git a/ROS2_HUMBLE/src/stararm102_description/package.xml b/ROS2_HUMBLE/src/stararm102_description/package.xml
+--- a/ROS2_HUMBLE/src/stararm102_description/package.xml
++++ b/ROS2_HUMBLE/src/stararm102_description/package.xml
+@@ -1,21 +1,16 @@
+-<package format="2">
++<?xml version="1.0"?>
++<package format="3">
+   <name>stararm102_description</name>
+   <version>1.0.0</version>
+-  <description>
+-    <p>URDF Description package for stararm102_description</p>
+-    <p>This package contains configuration data, 3D models and launch files
+-for stararm102_description robot</p>
+-  </description>
++  <description>URDF description and meshes for Star Arm 102</description>
+   <author>TODO</author>
+-  <maintainer email="TODO@email.com" />
++  <maintainer email="TODO@email.com">TODO</maintainer>
+   <license>BSD</license>
+-  <buildtool_depend>catkin</buildtool_depend>
+-  <depend>roslaunch</depend>
+-  <depend>robot_state_publisher</depend>
+-  <depend>rviz</depend>
+-  <depend>joint_state_publisher_gui</depend>
+-  <depend>gazebo</depend>
++
++  <buildtool_depend>ament_cmake</buildtool_depend>
++  <exec_depend>urdf</exec_depend>
++
+   <export>
+-    <architecture_independent />
++    <build_type>ament_cmake</build_type>
+   </export>
+ </package>
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
 index 24734ba..c9fe2ed 100644
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
@@ -168,5 +72,14 @@ index 24734ba..c9fe2ed 100644
 -        <joint name="joint4"/>
 -        <joint name="joint5"/>
 -        <joint name="joint6"/>
-+        <chain base_link="base_link" tip_link="tool0"/>
++        <chain base_link="base_link" tip_link="link6"/>
      </group>
+diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml b/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
+--- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
++++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
+@@ -1,4 +1,3 @@
+ arm:
+-  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+-  kinematics_solver_search_resolution: 0.0050000000000000001
++  kinematics_solver: trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+   kinematics_solver_timeout: 0.0050000000000000001

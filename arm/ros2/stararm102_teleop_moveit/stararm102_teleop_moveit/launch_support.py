@@ -1,4 +1,4 @@
-"""Shared MoveIt launch construction for simulation and hardware."""
+"""Construction helpers for the single MoveIt control path."""
 
 from launch_ros.actions import Node
 from launch_param_builder import ParameterBuilder
@@ -67,11 +67,11 @@ def control_nodes(
     return nodes
 
 
-def bridge_node(ipc_path: object, simulation_only: bool = True) -> Node:
+def bridge_node(ipc_path: object) -> Node:
     return Node(
         package="stararm102_teleop_moveit",
         executable="servo_ipc_bridge",
-        parameters=[{"ipc_path": ipc_path, "simulation_only": simulation_only}],
+        parameters=[{"ipc_path": ipc_path}],
         output="screen",
     )
 

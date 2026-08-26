@@ -2,6 +2,7 @@ import {
   averagePoseSamples,
   dot,
   frameFacingBaseStation,
+  multiplyQuaternions,
   quaternionAxisAngle,
   relativeQuaternionToModel,
   transformPosition,
@@ -95,7 +96,7 @@ Deno.test("relative orientation removes a non-identity reference", () => {
   assertNear(axisAngle.degrees, 60);
 });
 
-Deno.test("NOLO physical head-up raw -X maps to model +X", () => {
+Deno.test("NOLO physical front-up raw -X maps to model +X", () => {
   const half = Math.PI / 4;
   const relative = relativeQuaternionToModel(
     [0, 0, 0, 1],
@@ -108,7 +109,7 @@ Deno.test("NOLO physical head-up raw -X maps to model +X", () => {
   assertNear(axisAngle.degrees, 90);
 });
 
-Deno.test("NOLO physical left-tilt raw +Y maps to model +Z", () => {
+Deno.test("NOLO raw +Y maps to model +Z", () => {
   const half = Math.PI / 4;
   const relative = relativeQuaternionToModel(
     [0, 0, 0, 1],

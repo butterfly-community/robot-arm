@@ -2,32 +2,62 @@
 
 ## 结论
 
-- 仿真主路径已经采用 **ROS 2 Jazzy + MoveIt Servo** 管理 IK/Jacobian、奇异、关节限位、
+- 主路径采用 **ROS 2 Jazzy + MoveIt Servo** 管理 IK/Jacobian、奇异、关节限位、
   碰撞、平滑和停止；旧 `SimulationController` 已删除，不再维护第二套自写运行时 IK。
-- Rust NOLO 进程只生成带时间戳的目标 TCP 位姿，通过 Unix socket 与薄 `rclpy` 桥接器
-  对接标准 Servo Pose API；当前 TCP 由官方 `robot_state_publisher`/TF2 根据厂家 URDF
-  计算并随反馈返回，Rust 不保存关节链，也不实现 FK。
-- 真实机械臂复用同一个 Servo 上游，用标准 `JointTrajectoryController` 和官方
-  `JointStateTopicSystem` 替换 `GenericSystem` 输出端。新品 FL 的零位、方向和实际动态表现
-  仍需接机测量。
+- 当前六轴 IK 插件使用 **TRAC-IK**，替换厂家默认 KDL。它直接实现 MoveIt
+  `KinematicsBase`，不需要为每版 URDF 重新生成解析代码；保持 Jazzy 2.0.2 插件默认
+  `Distance` 模式和现有 `5 ms` timeout，不添加另一套求解门限。
+- Rust NOLO 进程只生成带时间戳的目标末端位姿，通过 Unix socket 与薄 `rclpy` 桥接器
+  对接标准 Servo Pose API；当前末端直接使用厂家 URDF 的 `link6`，由官方
+  `robot_state_publisher`/TF2 计算并随反馈返回。Rust 不保存关节链，也不实现 FK；在夹爪
+  TCP 完成实测前不添加额外工具坐标系。
+- 软件反馈和真实机械臂复用标准 `JointTrajectoryController` 与同一个官方
+  `JointStateTopicSystem`；是否连接串口只由 Rust `ArmJointIo` 决定。新品 FL 的实际动态
+  表现仍需接机测量。
 
 这能把设备采集和机器人运动学分开：手柄链路负责“用户想让 TCP 怎样运动”，MoveIt
 负责“当前机械臂如何实现这个目标”。浏览器不计算 IK，也不直接访问串口；机械臂页
-只负责输出选择、标准回零请求和状态显示，实时关节状态来自对应 ROS 后端。
+负责手柄/手动切换、普通关节请求、串口选择和统一反馈显示。
 
 ## 已核对的方案
 
-### MoveIt Servo：双输出软件已接入，真实后端待现场验收
+### MoveIt Servo：统一路径已接入并完成真机定性验收
 
 [MoveIt Servo](https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html)
 原生接收 Pose、Twist 或 JointJog 命令，并提供关节位置/速度限制、奇异检查、碰撞检查、
 输入平滑和陈旧命令停止。这些正是通电示教需要由成熟框架统一处理的功能，比在本项目
 逐项补写 IK 和安全边界更合适。
 
-两条容器链路复用厂家 `stararm102_description`、SRDF、KDL、碰撞网格和
-`JointTrajectoryController`；仿真使用 `mock_components/GenericSystem`，真机使用官方
-`JointStateTopicSystem` 加 SDK 薄适配。本项目只保存必要补丁、Servo 参数、启动文件
+唯一容器链路复用厂家 `stararm102_description`、SRDF、TRAC-IK、碰撞网格、
+`JointTrajectoryController` 和官方 `JointStateTopicSystem`。本项目只保存必要补丁、Servo 参数、启动文件
 和 IPC 桥接器；厂家完整源码保持在 `~/Develop/temp`。
+
+### TRAC-IK：当前六轴求解器
+
+[MoveIt 的 TRAC-IK 文档](https://moveit.picknik.ai/main/doc/how_to_guides/trac_ik/trac_ik_tutorial.html)
+将其定义为 KDL 的直接替代。TRAC-IK 同时运行带随机跳出的 KDL 改进算法和 SQP 优化算法，
+比 KDL 的单次牛顿迭代更能处理关节范围和局部极小值。Jazzy 已提供
+`trac_ik_kinematics_plugin` 二进制包，因此当前阶段不维护外部求解器源码。
+
+这项替换改善 Pose IK 和 MoveGroup 的收敛，不改变 MoveIt Servo 根据机器人雅可比条件数
+生成的奇异状态。状态 1/3 是否出现仍由姿态和 URDF 几何决定，不能用更换 IK 插件掩盖。
+
+容器实测已经确认 Servo 和 move_group 都加载
+`trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin`；`/compute_ik` 返回成功码 `1` 和一组六轴解。
+同一轮标准模拟仍能采集到状态 1/3，证明求解器替换有效，但 1/3 不是 KDL 求解失败。
+日志中的 `kdl_parser` 只负责解析 URDF 运动树，不是 IK 插件回退。
+
+### IKFast：模型稳定后才考虑
+
+[MoveIt IKFast](https://moveit.picknik.ai/main/doc/examples/ikfast/ikfast_tutorial.html) 可以为六轴链
+生成速度很快的解析 C++ 插件，但生成结果与具体 URDF 几何绑定。厂家模型刚更新过 J3 几何，
+其他轴和末端仍在确认，此时生成并维护 IKFast 只会增加一份需要随模型重做的代码。
+
+### pick_ik 和 EAIK：当前不接入
+
+`pick_ik` 的全局模式包含进化搜索和梯度优化，适合复杂目标和冗余机械臂，但不是当前实时六轴
+路径最薄的替换。EAIK 能从 URDF 分析部分 6R 结构，但目前没有可直接安装的 MoveIt 2
+`KinematicsBase` 插件，需要额外适配层；两者当前都不进入运行链。
 
 ### `openrr/k`：不替换当前 6R 求解器
 
@@ -64,13 +94,16 @@ NOLO USB + Fusion + 位置滤波
              ▼
 MoveIt Servo（厂家模型、IK/Jacobian、限位、奇异、碰撞、平滑、超时停止）
              │
-             ├── GenericSystem + arm/hand controllers（仿真）
-             └── JointStateTopicSystem + SDK 薄适配（J1–J6 + ID 6，待现场验收）
-                                      │
-                                      ▼
-                         /joint_states + TF2 TCP → Rust/网页
+             ▼
+arm/hand controllers -> JointStateTopicSystem -> Rust ArmJointIo
+                                                    │
+                                  软件反馈或 ID 0–6 串口 Monitor
+                                                    │
+                                                    ▼
+                                      /joint_states + TF2 TCP → Rust/网页
 ```
 
-真机尚未完成实测；MoveIt、ros2_control 和厂家驱动自身的行为不由项目重复实现。运行与
+真机已经完成串口反馈和运动的定性实测，定量精度、外参和长期稳定性仍待测量；MoveIt、
+ros2_control 和厂家驱动自身的行为不由项目重复实现。运行与
 补丁说明见
 [`../ros2/README.md`](../ros2/README.md)。

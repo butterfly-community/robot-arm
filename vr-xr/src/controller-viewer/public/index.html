@@ -33,7 +33,7 @@
           <p class="kicker">NOLO 官方方向约束</p>
           <h2 id="calibration-title">记录原点和零姿态</h2>
           <p id="calibration-help">
-            人正对基站并保持至少 50 厘米距离；触摸板朝上，手柄头部水平指向基站、尾部朝向胸口，保持静止长按菜单键 6 秒。已有零偏文件时只记录原点和零姿态，不会再次标定陀螺仪。
+            人正对基站，手柄位置不要与基站坐标原点重合；触摸板朝上，手柄头部水平指向基站、尾部朝向胸口，保持静止长按右侧键 6 秒。已有零偏文件时只记录原点和零姿态，不会再次标定陀螺仪。
           </p>
         </div>
         <div class="hold-meter" role="progressbar" aria-valuemin="0"
@@ -164,14 +164,18 @@
               <dd id="gyro-bias" class="mono">—</dd>
               <dt>零偏标定</dt>
               <dd id="gyro-calibration-state">未开始</dd>
-              <dt id="menu-state-label">菜单键</dt>
+              <dt id="trigger-state-label">Trigger（接管）</dt>
+              <dd id="trigger-state">—</dd>
+              <dt id="squeeze-state-label">右侧键（标定）</dt>
+              <dd id="squeeze-state">—</dd>
+              <dt id="menu-state-label">Menu（夹爪）</dt>
               <dd id="menu-state">—</dd>
             </dl>
             <button id="gyro-calibrate" class="diagnostic-action" type="button">
               静止 3 秒校准当前设备零偏
             </button>
             <p class="diagnostic-help">
-              后端会持久化每个设备第一次成功的零偏，之后长按菜单键只记录原点和零姿态。此按钮仅用于明确需要覆盖已保存零偏时；点击后将当前设备平稳放在桌面，任何动作都会清零连续静止计时。
+              后端会持久化每个设备第一次成功的零偏，之后长按右侧键只记录原点和零姿态。此按钮仅用于明确需要覆盖已保存零偏时；点击后将当前设备平稳放在桌面，任何动作都会清零连续静止计时。
             </p>
           </article>
 
@@ -209,6 +213,6 @@
         </section>
       </details>
     </main>
-    <script type="module" src="/app.js?v=20260825-1"></script>
+    <script type="module" src="/app.js?v=20260826-3"></script>
   </body>
 </html>

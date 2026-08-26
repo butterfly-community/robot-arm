@@ -1,37 +1,37 @@
 import * as THREE from "https://esm.sh/three@0.180.0?target=es2022";
 import { OrbitControls } from "https://esm.sh/three@0.180.0/examples/jsm/controls/OrbitControls.js?target=es2022";
-import { loadStarArmModel } from "./urdf-model.js?v=20260825-1";
+import { loadStarArmModel } from "./urdf-model.js?v=20260826-6";
 
 const $ = (id) => document.getElementById(id);
 const JOINT_COUNT = 6;
-const DISPLAY_JOINT_COUNT = 7;
+const CONTROL_COUNT = 7;
+const START_POSITION_DEG = [0, 0, -3, 0, 0, 0];
+const GRIPPER_START_POSITION_DEG = 1;
 const POLL_INTERVAL_MS = 33;
 const FRAMING_VERTICAL_OFFSET_RATIO = 0.55;
-const MODEL_JOINT_LIMITS_DEG = [
-  [-110, 110],
-  [0, 180],
-  [-270, 0],
-  [-90, 90],
-  [-65, 65],
-  [-150, 150],
-  [0, 90],
-];
-const modelJointTargets = new Float64Array(JOINT_COUNT);
-const liveModelJointDegrees = new Float64Array(DISPLAY_JOINT_COUNT);
-const manualModelJointDegrees = new Float64Array(DISPLAY_JOINT_COUNT);
+const liveDegrees = new Float64Array(CONTROL_COUNT);
+const targetDegrees = new Float64Array(CONTROL_COUNT);
+const modelJoints = new Float64Array(JOINT_COUNT);
+liveDegrees.set([...START_POSITION_DEG, GRIPPER_START_POSITION_DEG]);
+targetDegrees.set(liveDegrees);
+modelJoints.set(START_POSITION_DEG.map(THREE.MathUtils.degToRad));
 const jointRows = [];
 let robotModel = null;
 let latestSnapshot = null;
+let latestMotionStatus = null;
+let latestSerialState = null;
+let controlMode = "teleop";
+let teleopComponents = { position: true, pitch: true, turn: true };
+let desiredTeleopComponents = null;
+let teleopComponentsSubmitting = false;
+let manualInitialized = false;
+let previewIndex = null;
+let requestPending = false;
 let pollPending = false;
 let fittedOnce = false;
-let manualOverride = false;
-let visualGripperRad = 0;
-let selectedOutputBackend = "simulation";
-let backendSwitchPending = false;
-let latestHomeStatus = null;
-let homeRequestPending = false;
 let textSelectionActive = false;
 let textSelectionPointerDown = false;
+let jointParameterSignature;
 
 const stateLabels = {
   idle: "待机",
@@ -40,22 +40,21 @@ const stateLabels = {
   faulted: "输出已停止",
 };
 const stopReasonLabels = {
-  intent_idle: "未按下 Squeeze",
+  intent_idle: "未按下 Trigger",
   intent_faulted: "手柄输入无效",
   invalid_intent: "输入数据非法",
-  singularity: "MoveIt：接近奇异位形",
+  singularity: "MoveIt：奇异位停止",
   joint_limit: "MoveIt：达到关节限位",
   servo_unavailable: "MoveIt Servo 未连接",
   servo_invalid_feedback: "MoveIt 关节反馈非法",
-  servo_halt: "MoveIt Servo 已停止",
   servo_collision: "MoveIt：碰撞停止",
 };
-const homeStateLabels = {
+const motionStateLabels = {
   idle: "尚未请求",
   planning: "正在规划",
-  executing: "正在回零",
-  succeeded: "回零完成",
-  failed: "回零失败",
+  executing: "正在执行",
+  succeeded: "执行完成",
+  failed: "执行失败",
   cancelled: "已取消",
 };
 
@@ -84,7 +83,6 @@ controls.dampingFactor = 0.07;
 controls.minDistance = 0.18;
 controls.maxDistance = 2.2;
 controls.target.set(0.1, 0, 0.15);
-
 scene.add(new THREE.HemisphereLight(0xccecff, 0x18222b, 2.2));
 const keyLight = new THREE.DirectionalLight(0xffffff, 3.1);
 keyLight.position.set(0.45, -0.5, 0.85);
@@ -122,16 +120,17 @@ scene.add(new THREE.AxesHelper(0.13));
 
 function poseMarker(color, opacity, size) {
   const group = new THREE.Group();
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(size, 20, 12),
-    new THREE.MeshBasicMaterial({
-      color,
-      transparent: opacity < 1,
-      opacity,
-      depthTest: true,
-    }),
+  group.add(
+    new THREE.Mesh(
+      new THREE.SphereGeometry(size, 20, 12),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: opacity < 1,
+        opacity,
+        depthTest: true,
+      }),
+    ),
   );
-  group.add(sphere);
   const axes = new THREE.AxesHelper(size * 4.5);
   axes.material.transparent = opacity < 1;
   axes.material.opacity = opacity;
@@ -144,76 +143,113 @@ function poseMarker(color, opacity, size) {
 const currentTcpMarker = poseMarker(0xff9b5a, 1, 0.009);
 const desiredTcpMarker = poseMarker(0x47d8eb, 0.7, 0.007);
 
-function createJointRows() {
-  const fragment = document.createDocumentFragment();
-  for (let index = 0; index < DISPLAY_JOINT_COUNT; index += 1) {
-    const row = document.createElement("div");
-    row.className = "joint-row";
-    const label = index === JOINT_COUNT ? "J7" : `J${index + 1}`;
-    const [minimum, maximum] = MODEL_JOINT_LIMITS_DEG[index];
-    row.innerHTML =
-      `<strong>${label}</strong><input class="joint-slider" type="range" min="${minimum}" max="${maximum}" step="0.5" value="0" aria-label="${label} 模型角"><span class="joint-values"><b>0.0°</b><small>模型角</small></span>`;
-    fragment.append(row);
-    const slider = row.querySelector("input");
-    jointRows.push({
-      slider,
-      angle: row.querySelector("b"),
-      speed: row.querySelector("small"),
-    });
-    slider.addEventListener("input", () => {
-      if (!manualOverride) {
-        manualModelJointDegrees.set(liveModelJointDegrees);
-        manualOverride = true;
-      }
-      manualModelJointDegrees[index] = Number(slider.value);
-      applyVisualJointDegrees(manualModelJointDegrees, null);
-      updateManualModeUi();
-    });
-  }
-  $("joint-list").append(fragment);
-}
-
-function jointValuesText(degrees) {
-  return `[${
-    Array.from(degrees, (value) => `${value.toFixed(1)}°`).join(", ")
-  }]`;
-}
-
-function applyVisualJointDegrees(degrees, live) {
-  for (let index = 0; index < JOINT_COUNT; index += 1) {
-    modelJointTargets[index] = THREE.MathUtils.degToRad(degrees[index]);
-  }
-  visualGripperRad = THREE.MathUtils.degToRad(degrees[JOINT_COUNT]);
-  robotModel?.setArmJoints(modelJointTargets);
-  robotModel?.setGripper(visualGripperRad);
-  degrees.forEach((value, index) => {
-    const row = jointRows[index];
-    row.slider.value = String(value);
-    row.angle.textContent = `${value.toFixed(1)}°`;
-    row.speed.textContent = live ? "实时模型角" : "手动模型角";
-  });
-  $("manual-joint-values").textContent = `模型角 ${jointValuesText(degrees)}`;
-}
-
-function updateManualModeUi() {
-  $("joint-mode").textContent = manualOverride
-    ? "手动调整（仅本地）"
-    : "实时跟随";
-  $("resume-live").hidden = !manualOverride;
-  $("manual-joint-values").classList.toggle("manual", manualOverride);
-  if (manualOverride) {
-    $("simulation-state").textContent = "手动调整关节";
-    $("simulation-mode").textContent = "LOCAL ONLY";
-    $("enabled-state").textContent = "未发送";
-    $("stop-reason").textContent = "仅改变浏览器模型";
-    currentTcpMarker.visible = false;
-    desiredTcpMarker.visible = false;
-  }
-}
-
 function finiteArray(value, length) {
   return Array.isArray(value) && value.length === length &&
     value.every(Number.isFinite);
+}
+
+function jointValuesText(values) {
+  return `[${
+    Array.from(values, (value) => `${value.toFixed(1)}°`).join(", ")
+  }]`;
+}
+
+function updateTargetText() {
+  const label = previewIndex === null
+    ? "手动目标"
+    : `目标预览 ${
+      previewIndex === JOINT_COUNT ? "夹爪" : `J${previewIndex + 1}`
+    }`;
+  $("manual-joint-values").textContent = `${label} ${
+    jointValuesText(targetDegrees)
+  }`;
+  $("manual-joint-values").classList.toggle("manual", previewIndex !== null);
+}
+
+function syncTargetRows() {
+  jointRows.forEach((row, index) => {
+    row.slider.value = String(targetDegrees[index]);
+    row.angle.textContent = `${targetDegrees[index].toFixed(1)}°`;
+    row.detail.textContent = "手动目标";
+  });
+  updateTargetText();
+}
+
+function initializeManualTargets() {
+  targetDegrees.set(liveDegrees);
+  manualInitialized = true;
+  previewIndex = null;
+  syncTargetRows();
+}
+
+function createJointRows(limitsRad) {
+  const fragment = document.createDocumentFragment();
+  limitsRad.forEach(([minimum, maximum], index) => {
+    const row = document.createElement("div");
+    row.className = "joint-row";
+    const label = index === JOINT_COUNT ? "夹爪" : `J${index + 1}`;
+    row.innerHTML =
+      `<strong>${label}</strong><input class="joint-slider" type="range" min="${
+        THREE.MathUtils.radToDeg(minimum)
+      }" max="${THREE.MathUtils.radToDeg(maximum)}" step="any" value="${
+        targetDegrees[index]
+      }" aria-label="${label} 目标角"><span class="joint-values"><b>${
+        targetDegrees[index].toFixed(1)
+      }°</b><small>实时反馈</small></span>`;
+    const slider = row.querySelector("input");
+    const entry = {
+      slider,
+      angle: row.querySelector("b"),
+      detail: row.querySelector("small"),
+    };
+    jointRows.push(entry);
+    slider.addEventListener("input", () => {
+      if (controlMode !== "manual") return;
+      previewIndex = index;
+      targetDegrees[index] = Number(slider.value);
+      entry.angle.textContent = `${targetDegrees[index].toFixed(1)}°`;
+      entry.detail.textContent = "目标预览";
+      updateTargetText();
+    });
+    slider.addEventListener("change", () => {
+      if (controlMode !== "manual") return;
+      targetDegrees[index] = Number(slider.value);
+      previewIndex = null;
+      syncTargetRows();
+      if (index === JOINT_COUNT) {
+        void submitGripperTarget(
+          THREE.MathUtils.degToRad(targetDegrees[index]),
+        );
+      } else {
+        void submitArmTarget(Array.from(
+          targetDegrees.slice(0, JOINT_COUNT),
+          THREE.MathUtils.degToRad,
+        ));
+      }
+    });
+    fragment.append(row);
+  });
+  $("joint-list").append(fragment);
+  updateControlModeUi();
+}
+
+function applyActualModel(snapshot) {
+  snapshot.joints_rad.forEach((value, index) => {
+    liveDegrees[index] = THREE.MathUtils.radToDeg(value);
+    modelJoints[index] = value;
+  });
+  liveDegrees[JOINT_COUNT] = THREE.MathUtils.radToDeg(snapshot.gripper_rad);
+  robotModel?.setArmJoints(modelJoints);
+  robotModel?.setGripper(snapshot.gripper_rad);
+  if (controlMode !== "manual") {
+    targetDegrees.set(liveDegrees);
+    jointRows.forEach((row, index) => {
+      row.slider.value = String(liveDegrees[index]);
+      row.angle.textContent = `${liveDegrees[index].toFixed(1)}°`;
+      row.detail.textContent = "实时反馈";
+    });
+    updateTargetText();
+  }
 }
 
 function finitePose(value) {
@@ -225,86 +261,52 @@ function setMarker(marker, pose) {
   marker.visible = finitePose(pose);
   if (!marker.visible) return;
   marker.position.fromArray(pose.position_m);
-  const [x, y, z, w] = pose.orientation_xyzw;
-  marker.quaternion.set(x, y, z, w).normalize();
+  marker.quaternion.fromArray(pose.orientation_xyzw).normalize();
 }
 
 function vectorText(value, digits = 3) {
-  if (!finiteArray(value, 3)) return "—";
-  return `[${value.map((item) => item.toFixed(digits)).join(", ")}] m`;
+  return finiteArray(value, 3)
+    ? `[${value.map((item) => item.toFixed(digits)).join(", ")}] m`
+    : "—";
 }
 
 function quaternionText(value) {
-  if (!finiteArray(value, 4)) return "—";
-  return `[${value.map((item) => item.toFixed(4)).join(", ")}]`;
+  return finiteArray(value, 4)
+    ? `[${value.map((item) => item.toFixed(4)).join(", ")}]`
+    : "—";
 }
 
 function updateSnapshot(snapshot) {
-  if (!snapshot || !finiteArray(snapshot.joints_rad, JOINT_COUNT)) {
-    throw new Error("latestArmSimulation 缺少有效 joints_rad[6]");
-  }
-  if (!finiteArray(snapshot.model_joints_rad, JOINT_COUNT)) {
-    throw new Error("latestArmSimulation 缺少有效 model_joints_rad[6]");
-  }
-  if (!Number.isFinite(snapshot.gripper_rad)) {
-    throw new Error("latestArmSimulation 缺少有效 gripper_rad");
+  if (
+    !snapshot || !finiteArray(snapshot.joints_rad, JOINT_COUNT) ||
+    !Number.isFinite(snapshot.gripper_rad)
+  ) {
+    throw new Error("latestArmState 缺少有效的 J1–J6 或夹爪反馈");
   }
   latestSnapshot = snapshot;
-  snapshot.model_joints_rad.forEach((value, index) => {
-    liveModelJointDegrees[index] = THREE.MathUtils.radToDeg(value);
-  });
-  liveModelJointDegrees[JOINT_COUNT] = THREE.MathUtils.radToDeg(
-    snapshot.gripper_rad,
-  );
-  const state = stateLabels[snapshot.state] ?? snapshot.state ?? "未知";
-  $("simulation-state").textContent = manualOverride ? "手动调整关节" : state;
+  applyActualModel(snapshot);
+  $("arm-state").textContent = stateLabels[snapshot.state] ??
+    snapshot.state ?? "未知";
   $("model-id").textContent = snapshot.model_id ?? "—";
-  $("backend-name").textContent = snapshot.backend === "moveit_servo_simulation"
-    ? "MoveIt Servo / 仿真"
-    : snapshot.backend === "moveit_servo_hardware"
-    ? "MoveIt Servo / 真机"
-    : snapshot.backend ?? "—";
-  $("simulation-mode").textContent = manualOverride
-    ? "LOCAL ONLY"
-    : snapshot.simulation_only
-    ? "SIM ONLY"
-    : "HARDWARE";
-  $("enabled-state").textContent = manualOverride
-    ? "未发送"
-    : snapshot.enabled
-    ? "已接管"
-    : "未接管";
-  $("stop-reason").textContent = manualOverride
-    ? "仅改变浏览器模型"
-    : snapshot.stop_reason
+  const serialFeedback = snapshot.feedback_source === "serial";
+  $("feedback-source").textContent = serialFeedback
+    ? "串口 Monitor"
+    : "ROS 软件反馈";
+  $("feedback-mode").textContent = serialFeedback ? "SERIAL" : "SOFTWARE";
+  $("enabled-state").textContent = snapshot.enabled ? "已接管" : "未接管";
+  $("stop-reason").textContent = snapshot.stop_reason
     ? (stopReasonLabels[snapshot.stop_reason] ?? snapshot.stop_reason)
     : "—";
   $("servo-status").textContent = Number.isInteger(snapshot.servo_status_code)
     ? `${snapshot.servo_status_code}: ${snapshot.servo_status_message ?? "—"}`
     : "—";
-  $("feedback-age").textContent = Number.isFinite(
-      snapshot.servo_feedback_age_ms,
-    )
-    ? `${snapshot.servo_feedback_age_ms} ms`
-    : "—";
-  $("gripper-state").textContent = snapshot.gripper_closed
-    ? "扳机按下 / 闭合"
-    : "扳机松开 / 张开";
-  $("gripper-load").textContent = Number.isFinite(snapshot.gripper_power_w) &&
-      Number.isFinite(snapshot.gripper_current_a)
-    ? `${snapshot.gripper_power_w.toFixed(3)} W / ${
-      snapshot.gripper_current_a.toFixed(3)
-    } A`
-    : snapshot.simulation_only
-    ? "仿真不产生负载数据"
-    : "暂无真机负载数据";
-  $("gripper-status").textContent = Number.isFinite(
-      snapshot.gripper_temperature_c,
-    ) && Number.isInteger(snapshot.gripper_status)
-    ? `${snapshot.gripper_temperature_c.toFixed(1)} °C / 0x${
-      snapshot.gripper_status.toString(16).padStart(2, "0")
-    }`
-    : "—";
+  $("feedback-age").textContent =
+    Number.isFinite(snapshot.servo_feedback_age_ms)
+      ? `${snapshot.servo_feedback_age_ms} ms`
+      : "—";
+  $("gripper-angle").textContent = `${
+    THREE.MathUtils.radToDeg(snapshot.gripper_rad).toFixed(1)
+  }°`;
   $("tcp-position").textContent = vectorText(snapshot.tcp_pose?.position_m);
   $("tcp-orientation").textContent = quaternionText(
     snapshot.tcp_pose?.orientation_xyzw,
@@ -317,161 +319,197 @@ function updateSnapshot(snapshot) {
   );
   setMarker(currentTcpMarker, snapshot.tcp_pose);
   setMarker(desiredTcpMarker, snapshot.desired_tcp_pose);
-  if (manualOverride) {
-    currentTcpMarker.visible = false;
-    desiredTcpMarker.visible = false;
-  } else {
-    applyVisualJointDegrees(liveModelJointDegrees, true);
-  }
-  updateManualModeUi();
   const connection = $("connection-state");
-  if (manualOverride) {
-    connection.textContent = "本地手动调整";
-    connection.className = "badge constrained";
-  } else if (snapshot.state === "faulted") {
-    connection.textContent = snapshot.simulation_only
-      ? "仿真故障"
-      : "真机输出停止";
+  if (snapshot.state === "faulted") {
+    connection.textContent = "控制输出停止";
     connection.className = "badge faulted";
   } else if (snapshot.state === "constrained") {
-    connection.textContent = "目标已丢弃";
+    connection.textContent = "MoveIt 受约束";
     connection.className = "badge constrained";
   } else {
-    connection.textContent = "实时数据";
+    connection.textContent = serialFeedback ? "真机反馈" : "软件反馈";
     connection.className = "badge";
   }
+  $("output-warning").textContent = serialFeedback
+    ? "串口 Monitor 反馈"
+    : "软件反馈";
 }
 
-function updateBackendUi() {
-  const simulation = selectedOutputBackend === "simulation";
-  $("select-simulation").setAttribute("aria-pressed", String(simulation));
-  $("select-hardware").setAttribute("aria-pressed", String(!simulation));
-  $("select-simulation").disabled = backendSwitchPending;
-  $("select-hardware").disabled = backendSwitchPending;
-  $("output-warning").textContent = simulation
-    ? "当前为仿真输出（默认）"
-    : "当前为真机输出";
-  $("output-help").textContent = simulation
-    ? "按住手柄右侧 Squeeze 键接管，扳机控制仿真夹爪；J1–J7 滑块始终只修改浏览器模型。"
-    : "目标将发送给真机 MoveIt Servo 链路；Trigger 通过 hand_controller 控制 ID 6，J1–J7 滑块不会发送命令。";
-  $("home-start").textContent = "规划并回零";
-  $("home-note").textContent = "MoveIt 规划通过后自动执行；执行中可随时停止。";
-}
-
-function updateHomeStatus(status) {
-  latestHomeStatus = status ?? {
+function updateMotionStatus(status) {
+  latestMotionStatus = status ?? {
     request_id: 0,
     state: "idle",
-    message: "ROS 回零协调器尚未连接",
+    message: "尚未请求普通运动",
     trajectory_points: 0,
     duration_seconds: null,
-    trajectory_model_joints_rad: [],
   };
-  const state = latestHomeStatus.state ?? "idle";
-  const busy = ["planning", "executing"].includes(state);
-  const trajectory = Array.isArray(
-      latestHomeStatus.trajectory_model_joints_rad,
-    )
-    ? latestHomeStatus.trajectory_model_joints_rad.filter((point) =>
-      finiteArray(point, JOINT_COUNT)
-    )
-    : [];
-  $("home-state").textContent = homeStateLabels[state] ?? state;
-  $("home-message").textContent = latestHomeStatus.message || "—";
-  $("home-points").textContent = Number.isInteger(
-      latestHomeStatus.trajectory_points,
-    ) && latestHomeStatus.trajectory_points > 0
-    ? String(latestHomeStatus.trajectory_points)
+  const busy = ["planning", "executing"].includes(latestMotionStatus.state);
+  $("motion-state").textContent = motionStateLabels[latestMotionStatus.state] ??
+    latestMotionStatus.state;
+  $("motion-message").textContent = latestMotionStatus.message || "—";
+  $("motion-points").textContent = latestMotionStatus.trajectory_points > 0
+    ? String(latestMotionStatus.trajectory_points)
     : "—";
-  $("home-duration").textContent = Number.isFinite(
-      latestHomeStatus.duration_seconds,
-    )
-    ? `${latestHomeStatus.duration_seconds.toFixed(1)} 秒`
-    : "—";
-  $("home-start").disabled = homeRequestPending || busy;
-  $("home-cancel").hidden = !busy;
-  $("home-cancel").disabled = homeRequestPending;
-  $("home-preview").hidden = trajectory.length === 0;
-  $("home-preview-slider").max = String(Math.max(0, trajectory.length - 1));
-  $("home-preview-slider").dataset.trajectory = JSON.stringify(trajectory);
-  if (trajectory.length > 0 && $("home-preview-values").textContent === "—") {
-    showHomePreviewPoint(0, false);
+  $("motion-duration").textContent =
+    Number.isFinite(latestMotionStatus.duration_seconds)
+      ? `${latestMotionStatus.duration_seconds.toFixed(1)} 秒`
+      : "—";
+  $("start-position-arm").disabled = requestPending || busy;
+  $("cancel-motion").hidden = !busy;
+  $("cancel-motion").disabled = requestPending;
+}
+
+function updateSerialState(state) {
+  latestSerialState = state ??
+    { selected_port: null, connected: false, error: null };
+  const connected = latestSerialState.connected === true;
+  $("serial-state").textContent = connected ? "已连接" : "未连接";
+  $("serial-error").textContent = latestSerialState.error ??
+    latestSerialState.parameter_error ?? "—";
+  const parameterSignature = JSON.stringify(
+    latestSerialState.internal_parameters ?? null,
+  );
+  if (robotModel && parameterSignature !== jointParameterSignature) {
+    robotModel.setJointParameters(latestSerialState.internal_parameters);
+    jointParameterSignature = parameterSignature;
+  }
+  if (
+    latestSerialState.selected_port &&
+    document.activeElement !== $("serial-port")
+  ) {
+    $("serial-port").value = latestSerialState.selected_port;
+  }
+  $("serial-connect-controls").hidden = connected;
+  $("serial-connected-info").hidden = !connected;
+  $("serial-connected-port").textContent = latestSerialState.selected_port ??
+    "—";
+  $("serial-connect").disabled = requestPending;
+  $("serial-disconnect").disabled = requestPending;
+}
+
+function updateControlModeUi() {
+  const manual = controlMode === "manual";
+  $("mode-teleop").setAttribute("aria-pressed", String(!manual));
+  $("mode-manual").setAttribute("aria-pressed", String(manual));
+  $("mode-teleop").disabled = requestPending;
+  $("mode-manual").disabled = requestPending;
+  jointRows.forEach((row) => row.slider.disabled = !manual || requestPending);
+  $("joint-help").textContent = manual
+    ? "拖动只更新目标预览和数值；松开 J1–J6 时提交完整六轴目标，松开夹爪时只提交夹爪角。"
+    : "手柄控制中；切换模式本身不产生运动。";
+}
+
+function updateTeleopComponentsUi() {
+  $("teleop-position").checked = teleopComponents.position;
+  $("teleop-pitch").checked = teleopComponents.pitch;
+  $("teleop-turn").checked = teleopComponents.turn;
+  for (
+    const id of [
+      "teleop-position",
+      "teleop-pitch",
+      "teleop-turn",
+    ]
+  ) {
+    $(id).disabled = false;
   }
 }
 
-function showHomePreviewPoint(index, applyToModel = true) {
-  let trajectory = [];
-  try {
-    trajectory = JSON.parse(
-      $("home-preview-slider").dataset.trajectory ?? "[]",
-    );
-  } catch {
-    return;
-  }
-  const point = trajectory[index];
-  if (!finiteArray(point, JOINT_COUNT)) return;
-  const degrees = point.map(THREE.MathUtils.radToDeg);
-  if (applyToModel) {
-    const display = [...degrees, liveModelJointDegrees[JOINT_COUNT]];
-    manualModelJointDegrees.set(display);
-    manualOverride = true;
-    applyVisualJointDegrees(manualModelJointDegrees, null);
-    updateManualModeUi();
-  }
-  $("home-preview-values").textContent = `${index + 1}/${trajectory.length} · ${
-    jointValuesText(degrees)
-  }`;
+async function requestJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    cache: "no-store",
+    headers: body === undefined
+      ? undefined
+      : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+  return payload;
 }
 
-async function requestHome(action) {
-  if (homeRequestPending) return;
-  homeRequestPending = true;
-  updateHomeStatus(latestHomeStatus);
+async function withRequest(task, errorTarget = "motion-message") {
+  if (requestPending) return;
+  requestPending = true;
+  updateControlModeUi();
+  updateTeleopComponentsUi();
+  updateMotionStatus(latestMotionStatus);
+  updateSerialState(latestSerialState);
   try {
-    const response = await fetch(
-      `/api/arm-home/${selectedOutputBackend}/${action}`,
-      { method: "POST", cache: "no-store" },
-    );
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error ?? `HTTP ${response.status}`);
-    }
-    if (action !== "cancel") {
-      manualOverride = false;
-      $("home-preview-values").textContent = "—";
-    }
+    await task();
     await pollStatus();
   } catch (error) {
-    $("home-message").textContent = `回零请求失败：${error.message}`;
+    $(errorTarget).textContent = error.message;
     console.error(error);
   } finally {
-    homeRequestPending = false;
-    updateHomeStatus(latestHomeStatus);
+    requestPending = false;
+    updateControlModeUi();
+    updateTeleopComponentsUi();
+    updateMotionStatus(latestMotionStatus);
+    updateSerialState(latestSerialState);
   }
 }
 
-async function selectOutputBackend(backend) {
-  if (backendSwitchPending || backend === selectedOutputBackend) return;
-  backendSwitchPending = true;
-  updateBackendUi();
+async function setControlMode(mode) {
+  if (mode === controlMode) return;
+  await withRequest(async () => {
+    await requestJson("/api/arm-control-mode", { mode });
+    controlMode = mode;
+    if (mode === "manual") initializeManualTargets();
+    else manualInitialized = false;
+  });
+}
+
+function setTeleopComponents() {
+  desiredTeleopComponents = {
+    position: $("teleop-position").checked,
+    pitch: $("teleop-pitch").checked,
+    turn: $("teleop-turn").checked,
+  };
+  teleopComponents = desiredTeleopComponents;
+  updateTeleopComponentsUi();
+  void submitTeleopComponents();
+}
+
+async function submitTeleopComponents() {
+  if (teleopComponentsSubmitting) return;
+  teleopComponentsSubmitting = true;
   try {
-    const response = await fetch(`/api/arm-output/${backend}`, {
-      method: "POST",
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    selectedOutputBackend = backend;
-    manualOverride = false;
-    updateBackendUi();
-    await pollStatus();
+    while (desiredTeleopComponents !== null) {
+      const components = desiredTeleopComponents;
+      desiredTeleopComponents = null;
+      const applied = await requestJson(
+        "/api/arm-teleop-components",
+        components,
+      );
+      if (desiredTeleopComponents === null) {
+        teleopComponents = applied;
+        updateTeleopComponentsUi();
+      }
+    }
+    $("teleop-components-message").textContent =
+      "未勾选的分量不进入机械臂目标。";
   } catch (error) {
+    desiredTeleopComponents = null;
+    $("teleop-components-message").textContent = error.message;
     console.error(error);
-    $("connection-state").textContent = "切换输出失败";
-    $("connection-state").className = "badge faulted";
+    await pollStatus();
   } finally {
-    backendSwitchPending = false;
-    updateBackendUi();
+    teleopComponentsSubmitting = false;
+    if (desiredTeleopComponents !== null) void submitTeleopComponents();
   }
+}
+
+async function submitArmTarget(jointsRad) {
+  await withRequest(() =>
+    requestJson("/api/arm-motion", { joints_rad: jointsRad })
+  );
+}
+
+async function submitGripperTarget(positionRad) {
+  await withRequest(() =>
+    requestJson("/api/arm-gripper", { position_rad: positionRad })
+  );
 }
 
 async function pollStatus() {
@@ -481,23 +519,33 @@ async function pollStatus() {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    selectedOutputBackend = payload.armOutputBackend === "hardware"
-      ? "hardware"
-      : "simulation";
-    latestSnapshot = selectedOutputBackend === "hardware"
-      ? payload.latestArmHardware
-      : payload.latestArmSimulation;
-    latestHomeStatus = selectedOutputBackend === "hardware"
-      ? payload.armHomeHardware
-      : payload.armHomeSimulation;
+    latestSnapshot = payload.latestArmState;
+    latestMotionStatus = payload.motionStatus;
+    latestSerialState = payload.serialState;
+    const serverTeleopComponents = payload.teleopComponents ?? {
+      position: true,
+      pitch: true,
+      turn: true,
+    };
+    if (!teleopComponentsSubmitting && desiredTeleopComponents === null) {
+      teleopComponents = serverTeleopComponents;
+    }
+    const nextMode = payload.controlMode === "manual" ? "manual" : "teleop";
     if (textSelectionActive) return;
-    updateBackendUi();
+    const modeChanged = nextMode !== controlMode;
+    controlMode = nextMode;
     updateSnapshot(latestSnapshot);
-    updateHomeStatus(latestHomeStatus);
+    if (controlMode === "manual" && (modeChanged || !manualInitialized)) {
+      initializeManualTargets();
+    }
+    if (controlMode !== "manual") manualInitialized = false;
+    updateControlModeUi();
+    updateTeleopComponentsUi();
+    updateMotionStatus(latestMotionStatus);
+    updateSerialState(latestSerialState);
   } catch (error) {
-    const connection = $("connection-state");
-    connection.textContent = "数据连接失败";
-    connection.className = "badge faulted";
+    $("connection-state").textContent = "数据连接失败";
+    $("connection-state").className = "badge faulted";
     console.error(error);
   } finally {
     pollPending = false;
@@ -510,9 +558,11 @@ function selectedTextExists() {
 }
 
 function refreshAfterTextSelection() {
-  updateBackendUi();
   if (latestSnapshot) updateSnapshot(latestSnapshot);
-  updateHomeStatus(latestHomeStatus);
+  updateControlModeUi();
+  updateTeleopComponentsUi();
+  updateMotionStatus(latestMotionStatus);
+  updateSerialState(latestSerialState);
 }
 
 function finishTextSelection() {
@@ -543,8 +593,10 @@ function fitModel() {
   if (box.isEmpty()) return;
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const direction = camera.position.clone().sub(controls.target).normalize();
-  const halfFov = THREE.MathUtils.degToRad(camera.fov * 0.5);
-  const distance = Math.max(0.35, sphere.radius / Math.sin(halfFov) * 1.2);
+  const distance = Math.max(
+    0.35,
+    sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov * 0.5)) * 1.2,
+  );
   const framedTarget = sphere.center.clone();
   framedTarget.z += sphere.radius * FRAMING_VERTICAL_OFFSET_RATIO;
   controls.target.copy(framedTarget);
@@ -569,20 +621,24 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-createJointRows();
+async function moveArmToStartPosition() {
+  targetDegrees.set(START_POSITION_DEG, 0);
+  previewIndex = null;
+  syncTargetRows();
+  await submitArmTarget(
+    START_POSITION_DEG.map(THREE.MathUtils.degToRad),
+  );
+}
+
 setView("iso");
 new ResizeObserver(resize).observe(viewport);
-document.addEventListener("selectstart", () => {
-  textSelectionActive = true;
-});
+document.addEventListener("selectstart", () => textSelectionActive = true);
 document.addEventListener("selectionchange", () => {
   if (selectedTextExists()) textSelectionActive = true;
   else if (!textSelectionPointerDown) finishTextSelection();
 });
 document.addEventListener("pointerdown", (event) => {
-  textSelectionPointerDown = !event.target.closest(
-    "button, a, input, canvas",
-  );
+  textSelectionPointerDown = !event.target.closest("button, a, input, canvas");
   if (textSelectionPointerDown) textSelectionActive = true;
 });
 globalThis.addEventListener("pointerup", () => {
@@ -593,25 +649,39 @@ document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 $("fit-model").addEventListener("click", fitModel);
-$("select-simulation").addEventListener("click", () => {
-  void selectOutputBackend("simulation");
+$("joint-labels-toggle").addEventListener("change", (event) => {
+  robotModel?.setJointLabelsVisible(event.currentTarget.checked);
 });
-$("select-hardware").addEventListener("click", () => {
-  void selectOutputBackend("hardware");
+$("mode-teleop").addEventListener("click", () => void setControlMode("teleop"));
+$("mode-manual").addEventListener("click", () => void setControlMode("manual"));
+for (
+  const id of [
+    "teleop-position",
+    "teleop-pitch",
+    "teleop-turn",
+  ]
+) {
+  $(id).addEventListener("change", setTeleopComponents);
+}
+$("start-position-arm").addEventListener(
+  "click",
+  () => void moveArmToStartPosition(),
+);
+$("cancel-motion").addEventListener("click", () => {
+  void withRequest(() => requestJson("/api/arm-motion/cancel"));
 });
-$("home-start").addEventListener("click", () => {
-  void requestHome("plan");
+$("serial-connect").addEventListener("click", () => {
+  void withRequest(
+    () =>
+      requestJson("/api/arm-serial/connect", { port: $("serial-port").value }),
+    "serial-error",
+  );
 });
-$("home-cancel").addEventListener("click", () => {
-  void requestHome("cancel");
-});
-$("home-preview-slider").addEventListener("input", (event) => {
-  showHomePreviewPoint(Number(event.target.value));
-});
-$("resume-live").addEventListener("click", () => {
-  manualOverride = false;
-  if (latestSnapshot) updateSnapshot(latestSnapshot);
-  else updateManualModeUi();
+$("serial-disconnect").addEventListener("click", () => {
+  void withRequest(
+    () => requestJson("/api/arm-serial/disconnect"),
+    "serial-error",
+  );
 });
 
 try {
@@ -619,8 +689,13 @@ try {
     $("model-state").textContent = `加载模型 ${loaded}/${total}`;
   });
   scene.add(robotModel.root);
-  robotModel.setArmJoints(modelJointTargets);
-  robotModel.setGripper(visualGripperRad);
+  createJointRows(robotModel.jointLimitsRad);
+  robotModel.setArmJoints(modelJoints);
+  robotModel.setGripper(
+    THREE.MathUtils.degToRad(GRIPPER_START_POSITION_DEG),
+  );
+  robotModel.setJointLabelsVisible($("joint-labels-toggle").checked);
+  updateSerialState(latestSerialState);
   $("model-state").textContent = `${robotModel.meshCount} 个 STL · 已就绪`;
   if (!fittedOnce) {
     fittedOnce = true;

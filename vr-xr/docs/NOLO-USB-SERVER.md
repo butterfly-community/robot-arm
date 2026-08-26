@@ -15,7 +15,7 @@
 - 三个设备各自的 `[x, y, z, w]` 融合四元数；
 - Menu、Trigger 和 Squeeze 按键；
 - 采样序号、采样质量和 Fusion 状态诊断数据；
-- Controller 0 的 Squeeze 相对示教接管和 Trigger 夹爪意图；它们只作为后续控制层输入，
+- Controller 0 的 Trigger 相对示教接管和 Menu 夹爪意图；它们只作为后续控制层输入，
   不访问机械臂。
 
 后端只在对应设备采样序号发生变化时更新 Fusion 和发布新姿态。重复的旧负载不会再次
@@ -27,7 +27,6 @@
   `report[59]`。
 - `unchanged_ms`：当前设备的 `sample_sequence` 多久没有变化。
 - `communication_fresh`：当前 USB 会话已经收到过该设备的新样本；实际断开时为 false。
-- `sample_changed`：这一帧是否来自新的设备采样序号。
 - `hmd_unchanged_ms`：`report[59]` HMD/USB 中继采样序号多久没有变化。
 - `hmd_relay_online`：当前 USB 会话已经收到过 HMD 新样本；实际断开时为 false。
 - `samples_received`、`samples_missed`、`duplicate_reports`：序号连续性累计统计；序号按
@@ -67,9 +66,18 @@ USB 重连、设备序号停止、完整位姿标定、非有限输入或非递�
 两种 Controller 报告内的 HMD 序号相位不同。后端分别跟踪两条约 120 Hz 的
 `report[59]` 流，再合并其新样本和统计；禁止直接对相邻异类报告的字节 59 做差。
 
-## 构建与运行
+## Compose 运行与源码调试
 
 先停止所有会争用同一个 HID 的其他程序。
+
+完整服务直接在工程根目录运行：
+
+```bash
+docker compose up -d
+docker compose down
+```
+
+下面的 Cargo 命令只用于单独调试 Rust 后端，不是完整服务的运行入口。
 
 构建：
 
@@ -98,7 +106,6 @@ cargo build --release
 --static-dir=PATH
 --gyro-calibration-file=PATH
 --servo-ipc=PATH
---hardware-servo-ipc=PATH
 ```
 
 控制器位置固定使用 `casiez/OneEuroFilter` Rust 示例的上游参数，不提供本地调参入口。
@@ -114,22 +121,34 @@ cargo build --release
 ## HTTP 接口
 
 - `/`：实时网页。
-- `/arm-simulator/`：独立的 Star Arm 102-FL 三维输出页；默认仿真，可显式切换真机。
+- `/arm-simulator/`：独立的 Star Arm 102-FL 三维反馈与控制页。
 - `/events`：`status` 和 `pose` Server-Sent Events。
 - `/api/status`：当前状态和三个设备各自最新帧 `latestFrames`；`latestTeleopIntent` 是
-  Controller 0 的最新相对示教意图，
-  `latestArmSimulation`、`latestArmHardware` 是两条 MoveIt 链路的独立快照，
-  `armOutputBackend` 是当前唯一有效输出且启动默认 `simulation`；`simulationRequested` 和
+  Controller 0 的最新相对示教意图；`latestArmState` 是唯一机械臂快照，`motionStatus`、
+  `serialState` 和 `controlMode` 分别给出普通运动、运行时串口和手柄/手动控制状态；
+  `teleopComponents` 给出空间位置移动、前部抬起/前部往下、左旋/右旋三个采集开关；
+  `simulationRequested` 和
   `simulationActive` 分别表示网页切换请求与虚拟报告线程实际状态。
 - `POST /api/gyro-calibration/0|1|2`：开始对应设备的显式陀螺仪零偏标定。
 - `POST /api/pose-calibration/0|1|2`：重新初始化对应设备的 Fusion；已有零偏时直接复用，
   没有零偏时同时开始首次零偏标定。
-- `POST /api/simulation/start`：暂停真实 HID 读取并启动确定性的虚拟 USB 报告循环。
-- `POST /api/simulation/stop`：只停止虚拟报告并重新尝试连接真实 HID；不联动回零，回零
-  由独立的机械臂专用回零接口控制。
-- `POST /api/arm-output/simulation|hardware`：只切换机械臂目标路由；不会启动 ROS、打开
-  串口或自行接管；Squeeze 已按住时会在新后端当前 TCP 自动重新锚定。
-- `POST /api/arm-home/{simulation|hardware}/{plan|cancel}`：专用回零；规划成功后自动执行。
+- `POST /api/simulation/start`：切到手柄控制，暂停真实 HID 读取并直接启动确定性虚拟 USB 报告；
+  不提交 J1–J6 或夹爪运动。
+- `POST /api/simulation/stop`：只停止虚拟报告并重新尝试连接真实 HID；不联动返回起始位，起始位
+  由机械臂页起始位按钮提交普通六轴 `[0°, 0°, -3°, 0°, 0°, 0°]` 目标。
+- `POST /api/arm-control-mode`：`{"mode":"teleop|manual"}`，切换命令来源且不产生运动。
+- `POST /api/arm-teleop-components`：提交
+  `{"position":true|false,"pitch":true|false,"turn":true|false}`。
+  三个字段分别控制空间位置移动、前部抬起/前部往下、左旋/右旋是否进入机械臂目标；状态保存在
+  当前 Rust 后端会话中，刷新网页不会丢失，服务重启后三项默认勾选。
+- `POST /api/arm-motion`：提交完整的 J1–J6 弧度目标；`[0°, 0°, -3°, 0°, 0°, 0°]` 就是
+  普通起始位运动。
+- `POST /api/arm-motion/cancel`：取消当前普通运动请求。
+- `POST /api/arm-gripper`：提交单个夹爪绝对弧度，不触发六轴规划。
+- `GET /api/arm-serial`、`POST /api/arm-serial/connect`、
+  `POST /api/arm-serial/disconnect`：查询、按用户端口连接和断开 Rust 串口。
+  每次连接会只读查询 ID 0–6 的内部 PID、保持 PID、偏置、方向和死区，并通过
+  `serialState.internal_parameters` 返回；查询失败只写入 `parameter_error`，不阻止连接。
 
 `pose` 帧以 `source_id=0/1/2` 区分 Controller 0、Controller 1 和 Head Marker；
 `sample_rate_hz` 给出名义采样率，`sample_sequence` 和 `communication_fresh` 对三种设备
@@ -140,30 +159,42 @@ cargo build --release
 网页顶部“启动模拟”使用和真实设备相同的加密 64 字节报告边界。模拟器先构造
 Controller 0/1 与 HMD 的位置、IMU、按键和两个采样序号，调用生产报告编码器，再把
 结果交回生产 `decode_report`；解码之后继续走相同的 Fusion、One Euro、采样新鲜度、
-Squeeze Teleop 和 SSE 路径。它不会绕过采集链路直接写网页 JSON，也不会读取或覆盖
-真实设备的陀螺仪零偏文件。
+Trigger Teleop 和 SSE 路径。它不会绕过采集链路直接写网页 JSON，也不会读取或覆盖
+真实设备的陀螺仪零偏文件。虚拟输入使用独立的无持久化 Fusion 状态，并直接使用模拟器
+生成的陀螺仪数据，不应用手工零偏或 Fusion Offset 的自适应零偏补偿；真实 USB 的补偿
+路径不变。虚拟 Fusion 的 `delta_time` 来自生成报告自身的固定时间轴，不受 Docker 调度和
+报告循环唤醒抖动影响；真实 USB 仍使用实际样本接收时间。
 
-启动模拟会临时释放真实 HID，并让网页切到 Controller 0。前 6.25 秒虚拟 Menu 保持
-按下，位置和 IMU 保持静止，网页按原有流程从第二秒开始完成 Fusion 零偏并记录原点、
-零姿态和朝向基站的人体前方。虚拟源保持静止到第 10 秒，随后自动按住 Squeeze，在
+启动模拟只切到手柄控制，暂停真实 HID，然后直接产生虚拟报告并让网页切到 Controller 0；
+不要求起始位也不提交机械臂运动。前 6.25 秒虚拟 Squeeze 保持
+按下，位置和 IMU 保持静止，网页按原有流程从第二秒开始完成标定状态并记录原点、零姿态
+和朝向基站的人体前方；这段流程不会把计算结果作为虚拟陀螺仪零偏。虚拟源保持静止到
+第 10 秒，随后自动按住 Trigger，在
 3 秒内连续上升 10 cm 并
-直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，36 秒一轮
+直接进入循环。之后每个方向使用 3 秒平滑过渡，相反方向负责回到工作状态，30 秒一轮
 并持续循环：
 
 1. 从工作高度再向上 5 cm，到达相对原始零点 `+15 cm`；随后向下 5 cm，返回
    `+10 cm` 工作高度，不回到零点；
-2. 向左 5 cm 后向右 5 cm、向前 5 cm 后向后 5 cm，分别回到工作中心；
-3. 手柄头部抬起 1.5 cm 后下压 1.5 cm、向右侧倾 1.5 cm 后向左侧倾 1.5 cm，分别回到工作
-   姿态；
-4. 手柄向左旋转 2.5 cm 后向右旋转 2.5 cm，回到工作姿态。
+2. 向左 2 cm 后向右 2 cm、向前 5 cm 后向后 5 cm，分别回到工作中心；
+3. 手柄左旋 8° 后右旋 8° 返回、前部抬起 8° 后前部往下 8° 返回；回程反向重走去程，
+   分别回到工作姿态。
 
-姿态的“cm”不是角度单位。它按网页模型头尾标记间距 20.5 cm 计算：抬起和侧倾 1.5 cm
-等价峰值角约 4.196°，左右旋转 2.5 cm 等价峰值角约 7.005°。模拟平移进入机械臂链路
-后仍会应用 1:2 比例，因此手柄空间移动 5 cm 对应目标 TCP 2.5 cm；姿态不应用该比例。
+虚拟手柄姿态直接使用 8° 峰值角；进入机械臂后使用厂家 URDF 中夹爪后部安装位置到
+`link6` 的 7.313 cm 几何生成末端圆弧目标。
+模拟平移进入机械臂链路
+后仍会应用 1:2 比例，因此手柄左右移动 2 cm 对应目标 TCP 1 cm，其他方向移动 5 cm 对应
+目标 TCP 2.5 cm；姿态不应用该比例。
 Controller 1 和 Head Marker 在该循环中保持静止，但仍按各自名义频率输出。
 
+人体坐标原点和姿态参考保存在当前 Rust 后端会话的 `humanReferences` 中。普通 Squeeze 标定
+完成时页面通过 `/api/human-reference/{source_id}` 把最终参考交给后端；虚拟 NOLO 则在会话
+开始时直接登记生成器的确定参考。刷新页面后从 `/api/status` 恢复各来源对应的参考；之后
+切换手柄或头部时使用该来源的最新帧，不从 Teleop 接管锚点反推，也不使用 `localStorage`、
+`sessionStorage` 或其他网页存储。
+
 同一生成器也提供独立程序 `nolo-cv1-simulator`，默认向标准输出写出一次完整的
-49 秒数据（10 秒标定与接管准备、3 秒预抬升 10 cm 和一轮动作），
+43 秒数据（10 秒标定与接管准备、3 秒预抬升 10 cm 和一轮动作），
 格式是连续拼接的加密 64 字节报告：
 
 ```bash
@@ -184,8 +215,8 @@ root、USB gadget 控制器或专用硬件，且不会提高当前采集到机�
 
 状态语义：
 
-- `idle`：Squeeze 未按下，没有活动意图。
-- `active`：Squeeze 保持按下，输出相对位置、相对姿态和 Trigger 夹爪开合命令，
+- `idle`：Trigger 未按下，没有活动意图。
+- `active`：Trigger 保持按下，输出相对位置、相对姿态和 Menu 夹爪开合命令，
   其余层可直接由状态判断是否接管。
 - `faulted`：USB、标定或输入数据使当前意图失效；下一份有效样本会在当前位姿重新锚定。
 
@@ -194,7 +225,7 @@ root、USB gadget 控制器或专用硬件，且不会提高当前采集到机�
 `relative_orientation` 使用 `[x,y,z,w]`，计算为
 `inverse(q_start) * q_current`，并统一四元数符号，等价的 `q` / `-q` 不会产生跳变。
 
-意图只保留状态、采样序号和时间、Squeeze、相对位姿、夹爪意图及停止原因。原始/滤波
+意图只保留状态、采样序号和时间、接管状态、相对位姿、夹爪意图及停止原因。原始/滤波
 位置和当前四元数已经存在于 `latestFrames`，不在意图中复制。
 
 下列情况会使意图进入 `faulted` 并清除相对输出：
@@ -204,32 +235,31 @@ root、USB gadget 控制器或专用硬件，且不会提高当前采集到机�
 - Fusion 初始化或陀螺仪标定正在进行；
 - 原始/滤波位置非有限、滤波位置缺失或四元数不可用；
 
-后端启动时如果 Squeeze 已经按住，会立即以当前有效位姿建立零相对锚点。活动期间
-`gripper_closed=true` 表示 Trigger 按下，`false` 表示 Trigger 松开；idle/faulted
-时该字段为 `null`，避免夹爪命令越过接管边界。状态机不打开 Star Arm 串口、不运行
+后端启动时如果 Trigger 已经按住，会立即以当前有效位姿建立零相对锚点。活动期间
+`gripper_pressed=true` 表示 Menu 按下，`false` 表示 Menu 松开；idle/faulted
+时该字段为 `null`。状态机不打开 Star Arm 串口、不运行
 逆运动学，也不直接产生关节目标。
 
-## Star Arm 102-FL 双输出
+## Star Arm 102-FL 统一控制
 
-NOLO 进程在两个独立 Unix socket 上提供 100 Hz latest-value IPC。它读取唯一最新
-`TeleopIntent`，用 `stararm102-control` 完成坐标映射和目标 TCP，然后发送给 ROS 侧
-`servo_ipc_bridge`。示教路径只转换 JSON、`PoseStamped`、`JointState`、`ServoStatus` 和
-TF2 位姿；维护回零则调用标准 MoveGroup/ExecuteTrajectory。运动学、限位、奇异、碰撞、
-平滑、路径规划和时间参数化由 MoveIt 完成。动力学补丁使用用户此前根据官方
-`200°/s、100 ms` 示例换算后明确选定的 `30 rad/s²`，供官方 TOTG 生成回零轨迹时间。
-仿真链路输出到厂家 `GenericSystem`；真机链路经
-标准 `JointTrajectoryController` 和官方 `JointStateTopicSystem` 到
-`fashionstar_uart_sdk` 适配层。两边的
-`/joint_states` 与官方 `robot_state_publisher` 生成的 `base_link -> tool0` 经各自 socket
-返回。Rust 校验 IPC schema v2、六关节名称/长度/有限值、TF2 TCP 和 FL 方向后生成
-两份状态快照；Rust 不保存 URDF 关节链，也不计算 FK。反馈 `sequence` 和年龄用于展示，
-不再形成项目拒绝条件。
+NOLO 进程只在 `moveit-servo.sock` 上提供一套 100 Hz latest-value IPC。ROS 始终运行同一个
+`JointStateTopicSystem`、`arm_controller`、`hand_controller`、MoveIt Servo 和 MoveGroup。
+运动学、限位、奇异、碰撞、平滑、路径规划和时间参数化都由 MoveIt 完成；动力学补丁保留
+此前依据官方资料确认的 J1–J6 `30 rad/s²`。IPC schema v5 明确区分 Rust 发往 ROS 的
+手柄目标、普通六轴运动、夹爪绝对角和统一 `ArmState`，以及 ROS 返回的七关节控制器设定值、
+TF2 TCP 和运动状态。Rust 不保存 URDF 关节链，也不计算 FK；反馈年龄只用于展示。
 
-Squeeze 新接管时记录所选后端的当前 TCP；相对输入零对应当前末端，重新接管不会跳回旧目标。
+Trigger 新接管时记录当前 TCP；相对输入零对应当前末端，重新接管不会跳回旧目标。
 默认坐标映射为 NOLO 前 `-Z` → 机械臂前 `+X`、NOLO 右 `+X` → 机械臂右 `-Y`、
 NOLO 上 `+Y` → 机械臂上 `+Z`。手柄自身姿态不复用位置矩阵，而是按实机动作单独映射：
-头部抬起（原始 `-X`）→ TCP `-Y`，向左侧倾（原始 `+Y`）→ TCP `-X`，向左转向
-（原始 `+Z`）→ TCP `+Z`。两组矩阵都由机械臂版本化配置提供并分别接受正交性检查。
+空间移动平移整只夹爪并保持姿态。姿态手势保持夹爪后部安装基准点不动，并将位置和姿态作为同一个
+六自由度末端目标交给 MoveIt：前部抬起（原始 `-X`）使尖端沿竖直圆弧向上移动，前部往下则沿同一圆弧向下返回；
+左旋（原始 `+Z`）使尖端从机械臂上方向下看时沿水平圆弧逆时针移动，右旋则顺时针移动。
+这些语义描述夹爪尖端的位置移动，不描述为改变指向。手柄原始 `Y` 轴的自身滚转不进入机械臂目标，
+也不保留独立的左转向/右转向路径。
+三组输入可在机械臂页用三个复选框独立控制。相对四元数转换成接管时手柄局部坐标系中的旋转向量，
+不使用欧拉角。切换时以当前 TCP 重新锚定，复选框本身不产生位移。
+平移坐标矩阵由机械臂版本化配置提供并接受正交性检查；姿态直接使用上述两个明确轴，不再保留额外映射矩阵。
 
 平移缩放由版本化配置的 `translation_scale=0.5` 唯一控制：
 
@@ -240,58 +270,60 @@ robot_delta = robot_from_nolo_position × controller_delta × 0.5
 因此手柄移动 2 cm，机械臂目标 TCP 移动 1 cm。该比例只作用于相对位置；相对四元数
 保持完整旋转角度，MoveIt Servo 的线速度和角速度限制也仍分别生效。
 
-输出包含六轴逻辑角 `joints_rad`、厂家 URDF 模型角 `model_joints_rad`、
-TF2 当前 TCP、期望 TCP、Servo 状态/说明、反馈年龄和停止原因。两条链路分别标记
-`backend=moveit_servo_simulation|moveit_servo_hardware`；IPC 缺失、
-反馈非法、Servo 状态缺失/停止/未知时不发布目标并进入 `faulted`；反馈年龄只作诊断。
-有效反馈恢复后，即使 Squeeze 一直按住也会自动重新锚定并恢复输出。
-MoveIt 奇异、碰撞或关节边界显示为 `constrained`；约束状态的后续目标继续处理，以允许
-移回可行区域。Servo 不使用有限奇异点硬停值，避免代码 `2` 将离开奇异点的命令也永久
-乘为零。Rust 不再维护一套猜测的工作空间几何。Trigger 在 active 状态产生两态夹爪
-意图：张开目标为 `90°`，闭合目标
-为 `0°`。ROS 桥通过 `hand_controller/joint7_left` 发送对应 `JointTrajectory`，仿真
-模型和快照显示该目标。同一标准控制通道也用于真机，底层只写厂家指定的 ID 6；真机
-链路另外读取并返回实际位置、功率、电流、温度和原始状态字节。仿真快照的
-`simulation_only=true`，真机快照为 `false`。真机启动不修改 ID 6 参数；接触门限不在
-软件中猜测。
+唯一 `ArmSnapshot` 包含固定 J1–J6 顺序的 `joints_rad`、夹爪绝对角 `gripper_rad`、
+`software|serial` 反馈来源、TF2 当前/期望 TCP、Servo 状态和停止原因。IPC 不再发送关节
+名称，也不保存逻辑角/模型角两套可逆副本。IPC 缺失、反馈非法、Servo 停止或状态未知时不发布目标；
+有效反馈恢复后，即使 Trigger 一直按住也会在最新 TCP 重新锚定。
+MoveIt 奇异、碰撞或关节边界显示为 `constrained`；状态码 `1/3/4` 的减速提示只出现在
+Servo 状态中，不写入停止原因，状态码 `2/5/6` 的停止才给出对应停止原因。后续目标继续处理，
+以允许移回可行区域。Servo 不使用有限奇异点硬停值。Menu 输入按机械臂配置转换成夹爪绝对角，ROS
+桥不再二次解释开合状态，直接通过
+`hand_controller/joint7_left` 发送 `JointTrajectory`。`JointStateTopicSystem` 把 J1–J6
+与夹爪设定值发给 Rust `ArmJointIo`：未连接串口时，它们直接成为软件反馈；连接后同一组
+设定值写入 ID 0–6，并由 Monitor 实测位置覆盖同一个 `ArmState`。独立 UART 库完整解码
+Monitor 帧用于协议校验；生产适配器只把 ID 和位置写入当前状态，功率、电流、温度、状态及
+多圈值不进入控制路径。本机实测确认 J4/ID 3 的串口正方向与模型相反，因此只在真机串口
+边界对 J4 命令和反馈同时取反；纯软件反馈、MoveIt、URDF 和网页模型不变。
+位置命令使用厂家连续 follower 循环的 `100 ms / 50 ms / 50 ms / power 0`，并按最终 0.1° 整数协议包精确去重；
+同一包不在每个 10 ms 控制周期重复发送，以免反复重启舵机插值。任一编码值变化即发送，
+不另加角度门限。
 
-服务启动时总是选择仿真。仿真与真机分别使用 `ROS_DOMAIN_ID=42/43` 和独立 socket，
-可以同时反馈；未选中的链路只收到 `enabled=false`。网页切换会使控制器在新后端当前
-TCP 重新锚定。真机启动 ping ID 0–6 并要求 `Monitor` 返回可编码的有限位置；项目不再
-重复关节行程、反馈时效、授权或故障闭锁。轨迹连续性与动态由 MoveIt 和标准控制器负责，
-适配器不调用校准、原点、多圈重置或力矩切换。
+网页按用户给出的端口运行时连接。Rust 先 Ping 并 Monitor 读取 ID 0–6，不发送运动；连接不判断
+软件或真机的起始位，读取成功后直接使用真机 J1–J6 与夹爪反馈。
+断开后保留最后实测反馈并继续软件模式，不返回起始位、不重启 ROS。适配器不调用校准、原点、
+多圈重置或力矩切换。运行中串口读写失败保留最后真机反馈，随后释放旧句柄并立即重开同一
+端口；成功后继续读写，失败则显示实际错误并回到未连接状态，不增加重试次数门限或另一套
+重连状态机。
 
-现场确认的唯一默认姿态和示教启动姿态都是 J1–J7 全部 `0°`。仿真启动时六轴逻辑角、
-URDF 模型角和闭合夹爪角均为零；没有单独的回零姿态、工作姿态或自动展开阶段。松开
-Trigger 后，J7 才从闭合 `0°` 切换为张开 `90°`。该模型角与 FL 插件的
+统一起始位和示教启动姿态是 J1–J6 `[0°, 0°, -3°, 0°, 0°, 0°]`、夹爪 `+1°`；没有单独的起始位姿态、
+工作姿态或自动展开阶段。该模型角与 FL 插件的
 舵机逻辑多圈量 `[-270°, 0°] / direction=-6` 独立，不做直接除法换算。
 
-这里的“仿真启动”是 ROS `GenericSystem` 进程启动，不是网页“启动模拟”按钮。网页按钮
-只切换真实/虚拟 NOLO 输入；停止后机械臂保持当前位置，不会自动回零。机械臂页另有独立
-“专用回零”：使用 MoveGroup/OMPL 碰撞规划到 J1–J6 全零，并由官方 TOTG 生成轨迹
-时间；仿真和真机都通过标准 `ExecuteTrajectory -> JointTrajectoryController`
-执行。执行前暂停 Servo 连续输出；动作完成后必须收到更新的关节反馈且每轴均在 `±1°`
-内，才报告成功并恢复 Servo。仿真和真机都在一次请求中规划并自动执行；ros-controls 官方
-`JointStateTopicSystem` 在 ros2_control 和 Python 厂家 SDK 薄适配器之间传递单帧关节状态/目标。
-Python 不实现 `FollowJointTrajectory`、轨迹插值或路径规划。该动作不修改舵机原点、
-多圈状态或力矩。若起始状态已经自碰撞，标准规划失败后会通过 MoveIt 状态有效性服务取得
+网页“启动模拟”只切到手柄控制并直接开始虚拟 NOLO 输入，不发送机械臂或夹爪命令。
+“停止模拟”也只停止虚拟输入。单独的起始位按钮会把 J1–J6 的
+`[0°, 0°, -3°, 0°, 0°, 0°]` 提交为普通 `MotionRequest`，保持夹爪当前角度。所有六轴目标都使用
+MoveGroup/OMPL、官方 TOTG 和标准 `ExecuteTrajectory -> JointTrajectoryController`；
+执行前暂停 Servo 对同一 controller 的连续输出，结束后恢复。MoveIt 返回普通轨迹执行成功即完成，
+不为起始位增加反馈容差二次判断。若起始状态已经自碰撞，标准规划失败后会通过 MoveIt 状态有效性服务取得
 当前碰撞对，读取完整 ACM，并仅在本次 MoveGroup 请求中临时放行这些碰撞对后强制重新
-规划；不存在控制器直发或自造轨迹旁路，其他碰撞检查保持启用。项目没有 3D 传感器，所以只能检查模型自碰撞，
+规划；该重试适用于任意六轴目标，不存在控制器直发或起始位旁路。项目没有 3D 传感器，所以只能检查模型自碰撞，
 不能感知工作区中的临时外部障碍物。
 
-`/arm-simulator/` 每 33 ms 读取一次所选后端快照，用 `model_joints_rad` 的 J1–J6 驱动从厂家
-URDF 构建的关节树，
+`/arm-simulator/` 每 33 ms 读取一次统一快照，用 `joints_rad` 的 J1–J6 驱动从厂家 URDF
+构建的关节树，
 并显示当前和目标 TCP。页面使用厂家 STL 表现本体，并按 `gripper_rad` 驱动
-J7 左夹爪及 URDF mimic 右夹爪。页面只通过专用 POST 接口选择后端，不直接访问串口，
-并可通过另一组 POST 接口请求标准 MoveIt 回零；它没有零点、参数或力矩写入能力。
-J1–J7 行提供模型角滑块；拖动后只在当前浏览器暂停实时
-模型跟随并调整 Three.js 关节，不修改后端快照。点击“恢复实时”即可重新跟随后端。
-模型资产来源和固定上游提交记录在
-`src/controller-viewer/public/arm-simulator/models/README.md`。
+J7 左夹爪及 URDF mimic 右夹爪。页面可选择手柄/手动控制，并按用户输入连接 Rust 串口；
+切换模式本身不产生运动。七个滑块直接读取已加载 URDF 的范围，拖动只显示目标数值，
+不覆盖持续显示反馈的 Three.js 主模型；松开 J1–J6 时提交完整六轴目标，松开夹爪时只提交
+绝对夹爪角。
+网页源码不保存厂家 URDF、网格或第二份关节参数。Docker 构建先在厂家包临时副本上应用
+与 MoveIt 相同的三个补丁，再由 `tools/prepare-controller-viewer.ts` 把其中的 description
+URDF 和 meshes 写入最终 `/srv/controller-viewer/arm-simulator/models`；七个滑块运行时
+直接读取该 URDF 的关节范围。
 
 设备配置、厂家 MoveIt 模型补丁、具体限制和 P1 只读探针见
-[Star Arm 102-FL 接入与双输出](../../arm/docs/STAR-ARM-102-FL-INTEGRATION.md)。
-ROS 启动和补丁见 [MoveIt Servo 双输出链路](../../arm/ros2/README.md)，方案边界见
+[Star Arm 102-FL 接入](../../arm/docs/STAR-ARM-102-FL-INTEGRATION.md)。
+ROS 启动和补丁见 [MoveIt Servo 统一链路](../../arm/ros2/README.md)，方案边界见
 [IK 与实时笛卡尔伺服选型](../../arm/docs/IK-SELECTION.md)。
 
 内部解码、Fusion、`/api/status` 快照和 SSE 都按设备新样本更新。机械臂控制使用本机
@@ -306,12 +338,15 @@ ROS 启动和补丁见 [MoveIt Servo 双输出链路](../../arm/ros2/README.md)�
 
 ## 陀螺仪零偏标定
 
+本节只适用于真实 USB 设备。虚拟报告保持相同的标定交互与诊断状态，但不读取、保存或应用
+陀螺仪零偏，也不运行 Offset 自适应零偏补偿，避免把已知的模拟慢速旋转误判为传感器漂移。
+
 每个设备第一次成功完成的手工陀螺仪零偏会立即写入
 `vr-xr/state/gyro-bias-v1.json`。后端重启或 USB 重连时读取文件，并把对应 Fusion 状态
-直接恢复为“零偏已完成”。因此重复长按 Menu 只使用最近的有效样本记录网页原点、
+直接恢复为“零偏已完成”。因此重复长按 Squeeze 只使用最近的有效样本记录网页原点、
 零姿态和人体前方，不重启 Fusion、不清空 Offset，也不重新采集零偏。
 
-若某个设备在文件中没有有效条目，它第一次长按 Menu 时仍按原流程执行：第一秒用于
+若某个设备在文件中没有有效条目，它第一次长按 Squeeze 时仍按原流程执行：第一秒用于
 摆稳，随后重新初始化 Fusion，并要求连续静止 3 秒来计算零偏；成功后才记录原点并将
 零偏写入文件。文件存在但缺少该来源、schema 不兼容、数值非有限或超过 Fusion 官方
 静止门限时，都不会冒充有效零偏。
@@ -330,8 +365,8 @@ AHRS 使用 `Ahrs::new()`，全部算法参数由当前 `fusion-ahrs` 版本的
 `AhrsSettings::default()` 提供，本工程不复制或覆盖默认值。NOLO 没有磁力计，因此
 更新接口使用 `update_no_magnetometer()`。
 
-后端不再叠加自定义快速收敛或动态增益。快速动作后俯仰/侧倾会按照 Fusion 的标准
-重力反馈自然收敛；无磁力计时 yaw 不会由加速度计纠正。
+后端不再叠加自定义快速收敛或动态增益。快速姿态动作后会按照 Fusion 的标准重力反馈自然收敛；
+无磁力计时，绕重力方向的姿态不会由加速度计纠正。
 
 ## 采样前确认设备状态
 
@@ -367,7 +402,7 @@ cargo build --release --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml \
 ```bash
 cargo test --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml
 cargo clippy --all-targets --manifest-path vr-xr/src/nolo-usb-server/Cargo.toml -- -D warnings
-deno test --allow-read=vr-xr/src/controller-viewer/public vr-xr/tests
+deno test --allow-read=vr-xr,/tmp --allow-write=/tmp vr-xr/tests
 ```
 
 测试不访问 USB；实机采样必须单独执行探针或启动后端。

@@ -116,8 +116,7 @@ export function relativeQuaternionToModel(reference, current) {
     multiplyQuaternions(conjugateQuaternion(reference), current),
   );
   // Controlled controller motion establishes this proper body-axis rotation:
-  // head-up raw -X -> model +X, left-tilt raw +Y -> model +Z,
-  // and left-yaw raw +Z -> model +Y.
+  // raw -X -> model +X, raw +Y -> model +Z, and raw +Z -> model +Y.
   let model = [
     -rawRelative[0],
     rawRelative[2],

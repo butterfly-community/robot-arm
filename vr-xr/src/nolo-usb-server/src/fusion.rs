@@ -112,19 +112,21 @@ struct ImuFusion {
     ahrs: Ahrs,
     offset: Offset,
     manual_calibration: ManualGyroCalibration,
+    apply_gyro_bias_correction: bool,
     previous_update: Option<Instant>,
     sample_rate_hz: f32,
     accel_counts_per_g: f32,
 }
 
 impl ImuFusion {
-    fn new(sample_rate_hz: f32, accel_counts_per_g: f32) -> Self {
+    fn new(sample_rate_hz: f32, accel_counts_per_g: f32, apply_gyro_bias_correction: bool) -> Self {
         let ahrs = Ahrs::new();
         let offset = Offset::new(OffsetSettings::default(), sample_rate_hz);
         Self {
             ahrs,
             offset,
             manual_calibration: ManualGyroCalibration::new(sample_rate_hz),
+            apply_gyro_bias_correction,
             previous_update: None,
             sample_rate_hz,
             accel_counts_per_g,
@@ -160,7 +162,11 @@ impl ImuFusion {
             // while that same window was being collected.
             self.offset.reset();
         }
-        let corrected_gyro = self.offset.update(manually_corrected_gyro);
+        let corrected_gyro = if self.apply_gyro_bias_correction {
+            self.offset.update(manually_corrected_gyro)
+        } else {
+            gyro
+        };
         self.ahrs
             .update_no_magnetometer(corrected_gyro, accelerometer, delta);
         let quaternion = self.ahrs.quaternion();
@@ -219,6 +225,15 @@ impl ControllerFusion {
         Self(ImuFusion::new(
             CONTROLLER_SAMPLE_RATE_HZ,
             ACCEL_COUNTS_PER_G,
+            true,
+        ))
+    }
+
+    pub fn new_for_virtual_input() -> Self {
+        Self(ImuFusion::new(
+            CONTROLLER_SAMPLE_RATE_HZ,
+            ACCEL_COUNTS_PER_G,
+            false,
         ))
     }
 
@@ -252,7 +267,11 @@ pub struct HmdFusion(ImuFusion);
 
 impl HmdFusion {
     pub fn new() -> Self {
-        Self(ImuFusion::new(HMD_SAMPLE_RATE_HZ, 16384.0))
+        Self(ImuFusion::new(HMD_SAMPLE_RATE_HZ, 16384.0, true))
+    }
+
+    pub fn new_for_virtual_input() -> Self {
+        Self(ImuFusion::new(HMD_SAMPLE_RATE_HZ, 16384.0, false))
     }
 
     /// Return a quaternion in the API's `[x, y, z, w]` order.

@@ -88,6 +88,16 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
   if (!app.includes("cancelCalibrationHold();")) {
     throw new Error("source changes do not cancel stale calibration holds");
   }
+  if (
+    !app.includes("frame.squeeze_pressed") ||
+    !app.includes("latest?.squeeze_pressed") ||
+    app.includes("const pressed = !isHead && valid && frame.menu_pressed") ||
+    !html.includes("Trigger（接管）") ||
+    !html.includes("右侧键（标定）") ||
+    !html.includes("Menu（夹爪）")
+  ) {
+    throw new Error("physical button functions are not aligned in the viewer");
+  }
   for (
     const endpoint of ["/api/simulation/start", "/api/simulation/stop"]
   ) {
@@ -112,6 +122,19 @@ Deno.test("viewer DOM references resolve and use explicit pose validity", () => 
     !app.includes("先预抬升 10 厘米，再开始循环")
   ) {
     throw new Error("virtual NOLO does not reset and explain auto calibration");
+  }
+  if (
+    !app.includes("restoreViewFromBackend(payload)") ||
+    !app.includes("payload.humanReferences") ||
+    !app.includes("/api/human-reference/${sourceId}") ||
+    !app.includes("latestBackendStatus = payload") ||
+    !app.includes("restoreViewFromBackend(latestBackendStatus)") ||
+    !app.includes('calibration-state").textContent = "已完成（后端会话）"')
+  ) {
+    throw new Error("virtual pose cannot be restored from backend state");
+  }
+  if (app.includes("localStorage") || app.includes("sessionStorage")) {
+    throw new Error("human-frame calibration leaked into browser storage");
   }
   if (
     !app.includes("const active = frame.communication_fresh === true") ||

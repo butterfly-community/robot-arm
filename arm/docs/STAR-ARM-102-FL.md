@@ -105,11 +105,12 @@
 | Fashion Star SDK | `fashionstar_uart_sdk >=1.3.12` |
 | 电机总线包 | `lerobot_motor_starai >=0.0.6` |
 
-上述是厂家 FL 插件的依赖关系，不是本项目真机连接选择。审计 `lerobot_motor_starai`
-0.0.6 和 0.0.7 后确认其 `connect()` 会释放力矩并广播 `ResetLoop(0xFF)`；本项目因此直接
-使用它底层的 `fashionstar_uart_sdk==1.3.12` 非配置式打开端口，并只复用官方 ping、
-`Monitor`/位置读取和同步位置命令。严格只读探针使用 `Present_Position`；连续真机节点
-使用 `Monitor`，以便在同一反馈中取得七轴位置和夹爪负载诊断。
+上述是厂家 FL 插件的依赖关系，不是本项目运行时依赖。审计 `lerobot_motor_starai` 0.0.6
+和 0.0.7 后确认其 `connect()` 会释放力矩并广播 `ResetLoop(0xFF)`。本项目的独立 Python
+只读探针使用 `fashionstar_uart_sdk==1.3.12` 执行 ping 和 `Present_Position`；生产 Rust
+使用独立 `fashionstar-uart` 库实现厂家公开帧格式，以 `Monitor` 取得七轴位置并发送同步
+位置命令，不加载 Python SDK。该库已通过官方 `Packet`/`PortHandler` 的双向 `socat`
+交叉测试；`ArmJointIo` 只消费 Monitor 的 ID 和位置，不把其他负载字段加入控制状态。
 
 Linux 的 `/dev/ttyUSB1` 只是示例，也可以使用 `/dev/serial/by-id/...` 等稳定名称。同一
 串口只能由一个进程占用。
@@ -140,9 +141,9 @@ ID 6 给出 `stall_protection=0`、`stall_power_limit=2000 mW`、
 `power_protection=4000 mW`、`current_protection=6000 mA` 的模板，但这不能证明当前实物
 已配置为这些数值。
 
-当前代码统一用 `hand_controller` 控制仿真与真机，只向真机 ID 6 发送位置目标，并读取
-位置、功率、电流、温度和原始状态字节。启动链不读取或改写上述保护参数，状态位 6 也
-不被推断成“正常保持”。厂家依据见
+当前代码统一用 `hand_controller` 控制仿真与真机，只向真机 ID 6 发送位置目标。UART
+协议库完整解码 Monitor 帧用于协议校验；启动链只消费 ID 和位置，不把其他字段写入控制
+状态，也不读取或改写上述保护参数。厂家依据见
 [功率保护参数说明](https://fashionstar.com.hk/wiki/zh/documents/servo/setting-protection-parameters/)，
 项目参数模板见上游 `Python_SDK/set-param.py` 的 ID 6 配置。
 
@@ -164,28 +165,32 @@ ID 6 给出 `stall_protection=0`、`stall_power_limit=2000 mW`、
 
 FL 插件提供的是**关节角目标接口**，没有把 6D 末端位姿自动转换为关节角。本项目现用
 MoveIt Servo 完成仿真与真机软件链路的运动学和约束，不调用上游 `send_action()`；
-真机输出改由标准控制器和受限 SDK 薄适配层接收单帧关节目标。该软件链尚未在实物上
-完成通电验收。
+真机输出改由标准控制器和 Rust 串口薄适配层接收关节目标。当前已经完成实物串口连接、
+Monitor 反馈、J4 方向、夹爪和圆弧运动的现场定性验收；定量精度、外参和长期动态仍待测量。
 
 ## ROS 资产的采用边界
 
-根目录产品表说明 FL 支持 ROS2、MoveIt 和 Gazebo，但仓库里的 ROS2 模型没有在文件中
-标注“新品 FL 硬件版本”，而且数值与当前 FL 产品表、当前 FL LeRobot 配置存在冲突：
+根目录产品表说明 FL 支持 ROS2、MoveIt 和 Gazebo。厂家后续提供的 description 更新修正了
+关节几何并同步替换了 9 个 STL，但没有对应的新 Git 提交，而且把 description 包外壳重新
+导出成了 ROS 1 `catkin`。项目只在容器临时副本中将该外壳适配为 ROS 2 `ament_cmake`。
+
+新版 URDF 的位置范围仍与 FL 产品表、当前 FL LeRobot 配置不同：
 
 - URDF 的 joint1 约为 ±130°，产品表为 ±110°。
-- URDF 的 joint3 只有约 180°，产品表为 270°。
-- URDF 的 joint4 上限约 126°，产品表为 90°。
-- URDF 的 joint6 为 ±180°，产品表为 ±150°。
+- URDF 的 joint2、joint3、joint4 均为约 ±90°；其中 joint3 总范围约 180°，产品表为 270°。
+- URDF 的 joint5、joint6 和两个夹爪关节均为约 ±130°，与对应产品表范围不同。
 - 上游 MoveIt 覆盖配置曾把 ROS `joint6`（第六旋转关节、舵机 ID 5，不是舵机 ID 6
   的夹爪）最大速度写成 `13.14 rad/s`。动力学补丁将 J1–J7 统一为 `3.14 rad/s`，并使用
   用户此前根据官方 `200°/s、100 ms` 示例换算后明确选定的 J1–J6 `30 rad/s²`；真实动态
   仍可另行测量核对。
 - ROS2 驱动默认启动会向零位运动，退出路径没有实现可靠停止。
 
-当前仿真复用其几何链、网格、SRDF、KDL、控制器配置和 `GenericSystem`，并在容器临时
-副本上通过项目补丁按新品产品表覆盖关节范围、添加 `tool0` 并修正 Jazzy mimic 配置。
-真机软件后端使用同一套修正模型，并额外应用 topic hardware 补丁；上游惯量、effort、
-几何和动力学数值仍需与实物对照。
+按用户确认，当前统一 ROS 路径以厂家新版 URDF 的位置范围为唯一来源；项目不按产品表增加
+覆盖，也不在 Rust 配置中保存第二套位置限位。厂家 ros2_control 中 J5 和夹爪主关节与
+URDF 不一致，topic I/O 补丁将这两项同步为 URDF 的 `[-2.27, 2.27]`。其余补丁负责 ROS 2
+包装、把 arm 链结束在厂家已有的 `link6`、Jazzy mimic 控制边界和
+`JointStateTopicSystem`；不添加未经实测的 TCP link。上游惯量、effort、几何和动力学数值
+仍需与实物对照。
 
 同理，历史 `Python_SDK/stararm102_ro.py` 虽然会向 follower 发送同步关节命令，但它的
 目标来自 LD/HD 主臂角度复制。本文不再从中提取滤波窗口、刷新频率、裸数据包结构或
@@ -199,15 +204,15 @@ MoveIt Servo 完成仿真与真机软件链路的运动学和约束，不调用�
 - 新品规格为 420 mm 臂展、500 g 建议负载、±0.5 mm 标称重复精度、12 V/10 A。
 - 当前明确的独立软件入口是新版 LeRobot `Stararm102FL`，通过单独串口以 1 Mbaud 读写
   七个关节。
-- MoveIt Servo 仿真与真机软件链路已经完成；真机仍未连接。真实零位/方向、反馈冻结、
-  独立硬件急停和分级通电行为仍属于 P3 现场验收，不能由软件测试代替。
+- MoveIt Servo、软件反馈与运行时串口链路已经完成，并已连接真机执行定性运动测试；J4
+  串口方向、PID 读数和未到位/抖动现象已经记录。外参、定量误差与长期稳定性仍需现场测量。
 
-值得在接机时记录：
+后续仍需补充或定量核对：
 
 1. 机身标签确实为 Star Arm 102-FL 新品，而非旧版同名 follower。
 2. 实物电源接口、额定输入、UC-01 USB 身份和稳定串口名称。
-3. ID 0–6 的实际舵机型号与当前位置反馈。
-4. 每个关节的机械零位、正方向、硬止挡和保守软限位。
+3. ID 0–6 的实际舵机型号；当前位置反馈链已经现场验证。
+4. 每个关节的机械零位、正方向和硬止挡；只有用户明确要求时才据此修改软件范围。
 5. 夹爪逻辑比例与实际开口毫米。
 6. 新品 FL 对应的 URDF、`base_link`、工具中心点和逆运动学模型。
 7. 夹爪堵转、功率和电流保护的实际配置与状态反馈。
@@ -215,8 +220,8 @@ MoveIt Servo 完成仿真与真机软件链路的运动学和约束，不调用�
 
 这些测量用于修正模型和可复现问题，不作为项目新增软件门限的依据，除非用户明确要求。
 
-当前只读探针、版本化模型和双输出控制实现见
-[Star Arm 102-FL 接入与双输出](STAR-ARM-102-FL-INTEGRATION.md)。
+当前只读探针、版本化模型和统一控制实现见
+[Star Arm 102-FL 统一接入](STAR-ARM-102-FL-INTEGRATION.md)。
 
 ## 采用的上游文件
 
