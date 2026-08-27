@@ -1,0 +1,76 @@
+# syntax=docker/dockerfile:1.7
+FROM debian:13-slim AS openxr-build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential ca-certificates cmake glslang-tools libeigen3-dev \
+        libgl1-mesa-dev libhidapi-dev libudev-dev libusb-1.0-0-dev \
+        libvulkan-dev libxcb-randr0-dev libxcb1-dev meson ninja-build \
+        pkg-config python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openhmd_source / /src/openhmd
+COPY --from=monado_source / /src/monado
+COPY --from=fusion_source /Fusion /src/Fusion
+COPY patches/openhmd-nolo-cv1-runtime.patch /tmp/openhmd-nolo-cv1-runtime.patch
+
+RUN mkdir -p /src/openhmd/src/ext_deps/Fusion \
+    && cp /src/Fusion/FusionAhrs.c /src/Fusion/FusionAhrs.h \
+        /src/Fusion/FusionBias.c /src/Fusion/FusionBias.h \
+        /src/Fusion/FusionConfig.h /src/Fusion/FusionConvention.h \
+        /src/Fusion/FusionInline.h /src/Fusion/FusionMath.h \
+        /src/Fusion/FusionModel.h \
+        /src/openhmd/src/ext_deps/Fusion/ \
+    && patch --dry-run --directory=/src/openhmd --strip=1 < /tmp/openhmd-nolo-cv1-runtime.patch \
+    && patch --directory=/src/openhmd --strip=1 < /tmp/openhmd-nolo-cv1-runtime.patch \
+    && meson setup /build/openhmd /src/openhmd \
+        --buildtype=release --prefix=/opt/openxr --libdir=lib \
+        -Ddrivers=nolo -Dexamples= -Dhidapi=libusb -Dtests=true \
+    && meson compile -C /build/openhmd \
+    && meson test -C /build/openhmd --print-errorlogs \
+    && meson install -C /build/openhmd
+
+ENV PKG_CONFIG_PATH=/opt/openxr/lib/pkgconfig
+RUN cmake -S /src/monado -B /build/monado -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/openxr \
+        -DXRT_BUILD_DRIVER_OHMD=ON \
+        -DXRT_BUILD_DRIVER_SIMULATED=ON \
+        -DXRT_FEATURE_SERVICE=ON \
+        -DXRT_FEATURE_SERVICE_SYSTEMD=OFF \
+    && cmake --build /build/monado \
+    && cmake --install /build/monado
+
+COPY tools/extract_openxr_profile_catalog.py /tmp/extract_openxr_profile_catalog.py
+RUN python3 /tmp/extract_openxr_profile_catalog.py \
+        /src/monado/src/xrt/auxiliary/bindings/bindings.json \
+        /opt/openxr/share/robot-arm/interaction-profiles.json
+
+FROM rust:1.97-trixie AS dora-build
+RUN git clone --filter=blob:none https://github.com/dora-rs/dora.git /dora-src \
+    && git -C /dora-src checkout 06254f3d3353132f1184020d693680be4733bc2c \
+    && cargo build --manifest-path /dora-src/Cargo.toml --release -p dora-cli
+
+FROM rust:1.97-trixie AS source-build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY nodes nodes
+RUN cargo build --release --locked -p openxr-source-node
+
+FROM debian:13-slim AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates libgl1 libhidapi-libusb0 libudev1 libusb-1.0-0 \
+        libopenxr-dev libvulkan1 libxcb-randr0 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=openxr-build /opt/openxr /opt/openxr
+ENV LD_LIBRARY_PATH=/opt/openxr/lib
+ENV XR_RUNTIME_JSON=/opt/openxr/share/openxr/1/openxr_monado.json
+ENTRYPOINT ["/opt/openxr/bin/monado-service"]
+
+FROM runtime AS source
+COPY --from=dora-build /dora-src/target/release/dora /usr/local/bin/dora
+COPY --from=source-build /src/target/release/openxr-source-node /opt/robot-arm/bin/openxr-source-node
+ENTRYPOINT []

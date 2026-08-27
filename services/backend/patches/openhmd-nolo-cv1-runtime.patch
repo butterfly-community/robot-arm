@@ -1,0 +1,524 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8a809a1..f58a786 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -42,6 +42,7 @@ option(OPENHMD_DRIVER_WMR "Windows Mixed Reality" ON)
+ option(OPENHMD_DRIVER_PSVR "Sony PSVR" ON)
+ option(OPENHMD_DRIVER_HTC_VIVE "HTC Vive" ON)
+ option(OPENHMD_DRIVER_NOLO "NOLO VR CV1" ON)
++set(NOLO_FUSION_SOURCE_DIR "" CACHE PATH "Path to the xioTechnologies/Fusion C sources")
+ option(OPENHMD_DRIVER_XGVR "3Glasses HMD" ON)
+ option(OPENHMD_DRIVER_VRTEK "VR-Tek HMD" ON)
+ option(OPENHMD_DRIVER_EXTERNAL "External sensor driver" ON)
+@@ -132,11 +133,19 @@ if(OPENHMD_DRIVER_HTC_VIVE)
+ endif(OPENHMD_DRIVER_HTC_VIVE)
+
+ if(OPENHMD_DRIVER_NOLO)
++	if(NOT EXISTS "${NOLO_FUSION_SOURCE_DIR}/FusionAhrs.c" OR
++	   NOT EXISTS "${NOLO_FUSION_SOURCE_DIR}/FusionBias.c")
++		message(FATAL_ERROR "OPENHMD_DRIVER_NOLO requires NOLO_FUSION_SOURCE_DIR to point to xioTechnologies/Fusion/Fusion")
++	endif()
+ 	set(openhmd_source_files ${openhmd_source_files}
+ 	${CMAKE_CURRENT_LIST_DIR}/src/drv_nolo/nolo.c
+ 	${CMAKE_CURRENT_LIST_DIR}/src/drv_nolo/packet.c
++	${CMAKE_CURRENT_LIST_DIR}/src/drv_nolo/nolo_fusion.c
++	${NOLO_FUSION_SOURCE_DIR}/FusionAhrs.c
++	${NOLO_FUSION_SOURCE_DIR}/FusionBias.c
+ 	)
+ 	add_definitions(-DDRIVER_NOLO)
++	include_directories(${NOLO_FUSION_SOURCE_DIR})
+
+ 	find_package(HIDAPI REQUIRED)
+ 	include_directories(${HIDAPI_INCLUDE_DIRS})
+diff --git a/meson.build b/meson.build
+index 85e952a..9e644af 100644
+--- a/meson.build
++++ b/meson.build
+@@ -125,9 +125,13 @@ if _drivers.contains('vive')
+ endif
+
+ if _drivers.contains('nolo')
++	nolo_fusion_include = include_directories('src/ext_deps/Fusion')
+ 	sources += [
+ 		'src/drv_nolo/nolo.c',
+ 		'src/drv_nolo/packet.c',
++		'src/drv_nolo/nolo_fusion.c',
++		'src/ext_deps/Fusion/FusionAhrs.c',
++		'src/ext_deps/Fusion/FusionBias.c',
+ 	]
+ 	c_args += '-DDRIVER_NOLO'
+ 	deps += dep_hidapi
+@@ -178,7 +182,7 @@ endif
+ openhmd_lib = library(
+ 	'openhmd',
+ 	sources,
+-	include_directories: include_directories('./include'),
++	include_directories: _drivers.contains('nolo') ? [include_directories('./include'), nolo_fusion_include] : include_directories('./include'),
+ 	c_args: c_args,
+ 	dependencies: deps,
+ 	install: true,
+@@ -289,4 +293,21 @@ if get_option('tests')
+ 	)
+
+ 	test('unittests', unittests)
++	if _drivers.contains('nolo')
++		nolo_unittests = executable(
++			'openhmd_nolo_unittests',
++			[
++				'src/drv_nolo/packet.c',
++				'src/drv_nolo/nolo_fusion.c',
++				'src/ext_deps/Fusion/FusionAhrs.c',
++				'src/ext_deps/Fusion/FusionBias.c',
++				'tests/unittests/nolo.c',
++			],
++			include_directories: [include_directories('./include', './src'), nolo_fusion_include],
++			dependencies: [dep_libm, dep_hidapi],
++		)
++
++		test('nolo_unittests', nolo_unittests)
++	endif
++
+ endif
+diff --git a/pkg-config/openhmd.pc.cmakein b/pkg-config/openhmd.pc.cmakein
+index 17afffc..3d66a28 100644
+--- a/pkg-config/openhmd.pc.cmakein
++++ b/pkg-config/openhmd.pc.cmakein
+@@ -1,11 +1,11 @@
+ prefix=${CMAKE_INSTALL_PREFIX}
+-libdir=$${PKG_CONFIG_INCLUDEDIR}
+-includedir=${PKG_CONFIG_LIBDIR}
++libdir=${CMAKE_INSTALL_PREFIX}/lib
++includedir=${CMAKE_INSTALL_PREFIX}/include
+
+ Name: openhmd
+ Description: API and drivers for immersive technology devices such as HMDs
+ Version: 0.3.0
+-Requires: @hidapi@
++Requires:
+ Conflicts:
+-Libs: -L${libdir} -lopenhmd @deps_ld_flags@
+-Cflags: -I${includedir}
++Libs: -L${CMAKE_INSTALL_PREFIX}/lib -lopenhmd
++Cflags: -I${CMAKE_INSTALL_PREFIX}/include
+diff --git a/src/drv_nolo/nolo.c b/src/drv_nolo/nolo.c
+index 6381878..baa9338 100644
+--- a/src/drv_nolo/nolo.c
++++ b/src/drv_nolo/nolo.c
+@@ -18,8 +18,6 @@
+ #include "nolo.h"
+ #include "../hid.h"
+
+-#define TICK_LEN (1.0f / 120000.0f) // 120 Hz ticks
+-
+ static const int controllerLength = 3 + (3+4)*2 + 2 + 2 + 1;
+ static devices_t* nolo_devices;
+
+@@ -28,20 +26,6 @@ static drv_priv* drv_priv_get(ohmd_device* device)
+ 	return (drv_priv*)device;
+ }
+
+-static void accel_from_nolo_vec(const int16_t* smp, vec3f* out_vec)
+-{
+-	out_vec->x = (float)smp[0];
+-	out_vec->y = (float)smp[1];
+-	out_vec->z = -(float)smp[2];
+-}
+-
+-static void gyro_from_nolo_vec(const int16_t* smp, vec3f* out_vec)
+-{
+-	out_vec->x = (float)smp[0];
+-	out_vec->y = (float)smp[1];
+-	out_vec->z = -(float)smp[2];
+-}
+-
+ static void handle_tracker_sensor_msg(drv_priv* priv, unsigned char* buffer, int size, int type)
+ {
+ 	uint64_t last_sample_tick = priv->sample.tick;
+@@ -59,12 +43,11 @@ static void handle_tracker_sensor_msg(drv_priv* priv, unsigned char* buffer, int
+ 	if(last_sample_tick > 0) //startup correction
+ 		tick_delta = priv->sample.tick - last_sample_tick;
+
+-	float dt = (tick_delta/(float)priv->base.ctx->monotonic_ticks_per_sec)/1000.0f;
++	float dt = nolo_ticks_to_seconds(tick_delta, priv->base.ctx->monotonic_ticks_per_sec);
+
+-	vec3f mag = {{0.0f, 0.0f, 0.0f}};
+-	accel_from_nolo_vec(priv->sample.accel, &priv->raw_gyro);
+-	gyro_from_nolo_vec(priv->sample.gyro, &priv->raw_accel);
+-	ofusion_update(&priv->sensor_fusion, dt, &priv->raw_gyro, &priv->raw_accel, &mag);
++	nolo_imu_device device = type == 1 ? NOLO_IMU_CONTROLLER : NOLO_IMU_HMD;
++	nolo_sample_to_si(&priv->sample, device, &priv->raw_gyro, &priv->raw_accel);
++	priv->base.rotation = nolo_fusion_update(&priv->sensor_fusion, dt, &priv->raw_gyro, &priv->raw_accel);
+ }
+
+ static void update_device(ohmd_device* device)
+@@ -149,10 +132,7 @@ static int getf(ohmd_device* device, ohmd_float_value type, float* out)
+ 	switch(type){
+
+ 	case OHMD_ROTATION_QUAT: {
+-			if (priv->rev == 1) //old firmware
+-				*(quatf*)out = priv->base.rotation;
+-			else //new firmware
+-				*(quatf*)out = priv->sensor_fusion.orient;
++		*(quatf*)out = priv->base.rotation;
+ 			break;
+ 		}
+
+@@ -320,7 +300,7 @@ static ohmd_device* open_device(ohmd_driver* driver, ohmd_device_desc* desc)
+ 	priv->base.close = close_device;
+ 	priv->base.getf = getf;
+
+-	ofusion_init(&priv->sensor_fusion);
++	nolo_fusion_init(&priv->sensor_fusion, priv->id == 0 ? 240.0f : 120.0f);
+
+ 	return &priv->base;
+
+diff --git a/src/drv_nolo/nolo.h b/src/drv_nolo/nolo.h
+index 3e7ac6e..afdd74c 100644
+--- a/src/drv_nolo/nolo.h
++++ b/src/drv_nolo/nolo.h
+@@ -12,6 +12,7 @@
+ #define NOLODRIVER_H
+
+ #include "../openhmdi.h"
++#include "nolo_fusion.h"
+ #include <hidapi.h>
+
+ #define FEATURE_BUFFER_SIZE 64
+@@ -23,6 +24,12 @@ typedef struct
+ 	uint64_t tick;
+ } nolo_sample;
+
++typedef enum
++{
++	NOLO_IMU_HMD,
++	NOLO_IMU_CONTROLLER,
++} nolo_imu_device;
++
+ typedef struct {
+ 	ohmd_device base;
+
+@@ -32,7 +39,7 @@ typedef struct {
+ 	float controller_values[8];
+
+ 	nolo_sample sample;
+-	fusion sensor_fusion;
++	nolo_fusion sensor_fusion;
+ 	vec3f raw_accel, raw_gyro;
+ } drv_priv;
+
+@@ -68,5 +75,7 @@ void nolo_decode_quat_orientation(const unsigned char* data, quatf* quat);
+ void nolo_decode_orientation(const unsigned char* data, nolo_sample* smp);
+ void nolo_decode_position(const unsigned char* data, vec3f* pos);
+
+-#endif
++void nolo_sample_to_si(const nolo_sample* sample, nolo_imu_device device, vec3f* gyro, vec3f* accel);
++float nolo_ticks_to_seconds(uint64_t tick_delta, uint64_t ticks_per_second);
+
++#endif
+diff --git a/src/drv_nolo/nolo_fusion.c b/src/drv_nolo/nolo_fusion.c
+new file mode 100644
+index 0000000..00bfde7
+--- /dev/null
++++ b/src/drv_nolo/nolo_fusion.c
+@@ -0,0 +1,48 @@
++// Copyright 2026 OpenHMD contributors.
++// SPDX-License-Identifier: BSL-1.0
++
++#include "nolo_fusion.h"
++
++#define NOLO_GRAVITY_M_S2 9.80665f
++
++void nolo_fusion_init(nolo_fusion* fusion, float sample_rate_hz)
++{
++	FusionAhrsInitialise(&fusion->ahrs);
++	FusionAhrsSettings ahrs_settings = fusionAhrsDefaultSettings;
++	ahrs_settings.sampleRate = sample_rate_hz;
++	FusionAhrsSetSettings(&fusion->ahrs, &ahrs_settings);
++
++	FusionBiasInitialise(&fusion->bias);
++	FusionBiasSettings bias_settings = fusionBiasDefaultSettings;
++	bias_settings.sampleRate = sample_rate_hz;
++	FusionBiasSetSettings(&fusion->bias, &bias_settings);
++}
++
++quatf nolo_fusion_update(nolo_fusion* fusion, float dt, const vec3f* gyro_rad_s, const vec3f* accel_m_s2)
++{
++	FusionVector gyroscope = {{
++		FusionRadiansToDegrees(gyro_rad_s->x),
++		FusionRadiansToDegrees(gyro_rad_s->y),
++		FusionRadiansToDegrees(gyro_rad_s->z),
++	}};
++	const FusionVector accelerometer = {{
++		accel_m_s2->x / NOLO_GRAVITY_M_S2,
++		accel_m_s2->y / NOLO_GRAVITY_M_S2,
++		accel_m_s2->z / NOLO_GRAVITY_M_S2,
++	}};
++
++	gyroscope = FusionBiasUpdate(&fusion->bias, gyroscope);
++	if (dt > 0.0f) {
++		FusionAhrsSetSamplePeriod(&fusion->ahrs, dt);
++	}
++	FusionAhrsUpdateNoMagnetometer(&fusion->ahrs, gyroscope, accelerometer);
++
++	const FusionQuaternion orientation = FusionAhrsGetQuaternion(&fusion->ahrs);
++	const quatf result = {{
++		orientation.element.x,
++		orientation.element.y,
++		orientation.element.z,
++		orientation.element.w,
++	}};
++	return result;
++}
+diff --git a/src/drv_nolo/nolo_fusion.h b/src/drv_nolo/nolo_fusion.h
+new file mode 100644
+index 0000000..cd23c99
+--- /dev/null
++++ b/src/drv_nolo/nolo_fusion.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 OpenHMD contributors.
++// SPDX-License-Identifier: BSL-1.0
++
++#ifndef NOLO_FUSION_H
++#define NOLO_FUSION_H
++
++#include "FusionAhrs.h"
++#include "FusionBias.h"
++
++#include "../openhmdi.h"
++
++typedef struct
++{
++	FusionAhrs ahrs;
++	FusionBias bias;
++} nolo_fusion;
++
++void nolo_fusion_init(nolo_fusion* fusion, float sample_rate_hz);
++quatf nolo_fusion_update(nolo_fusion* fusion, float dt, const vec3f* gyro_rad_s, const vec3f* accel_m_s2);
++
++#endif
+diff --git a/src/drv_nolo/packet.c b/src/drv_nolo/packet.c
+index 55fd650..7ab41eb 100644
+--- a/src/drv_nolo/packet.c
++++ b/src/drv_nolo/packet.c
+@@ -11,6 +11,10 @@
+ #include <stdio.h>
+ #include "nolo.h"
+
++#define NOLO_GRAVITY_M_S2 9.80665f
++#define NOLO_CONTROLLER_ACCEL_COUNTS_PER_G 1024.0f
++#define NOLO_HMD_ACCEL_COUNTS_PER_G 16384.0f
++#define NOLO_GYRO_RADIANS_PER_SECOND_PER_COUNT ((2000.0f / 32768.0f) * (3.14159265358979323846f / 180.0f))
+ #define DELTA 0x9e3779b9
+ #define MX (((z>>5^y<<2) + (y>>3^z<<4)) ^ ((sum^y) + (key[(p&3)^e] ^ z)))
+
+@@ -38,6 +42,39 @@ inline static uint32_t read32(const unsigned char** buffer)
+ 	return ret;
+ }
+
++void nolo_sample_to_si(const nolo_sample* sample, nolo_imu_device device, vec3f* gyro, vec3f* accel)
++{
++	const float accel_counts_per_g = device == NOLO_IMU_CONTROLLER
++		? NOLO_CONTROLLER_ACCEL_COUNTS_PER_G
++		: NOLO_HMD_ACCEL_COUNTS_PER_G;
++	const float accel_scale = NOLO_GRAVITY_M_S2 / accel_counts_per_g;
++
++	/*
++	 * Converting NOLO's sensor coordinates reflects the raw Z axis. Acceleration
++	 * is a polar vector, but angular velocity is an axial vector and therefore
++	 * gains an additional determinant sign under a reflection. Controlled
++	 * hardware motion confirms this -X/-Y/+Z gyro relation to the transformed
++	 * accelerometer.  The scale is NOLO's +/-2000 degrees/second range divided
++	 * by the signed i16 range, converted to radians/second.
++	 */
++	gyro->x = -(float)sample->gyro[0] * NOLO_GYRO_RADIANS_PER_SECOND_PER_COUNT;
++	gyro->y = -(float)sample->gyro[1] * NOLO_GYRO_RADIANS_PER_SECOND_PER_COUNT;
++	gyro->z = (float)sample->gyro[2] * NOLO_GYRO_RADIANS_PER_SECOND_PER_COUNT;
++
++	accel->x = (float)sample->accel[0] * accel_scale;
++	accel->y = (float)sample->accel[1] * accel_scale;
++	accel->z = -(float)sample->accel[2] * accel_scale;
++}
++
++float nolo_ticks_to_seconds(uint64_t tick_delta, uint64_t ticks_per_second)
++{
++	if (ticks_per_second == 0) {
++		return 0.0f;
++	}
++
++	return tick_delta / (float)ticks_per_second;
++}
++
+ void btea_decrypt(uint32_t *v, int n, int base_rounds, uint32_t const key[4])
+ {
+ 	uint32_t y, z, sum;
+@@ -96,29 +133,29 @@ void nolo_decode_position(const unsigned char* data, vec3f* pos)
+
+ void nolo_decode_orientation(const unsigned char* data, nolo_sample* smp)
+ {	
+-	// acceleration
++	// angular velocity
+ 	for(int i = 0; i < 3; i++){
+-		smp->accel[i] = read16(&data);
++		smp->gyro[i] = read16(&data);
+ 	}
+
+ 	data += 6;
+
+-	// gyro
++	// acceleration
+ 	for(int i = 0; i < 3; i++){
+-		smp->gyro[i] = read16(&data);
++		smp->accel[i] = read16(&data);
+ 	}
+ }
+
+ static void nolo_decode_controller_orientation(const unsigned char* data, nolo_sample* smp)
+ {	
+-	// gyro
++	// acceleration
+ 	for(int i = 0; i < 3; i++){
+-		smp->gyro[i] = read16(&data);
++		smp->accel[i] = read16(&data);
+ 	}
+
+-	// acceleration
++	// angular velocity
+ 	for(int i = 0; i < 3; i++){
+-		smp->accel[i] = read16(&data);
++		smp->gyro[i] = read16(&data);
+ 	}
+ }
+
+diff --git a/tests/unittests/nolo.c b/tests/unittests/nolo.c
+new file mode 100644
+index 0000000..c954358
+--- /dev/null
++++ b/tests/unittests/nolo.c
+@@ -0,0 +1,127 @@
++// Copyright 2026 OpenHMD contributors.
++// SPDX-License-Identifier: BSL-1.0
++
++#include <math.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "drv_nolo/nolo.h"
++
++#define ASSERT_TRUE(value) do { \
++	if (!(value)) { \
++		fprintf(stderr, "assertion failed at %s:%d: %s\\n", __FILE__, __LINE__, #value); \
++		exit(1); \
++	} \
++} while (0)
++
++static void put_i16(unsigned char* data, size_t offset, int16_t value)
++{
++	data[offset] = (unsigned char)((uint16_t)value & 0xff);
++	data[offset + 1] = (unsigned char)((uint16_t)value >> 8);
++}
++
++static void assert_close(float actual, float expected)
++{
++	ASSERT_TRUE(fabsf(actual - expected) < 0.0001f);
++}
++
++static void test_controller_sample(void)
++{
++	unsigned char packet[64] = {0};
++	drv_priv priv;
++	memset(&priv, 0, sizeof(priv));
++	priv.rev = 2;
++	put_i16(packet, 7, 1024);
++	put_i16(packet, 9, -512);
++	put_i16(packet, 11, 256);
++	put_i16(packet, 13, 1000);
++	put_i16(packet, 15, -2000);
++	put_i16(packet, 17, 3000);
++
++	nolo_decode_controller(&priv, packet);
++	ASSERT_TRUE(priv.sample.accel[0] == 1024);
++	ASSERT_TRUE(priv.sample.accel[1] == -512);
++	ASSERT_TRUE(priv.sample.accel[2] == 256);
++	ASSERT_TRUE(priv.sample.gyro[0] == 1000);
++	ASSERT_TRUE(priv.sample.gyro[1] == -2000);
++	ASSERT_TRUE(priv.sample.gyro[2] == 3000);
++
++	vec3f gyro;
++	vec3f accel;
++	nolo_sample_to_si(&priv.sample, NOLO_IMU_CONTROLLER, &gyro, &accel);
++	assert_close(gyro.x, -1.0652645f);
++	assert_close(gyro.y, 2.130529f);
++	assert_close(gyro.z, 3.1957935f);
++	assert_close(accel.x, 9.80665f);
++	assert_close(accel.y, -4.903325f);
++	assert_close(accel.z, -2.4516625f);
++}
++
++static void test_hmd_sample(void)
++{
++	unsigned char packet[64] = {0};
++	drv_priv priv;
++	memset(&priv, 0, sizeof(priv));
++	priv.rev = 2;
++	put_i16(packet, 37, 1000);
++	put_i16(packet, 39, -2000);
++	put_i16(packet, 41, 3000);
++	put_i16(packet, 49, 16384);
++	put_i16(packet, 51, -8192);
++	put_i16(packet, 53, 4096);
++
++	nolo_decode_hmd_marker(&priv, packet);
++	ASSERT_TRUE(priv.sample.gyro[0] == 1000);
++	ASSERT_TRUE(priv.sample.gyro[1] == -2000);
++	ASSERT_TRUE(priv.sample.gyro[2] == 3000);
++	ASSERT_TRUE(priv.sample.accel[0] == 16384);
++	ASSERT_TRUE(priv.sample.accel[1] == -8192);
++	ASSERT_TRUE(priv.sample.accel[2] == 4096);
++
++	vec3f gyro;
++	vec3f accel;
++	nolo_sample_to_si(&priv.sample, NOLO_IMU_HMD, &gyro, &accel);
++	assert_close(gyro.x, -1.0652645f);
++	assert_close(gyro.y, 2.130529f);
++	assert_close(gyro.z, 3.1957935f);
++	assert_close(accel.x, 9.80665f);
++	assert_close(accel.y, -4.903325f);
++	assert_close(accel.z, -2.4516625f);
++}
++
++static void test_tick_conversion(void)
++{
++	assert_close(nolo_ticks_to_seconds(8333333, 1000000000), 0.008333333f);
++	assert_close(nolo_ticks_to_seconds(1, 0), 0.0f);
++}
++
++static void test_fusion_yaw_integration(void)
++{
++	nolo_fusion fusion;
++	nolo_fusion_init(&fusion, 120.0f);
++	const vec3f stationary_accel = {{0.0f, 0.0f, 9.80665f}};
++	const vec3f zero_gyro = {{0.0f, 0.0f, 0.0f}};
++	for (int i = 0; i < 360; i++) {
++		nolo_fusion_update(&fusion, 1.0f / 120.0f, &zero_gyro, &stationary_accel);
++	}
++
++	const vec3f yaw_gyro = {{0.0f, 0.0f, 1.57079632679f}};
++	quatf orientation = {{0.0f, 0.0f, 0.0f, 1.0f}};
++	for (int i = 0; i < 120; i++) {
++		orientation = nolo_fusion_update(&fusion, 1.0f / 120.0f, &yaw_gyro, &stationary_accel);
++	}
++	ASSERT_TRUE(fabsf(orientation.z - 0.7071f) < 0.02f);
++	ASSERT_TRUE(fabsf(orientation.w - 0.7071f) < 0.02f);
++}
++
++int main(void)
++{
++	test_controller_sample();
++	test_hmd_sample();
++	test_tick_conversion();
++	test_fusion_yaw_integration();
++	puts("NOLO unit tests: ok");
++	return 0;
++}

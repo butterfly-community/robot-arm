@@ -1,0 +1,7 @@
+moveit_servo:
+  move_group_name: arm
+  command_in_type: speed_units
+  command_out_topic: /arm_controller/joint_trajectory
+  publish_joint_velocities: false
+  self_collision_proximity_threshold: 0.002
+  hard_stop_singularity_threshold: .inf

@@ -1,0 +1,14 @@
+[package]
+name = "spatial-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nalgebra.workspace = true
+robot-arm-messages.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "web-gateway-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+dora-node-api.workspace = true
+eyre.workspace = true
+robot-arm-messages.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

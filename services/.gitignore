@@ -1,0 +1,9 @@
+/backend/target/
+/target/
+**/node_modules/
+/frontend/web/**/.next/
+*.tsbuildinfo
+**/__pycache__/
+*.pyc
+/runtime-data/
+**/test-results/
