@@ -57,6 +57,18 @@ diff --git a/ROS2_HUMBLE/src/stararm102_description/package.xml b/ROS2_HUMBLE/sr
 +    <build_type>ament_cmake</build_type>
    </export>
  </package>
+diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+--- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
++++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+@@ -268,7 +268,7 @@
+     <child
+       link="link4" />
+     <axis
+-      xyz="0 0 1" />
++      xyz="0 0 -1" />
+     <limit
+       lower="-1.57"
+       upper="1.57"
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
 index 24734ba..c9fe2ed 100644
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf

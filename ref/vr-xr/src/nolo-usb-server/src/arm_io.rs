@@ -133,7 +133,7 @@ fn arm_state_from_monitors(monitors: [Monitor; SERVO_COUNT]) -> ArmStateFrame {
             monitors[0].position_degrees().to_radians(),
             monitors[1].position_degrees().to_radians(),
             monitors[2].position_degrees().to_radians(),
-            -monitors[3].position_degrees().to_radians(),
+            monitors[3].position_degrees().to_radians(),
             monitors[4].position_degrees().to_radians(),
             monitors[5].position_degrees().to_radians(),
         ],
@@ -150,7 +150,7 @@ fn arm_position_commands(
         joints_rad[0],
         joints_rad[1],
         joints_rad[2],
-        -joints_rad[3],
+        joints_rad[3],
         joints_rad[4],
         joints_rad[5],
         -gripper_position_rad,
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_adapter_negates_j4_and_the_gripper_in_both_directions() {
+    fn arm_adapter_keeps_arm_joint_signs_and_negates_only_the_gripper() {
         let monitors = std::array::from_fn(|index| Monitor {
             id: index as u8,
             voltage_mv: 0,
@@ -649,7 +649,7 @@ mod tests {
         let state = arm_state_from_monitors(monitors);
         assert_eq!(
             state.joints_rad,
-            [1.0_f64, 2.0, 3.0, -4.0, 5.0, 6.0].map(f64::to_radians)
+            [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0].map(f64::to_radians)
         );
         assert_eq!(state.gripper_position_rad, (-7.0_f64).to_radians());
 
@@ -667,7 +667,7 @@ mod tests {
         .unwrap();
         assert_eq!(commands.map(|command| command.id), [0, 1, 2, 3, 4, 5, 6]);
         assert_eq!(commands[0].position_tenths_degree, 0);
-        assert_eq!(commands[3].position_tenths_degree, -30);
+        assert_eq!(commands[3].position_tenths_degree, 30);
         assert_eq!(commands[6].position_tenths_degree, -900);
         assert!(commands.iter().all(|command| {
             command.motion_time_ms == MOTION_TIME_MS

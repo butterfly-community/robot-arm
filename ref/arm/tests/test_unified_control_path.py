@@ -142,7 +142,14 @@ class UnifiedControlPathTests(unittest.TestCase):
             ARM_ROOT / "patches" / "star-arm-102-fl-topic-io.patch"
         ).read_text()
         profile = (ARM_ROOT / "config" / "stararm102-fl.v1.json").read_text()
-        self.assertNotIn("stararm102_description.urdf b/", model_patch)
+        added_model_lines = [
+            line[1:]
+            for line in model_patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        self.assertNotIn("<limit", added_model_lines)
+        self.assertFalse(any("lower=" in line for line in added_model_lines))
+        self.assertFalse(any("upper=" in line for line in added_model_lines))
         self.assertNotIn("lower_deg", profile)
         self.assertNotIn("upper_deg", profile)
         added_topic_lines = [
@@ -158,6 +165,24 @@ class UnifiedControlPathTests(unittest.TestCase):
             [line.strip() for line in added_topic_lines if '<param name="max">' in line],
             ['<param name="max">2.27</param>'] * 2,
         )
+
+    def test_j4_direction_lives_in_urdf_and_driver_keeps_joint_signs(self):
+        model_patch = (
+            ARM_ROOT / "patches" / "star-arm-102-fl-moveit-model.patch"
+        ).read_text()
+        arm_io = (
+            ARM_ROOT.parent
+            / "vr-xr"
+            / "src"
+            / "nolo-usb-server"
+            / "src"
+            / "arm_io.rs"
+        ).read_text()
+        self.assertIn('xyz="0 0 -1"', model_patch)
+        self.assertIn("monitors[3].position_degrees().to_radians()", arm_io)
+        self.assertNotIn("-monitors[3].position_degrees().to_radians()", arm_io)
+        self.assertIn("joints_rad[3],", arm_io)
+        self.assertNotIn("-joints_rad[3],", arm_io)
 
     def test_web_model_is_generated_from_the_patched_vendor_package(self):
         root = ARM_ROOT.parent
