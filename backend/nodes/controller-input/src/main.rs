@@ -60,7 +60,7 @@ const SDL_AXES: [(Axis, &str); 6] = [
     (Axis::TriggerRight, "axis/right_trigger"),
 ];
 
-const SDL_BUTTONS: [(Button, &str); 21] = [
+const SDL_BUTTONS: [(Button, &str); 26] = [
     (Button::South, "button/south"),
     (Button::East, "button/east"),
     (Button::West, "button/west"),
@@ -79,9 +79,23 @@ const SDL_BUTTONS: [(Button, &str); 21] = [
     (Button::Misc1, "button/misc1"),
     (Button::Misc2, "button/misc2"),
     (Button::Misc3, "button/misc3"),
+    (Button::Misc4, "button/misc4"),
+    (Button::Misc5, "button/misc5"),
+    (Button::Misc6, "button/misc6"),
     (Button::LeftPaddle1, "button/left_paddle1"),
     (Button::RightPaddle1, "button/right_paddle1"),
+    (Button::LeftPaddle2, "button/left_paddle2"),
+    (Button::RightPaddle2, "button/right_paddle2"),
     (Button::Touchpad, "button/touchpad"),
+];
+
+const NOLO_BUTTONS: [(u8, &str, &str); 6] = [
+    (0, "button/touchpad", "触摸板按下"),
+    (1, "button/trigger", "扳机"),
+    (2, "button/menu", "菜单键"),
+    (3, "button/system", "系统键"),
+    (4, "button/grip", "侧握键"),
+    (5, "button/touchpad_touch", "正在触摸触摸板"),
 ];
 
 fn main() -> Result<()> {
@@ -974,16 +988,12 @@ fn run_nolo_driver(sender: &Sender<DriverEvent>) -> Result<()> {
                     ];
                     let orientation = fusion[index].update(gyro, acceleration, time_ns);
                     let mut components = BTreeMap::new();
-                    for bit in 0..8 {
-                        components.insert(
-                            format!("button/{bit}"),
-                            f64::from((frame.buttons >> bit) & 1),
-                        );
+                    for (bit, path, _) in NOLO_BUTTONS {
+                        components.insert(path.into(), f64::from((frame.buttons >> bit) & 1));
                     }
-                    if let Some([x, y]) = frame.touchpad {
-                        components.insert("touch/x".into(), f64::from(x) / 255.0);
-                        components.insert("touch/y".into(), f64::from(y) / 255.0);
-                    }
+                    let [x, y] = frame.touchpad.unwrap_or([0, 0]);
+                    components.insert("axis/touchpad_x".into(), f64::from(x) / 255.0);
+                    components.insert("axis/touchpad_y".into(), f64::from(y) / 255.0);
                     let received = now_ns();
                     sender.send(DriverEvent::Sample(RawSample {
                         sequence: sequence[index],
@@ -1014,20 +1024,27 @@ fn run_nolo_driver(sender: &Sender<DriverEvent>) -> Result<()> {
 }
 
 fn nolo_source(info: &hidapi::DeviceInfo, device_id: &str, controller: u8) -> InputSourceInfo {
-    let mut components = (0..8)
-        .map(|bit| InputComponentInfo {
-            path: format!("button/{bit}"),
+    let mut components = NOLO_BUTTONS
+        .into_iter()
+        .map(|(_, path, localized_name)| InputComponentInfo {
+            path: path.into(),
             action_type: ActionType::Boolean,
-            localized_name: Some(format!("Button bit {bit}")),
+            localized_name: Some(localized_name.into()),
             definition_source: "nolo-cv1-report".into(),
         })
         .collect::<Vec<_>>();
-    components.extend(["touch/x", "touch/y"].map(|path| InputComponentInfo {
-        path: path.into(),
-        action_type: ActionType::Float,
-        localized_name: Some(path.into()),
-        definition_source: "nolo-cv1-report".into(),
-    }));
+    components.extend(
+        [
+            ("axis/touchpad_x", "触摸板横向位置"),
+            ("axis/touchpad_y", "触摸板纵向位置"),
+        ]
+        .map(|(path, localized_name)| InputComponentInfo {
+            path: path.into(),
+            action_type: ActionType::Float,
+            localized_name: Some(localized_name.into()),
+            definition_source: "nolo-cv1-report".into(),
+        }),
+    );
     InputSourceInfo {
         source_id: format!("nolo:{device_id}:controller-{controller}"),
         driver_id: NOLO_DRIVER_ID.into(),
@@ -1353,6 +1370,7 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn source(
         source_id: &str,
@@ -1391,6 +1409,44 @@ mod tests {
                 .collect(),
         };
         BTreeMap::from([("fixture".into(), sample)])
+    }
+
+    #[test]
+    fn declared_component_tables_cover_sdl3_and_named_nolo_inputs() {
+        assert_eq!(SDL_AXES.len(), 6);
+        assert_eq!(SDL_BUTTONS.len(), 26);
+        assert_eq!(
+            SDL_BUTTONS
+                .iter()
+                .map(|(_, path)| *path)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            SDL_BUTTONS.len()
+        );
+        assert!(SDL_BUTTONS.iter().any(|(_, path)| *path == "button/misc6"));
+        assert!(
+            SDL_BUTTONS
+                .iter()
+                .any(|(_, path)| *path == "button/left_paddle2")
+        );
+        assert!(
+            SDL_BUTTONS
+                .iter()
+                .any(|(_, path)| *path == "button/right_paddle2")
+        );
+
+        assert_eq!(NOLO_BUTTONS.map(|(bit, _, _)| bit), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            NOLO_BUTTONS.map(|(_, path, _)| path),
+            [
+                "button/touchpad",
+                "button/trigger",
+                "button/menu",
+                "button/system",
+                "button/grip",
+                "button/touchpad_touch",
+            ]
+        );
     }
 
     #[test]
