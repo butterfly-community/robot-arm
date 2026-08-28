@@ -1,0 +1,8 @@
+{
+  "services": {
+    "controller-input": [],
+    "spatial-transform": ["controller-input"],
+    "stararm-102-execution": [],
+    "stararm-102-motion": ["spatial-transform", "stararm-102-execution"]
+  }
+}

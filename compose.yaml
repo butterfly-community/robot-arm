@@ -1,0 +1,160 @@
+name: robot-arm-services
+
+x-dora-daemon: &dora-daemon
+  image: robot-arm-services-backend
+  depends_on:
+    dora-coordinator:
+      condition: service_started
+  networks: [robot-services]
+  environment:
+    DORA_COORDINATOR_ADDR: 172.30.0.250
+    DORA_DATAFLOW_NAME: robot-arm-services
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
+
+x-web-app: &web-app
+  image: robot-arm-services-frontend
+  networks: [robot-services]
+
+services:
+  dora-coordinator:
+    <<: *dora-daemon
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.rust
+    depends_on: {}
+    command: ["dora", "coordinator", "--interface", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6013"]
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.250
+
+  controller-input:
+    <<: *dora-daemon
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "controller-input"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      CONTROLLER_INPUT_CONFIG: /config/controller-input.json
+    volumes:
+      - ./backend/config/runtime:/config
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - /sys:/sys:ro
+    device_cgroup_rules:
+      - "c 13:* rwm"
+      - "c 189:* rwm"
+
+  spatial-transform:
+    <<: *dora-daemon
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "spatial-transform"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      SPATIAL_CONFIG: /config/spatial-transform.json
+    volumes: ["./backend/config/runtime:/config"]
+
+  service-status:
+    <<: *dora-daemon
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "service-status"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      SERVICE_STATUS_CONFIG: /config/service-status.json
+    volumes: ["./backend/config/service-status.json:/config/service-status.json:ro"]
+
+  stararm-102-execution:
+    <<: *dora-daemon
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-execution"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      STARARM_EXECUTION_CONFIG: /config/stararm-102-execution.json
+    volumes:
+      - ./backend/config/runtime:/config
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - /sys:/sys:ro
+    device_cgroup_rules:
+      - "c 188:* rwm"
+
+  web-gateway:
+    <<: *dora-daemon
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "web-gateway"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+
+  stararm-102-motion:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.motion
+      additional_contexts:
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-motion"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+      ROS_DOMAIN_ID: "42"
+      STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
+    depends_on:
+      dora-coordinator: { condition: service_started }
+    networks: [robot-services]
+    volumes: ["./backend/config/runtime:/config"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
+
+  dataflow:
+    <<: *dora-daemon
+    command: ["dora", "start", "--coordinator-addr", "172.30.0.250", "--name", "robot-arm-services", "--attach", "/config/dataflow.yml"]
+    healthcheck: { disable: true }
+    volumes:
+      - ./dataflow.yml:/config/dataflow.yml:ro
+      - ./tools/replay/artifacts:/recordings
+    depends_on:
+      controller-input: { condition: service_healthy }
+      service-status: { condition: service_healthy }
+      spatial-transform: { condition: service_healthy }
+      stararm-102-motion: { condition: service_healthy }
+      stararm-102-execution: { condition: service_healthy }
+      web-gateway: { condition: service_healthy }
+
+  web-tracking:
+    <<: *web-app
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.web
+    environment: { WEB_APP: tracking }
+  web-spatial:
+    <<: *web-app
+    environment: { WEB_APP: spatial }
+  web-motion:
+    <<: *web-app
+    environment: { WEB_APP: motion }
+  web-arm-execution:
+    <<: *web-app
+    environment: { WEB_APP: arm-execution }
+
+  web-entry:
+    image: nginx:stable-alpine
+    ports: ["192.168.100.10:8765:8765"]
+    volumes: ["./frontend/web/entry/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    depends_on: [web-tracking, web-spatial, web-motion, web-arm-execution, web-gateway]
+    networks: [robot-services]
+
+  integration-test:
+    image: node:24-trixie-slim
+    profiles: ["test"]
+    command: ["node", "/tests/integration/software-flow.mjs"]
+    environment:
+      SERVICES_BASE_URL: http://web-entry:8765
+    volumes: ["./tests:/tests:ro"]
+    networks: [robot-services]
+
+networks:
+  robot-services:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

@@ -1,2 +1,13 @@
 /ref/local-reports/
 /ref/vr-xr/src/controller-viewer/public/arm-simulator/models/
+/backend/target/
+/target/
+**/node_modules/
+/frontend/web/**/.next/
+*.tsbuildinfo
+**/__pycache__/
+*.pyc
+**/.ruff_cache/
+**/test-results/
+**/playwright-report/
+**/blob-report/

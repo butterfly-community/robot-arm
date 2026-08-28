@@ -1,0 +1,23 @@
+[package]
+name = "controller-input-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata.cargo-machete]
+# This direct dependency contributes SDL build features without a Rust import.
+ignored = ["sdl3-sys"]
+
+[dependencies]
+dora-node-api.workspace = true
+eyre.workspace = true
+fusion-ahrs = "0.7.0"
+hidapi = { version = "2.6.6", default-features = false, features = ["linux-static-libusb"] }
+json-config-store.workspace = true
+nalgebra.workspace = true
+nolo-cv1 = { path = "../../crates/nolo-cv1" }
+robot-arm-messages.workspace = true
+sdl3 = { version = "0.18.4", features = ["build-from-source-static", "build-from-source-unix-console", "hidapi"] }
+sdl3-sys = { version = "0.6.8", default-features = false, features = ["no-sdl-audio", "no-sdl-video", "no-sdl-gpu", "no-sdl-render", "no-sdl-camera", "no-sdl-power", "no-sdl-dialog", "no-sdl-tray"] }
+serde.workspace = true

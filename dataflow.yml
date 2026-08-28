@@ -1,0 +1,178 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/dora-rs/dora/main/dora-schema.json
+debug:
+  enable_debug_inspection: true
+
+nodes:
+  - id: controller-input-node
+    path: /opt/robot-arm/bin/controller-input-node
+    restart_policy: on-failure
+    deploy:
+      machine: controller-input
+    inputs:
+      tick:
+        source: dora/timer/hz/100
+        queue_size: 1
+        queue_policy: drop_oldest
+      scan: dora/timer/millis/1000
+      snapshot: web-gateway-node/tracking_snapshot
+      select_source: web-gateway-node/select_source_request
+      apply_bindings: web-gateway-node/apply_bindings_request
+      set_simulation: web-gateway-node/set_simulation_request
+      arm_telemetry:
+        source: stararm-102-execution-node/arm_telemetry
+        queue_size: 1
+        queue_policy: drop_oldest
+    outputs:
+      - discovery_state
+      - service_state
+      - absolute_pose
+      - control_input
+      - source_request_result
+      - bindings_request_result
+      - simulation_request_result
+
+  - id: spatial-transform-node
+    path: /opt/robot-arm/bin/spatial-transform-node
+    deploy:
+      machine: spatial-transform
+    inputs:
+      absolute_pose:
+        source: controller-input-node/absolute_pose
+        queue_size: 1
+        queue_policy: drop_oldest
+      control_input:
+        source: controller-input-node/control_input
+        queue_size: 1
+        queue_policy: drop_oldest
+      update_config: web-gateway-node/update_spatial_config_request
+      confirm_origin: web-gateway-node/confirm_origin_request
+      snapshot: web-gateway-node/spatial_snapshot
+    outputs:
+      - relative_motion
+      - config_state
+      - service_state
+      - request_result
+
+  - id: stararm-102-motion-node
+    path: /opt/ros_ws/install/stararm_102_motion_node/lib/stararm_102_motion_node/dora_motion_node
+    deploy:
+      machine: stararm-102-motion
+    inputs:
+      relative_motion:
+        source: spatial-transform-node/relative_motion
+        queue_size: 1
+        queue_policy: drop_oldest
+      arm_state:
+        source: stararm-102-execution-node/arm_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      set_control_mode: web-gateway-node/set_control_mode_request
+      motion_request: web-gateway-node/motion_request
+      tool_actuator_request: web-gateway-node/tool_actuator_request
+      model_asset_request: web-gateway-node/model_asset_request
+      snapshot: web-gateway-node/motion_snapshot
+    outputs:
+      - robot_model_info
+      - motion_state
+      - service_state
+      - motion_status
+      - actuator_status
+      - arm_command
+      - mode_request_result
+      - motion_request_result
+      - model_asset_response
+
+  - id: stararm-102-execution-node
+    path: /opt/robot-arm/bin/stararm-102-execution-node
+    deploy:
+      machine: stararm-102-execution
+    inputs:
+      arm_command:
+        source: stararm-102-motion-node/arm_command
+        queue_size: 1
+        queue_policy: drop_oldest
+      execution_request: web-gateway-node/execution_request
+      snapshot: web-gateway-node/execution_snapshot
+      tick:
+        source: dora/timer/millis/10
+        queue_size: 1
+        queue_policy: drop_oldest
+      scan: dora/timer/millis/1000
+    outputs:
+      - execution_info
+      - transport_state
+      - arm_state
+      - arm_telemetry
+      - service_state
+      - request_result
+
+  - id: service-status-node
+    path: /opt/robot-arm/bin/service-status-node
+    deploy:
+      machine: service-status
+    inputs:
+      controller-input: controller-input-node/service_state
+      spatial-transform: spatial-transform-node/service_state
+      stararm-102-motion: stararm-102-motion-node/service_state
+      stararm-102-execution: stararm-102-execution-node/service_state
+    outputs:
+      - system_readiness
+
+  - id: web-gateway-node
+    path: /opt/robot-arm/bin/web-gateway-node
+    deploy:
+      machine: web-gateway
+    inputs:
+      discovery_state: controller-input-node/discovery_state
+      absolute_pose:
+        source: controller-input-node/absolute_pose
+        queue_size: 1
+        queue_policy: drop_oldest
+      control_input:
+        source: controller-input-node/control_input
+        queue_size: 1
+        queue_policy: drop_oldest
+      source_request_result: controller-input-node/source_request_result
+      bindings_request_result: controller-input-node/bindings_request_result
+      simulation_request_result: controller-input-node/simulation_request_result
+      spatial_config_state: spatial-transform-node/config_state
+      spatial_service_state: spatial-transform-node/service_state
+      relative_motion:
+        source: spatial-transform-node/relative_motion
+        queue_size: 1
+        queue_policy: drop_oldest
+      spatial_request_result: spatial-transform-node/request_result
+      robot_model_info: stararm-102-motion-node/robot_model_info
+      motion_state: stararm-102-motion-node/motion_state
+      motion_status: stararm-102-motion-node/motion_status
+      actuator_status: stararm-102-motion-node/actuator_status
+      mode_request_result: stararm-102-motion-node/mode_request_result
+      motion_request_result: stararm-102-motion-node/motion_request_result
+      model_asset_response: stararm-102-motion-node/model_asset_response
+      execution_info: stararm-102-execution-node/execution_info
+      transport_state:
+        source: stararm-102-execution-node/transport_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      execution_service_state: stararm-102-execution-node/service_state
+      arm_state:
+        source: stararm-102-execution-node/arm_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      execution_request_result: stararm-102-execution-node/request_result
+      system_readiness: service-status-node/system_readiness
+    outputs:
+      - tracking_snapshot
+      - select_source_request
+      - apply_bindings_request
+      - set_simulation_request
+      - spatial_snapshot
+      - update_spatial_config_request
+      - confirm_origin_request
+      - motion_snapshot
+      - set_control_mode_request
+      - motion_request
+      - tool_actuator_request
+      - model_asset_request
+      - execution_snapshot
+      - execution_request

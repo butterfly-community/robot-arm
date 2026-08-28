@@ -1,0 +1,10 @@
+packages:
+  - web/apps/*
+  - web/packages/*
+
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+
+overrides:
+  postcss: 8.5.26

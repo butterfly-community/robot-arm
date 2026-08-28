@@ -1,0 +1,100 @@
+{
+  "schema_version": 2,
+  "source": "synthetic_controller_input",
+  "coordinate_convention": "+X forward, +Y left, +Z up; quaternion XYZW; radians",
+  "translation_scale": 0.5,
+  "baseline": {
+    "position_m": [0.0, 0.0, 0.0],
+    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "cases": [
+    {
+      "name": "forward_2_cm",
+      "position_m": [0.0, 0.0, -0.04],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.02, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "back_2_cm",
+      "position_m": [0.0, 0.0, 0.04],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [-0.02, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "left_2_cm",
+      "position_m": [-0.04, 0.0, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.0, 0.02, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "right_2_cm",
+      "position_m": [0.04, 0.0, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.0, -0.02, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "up_2_cm",
+      "position_m": [0.0, 0.04, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.0, 0.0, 0.02],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "down_2_cm",
+      "position_m": [0.0, -0.04, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.0, 0.0, -0.02],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "front_up_8_deg",
+      "position_m": [0.0, 0.0, 0.0],
+      "orientation_xyzw": [-0.0697564737441253, 0.0, 0.0, 0.9975640502598242],
+      "expected_translation_m": [0.0, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.13962634015954636,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "front_down_8_deg",
+      "position_m": [0.0, 0.0, 0.0],
+      "orientation_xyzw": [0.0697564737441253, 0.0, 0.0, 0.9975640502598242],
+      "expected_translation_m": [0.0, 0.0, 0.0],
+      "expected_front_pitch_rad": -0.13962634015954636,
+      "expected_horizontal_arc_rad": 0.0
+    },
+    {
+      "name": "horizontal_left_8_deg",
+      "position_m": [0.0, 0.0, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0697564737441253, 0.9975640502598242],
+      "expected_translation_m": [0.0, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.13962634015954636
+    },
+    {
+      "name": "horizontal_right_8_deg",
+      "position_m": [0.0, 0.0, 0.0],
+      "orientation_xyzw": [0.0, 0.0, -0.0697564737441253, 0.9975640502598242],
+      "expected_translation_m": [0.0, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": -0.13962634015954636
+    },
+    {
+      "name": "return_to_baseline",
+      "position_m": [0.0, 0.0, 0.0],
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "expected_translation_m": [0.0, 0.0, 0.0],
+      "expected_front_pitch_rad": 0.0,
+      "expected_horizontal_arc_rad": 0.0
+    }
+  ]
+}

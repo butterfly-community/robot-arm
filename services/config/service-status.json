@@ -1,8 +1,0 @@
-{
-  "services": {
-    "openxr-source": [],
-    "spatial-transform": ["openxr-source"],
-    "stararm-102-execution": [],
-    "stararm-102-motion": ["spatial-transform", "stararm-102-execution"]
-  }
-}

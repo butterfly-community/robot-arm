@@ -1,0 +1,22 @@
+{
+  "name": "@robot/visualization",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@robot/contracts": "workspace:*",
+    "react": "19.2.8",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/three": "0.185.4",
+    "typescript": "6.0.3"
+  }
+}
