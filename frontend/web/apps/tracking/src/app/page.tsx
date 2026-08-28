@@ -1,6 +1,10 @@
 "use client";
 
-import type { AbsolutePoseFrame, ControlInputFrame } from "@robot/contracts";
+import {
+  virtualFeedbackTarget,
+  type AbsolutePoseFrame,
+  type ControlInputFrame,
+} from "@robot/contracts";
 import { post, requestId, useGateway } from "@robot/gateway-client";
 import {
   Button,
@@ -16,9 +20,12 @@ import {
 import { PoseViewer } from "@robot/visualization";
 import { useState } from "react";
 
+const feedbackActions = [["primary_tool", "夹爪力度回馈"]] as const;
+
 const actions = [
   ["control_active", "接管控制", "boolean"],
   ["confirm_origin", "确认原点", "boolean"],
+  ["primary_tool_open", "打开夹爪", "boolean"],
   ["primary_tool", "夹爪连续控制", "float"],
   ["move_forward_back", "前后移动", "float"],
   ["move_left_right", "左右移动", "float"],
@@ -57,30 +64,38 @@ export default function Page() {
   const bindingStates = (discovery.bindings ?? []) as Array<
     Record<string, unknown>
   >;
-  const bindingsKey = JSON.stringify(bindingStates);
-  const [previousBindingsKey, setPreviousBindingsKey] = useState("");
-  const [paths, setPaths] = useState<Record<string, string>>({});
-  const [inverted, setInverted] = useState<Record<string, boolean>>({});
-  const [types, setTypes] = useState<Record<string, "boolean" | "float">>({});
-  const selected =
-    sources.find(
-      (source) => source.source_id === discovery.selected_source_id,
-    ) ?? (discovery.selected_source as Record<string, unknown> | undefined);
-  const components = (selected?.available_components ?? []) as Array<
+  const feedbackStates = (discovery.feedback_bindings ?? []) as Array<
     Record<string, unknown>
   >;
+  const configKey = JSON.stringify([bindingStates, feedbackStates]);
+  const [previousConfigKey, setPreviousConfigKey] = useState("");
+  const [paths, setPaths] = useState<Record<string, string>>({});
+  const [sourceIds, setSourceIds] = useState<Record<string, string>>({});
+  const [inverted, setInverted] = useState<Record<string, boolean>>({});
+  const [types, setTypes] = useState<Record<string, "boolean" | "float">>({});
+  const [feedbackSourceIds, setFeedbackSourceIds] = useState<
+    Record<string, string>
+  >({});
+  const [feedbackPaths, setFeedbackPaths] = useState<Record<string, string>>(
+    {},
+  );
+  const positionSource = sources.find(
+    (source) => source.source_id === discovery.position_source_id,
+  );
+  const orientationSource = sources.find(
+    (source) => source.source_id === discovery.orientation_source_id,
+  );
   const simulation = (discovery.simulation ?? {}) as Record<string, unknown>;
   const diagnostics = (
     (discovery.diagnostics ?? []) as Array<Record<string, unknown>>
   )[0];
   const controlActive = Boolean(input?.control_active?.value);
 
-  if (previousBindingsKey !== bindingsKey) {
-    setPreviousBindingsKey(bindingsKey);
-    const current = JSON.parse(bindingsKey) as Array<Record<string, unknown>>;
+  if (previousConfigKey !== configKey) {
+    setPreviousConfigKey(configKey);
     setPaths(
       Object.fromEntries(
-        current.map((binding) => [
+        bindingStates.map((binding) => [
           String(binding.action),
           ((binding.configured_components ?? []) as unknown[])
             .map(String)
@@ -88,9 +103,17 @@ export default function Page() {
         ]),
       ),
     );
+    setSourceIds(
+      Object.fromEntries(
+        bindingStates.map((binding) => [
+          String(binding.action),
+          String(binding.source_id ?? ""),
+        ]),
+      ),
+    );
     setInverted(
       Object.fromEntries(
-        current.map((binding) => [
+        bindingStates.map((binding) => [
           String(binding.action),
           Boolean(binding.invert),
         ]),
@@ -98,21 +121,41 @@ export default function Page() {
     );
     setTypes(
       Object.fromEntries(
-        current.map((binding) => [
+        bindingStates.map((binding) => [
           String(binding.action),
           binding.action_type === "boolean" ? "boolean" : "float",
         ]),
       ),
     );
+    setFeedbackSourceIds(
+      Object.fromEntries(
+        feedbackStates.map((binding) => [
+          String(binding.action),
+          String(binding.source_id ?? ""),
+        ]),
+      ),
+    );
+    setFeedbackPaths(
+      Object.fromEntries(
+        feedbackStates.map((binding) => [
+          String(binding.action),
+          String(binding.capability_path ?? ""),
+        ]),
+      ),
+    );
   }
 
-  async function select(source: Record<string, unknown>) {
+  async function select(
+    component: "position" | "orientation",
+    source: Record<string, unknown>,
+  ) {
     setError(undefined);
     try {
-      await post("/api/tracking/source", {
+      await post("/api/tracking/pose-source", {
         schema_version: 2,
         request_id: requestId(),
         action: "select",
+        component,
         driver_id: String(source.driver_id),
         device_id: String(source.device_id),
         source_id: String(source.source_id),
@@ -122,17 +165,17 @@ export default function Page() {
     }
   }
 
-  async function unselect() {
-    if (!selected) return;
+  async function unselect(component: "position" | "orientation") {
     setError(undefined);
     try {
-      await post("/api/tracking/source", {
+      await post("/api/tracking/pose-source", {
         schema_version: 2,
         request_id: requestId(),
         action: "unselect",
-        driver_id: String(selected.driver_id),
-        device_id: String(selected.device_id),
-        source_id: String(selected.source_id),
+        component,
+        driver_id: "",
+        device_id: "",
+        source_id: "",
       });
     } catch (reason) {
       setError(String(reason));
@@ -151,18 +194,28 @@ export default function Page() {
       await post("/api/tracking/bindings", {
         schema_version: 2,
         request_id: requestId(),
-        source_id: String(selected?.source_id ?? ""),
         bindings: actions
           .map(([action, , defaultType]) => ({
             action,
             action_type: types[action] ?? defaultType,
+            source_id: sourceIds[action] ?? "",
             component_paths: (paths[action] ?? "")
               .split(",")
               .map((value) => value.trim())
               .filter(Boolean),
             invert: Boolean(inverted[action]),
           }))
-          .filter((binding) => binding.component_paths.length > 0),
+          .filter(
+            (binding) =>
+              binding.source_id && binding.component_paths.length > 0,
+          ),
+        feedback_bindings: feedbackActions
+          .map(([action]) => ({
+            action,
+            source_id: feedbackSourceIds[action] ?? "",
+            capability_path: feedbackPaths[action] ?? "",
+          }))
+          .filter((binding) => binding.source_id && binding.capability_path),
       });
     } catch (reason) {
       setError(String(reason));
@@ -241,7 +294,11 @@ export default function Page() {
           title="空间位置 / 自身姿态"
           action={
             <StatusBadge tone={pose ? "good" : "warning"}>
-              {pose ? pose.source_id : "等待位姿"}
+              {pose
+                ? [pose.position_source_id, pose.orientation_source_id]
+                    .filter(Boolean)
+                    .join(" + ") || "位姿分量未绑定"
+                : "等待位姿"}
             </StatusBadge>
           }
         >
@@ -288,13 +345,27 @@ export default function Page() {
 
         <Card className="span-4" eyebrow="Controller devices" title="输入源">
           <KeyValue
-            label="驱动"
-            value={String(selected?.driver_id ?? "未选择")}
+            label="空间位置来源"
+            value={String(
+              positionSource?.display_name ??
+                discovery.position_source_id ??
+                "未选择",
+            )}
           />
-          <KeyValue label="设备" value={String(selected?.device_id ?? "—")} />
+          <KeyValue
+            label="设备自身姿态来源"
+            value={String(
+              orientationSource?.display_name ??
+                discovery.orientation_source_id ??
+                "未选择",
+            )}
+          />
           <div className="source-list">
             {sources.map((source) => {
-              const current = source.source_id === discovery.selected_source_id;
+              const positionCurrent =
+                source.source_id === discovery.position_source_id;
+              const orientationCurrent =
+                source.source_id === discovery.orientation_source_id;
               return (
                 <div className="source-item" key={String(source.source_id)}>
                   <div className="row-spread">
@@ -302,78 +373,122 @@ export default function Page() {
                       <strong>
                         {String(source.display_name ?? source.source_id)}
                       </strong>
-                      <small>{String(source.driver_id ?? "未知驱动")}</small>
+                      <small>
+                        {String(source.driver_id ?? "未知驱动")} · 空间
+                        {source.position_capable ? "有" : "无"} · 姿态
+                        {source.orientation_capable ? "有" : "无"}
+                      </small>
                     </div>
-                    <Button
-                      variant={current ? "outline" : "default"}
-                      onClick={() => select(source)}
-                    >
-                      {current ? "当前输入" : "使用"}
-                    </Button>
+                  </div>
+                  <div className="card-actions">
+                    {Boolean(source.position_capable) && (
+                      <Button
+                        variant="outline"
+                        onClick={() => select("position", source)}
+                      >
+                        {positionCurrent ? "当前空间来源" : "用作空间来源"}
+                      </Button>
+                    )}
+                    {Boolean(source.orientation_capable) && (
+                      <Button
+                        variant="outline"
+                        onClick={() => select("orientation", source)}
+                      >
+                        {orientationCurrent ? "当前姿态来源" : "用作姿态来源"}
+                      </Button>
+                    )}
                   </div>
                 </div>
               );
             })}
           </div>
-          {selected && (
-            <div className="card-actions">
-              <Button variant="ghost" onClick={unselect}>
-                停止使用当前输入源
-              </Button>
-            </div>
-          )}
+          <div className="card-actions">
+            <Button variant="ghost" onClick={() => unselect("position")}>
+              清除空间来源
+            </Button>
+            <Button variant="ghost" onClick={() => unselect("orientation")}>
+              清除姿态来源
+            </Button>
+          </div>
         </Card>
 
-        <Card className="span-8" eyebrow="Action mapping" title="功能绑定">
+        <Card
+          className="span-8"
+          eyebrow="Action mapping"
+          title="功能与反馈绑定"
+        >
           <div className="binding-grid">
-            {actions.map(([action, label, defaultType]) => (
-              <Field key={action} label={label} englishLabel={action}>
-                <div className="binding-row">
-                  <select
-                    value={types[action] ?? defaultType}
-                    disabled={defaultType === "boolean"}
-                    onChange={(event) =>
-                      setTypes({
-                        ...types,
-                        [action]: event.currentTarget.value as
-                          "boolean" | "float",
-                      })
-                    }
-                  >
-                    <option value="boolean">按钮 / 正负按钮对</option>
-                    <option value="float">连续轴</option>
-                  </select>
-                  {Array.from({
-                    length:
-                      defaultType === "float" && types[action] === "boolean"
-                        ? 2
-                        : 1,
-                  }).map((_, index) => (
+            {actions.map(([action, label, defaultType]) => {
+              const source = sources.find(
+                (candidate) => candidate.source_id === sourceIds[action],
+              );
+              const components = (source?.available_components ?? []) as Array<
+                Record<string, unknown>
+              >;
+              return (
+                <Field key={action} label={label} englishLabel={action}>
+                  <div className="binding-row">
                     <select
-                      key={index}
-                      value={
-                        (paths[action] ?? "").split(",")[index]?.trim() ?? ""
-                      }
+                      value={sourceIds[action] ?? ""}
+                      onChange={(event) => {
+                        setSourceIds({
+                          ...sourceIds,
+                          [action]: event.currentTarget.value,
+                        });
+                        setPaths({ ...paths, [action]: "" });
+                      }}
+                    >
+                      <option value="">选择输入设备</option>
+                      {sources.map((candidate) => (
+                        <option
+                          key={String(candidate.source_id)}
+                          value={String(candidate.source_id)}
+                        >
+                          {String(
+                            candidate.display_name ?? candidate.source_id,
+                          )}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={types[action] ?? defaultType}
+                      disabled={defaultType === "boolean"}
                       onChange={(event) =>
-                        setPath(action, index, event.currentTarget.value)
+                        setTypes({
+                          ...types,
+                          [action]: event.currentTarget.value as
+                            "boolean" | "float",
+                        })
                       }
                     >
-                      <option value="">
-                        {index === 0 &&
-                        types[action] === "boolean" &&
-                        defaultType === "float"
-                          ? "负方向按钮"
-                          : index === 1
-                            ? "正方向按钮"
-                            : "选择设备输入"}
-                      </option>
-                      {components
-                        .filter(
-                          (component) =>
-                            component.action_type ===
-                            (types[action] ?? defaultType),
-                        )
-                        .map((component) => (
+                      <option value="boolean">开关 / 正负按钮对</option>
+                      <option value="float">连续轴</option>
+                    </select>
+                    {Array.from({
+                      length:
+                        defaultType === "float" && types[action] === "boolean"
+                          ? 2
+                          : 1,
+                    }).map((_, index) => (
+                      <select
+                        key={index}
+                        value={
+                          (paths[action] ?? "").split(",")[index]?.trim() ?? ""
+                        }
+                        onChange={(event) =>
+                          setPath(action, index, event.currentTarget.value)
+                        }
+                      >
+                        <option value="">
+                          {index === 0 &&
+                          types[action] === "boolean" &&
+                          defaultType === "float"
+                            ? "负方向按钮"
+                            : index === 1
+                              ? "正方向按钮"
+                              : "选择设备输入"}
+                        </option>
+                        {components.map((component) => (
                           <option
                             key={String(component.path)}
                             value={String(component.path)}
@@ -381,24 +496,114 @@ export default function Page() {
                             {String(component.localized_name ?? component.path)}
                           </option>
                         ))}
+                      </select>
+                    ))}
+                    <label className="compact-check">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(inverted[action])}
+                        onChange={(event) =>
+                          setInverted({
+                            ...inverted,
+                            [action]: event.currentTarget.checked,
+                          })
+                        }
+                      />
+                      反向
+                    </label>
+                  </div>
+                </Field>
+              );
+            })}
+          </div>
+          <div className="binding-grid">
+            {feedbackActions.map(([action, label]) => {
+              const virtualSelected =
+                feedbackSourceIds[action] === virtualFeedbackTarget.sourceId;
+              const source = sources.find(
+                (candidate) =>
+                  candidate.source_id === feedbackSourceIds[action],
+              );
+              const capabilities = virtualSelected
+                ? [
+                    {
+                      path: virtualFeedbackTarget.capabilityPath,
+                      localized_name: "全局浮动圆环",
+                    },
+                  ]
+                : ((source?.available_feedback_capabilities ?? []) as Array<
+                    Record<string, unknown>
+                  >);
+              return (
+                <Field
+                  key={action}
+                  label={label}
+                  englishLabel={action + "_feedback"}
+                >
+                  <div className="binding-row">
+                    <select
+                      value={feedbackSourceIds[action] ?? ""}
+                      onChange={(event) => {
+                        const sourceId = event.currentTarget.value;
+                        setFeedbackSourceIds({
+                          ...feedbackSourceIds,
+                          [action]: sourceId,
+                        });
+                        setFeedbackPaths({
+                          ...feedbackPaths,
+                          [action]:
+                            sourceId === virtualFeedbackTarget.sourceId
+                              ? virtualFeedbackTarget.capabilityPath
+                              : "",
+                        });
+                      }}
+                    >
+                      <option value="">选择反馈设备</option>
+                      <option value={virtualFeedbackTarget.sourceId}>
+                        网页虚拟反馈
+                      </option>
+                      {sources
+                        .filter(
+                          (candidate) =>
+                            (
+                              candidate.available_feedback_capabilities as
+                                unknown[] | undefined
+                            )?.length,
+                        )
+                        .map((candidate) => (
+                          <option
+                            key={String(candidate.source_id)}
+                            value={String(candidate.source_id)}
+                          >
+                            {String(
+                              candidate.display_name ?? candidate.source_id,
+                            )}
+                          </option>
+                        ))}
                     </select>
-                  ))}
-                  <label className="compact-check">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(inverted[action])}
+                    <select
+                      value={feedbackPaths[action] ?? ""}
                       onChange={(event) =>
-                        setInverted({
-                          ...inverted,
-                          [action]: event.currentTarget.checked,
+                        setFeedbackPaths({
+                          ...feedbackPaths,
+                          [action]: event.currentTarget.value,
                         })
                       }
-                    />
-                    反向
-                  </label>
-                </div>
-              </Field>
-            ))}
+                    >
+                      <option value="">选择设备反馈能力</option>
+                      {capabilities.map((capability) => (
+                        <option
+                          key={String(capability.path)}
+                          value={String(capability.path)}
+                        >
+                          {String(capability.localized_name ?? capability.path)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </Field>
+              );
+            })}
           </div>
           <div className="card-actions">
             <Button onClick={applyBindings}>应用绑定</Button>

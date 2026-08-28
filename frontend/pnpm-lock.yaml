@@ -226,6 +226,12 @@ importers:
       '@radix-ui/react-slot':
         specifier: ^1.3.3
         version: 1.3.3(@types/react@19.2.18)(react@19.2.8)
+      '@robot/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@robot/gateway-client':
+        specifier: workspace:*
+        version: link:../gateway-client
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1

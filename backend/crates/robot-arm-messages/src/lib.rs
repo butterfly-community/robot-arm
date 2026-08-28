@@ -136,10 +136,9 @@ pub struct InputSourceInfo {
     pub position_capable: bool,
     pub orientation_capable: bool,
     pub action_capable: bool,
-    pub rumble_capable: bool,
-    pub trigger_rumble_capable: bool,
     pub active: bool,
     pub available_components: Vec<InputComponentInfo>,
+    pub available_feedback_capabilities: Vec<InputFeedbackCapabilityInfo>,
     pub original_error: Option<String>,
 }
 
@@ -149,6 +148,12 @@ pub struct InputComponentInfo {
     pub action_type: ActionType,
     pub localized_name: Option<String>,
     pub definition_source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InputFeedbackCapabilityInfo {
+    pub path: String,
+    pub localized_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +167,7 @@ pub enum ActionType {
 pub struct InputBindingState {
     pub action: String,
     pub action_type: ActionType,
+    pub source_id: Option<String>,
     pub invert: bool,
     pub configured_components: Vec<String>,
     pub active: bool,
@@ -196,9 +202,13 @@ pub struct InputDiscoveryState {
     pub schema_version: u32,
     pub drivers: Vec<InputDriverInfo>,
     pub sources: Vec<InputSourceInfo>,
-    pub selected_source_id: Option<String>,
-    pub selected_source: Option<SelectedInputSourceState>,
+    pub position_source_id: Option<String>,
+    pub position_source: Option<SelectedInputSourceState>,
+    pub orientation_source_id: Option<String>,
+    pub orientation_source: Option<SelectedInputSourceState>,
     pub bindings: Vec<InputBindingState>,
+    pub feedback_bindings: Vec<ActionFeedbackBindingState>,
+    pub virtual_feedback: Option<ActionFeedback>,
     pub diagnostics: Vec<InputStreamDiagnostics>,
     pub simulation: InputSimulationState,
     pub service: ServiceState,
@@ -220,29 +230,53 @@ pub struct InputSimulationRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SelectInputSourceRequest {
+pub struct SelectPoseSourceRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub action: RequestAction,
     pub driver_id: String,
     pub device_id: String,
     pub source_id: String,
+    pub component: PoseComponent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoseComponent {
+    Position,
+    Orientation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActionBinding {
     pub action: String,
     pub action_type: ActionType,
+    pub source_id: String,
     pub component_paths: Vec<String>,
     pub invert: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionFeedbackBinding {
+    pub action: String,
+    pub source_id: String,
+    pub capability_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionFeedbackBindingState {
+    pub action: String,
+    pub source_id: Option<String>,
+    pub capability_path: Option<String>,
+    pub applicable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplyInputBindingsRequest {
     pub schema_version: u32,
     pub request_id: String,
-    pub source_id: String,
     pub bindings: Vec<ActionBinding>,
+    pub feedback_bindings: Vec<ActionFeedbackBinding>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -259,7 +293,10 @@ pub struct AbsolutePoseFrame {
     pub sequence: u64,
     pub source_time_ns: i64,
     pub received_time_ns: i64,
-    pub source_id: String,
+    pub position_source_id: Option<String>,
+    pub orientation_source_id: Option<String>,
+    pub position_source_capable: bool,
+    pub orientation_source_capable: bool,
     pub reference_space: String,
     pub position_m: [f64; 3],
     pub orientation_xyzw: [f64; 4],
@@ -286,9 +323,9 @@ pub struct ControlInputFrame {
     pub sequence: u64,
     pub source_time_ns: i64,
     pub received_time_ns: i64,
-    pub source_id: String,
     pub control_active: BooleanActionSample,
     pub confirm_origin: BooleanActionSample,
+    pub primary_tool_open: BooleanActionSample,
     pub primary_tool: FloatActionSample,
     pub move_forward_back: FloatActionSample,
     pub move_left_right: FloatActionSample,
@@ -318,8 +355,8 @@ impl Default for SpatialComponentSwitches {
 pub struct SpatialConfigState {
     pub schema_version: u32,
     pub config_version: u64,
-    pub selected_source_id: Option<String>,
-    pub source_has_absolute_pose: bool,
+    pub position_source_id: Option<String>,
+    pub orientation_source_id: Option<String>,
     pub base_from_tracking_axes: [[f64; 3]; 3],
     pub translation_scale: f64,
     pub action_translation_m_per_s: Option<f64>,
@@ -334,8 +371,8 @@ impl Default for SpatialConfigState {
         Self {
             schema_version: SCHEMA_VERSION,
             config_version: 1,
-            selected_source_id: None,
-            source_has_absolute_pose: false,
+            position_source_id: None,
+            orientation_source_id: None,
             base_from_tracking_axes: [[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             translation_scale: 0.5,
             action_translation_m_per_s: None,
@@ -358,6 +395,7 @@ pub struct RelativeToolMotion {
     pub translation_m: [f64; 3],
     pub front_pitch_rad: f64,
     pub horizontal_arc_rad: f64,
+    pub primary_tool_open: bool,
     pub primary_tool_value: f64,
 }
 
@@ -368,8 +406,13 @@ pub struct SpatialConfigPatch {
         skip_serializing_if = "Option::is_none",
         with = "serde_with::rust::double_option"
     )]
-    pub selected_source_id: Option<Option<String>>,
-    pub source_has_absolute_pose: Option<bool>,
+    pub position_source_id: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub orientation_source_id: Option<Option<String>>,
     pub base_from_tracking_axes: Option<[[f64; 3]; 3]>,
     pub translation_scale: Option<f64>,
     #[serde(
@@ -650,6 +693,15 @@ pub struct ArmTelemetry {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionFeedback {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub sample_time_ns: i64,
+    pub action: String,
+    pub strength_percent: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionFieldSchema {
     pub key: String,
     pub label: String,
@@ -770,7 +822,10 @@ mod tests {
             sequence: 1,
             source_time_ns: 2,
             received_time_ns: 3,
-            source_id: "runtime/left".into(),
+            position_source_id: Some("runtime/left".into()),
+            orientation_source_id: Some("runtime/right".into()),
+            position_source_capable: true,
+            orientation_source_capable: true,
             reference_space: "local".into(),
             position_m: [1.0, 2.0, 3.0],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -783,9 +838,25 @@ mod tests {
     }
 
     #[test]
+    fn action_feedback_is_device_independent_and_uses_percent_strength() {
+        let feedback = ActionFeedback {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            sample_time_ns: 2,
+            action: "primary_tool".into(),
+            strength_percent: 75.0,
+        };
+        let json = serde_json::to_value(feedback).unwrap();
+        assert_eq!(json["strength_percent"], 75.0);
+        assert!(json.get("device_id").is_none());
+        assert!(json.get("vendor_id").is_none());
+        assert!(json.get("model_revision").is_none());
+    }
+
+    #[test]
     fn spatial_patch_distinguishes_missing_fields_from_explicit_null() {
         let missing: SpatialConfigPatch = serde_json::from_str("{}").unwrap();
-        assert_eq!(missing.selected_source_id, None);
+        assert_eq!(missing.position_source_id, None);
         assert_eq!(missing.action_translation_m_per_s, None);
         assert_eq!(missing.action_arc_rad_per_s, None);
         assert_eq!(missing.origin_position_m, None);
@@ -794,14 +865,14 @@ mod tests {
 
         let cleared: SpatialConfigPatch = serde_json::from_str(
             r#"{
-                "selected_source_id": null,
+                "position_source_id": null,
                 "action_translation_m_per_s": null,
                 "action_arc_rad_per_s": null,
                 "origin_position_m": null
             }"#,
         )
         .unwrap();
-        assert_eq!(cleared.selected_source_id, Some(None));
+        assert_eq!(cleared.position_source_id, Some(None));
         assert_eq!(cleared.action_translation_m_per_s, Some(None));
         assert_eq!(cleared.action_arc_rad_per_s, Some(None));
         assert_eq!(cleared.origin_position_m, Some(None));

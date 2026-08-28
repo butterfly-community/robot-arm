@@ -15,11 +15,11 @@ nodes:
         queue_policy: drop_oldest
       scan: dora/timer/millis/1000
       snapshot: web-gateway-node/tracking_snapshot
-      select_source: web-gateway-node/select_source_request
+      select_pose_source: web-gateway-node/select_pose_source_request
       apply_bindings: web-gateway-node/apply_bindings_request
       set_simulation: web-gateway-node/set_simulation_request
-      arm_telemetry:
-        source: stararm-102-execution-node/arm_telemetry
+      action_feedback:
+        source: stararm-102-execution-node/action_feedback
         queue_size: 1
         queue_policy: drop_oldest
     outputs:
@@ -27,7 +27,7 @@ nodes:
       - service_state
       - absolute_pose
       - control_input
-      - source_request_result
+      - pose_source_request_result
       - bindings_request_result
       - simulation_request_result
 
@@ -102,7 +102,7 @@ nodes:
       - execution_info
       - transport_state
       - arm_state
-      - arm_telemetry
+      - action_feedback
       - service_state
       - request_result
 
@@ -132,7 +132,7 @@ nodes:
         source: controller-input-node/control_input
         queue_size: 1
         queue_policy: drop_oldest
-      source_request_result: controller-input-node/source_request_result
+      pose_source_request_result: controller-input-node/pose_source_request_result
       bindings_request_result: controller-input-node/bindings_request_result
       simulation_request_result: controller-input-node/simulation_request_result
       spatial_config_state: spatial-transform-node/config_state
@@ -163,7 +163,7 @@ nodes:
       system_readiness: service-status-node/system_readiness
     outputs:
       - tracking_snapshot
-      - select_source_request
+      - select_pose_source_request
       - apply_bindings_request
       - set_simulation_request
       - spatial_snapshot

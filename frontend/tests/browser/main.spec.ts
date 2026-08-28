@@ -107,11 +107,17 @@ test("simulation control uses the normal input and spatial path", async ({
         const response = await request.get("/api/spatial/state");
         const state = await response.json();
         return {
-          source: state.values.spatial_config_state?.selected_source_id,
+          positionSource: state.values.spatial_config_state?.position_source_id,
+          orientationSource:
+            state.values.spatial_config_state?.orientation_source_id,
           active: state.values.relative_motion?.active,
         };
       })
-      .toEqual({ source: "simulation:standard-spatial-cycle", active: true });
+      .toEqual({
+        positionSource: "simulation:standard-spatial-cycle",
+        orientationSource: "simulation:standard-spatial-cycle",
+        active: true,
+      });
     const trackingViewer = page.getByLabel("三维空间位置和设备自身姿态");
     await expect(trackingViewer).toHaveAttribute("data-pose-ready", "true");
     await expect(trackingViewer.locator("canvas")).toBeVisible();
@@ -164,9 +170,31 @@ test("tracking page applies and displays a controller binding", async ({
 }) => {
   await page.goto("/tracking/");
   const before = await (await request.get("/api/tracking/state")).json();
+  const sources = before.values.discovery_state?.sources ?? [];
+  const sourceCard = page.locator("section.card").filter({
+    has: page.getByText("输入源", { exact: true }),
+  });
+  await expect(
+    sourceCard.getByRole("button", {
+      name: /^(用作空间来源|当前空间来源)$/,
+    }),
+  ).toHaveCount(
+    sources.filter((source: { position_capable?: boolean }) =>
+      Boolean(source.position_capable),
+    ).length,
+  );
+  await expect(
+    sourceCard.getByRole("button", {
+      name: /^(用作姿态来源|当前姿态来源)$/,
+    }),
+  ).toHaveCount(
+    sources.filter((source: { orientation_capable?: boolean }) =>
+      Boolean(source.orientation_capable),
+    ).length,
+  );
   const selectedRuntimeSource = before.values.discovery_state?.sources?.find(
-    (source: { source_id: string }) =>
-      source.source_id === before.values.discovery_state?.selected_source_id,
+    (source: { available_components?: unknown[] }) =>
+      (source.available_components?.length ?? 0) > 0,
   );
   test.skip(
     !selectedRuntimeSource,
@@ -183,20 +211,22 @@ test("tracking page applies and displays a controller binding", async ({
         action_type: string;
         configured_components: string[];
         invert: boolean;
+        source_id: string | null;
       }) => ({
         action: binding.action,
         action_type: binding.action_type,
+        source_id: binding.source_id,
         component_paths: binding.configured_components,
         invert: binding.invert,
       }),
     );
   try {
-    const state = await (await request.get("/api/tracking/state")).json();
-    expect(state.values.discovery_state.selected_source).toBeTruthy();
     const field = page.locator("fieldset.field").filter({
       has: page.getByText("接管控制", { exact: true }),
     });
-    const componentSelect = field.locator("select").nth(1);
+    const sourceSelect = field.locator("select").nth(0);
+    await sourceSelect.selectOption(selectedRuntimeSource.source_id);
+    const componentSelect = field.locator("select").nth(2);
     await expect
       .poll(() => componentSelect.locator("option").count())
       .toBeGreaterThan(1);
@@ -224,12 +254,99 @@ test("tracking page applies and displays a controller binding", async ({
       });
   } finally {
     const current = await (await request.get("/api/tracking/state")).json();
+    const feedbackBindings =
+      current.values.discovery_state.feedback_bindings?.map(
+        (binding: {
+          action: string;
+          source_id: string;
+          capability_path: string;
+        }) => ({
+          action: binding.action,
+          source_id: binding.source_id,
+          capability_path: binding.capability_path,
+        }),
+      ) ?? [];
     await request.post("/api/tracking/bindings", {
       data: {
         schema_version: 2,
         request_id: "browser-bindings-restore",
-        source_id: current.values.discovery_state.selected_source.source_id,
         bindings: original,
+        feedback_bindings: feedbackBindings,
+      },
+    });
+  }
+});
+
+test("virtual feedback is selectable, draggable, and visible across pages", async ({
+  page,
+  request,
+}) => {
+  const before = await (await request.get("/api/tracking/state")).json();
+  const inputBindings = (before.values.discovery_state?.bindings ?? [])
+    .filter(
+      (binding: { configured_components: string[] }) =>
+        binding.configured_components.length > 0,
+    )
+    .map(
+      (binding: {
+        action: string;
+        action_type: string;
+        configured_components: string[];
+        invert: boolean;
+        source_id: string | null;
+      }) => ({
+        action: binding.action,
+        action_type: binding.action_type,
+        source_id: binding.source_id,
+        component_paths: binding.configured_components,
+        invert: binding.invert,
+      }),
+    );
+  const feedbackBindings = (
+    before.values.discovery_state?.feedback_bindings ?? []
+  ).map(
+    (binding: {
+      action: string;
+      source_id: string;
+      capability_path: string;
+    }) => ({
+      action: binding.action,
+      source_id: binding.source_id,
+      capability_path: binding.capability_path,
+    }),
+  );
+
+  try {
+    await page.goto("/tracking/");
+    const field = page.locator("fieldset.field").filter({
+      has: page.getByText("夹爪力度回馈", { exact: true }),
+    });
+    await field.locator("select").first().selectOption("virtual-feedback");
+    await page.getByRole("button", { name: "应用绑定" }).click();
+
+    const meter = page.getByRole("meter", { name: "网页虚拟力度反馈" });
+    await expect(meter).toBeVisible();
+    const beforeDrag = await meter.boundingBox();
+    expect(beforeDrag).not.toBeNull();
+    await meter.hover();
+    await page.mouse.down();
+    await page.mouse.move(beforeDrag!.x + 70, beforeDrag!.y + 50);
+    await page.mouse.up();
+    const afterDrag = await meter.boundingBox();
+    expect(afterDrag?.x).not.toBe(beforeDrag?.x);
+    expect(afterDrag?.y).not.toBe(beforeDrag?.y);
+
+    await page.goto("/spatial/");
+    await expect(
+      page.getByRole("meter", { name: "网页虚拟力度反馈" }),
+    ).toBeVisible();
+  } finally {
+    await request.post("/api/tracking/bindings", {
+      data: {
+        schema_version: 2,
+        request_id: "browser-virtual-feedback-restore",
+        bindings: inputBindings,
+        feedback_bindings: feedbackBindings,
       },
     });
   }

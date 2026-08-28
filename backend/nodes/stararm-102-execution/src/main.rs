@@ -11,7 +11,7 @@ use fashionstar_uart::{
 };
 use json_config_store::{load_or_default, save};
 use robot_arm_messages::{
-    ActuatorTelemetry, ArmCommand, ArmState, ArmTelemetry, ConnectionFieldSchema,
+    ActionFeedback, ActuatorTelemetry, ArmCommand, ArmState, ArmTelemetry, ConnectionFieldSchema,
     ExecutionEndpoint, ExecutionInfo, ExecutionRequest, ExecutionTransportState, FeedbackSource,
     NumericFieldSchema, ParameterValue, RequestAction, RequestResult, SCHEMA_VERSION, ServiceState,
     from_arrow, to_arrow,
@@ -28,6 +28,7 @@ const MOTION_TIME_MS: u32 = 100;
 const ACCELERATION_TIME_MS: u16 = 50;
 const DECELERATION_TIME_MS: u16 = 50;
 const GRIPPER_COMMAND_POWER_MW: u16 = 2_000;
+const GRIPPER_IDLE_POWER_MW: u16 = 400;
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 fn main() -> Result<()> {
@@ -563,6 +564,27 @@ fn telemetry_from_monitors(
     }
 }
 
+fn primary_tool_feedback(telemetry: &ArmTelemetry) -> ActionFeedback {
+    let strength_percent = telemetry
+        .actuators
+        .iter()
+        .find(|actuator| actuator.actuator_key == "gripper")
+        .map(|actuator| {
+            let load_power_mw = actuator.power_mw.saturating_sub(GRIPPER_IDLE_POWER_MW);
+            f64::from(load_power_mw) / f64::from(GRIPPER_COMMAND_POWER_MW - GRIPPER_IDLE_POWER_MW)
+        })
+        .unwrap_or(0.0)
+        .min(1.0)
+        * 100.0;
+    ActionFeedback {
+        schema_version: SCHEMA_VERSION,
+        sequence: telemetry.sequence,
+        sample_time_ns: telemetry.sample_time_ns,
+        action: "primary_tool".into(),
+        strength_percent,
+    }
+}
+
 fn encode_command(command: &ArmCommand) -> Result<[PositionCommand; 7], String> {
     let positions = command
         .joints_rad
@@ -600,7 +622,11 @@ fn publish_transport(node: &mut DoraNode, execution: &StarArmExecution) -> Resul
 }
 fn publish_state(node: &mut DoraNode, execution: &StarArmExecution) -> Result<()> {
     send(node, "arm_state", &execution.state)?;
-    send(node, "arm_telemetry", &execution.telemetry)?;
+    send(
+        node,
+        "action_feedback",
+        &primary_tool_feedback(&execution.telemetry),
+    )?;
     send(node, "service_state", &execution.service_state())
 }
 fn send<T: serde::Serialize>(node: &mut DoraNode, id: &str, value: &T) -> Result<()> {
@@ -677,6 +703,34 @@ mod tests {
         });
         let state = state_from_monitors(&monitors, 1);
         assert_eq!(state.actuators_rad, [7.0_f64.to_radians()]);
+    }
+    #[test]
+    fn primary_tool_feedback_ignores_idle_power_with_margin() {
+        let telemetry = |power_mw| ArmTelemetry {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            sample_time_ns: 2,
+            model_revision: MODEL_REVISION.into(),
+            actuators: vec![ActuatorTelemetry {
+                actuator_key: "gripper".into(),
+                voltage_mv: 12_000,
+                current_ma: 30,
+                power_mw,
+                command_power_limit_mw: Some(GRIPPER_COMMAND_POWER_MW),
+                temperature_raw: 0,
+                status: 0,
+            }],
+        };
+        assert_eq!(primary_tool_feedback(&telemetry(364)).strength_percent, 0.0);
+        assert_eq!(primary_tool_feedback(&telemetry(400)).strength_percent, 0.0);
+        assert_eq!(
+            primary_tool_feedback(&telemetry(1_200)).strength_percent,
+            50.0
+        );
+        assert_eq!(
+            primary_tool_feedback(&telemetry(2_000)).strength_percent,
+            100.0
+        );
     }
     #[test]
     fn identical_encoded_command_is_the_deduplication_identity() {

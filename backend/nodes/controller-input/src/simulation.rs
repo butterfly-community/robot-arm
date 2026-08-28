@@ -40,7 +40,10 @@ impl SimulationPlayback {
                 sequence,
                 source_time_ns: now_ns,
                 received_time_ns: now_ns,
-                source_id: SOURCE_ID.into(),
+                position_source_id: Some(SOURCE_ID.into()),
+                orientation_source_id: Some(SOURCE_ID.into()),
+                position_source_capable: true,
+                orientation_source_capable: true,
                 reference_space: "simulation_local".into(),
                 position_m,
                 orientation_xyzw,
@@ -56,9 +59,9 @@ impl SimulationPlayback {
                 sequence,
                 source_time_ns: now_ns,
                 received_time_ns: now_ns,
-                source_id: SOURCE_ID.into(),
                 control_active: active,
                 confirm_origin: BooleanActionSample::default(),
+                primary_tool_open: BooleanActionSample::default(),
                 primary_tool: FloatActionSample::default(),
                 move_forward_back: FloatActionSample::default(),
                 move_left_right: FloatActionSample::default(),
@@ -82,7 +85,6 @@ pub fn inactive_input(sequence: u64, now_ns: i64) -> ControlInputFrame {
         sequence,
         source_time_ns: now_ns,
         received_time_ns: now_ns,
-        source_id: SOURCE_ID.into(),
         ..Default::default()
     }
 }
@@ -227,7 +229,8 @@ mod tests {
         let first = playback.sample(4, 100);
         let second = playback.sample(5, 200);
         assert_eq!(first.pose.sequence, 4);
-        assert_eq!(first.pose.source_id, first.input.source_id);
+        assert_eq!(first.pose.position_source_id.as_deref(), Some(SOURCE_ID));
+        assert_eq!(first.pose.orientation_source_id.as_deref(), Some(SOURCE_ID));
         assert!(first.input.control_active.value);
         assert_eq!(first.input.primary_tool.value, 0.0);
         assert_eq!(first.state.elapsed_s, Some(0.0));

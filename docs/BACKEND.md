@@ -4,15 +4,12 @@
 
 入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 读取持久配置，
 `commit_config()` 先写盘再替换内存配置；`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到
-新样本时生成统一位姿和 Action；`select()`、`apply_bindings()`、`set_simulation()` 分别处理输入源、
-组件绑定和测试数据。`evaluate_actions()` 与 `binding_value()` 把一个连续轴或一对方向按钮转换成
-功能 Action，不增加死区。输入源是否在线根据当前发现结果计算，不把运行时的 `active` 状态写盘。
+新样本时生成统一位姿和 Action；select_pose_source() 分别配置空间位置与姿态来源，并按运行时对应能力筛选和校验候选；apply_bindings() 保存每个 Action 自己的 source_id、输入组件以及独立的 Action 反馈目标，set_simulation() 处理测试数据。combined_pose_frame() 从两个来源透明合成位姿；evaluate_actions() 与 binding_value() 可同时读取多个设备，把连续轴或一对方向按钮转换成功能 Action，不增加死区。能力筛选只约束绝对空间与姿态来源，不约束 Action 或反馈绑定；没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。输入源是否在线根据当前发现结果计算，不把运行时的 active 状态写盘。
 
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在
 `crates/nolo-cv1`。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
 API。生产代码没有手柄型号白名单、型号分支或默认按键映射，型号名称与 USB 信息只作为发现元数据展示。`ImuFusion::update()` 是两类 IMU 输入唯一的姿态融合入口，算法来自 `fusion-ahrs`，项目只做
-单位与坐标适配。`apply_telemetry()`、`haptic_intensity()`、`apply_haptic()` 把夹爪 Monitor 功率转换
-为设备支持的振动能力。
+单位与坐标适配。apply_feedback() 按独立反馈绑定把设备无关的 Action 回馈路由到指定 source_id 和通用能力路径；haptic_intensity() 与 apply_haptic() 只完成 SDL3 归一化强度和反馈 API 的适配，不解释机械臂遥测。SDL3 按运行时实际声明发布 feedback/trigger_left、feedback/trigger_right、feedback/rumble；feedback/virtual 是始终可选的网页目标，选中时把同一 Action 回馈放进采集快照，由共享 Shell 渲染跨页面可拖动圆环。代码不根据型号猜测目标，也没有未绑定时的默认回退。
 
 手写部分：Dora 编排、消息组装、设备到统一组件的命名、用户绑定求值、NOLO 字节协议适配。
 使用库：`hidapi`、`sdl3`、`fusion-ahrs`、`nalgebra`、`serde`、Dora API，以及项目公共的
@@ -23,9 +20,7 @@ API。生产代码没有手柄型号白名单、型号分支或默认按键映�
 节点外壳负责持久化配置和 Dora I/O；磁盘 `SpatialConfig` 只含轴映射、比例、Action 速率、分量
 开关和原点，更新时复制、写盘成功后再替换运行配置。全部转换状态机在
 `crates/spatial-core::SpatialTransform`。
-`handle_pose()`、`handle_control()` 接收同源数据；`active_output()` 以每次接管时的位姿为基准输出
-相对平移、前部圆弧和水平圆弧；没有绝对位置的普通手柄则按用户配置速率积分 Action。夹爪连续值
-原样穿过。矩阵与四元数运算使用 `nalgebra`。配置补丁的“字段缺失”和“显式 `null` 清除”由
+handle_pose() 接收已经分别标明空间来源和姿态来源的组合位姿，handle_control() 接收与设备无关的聚合 Action；两者不要求同源。current_output() 以每次接管时的有效位姿分量为基准输出相对平移、前部圆弧和水平圆弧；未选择绝对位置或姿态来源的分量分别按用户配置速率积分对应 Action，选择后则只消费该绝对分量。夹爪连续值和打开按下沿原样穿过，不依赖整臂空间接管。矩阵与四元数运算使用 `nalgebra`。配置补丁的“字段缺失”和“显式 `null` 清除”由
 `serde_with::rust::double_option` 表达，没有自写 JSON 解析分支。
 
 ## stararm-102-motion-node
@@ -45,6 +40,8 @@ StarArm-102 关节常量。
 `StarArmBus`。`encode_command()` 把 J1–J6 和夹爪的统一模型绝对角直接编码为厂家命令，不做
 第二次方向换算；只有 ID 6 携带 2000 mW。`read_sorted_monitors()` 一次读取 ID 0–6；
 `state_from_monitors()` 生成位置反馈，`telemetry_from_monitors()` 生成电压、电流、功率、温度和状态。
+`primary_tool_feedback()` 在此设备专属边界把夹爪 400～2000 mW 映射为通用 `primary_tool` 0～100 力度百分比
+Action 回馈；400 mW 来自实测空载 364 mW 后保留的余量。
 串口帧和厂家协议由 `crates/fashionstar-uart` 实现，串口枚举使用 `serialport`。
 
 ## service-status-node 与 web-gateway-node

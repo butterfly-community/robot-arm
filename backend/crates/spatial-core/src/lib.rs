@@ -8,6 +8,8 @@ use robot_arm_messages::{
 struct PoseSample {
     position_m: Option<[f64; 3]>,
     orientation: Option<UnitQuaternion<f64>>,
+    position_source_capable: bool,
+    orientation_source_capable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -49,11 +51,11 @@ impl SpatialTransform {
     }
 
     pub fn apply_config(&mut self, patch: SpatialConfigPatch) {
-        if let Some(value) = patch.selected_source_id {
-            self.config.selected_source_id = value;
+        if let Some(value) = patch.position_source_id {
+            self.config.position_source_id = value;
         }
-        if let Some(value) = patch.source_has_absolute_pose {
-            self.config.source_has_absolute_pose = value;
+        if let Some(value) = patch.orientation_source_id {
+            self.config.orientation_source_id = value;
         }
         if let Some(value) = patch.base_from_tracking_axes {
             self.config.base_from_tracking_axes = value;
@@ -93,39 +95,23 @@ impl SpatialTransform {
         frame: AbsolutePoseFrame,
         transformed_time_ns: i64,
     ) -> Option<RelativeToolMotion> {
-        if self.config.selected_source_id.as_deref() != Some(frame.source_id.as_str()) {
+        let source_changed = self.config.position_source_id != frame.position_source_id
+            || self.config.orientation_source_id != frame.orientation_source_id;
+        if source_changed {
             self.end_session();
-            self.current_input = ControlInputFrame::default();
-        }
-        self.config.selected_source_id = Some(frame.source_id.clone());
-        self.config.source_has_absolute_pose = true;
-
-        let required_position_invalid =
-            self.config.switches.translation && !frame.flags.position_valid;
-        let required_orientation_invalid = (self.config.switches.front_pitch
-            || self.config.switches.horizontal_arc)
-            && !frame.flags.orientation_valid;
-        if required_position_invalid || required_orientation_invalid {
             self.current_pose = None;
-            self.end_session();
-            return Some(self.inactive_output(frame.source_time_ns, transformed_time_ns));
         }
-
+        self.config.position_source_id = frame.position_source_id.clone();
+        self.config.orientation_source_id = frame.orientation_source_id.clone();
         self.current_pose = Some(PoseSample {
             position_m: frame.flags.position_valid.then_some(frame.position_m),
             orientation: frame
                 .flags
                 .orientation_valid
                 .then(|| unit_quaternion(frame.orientation_xyzw)),
+            position_source_capable: frame.position_source_capable,
+            orientation_source_capable: frame.orientation_source_capable,
         });
-
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.pose.is_none())
-        {
-            self.end_session();
-        }
 
         if !self.current_input.control_active.value {
             return None;
@@ -139,13 +125,6 @@ impl SpatialTransform {
         frame: ControlInputFrame,
         transformed_time_ns: i64,
     ) -> RelativeToolMotion {
-        if self.config.selected_source_id.as_deref() != Some(frame.source_id.as_str()) {
-            self.end_session();
-            self.current_pose = None;
-            self.config.source_has_absolute_pose = false;
-        }
-        self.config.selected_source_id = Some(frame.source_id.clone());
-
         let confirm_now = frame.confirm_origin.is_active && frame.confirm_origin.value;
         if confirm_now && !self.previous_confirm_origin {
             self.confirm_origin();
@@ -201,13 +180,11 @@ impl SpatialTransform {
         let has_absolute_position = self
             .current_pose
             .as_ref()
-            .and_then(|value| value.position_m)
-            .is_some();
+            .is_some_and(|value| value.position_source_capable);
         let has_absolute_orientation = self
             .current_pose
             .as_ref()
-            .and_then(|value| value.orientation.as_ref())
-            .is_some();
+            .is_some_and(|value| value.orientation_source_capable);
         if !has_absolute_position && let Some(rate) = self.config.action_translation_m_per_s {
             session.action_translation_m[0] +=
                 active_value(self.current_input.move_forward_back) * rate * elapsed_s;
@@ -287,6 +264,7 @@ impl SpatialTransform {
             translation_m,
             front_pitch_rad,
             horizontal_arc_rad,
+            primary_tool_open: pressed(self.current_input.primary_tool_open),
             primary_tool_value: active_value(self.current_input.primary_tool),
         }
     }
@@ -307,6 +285,7 @@ impl SpatialTransform {
             translation_m: [0.0; 3],
             front_pitch_rad: 0.0,
             horizontal_arc_rad: 0.0,
+            primary_tool_open: pressed(self.current_input.primary_tool_open),
             primary_tool_value: active_value(self.current_input.primary_tool),
         }
     }
@@ -314,6 +293,10 @@ impl SpatialTransform {
 
 fn unit_quaternion(xyzw: [f64; 4]) -> UnitQuaternion<f64> {
     UnitQuaternion::new_normalize(Quaternion::new(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+}
+
+fn pressed(sample: robot_arm_messages::BooleanActionSample) -> bool {
+    sample.is_active && sample.changed_since_last_sync && sample.value
 }
 
 fn active_value(sample: robot_arm_messages::FloatActionSample) -> f64 {
@@ -366,7 +349,10 @@ mod tests {
             sequence,
             source_time_ns: sequence as i64 * 1_000_000_000,
             received_time_ns: sequence as i64 * 1_000_000_000,
-            source_id: "source".into(),
+            position_source_id: Some("source".into()),
+            orientation_source_id: Some("source".into()),
+            position_source_capable: true,
+            orientation_source_capable: true,
             reference_space: "local".into(),
             position_m,
             orientation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
@@ -385,7 +371,6 @@ mod tests {
             sequence,
             source_time_ns: sequence as i64 * 1_000_000_000,
             received_time_ns: sequence as i64 * 1_000_000_000,
-            source_id: "source".into(),
             control_active: BooleanActionSample {
                 is_active: true,
                 changed_since_last_sync: true,
@@ -401,7 +386,10 @@ mod tests {
             sequence,
             source_time_ns: sequence as i64 * 10_000_000,
             received_time_ns: sequence as i64 * 10_000_000,
-            source_id: "synthetic-controller".into(),
+            position_source_id: Some("synthetic-controller".into()),
+            orientation_source_id: Some("synthetic-controller".into()),
+            position_source_capable: true,
+            orientation_source_capable: true,
             reference_space: "local".into(),
             position_m: value.position_m,
             orientation_xyzw: value.orientation_xyzw,
@@ -436,8 +424,7 @@ mod tests {
                 ..Default::default()
             });
             transform.handle_pose(fixture_pose(1, &fixture.baseline), 10_000_000);
-            let mut active = control(2, true);
-            active.source_id = "synthetic-controller".into();
+            let active = control(2, true);
             transform.handle_control(active, 20_000_000);
             let output = transform
                 .handle_pose(
@@ -469,6 +456,26 @@ mod tests {
                 &case.name,
             );
         }
+    }
+
+    #[test]
+    fn tool_open_press_is_forwarded_once_even_without_spatial_control() {
+        let mut transform = SpatialTransform::new(SpatialConfigState::default());
+        let mut press = control(1, false);
+        press.primary_tool_open = BooleanActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: true,
+        };
+        assert!(transform.handle_control(press, 1).primary_tool_open);
+
+        let mut held = control(2, false);
+        held.primary_tool_open = BooleanActionSample {
+            is_active: true,
+            changed_since_last_sync: false,
+            value: true,
+        };
+        assert!(!transform.handle_control(held, 2).primary_tool_open);
     }
 
     #[test]
@@ -612,6 +619,39 @@ mod tests {
     }
 
     #[test]
+    fn declared_absolute_sources_disable_action_integration() {
+        let config = SpatialConfigState {
+            action_translation_m_per_s: Some(0.2),
+            action_arc_rad_per_s: Some(0.5),
+            ..Default::default()
+        };
+        let mut transform = SpatialTransform::new(config);
+        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+
+        let mut first = control(2, true);
+        first.move_forward_back = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        first.front_pitch = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        transform.handle_control(first.clone(), 2);
+
+        let mut second = control(3, true);
+        second.move_forward_back = first.move_forward_back;
+        second.front_pitch = first.front_pitch;
+        let output = transform.handle_control(second, 3);
+
+        assert_eq!(output.translation_m, [0.0; 3]);
+        assert_eq!(output.front_pitch_rad, 0.0);
+        assert_eq!(output.horizontal_arc_rad, 0.0);
+    }
+
+    #[test]
     fn release_and_reacquire_create_a_new_pose_baseline() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
         transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
@@ -632,11 +672,10 @@ mod tests {
         transform.handle_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()), 3);
 
         let mut next_pose = pose(4, [5.0, 6.0, 7.0], UnitQuaternion::identity());
-        next_pose.source_id = "another-source".into();
+        next_pose.position_source_id = Some("another-source".into());
+        next_pose.orientation_source_id = Some("another-source".into());
         transform.handle_pose(next_pose, 4);
-        let mut next_control = control(5, true);
-        next_control.source_id = "another-source".into();
-        let output = transform.handle_control(next_control, 5);
+        let output = transform.handle_control(control(5, true), 5);
         assert_eq!(output.translation_m, [0.0; 3]);
     }
 }

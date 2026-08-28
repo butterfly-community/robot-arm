@@ -16,12 +16,13 @@ use json_config_store::{load_or_default, save};
 use nalgebra::Vector3;
 use nolo_cv1::protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report};
 use robot_arm_messages::{
-    AbsolutePoseFrame, ActionBinding, ActionType, ApplyInputBindingsRequest, ArmTelemetry,
-    BooleanActionSample, ControlInputFrame, FloatActionSample, InputBindingState,
-    InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputSimulationRequest,
-    InputSimulationState, InputSourceInfo, InputStreamDiagnostics, PoseFlags, RequestAction,
-    RequestResult, SCHEMA_VERSION, SelectInputSourceRequest, SelectedInputSourceState,
-    ServiceState, from_arrow, to_arrow,
+    AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
+    ActionFeedbackBindingState, ActionType, ApplyInputBindingsRequest, BooleanActionSample,
+    ControlInputFrame, FloatActionSample, InputBindingState, InputComponentInfo,
+    InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo, InputSimulationRequest,
+    InputSimulationState, InputSourceInfo, InputStreamDiagnostics, PoseComponent, PoseFlags,
+    RequestAction, RequestResult, SCHEMA_VERSION, SelectPoseSourceRequest,
+    SelectedInputSourceState, ServiceState, from_arrow, to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -33,12 +34,15 @@ use simulation::{SimulationPlayback, inactive_input};
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
-const CONFIG_SCHEMA_VERSION: u32 = 1;
-const HAPTIC_DURATION_MS: u32 = u32::MAX;
+const CONFIG_SCHEMA_VERSION: u32 = 2;
+const HAPTIC_DURATION_MS: u32 = 50;
+const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
+const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
 
-const ACTIONS: [(&str, ActionType); 8] = [
+const ACTIONS: [(&str, ActionType); 9] = [
     ("control_active", ActionType::Boolean),
     ("confirm_origin", ActionType::Boolean),
+    ("primary_tool_open", ActionType::Boolean),
     ("primary_tool", ActionType::Float),
     ("move_forward_back", ActionType::Float),
     ("move_left_right", ActionType::Float),
@@ -103,11 +107,11 @@ fn main() -> Result<()> {
                     publish_discovery(&mut node, &input)?;
                 }
                 "snapshot" => publish_snapshot(&mut node, &mut input)?,
-                "select_source" => {
-                    let request: SelectInputSourceRequest =
-                        from_arrow(data.as_array()).context("decode select_source")?;
-                    let result = input.select(request);
-                    send(&mut node, "source_request_result", &result)?;
+                "select_pose_source" => {
+                    let request: SelectPoseSourceRequest =
+                        from_arrow(data.as_array()).context("decode select_pose_source")?;
+                    let result = input.select_pose_source(request);
+                    send(&mut node, "pose_source_request_result", &result)?;
                     publish_snapshot(&mut node, &mut input)?;
                 }
                 "apply_bindings" => {
@@ -127,10 +131,10 @@ fn main() -> Result<()> {
                     }
                     publish_snapshot(&mut node, &mut input)?;
                 }
-                "arm_telemetry" => {
-                    let telemetry: ArmTelemetry =
-                        from_arrow(data.as_array()).context("decode arm_telemetry")?;
-                    input.apply_telemetry(telemetry);
+                "action_feedback" => {
+                    let feedback: ActionFeedback =
+                        from_arrow(data.as_array()).context("decode action_feedback")?;
+                    input.apply_feedback(feedback);
                 }
                 _ => {}
             },
@@ -166,12 +170,12 @@ enum DriverEvent {
 
 struct HapticCommand {
     source_id: String,
-    component: Option<String>,
+    capability_path: String,
     intensity: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct InputSelection {
+struct PoseSourceSelection {
     driver_id: String,
     device_id: String,
     source_id: String,
@@ -181,8 +185,10 @@ struct InputSelection {
 struct InputConfig {
     #[serde(default = "config_schema_version")]
     schema_version: u32,
-    selected: Option<InputSelection>,
-    bindings: BTreeMap<String, Vec<ActionBinding>>,
+    position_source: Option<PoseSourceSelection>,
+    orientation_source: Option<PoseSourceSelection>,
+    bindings: Vec<ActionBinding>,
+    feedback_bindings: Vec<ActionFeedbackBinding>,
     config_version: u64,
 }
 
@@ -194,8 +200,10 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
-            selected: None,
-            bindings: BTreeMap::new(),
+            position_source: None,
+            orientation_source: None,
+            bindings: vec![],
+            feedback_bindings: vec![],
             config_version: 1,
         }
     }
@@ -208,13 +216,15 @@ struct ControllerInput {
     sources: BTreeMap<String, InputSourceInfo>,
     diagnostics: BTreeMap<String, InputStreamDiagnostics>,
     samples: BTreeMap<String, RawSample>,
-    last_published_sequence: Option<u64>,
+    last_published_sequences: BTreeMap<String, u64>,
+    pose_dirty: bool,
     previous_control: Option<ControlInputFrame>,
     simulation: Option<SimulationPlayback>,
     simulation_state: InputSimulationState,
     next_sequence: u64,
     receiver: Receiver<DriverEvent>,
     haptic: Sender<HapticCommand>,
+    virtual_feedback: Option<ActionFeedback>,
     last_error: Option<String>,
 }
 
@@ -234,7 +244,8 @@ impl ControllerInput {
             sources: BTreeMap::new(),
             diagnostics: BTreeMap::new(),
             samples: BTreeMap::new(),
-            last_published_sequence: None,
+            last_published_sequences: BTreeMap::new(),
+            pose_dirty: true,
             previous_control: None,
             simulation: None,
             simulation_state: InputSimulationState {
@@ -244,6 +255,7 @@ impl ControllerInput {
             next_sequence: 1,
             receiver,
             haptic,
+            virtual_feedback: None,
             last_error: None,
         })
     }
@@ -251,8 +263,18 @@ impl ControllerInput {
     fn commit_config(&mut self, config: InputConfig) -> Result<()> {
         save(&self.config_path, &config)?;
         self.config = config;
-        self.last_published_sequence = None;
+        self.last_published_sequences.clear();
+        self.pose_dirty = true;
         self.previous_control = None;
+        if self.virtual_feedback.as_ref().is_some_and(|feedback| {
+            !self
+                .config
+                .feedback_bindings
+                .iter()
+                .any(|binding| binding.action == feedback.action && is_virtual_feedback(binding))
+        }) {
+            self.virtual_feedback = None;
+        }
         Ok(())
     }
 
@@ -273,6 +295,11 @@ impl ControllerInput {
                             });
                         self.sources.insert(source.source_id.clone(), source);
                     }
+                    self.samples
+                        .retain(|source_id, _| self.sources.contains_key(source_id));
+                    self.last_published_sequences
+                        .retain(|source_id, _| self.sources.contains_key(source_id));
+                    self.pose_dirty = true;
                 }
                 Ok(DriverEvent::Sample(sample)) => {
                     let diagnostics = self
@@ -323,83 +350,115 @@ impl ControllerInput {
             return Some((Some(sample.pose), sample.input));
         }
 
-        let selected = self.config.selected.as_ref()?;
-        let sample = self.samples.get(&selected.source_id)?.clone();
-        if self.last_published_sequence == Some(sample.sequence) {
+        let relevant = |source_id: &str| {
+            self.config
+                .position_source
+                .as_ref()
+                .is_some_and(|source| source.source_id == source_id)
+                || self
+                    .config
+                    .orientation_source
+                    .as_ref()
+                    .is_some_and(|source| source.source_id == source_id)
+                || self
+                    .config
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.source_id == source_id)
+        };
+        let changed = self.samples.iter().any(|(source_id, sample)| {
+            relevant(source_id)
+                && self.last_published_sequences.get(source_id) != Some(&sample.sequence)
+        });
+        if !changed && !self.pose_dirty {
             return None;
         }
-        self.last_published_sequence = Some(sample.sequence);
-        let bindings = self
-            .config
-            .bindings
-            .get(&sample.source_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let control = evaluate_actions(&sample, bindings, self.previous_control.as_ref());
+        let pose_changed = [
+            &self.config.position_source,
+            &self.config.orientation_source,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|selected| {
+            self.samples.get(&selected.source_id).is_some_and(|sample| {
+                self.last_published_sequences.get(&selected.source_id) != Some(&sample.sequence)
+            })
+        });
+        let pose = (pose_changed || self.pose_dirty).then(|| {
+            combined_pose_frame(
+                self.config.position_source.as_ref(),
+                self.config.orientation_source.as_ref(),
+                &self.sources,
+                &self.samples,
+                self.next_sequence,
+                now,
+            )
+        });
+        self.pose_dirty = false;
+        for (source_id, sample) in &self.samples {
+            self.last_published_sequences
+                .insert(source_id.clone(), sample.sequence);
+        }
+        let control = evaluate_actions(
+            &self.samples,
+            &self.config.bindings,
+            self.previous_control.as_ref(),
+            self.next_sequence,
+            now,
+        );
+        self.next_sequence += 1;
         self.previous_control = Some(control.clone());
-        let pose = sample
-            .orientation_xyzw
-            .map(|orientation_xyzw| AbsolutePoseFrame {
-                schema_version: SCHEMA_VERSION,
-                sequence: sample.sequence,
-                source_time_ns: sample.source_time_ns,
-                received_time_ns: sample.received_time_ns,
-                source_id: sample.source_id.clone(),
-                reference_space: if sample.position_m.is_some() {
-                    "nolo_tracking"
-                } else {
-                    "controller_orientation"
-                }
-                .into(),
-                position_m: sample.position_m.unwrap_or([0.0; 3]),
-                orientation_xyzw,
-                flags: PoseFlags {
-                    position_valid: sample.position_m.is_some(),
-                    position_tracked: sample.position_m.is_some(),
-                    orientation_valid: true,
-                    orientation_tracked: true,
-                },
-            });
         Some((pose, control))
     }
 
-    fn select(
+    fn select_pose_source(
         &mut self,
-        request: SelectInputSourceRequest,
+        request: SelectPoseSourceRequest,
     ) -> RequestResult<SelectedInputSourceState> {
+        let selection = self
+            .sources
+            .get(&request.source_id)
+            .filter(|source| {
+                source.driver_id == request.driver_id && source.device_id == request.device_id
+            })
+            .filter(|source| supports_pose_component(source, request.component))
+            .map(|source| PoseSourceSelection {
+                driver_id: source.driver_id.clone(),
+                device_id: source.device_id.clone(),
+                source_id: source.source_id.clone(),
+            });
         let change = match request.action {
-            RequestAction::Select => {
-                let selected = self
-                    .sources
-                    .get(&request.source_id)
-                    .filter(|source| {
-                        source.driver_id == request.driver_id
-                            && source.device_id == request.device_id
-                    })
-                    .map(|source| InputSelection {
-                        driver_id: source.driver_id.clone(),
-                        device_id: source.device_id.clone(),
-                        source_id: source.source_id.clone(),
-                    })
-                    .ok_or_else(|| "选择的输入 source 当前不存在".to_owned());
-                selected.and_then(|selected| {
+            RequestAction::Select => selection
+                .ok_or_else(|| "选择的输入 source 不存在或不提供对应位姿能力".to_owned())
+                .and_then(|selection| {
                     let mut config = self.config.clone();
-                    config.selected = Some(selected);
+                    match request.component {
+                        PoseComponent::Position => config.position_source = Some(selection),
+                        PoseComponent::Orientation => config.orientation_source = Some(selection),
+                    }
                     config.config_version += 1;
                     self.commit_config(config)
                         .map_err(|error| error.to_string())
-                })
-            }
+                }),
             RequestAction::Unselect => {
                 let mut config = self.config.clone();
-                config.selected = None;
+                match request.component {
+                    PoseComponent::Position => config.position_source = None,
+                    PoseComponent::Orientation => config.orientation_source = None,
+                }
                 config.config_version += 1;
                 self.commit_config(config)
                     .map_err(|error| error.to_string())
             }
-            action => Err(format!("input 节点不处理 {action:?} source 请求")),
+            action => Err(format!("input 节点不处理 {action:?} pose source 请求")),
         };
-        request_result(request, self.selected_source_state(), change.err())
+        let value = match request.component {
+            PoseComponent::Position => self.source_state(self.config.position_source.as_ref()),
+            PoseComponent::Orientation => {
+                self.source_state(self.config.orientation_source.as_ref())
+            }
+        };
+        request_result(request, value, change.err())
     }
 
     fn apply_bindings(
@@ -411,9 +470,8 @@ impl ControllerInput {
             .map(|error| error.to_string());
         if error.is_none() {
             let mut config = self.config.clone();
-            config
-                .bindings
-                .insert(request.source_id.clone(), request.bindings.clone());
+            config.bindings = request.bindings.clone();
+            config.feedback_bindings = request.feedback_bindings.clone();
             config.config_version += 1;
             if let Err(save_error) = self.commit_config(config) {
                 return RequestResult {
@@ -452,6 +510,7 @@ impl ControllerInput {
             None
         } else {
             self.simulation = None;
+            self.pose_dirty = true;
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 ..Default::default()
@@ -473,49 +532,38 @@ impl ControllerInput {
         )
     }
 
-    fn apply_telemetry(&self, telemetry: ArmTelemetry) {
-        let Some(selected) = self.config.selected.as_ref() else {
-            return;
-        };
-        let Some(gripper) = telemetry
-            .actuators
-            .iter()
-            .find(|actuator| actuator.actuator_key == "gripper")
-        else {
-            return;
-        };
-        let component = self
+    fn apply_feedback(&mut self, feedback: ActionFeedback) {
+        if self
             .config
-            .bindings
-            .get(&selected.source_id)
-            .and_then(|bindings| {
-                bindings
-                    .iter()
-                    .find(|binding| binding.action == "primary_tool")
+            .feedback_bindings
+            .iter()
+            .any(|binding| binding.action == feedback.action && is_virtual_feedback(binding))
+        {
+            self.virtual_feedback = Some(feedback.clone());
+        }
+        for binding in
+            self.config.feedback_bindings.iter().filter(|binding| {
+                binding.action == feedback.action && !is_virtual_feedback(binding)
             })
-            .and_then(|binding| binding.component_paths.first())
-            .cloned();
-        let Some(limit) = gripper.command_power_limit_mw else {
-            return;
-        };
-        let _ = self.haptic.send(HapticCommand {
-            source_id: selected.source_id.clone(),
-            component,
-            intensity: haptic_intensity(gripper.power_mw, limit),
-        });
+        {
+            let _ = self.haptic.send(HapticCommand {
+                source_id: binding.source_id.clone(),
+                capability_path: binding.capability_path.clone(),
+                intensity: haptic_intensity(feedback.strength_percent),
+            });
+        }
     }
 
     fn binding_states(&self) -> Vec<InputBindingState> {
-        let selected = self.config.selected.as_ref();
-        let sample = selected.and_then(|value| self.samples.get(&value.source_id));
-        let bindings = selected
-            .and_then(|value| self.config.bindings.get(&value.source_id))
-            .map(Vec::as_slice)
-            .unwrap_or_default();
         ACTIONS
             .iter()
             .map(|(action, action_type)| {
-                let binding = bindings.iter().find(|value| value.action == *action);
+                let binding = self
+                    .config
+                    .bindings
+                    .iter()
+                    .find(|value| value.action == *action);
+                let sample = binding.and_then(|value| self.samples.get(&value.source_id));
                 let components = binding
                     .map(|value| value.component_paths.clone())
                     .unwrap_or_default();
@@ -531,9 +579,10 @@ impl ControllerInput {
                 InputBindingState {
                     action: (*action).into(),
                     action_type: *action_type,
+                    source_id: binding.map(|value| value.source_id.clone()),
                     invert: binding.is_some_and(|value| value.invert),
                     configured_components: components,
-                    active: applicable,
+                    active: binding.is_some() && sample.is_some(),
                     value,
                     applicable,
                     original_error: None,
@@ -542,8 +591,33 @@ impl ControllerInput {
             .collect()
     }
 
-    fn selected_source_state(&self) -> Option<SelectedInputSourceState> {
-        self.config.selected.as_ref().map(|selected| {
+    fn feedback_binding_states(&self) -> Vec<ActionFeedbackBindingState> {
+        self.config
+            .feedback_bindings
+            .iter()
+            .map(|binding| {
+                let applicable = is_virtual_feedback(binding)
+                    || self.sources.get(&binding.source_id).is_some_and(|source| {
+                        source
+                            .available_feedback_capabilities
+                            .iter()
+                            .any(|capability| capability.path == binding.capability_path)
+                    });
+                ActionFeedbackBindingState {
+                    action: binding.action.clone(),
+                    source_id: Some(binding.source_id.clone()),
+                    capability_path: Some(binding.capability_path.clone()),
+                    applicable,
+                }
+            })
+            .collect()
+    }
+
+    fn source_state(
+        &self,
+        selection: Option<&PoseSourceSelection>,
+    ) -> Option<SelectedInputSourceState> {
+        selection.map(|selected| {
             let active = self.sources.get(&selected.source_id).is_some_and(|source| {
                 source.active
                     && source.driver_id == selected.driver_id
@@ -563,13 +637,21 @@ impl ControllerInput {
             schema_version: SCHEMA_VERSION,
             drivers: self.drivers.values().cloned().collect(),
             sources: self.sources.values().cloned().collect(),
-            selected_source_id: self
+            position_source_id: self
                 .config
-                .selected
+                .position_source
                 .as_ref()
                 .map(|value| value.source_id.clone()),
-            selected_source: self.selected_source_state(),
+            position_source: self.source_state(self.config.position_source.as_ref()),
+            orientation_source_id: self
+                .config
+                .orientation_source
+                .as_ref()
+                .map(|value| value.source_id.clone()),
+            orientation_source: self.source_state(self.config.orientation_source.as_ref()),
             bindings: self.binding_states(),
+            feedback_bindings: self.feedback_binding_states(),
+            virtual_feedback: self.virtual_feedback.clone(),
             diagnostics: self.diagnostics.values().cloned().collect(),
             simulation: self.simulation_state.clone(),
             service: self.service_state(),
@@ -590,8 +672,20 @@ impl ControllerInput {
     }
 }
 
+fn is_virtual_feedback(binding: &ActionFeedbackBinding) -> bool {
+    binding.source_id == VIRTUAL_FEEDBACK_SOURCE_ID
+        && binding.capability_path == VIRTUAL_FEEDBACK_CAPABILITY_PATH
+}
+
+fn supports_pose_component(source: &InputSourceInfo, component: PoseComponent) -> bool {
+    match component {
+        PoseComponent::Position => source.position_capable,
+        PoseComponent::Orientation => source.orientation_capable,
+    }
+}
+
 fn request_result(
-    request: SelectInputSourceRequest,
+    request: SelectPoseSourceRequest,
     value: Option<SelectedInputSourceState>,
     error: Option<String>,
 ) -> RequestResult<SelectedInputSourceState> {
@@ -618,22 +712,79 @@ fn validate_bindings(bindings: &[ActionBinding]) -> Result<()> {
     Ok(())
 }
 
+fn combined_pose_frame(
+    position_source: Option<&PoseSourceSelection>,
+    orientation_source: Option<&PoseSourceSelection>,
+    sources: &BTreeMap<String, InputSourceInfo>,
+    samples: &BTreeMap<String, RawSample>,
+    sequence: u64,
+    now: i64,
+) -> AbsolutePoseFrame {
+    let position_sample = position_source.and_then(|source| samples.get(&source.source_id));
+    let orientation_sample = orientation_source.and_then(|source| samples.get(&source.source_id));
+    let source_time_ns = [position_sample, orientation_sample]
+        .into_iter()
+        .flatten()
+        .map(|sample| sample.source_time_ns)
+        .max()
+        .unwrap_or(now);
+    let received_time_ns = [position_sample, orientation_sample]
+        .into_iter()
+        .flatten()
+        .map(|sample| sample.received_time_ns)
+        .max()
+        .unwrap_or(now);
+    let position_m = position_sample.and_then(|sample| sample.position_m);
+    let orientation_xyzw = orientation_sample.and_then(|sample| sample.orientation_xyzw);
+    AbsolutePoseFrame {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        source_time_ns,
+        received_time_ns,
+        position_source_id: position_source.map(|source| source.source_id.clone()),
+        orientation_source_id: orientation_source.map(|source| source.source_id.clone()),
+        position_source_capable: position_source
+            .and_then(|source| sources.get(&source.source_id))
+            .is_some_and(|source| source.position_capable),
+        orientation_source_capable: orientation_source
+            .and_then(|source| sources.get(&source.source_id))
+            .is_some_and(|source| source.orientation_capable),
+        reference_space: "local".into(),
+        position_m: position_m.unwrap_or([0.0; 3]),
+        orientation_xyzw: orientation_xyzw.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+        flags: PoseFlags {
+            position_valid: position_m.is_some(),
+            position_tracked: position_m.is_some(),
+            orientation_valid: orientation_xyzw.is_some(),
+            orientation_tracked: orientation_xyzw.is_some(),
+        },
+    }
+}
+
 fn evaluate_actions(
-    sample: &RawSample,
+    samples: &BTreeMap<String, RawSample>,
     bindings: &[ActionBinding],
     previous: Option<&ControlInputFrame>,
+    sequence: u64,
+    now: i64,
 ) -> ControlInputFrame {
+    let binding = |action: &str| bindings.iter().find(|binding| binding.action == action);
     let value = |action: &str| {
-        bindings
-            .iter()
-            .find(|binding| binding.action == action)
-            .map(|binding| binding_value(sample, binding))
+        binding(action)
+            .and_then(|binding| {
+                samples
+                    .get(&binding.source_id)
+                    .map(|sample| binding_value(sample, binding))
+            })
             .unwrap_or(0.0)
+    };
+    let active = |action: &str| {
+        binding(action).is_some_and(|binding| samples.contains_key(&binding.source_id))
     };
     let boolean = |action: &str, previous_value: bool| {
         let current = value(action) != 0.0;
         BooleanActionSample {
-            is_active: bindings.iter().any(|binding| binding.action == action),
+            is_active: active(action),
             changed_since_last_sync: current != previous_value,
             value: current,
         }
@@ -641,17 +792,16 @@ fn evaluate_actions(
     let float = |action: &str, previous_value: f64| {
         let current = value(action);
         FloatActionSample {
-            is_active: bindings.iter().any(|binding| binding.action == action),
+            is_active: active(action),
             changed_since_last_sync: current != previous_value,
             value: current,
         }
     };
     ControlInputFrame {
         schema_version: SCHEMA_VERSION,
-        sequence: sample.sequence,
-        source_time_ns: sample.source_time_ns,
-        received_time_ns: sample.received_time_ns,
-        source_id: sample.source_id.clone(),
+        sequence,
+        source_time_ns: now,
+        received_time_ns: now,
         control_active: boolean(
             "control_active",
             previous.is_some_and(|frame| frame.control_active.value),
@@ -659,6 +809,10 @@ fn evaluate_actions(
         confirm_origin: boolean(
             "confirm_origin",
             previous.is_some_and(|frame| frame.confirm_origin.value),
+        ),
+        primary_tool_open: boolean(
+            "primary_tool_open",
+            previous.is_some_and(|frame| frame.primary_tool_open.value),
         ),
         primary_tool: float(
             "primary_tool",
@@ -888,10 +1042,9 @@ fn nolo_source(info: &hidapi::DeviceInfo, device_id: &str, controller: u8) -> In
         position_capable: true,
         orientation_capable: true,
         action_capable: true,
-        rumble_capable: false,
-        trigger_rumble_capable: false,
         active: true,
         available_components: components,
+        available_feedback_capabilities: vec![],
         original_error: None,
     }
 }
@@ -903,8 +1056,6 @@ struct SdlGamepadState {
     fusion: Option<ImuFusion>,
     latest_acceleration: Option<[f32; 3]>,
     orientation: Option<[f64; 4]>,
-    has_rumble: bool,
-    has_trigger_rumble: bool,
 }
 
 fn spawn_sdl_driver(sender: Sender<DriverEvent>, haptic: Receiver<HapticCommand>) {
@@ -1060,6 +1211,7 @@ fn open_sdl_gamepad(
         .serial_number()
         .or_else(|| gamepad.path())
         .unwrap_or_else(|| source_id.clone());
+    let feedback_capabilities = sdl_feedback_capabilities(has_trigger_rumble, has_rumble);
     let source = InputSourceInfo {
         source_id,
         driver_id: SDL_DRIVER_ID.into(),
@@ -1071,10 +1223,9 @@ fn open_sdl_gamepad(
         position_capable: false,
         orientation_capable: has_gyro && has_acceleration,
         action_capable: true,
-        rumble_capable: has_rumble,
-        trigger_rumble_capable: has_trigger_rumble,
         active: true,
         available_components: components,
+        available_feedback_capabilities: feedback_capabilities,
         original_error: None,
     };
     let fusion = (has_gyro && has_acceleration)
@@ -1088,32 +1239,60 @@ fn open_sdl_gamepad(
             fusion,
             latest_acceleration: None,
             orientation: None,
-            has_rumble,
-            has_trigger_rumble,
         },
     );
     Ok(())
 }
 
-fn haptic_intensity(power_mw: u16, reference_mw: u16) -> u16 {
-    ((u32::from(power_mw) * u32::from(u16::MAX)) / u32::from(reference_mw)).min(u32::from(u16::MAX))
-        as u16
+fn sdl_feedback_capabilities(
+    has_trigger_feedback: bool,
+    has_controller_rumble: bool,
+) -> Vec<InputFeedbackCapabilityInfo> {
+    let mut feedback_capabilities = vec![];
+    if has_trigger_feedback {
+        feedback_capabilities.extend([
+            InputFeedbackCapabilityInfo {
+                path: "feedback/trigger_left".into(),
+                localized_name: Some("Left trigger force".into()),
+            },
+            InputFeedbackCapabilityInfo {
+                path: "feedback/trigger_right".into(),
+                localized_name: Some("Right trigger force".into()),
+            },
+        ]);
+    }
+    if has_controller_rumble {
+        feedback_capabilities.push(InputFeedbackCapabilityInfo {
+            path: "feedback/rumble".into(),
+            localized_name: Some("Controller rumble".into()),
+        });
+    }
+    feedback_capabilities
+}
+
+fn haptic_intensity(strength_percent: f64) -> u16 {
+    (strength_percent.clamp(0.0, 100.0) * f64::from(u16::MAX) / 100.0).round() as u16
 }
 
 fn apply_haptic(state: &mut SdlGamepadState, command: HapticCommand) {
     let intensity = command.intensity;
-    if state.has_trigger_rumble {
-        let (left, right) = match command.component.as_deref() {
-            Some("axis/left_trigger") => (intensity, 0),
-            _ => (0, intensity),
-        };
-        let _ = state
-            .gamepad
-            .set_rumble_triggers(left, right, HAPTIC_DURATION_MS);
-    } else if state.has_rumble {
-        let _ = state
-            .gamepad
-            .set_rumble(intensity, intensity, HAPTIC_DURATION_MS);
+    match command.capability_path.as_str() {
+        "feedback/trigger_left" => {
+            let _ = state
+                .gamepad
+                .set_rumble_triggers(intensity, 0, HAPTIC_DURATION_MS);
+        }
+        "feedback/trigger_right" => {
+            let _ = state
+                .gamepad
+                .set_rumble_triggers(0, intensity, HAPTIC_DURATION_MS);
+        }
+        "feedback/rumble" => {
+            let _ = state
+                .gamepad
+                .set_rumble(intensity, intensity, HAPTIC_DURATION_MS);
+        }
+        _ => {}
     }
 }
 
@@ -1175,8 +1354,31 @@ fn now_ns() -> i64 {
 mod tests {
     use super::*;
 
-    fn sample(components: &[(&str, f64)]) -> RawSample {
-        RawSample {
+    fn source(
+        source_id: &str,
+        position_capable: bool,
+        orientation_capable: bool,
+    ) -> InputSourceInfo {
+        InputSourceInfo {
+            source_id: source_id.into(),
+            driver_id: "fixture-driver".into(),
+            device_id: source_id.into(),
+            display_name: source_id.into(),
+            vendor_id: None,
+            product_id: None,
+            serial: None,
+            position_capable,
+            orientation_capable,
+            action_capable: true,
+            active: true,
+            available_components: vec![],
+            available_feedback_capabilities: vec![],
+            original_error: None,
+        }
+    }
+
+    fn sample(components: &[(&str, f64)]) -> BTreeMap<String, RawSample> {
+        let sample = RawSample {
             sequence: 1,
             source_time_ns: 1,
             received_time_ns: 1,
@@ -1187,7 +1389,8 @@ mod tests {
                 .iter()
                 .map(|(key, value)| ((*key).into(), *value))
                 .collect(),
-        }
+        };
+        BTreeMap::from([("fixture".into(), sample)])
     }
 
     #[test]
@@ -1198,7 +1401,7 @@ mod tests {
             now_ns()
         ));
         let config = InputConfig {
-            selected: Some(InputSelection {
+            position_source: Some(PoseSourceSelection {
                 driver_id: "driver".into(),
                 device_id: "device".into(),
                 source_id: "source".into(),
@@ -1216,14 +1419,45 @@ mod tests {
     }
 
     #[test]
+    fn tool_open_button_emits_a_boolean_press_edge() {
+        let binding = ActionBinding {
+            action: "primary_tool_open".into(),
+            action_type: ActionType::Boolean,
+            source_id: "fixture".into(),
+            component_paths: vec!["button/south".into()],
+            invert: false,
+        };
+        let bindings = [binding];
+        let pressed = evaluate_actions(&sample(&[("button/south", 1.0)]), &bindings, None, 1, 1);
+        assert!(pressed.primary_tool_open.value);
+        assert!(pressed.primary_tool_open.changed_since_last_sync);
+        let held = evaluate_actions(
+            &sample(&[("button/south", 1.0)]),
+            &bindings,
+            Some(&pressed),
+            2,
+            2,
+        );
+        assert!(held.primary_tool_open.value);
+        assert!(!held.primary_tool_open.changed_since_last_sync);
+    }
+
+    #[test]
     fn analog_trigger_remains_continuous() {
         let binding = ActionBinding {
             action: "primary_tool".into(),
             action_type: ActionType::Float,
+            source_id: "fixture".into(),
             component_paths: vec!["axis/right_trigger".into()],
             invert: false,
         };
-        let frame = evaluate_actions(&sample(&[("axis/right_trigger", 0.375)]), &[binding], None);
+        let frame = evaluate_actions(
+            &sample(&[("axis/right_trigger", 0.375)]),
+            &[binding],
+            None,
+            1,
+            1,
+        );
         assert_eq!(frame.primary_tool.value, 0.375);
     }
 
@@ -1232,6 +1466,7 @@ mod tests {
         let binding = ActionBinding {
             action: "move_left_right".into(),
             action_type: ActionType::Float,
+            source_id: "fixture".into(),
             component_paths: vec!["button/left".into(), "button/right".into()],
             invert: false,
         };
@@ -1239,14 +1474,172 @@ mod tests {
             &sample(&[("button/left", 0.0), ("button/right", 1.0)]),
             &[binding],
             None,
+            1,
+            1,
         );
         assert_eq!(frame.move_left_right.value, 1.0);
     }
 
     #[test]
-    fn haptic_intensity_uses_the_selected_gripper_power() {
-        assert_eq!(haptic_intensity(1_000, 2_000), u16::MAX / 2);
-        assert_eq!(haptic_intensity(2_000, 2_000), u16::MAX);
-        assert_eq!(haptic_intensity(0, 2_000), 0);
+    fn pose_components_and_actions_can_come_from_different_devices() {
+        let mut samples = sample(&[("button/one", 1.0)]);
+        let mut position = samples.remove("fixture").unwrap();
+        position.source_id = "position-device".into();
+        position.position_m = Some([1.0, 2.0, 3.0]);
+        let mut orientation = position.clone();
+        orientation.source_id = "orientation-device".into();
+        orientation.position_m = None;
+        orientation.orientation_xyzw = Some([0.0, 0.0, 0.5, 0.5]);
+        orientation.components = BTreeMap::from([("axis/value".into(), 0.75)]);
+        samples.insert(position.source_id.clone(), position);
+        samples.insert(orientation.source_id.clone(), orientation);
+
+        let sources = BTreeMap::from([
+            (
+                "position-device".into(),
+                source("position-device", true, false),
+            ),
+            (
+                "orientation-device".into(),
+                source("orientation-device", false, true),
+            ),
+        ]);
+        let pose = combined_pose_frame(
+            Some(&PoseSourceSelection {
+                driver_id: "driver-a".into(),
+                device_id: "device-a".into(),
+                source_id: "position-device".into(),
+            }),
+            Some(&PoseSourceSelection {
+                driver_id: "driver-b".into(),
+                device_id: "device-b".into(),
+                source_id: "orientation-device".into(),
+            }),
+            &sources,
+            &samples,
+            1,
+            1,
+        );
+        assert_eq!(pose.position_m, [1.0, 2.0, 3.0]);
+        assert_eq!(pose.orientation_xyzw, [0.0, 0.0, 0.5, 0.5]);
+        assert_eq!(pose.position_source_id.as_deref(), Some("position-device"));
+        assert_eq!(
+            pose.orientation_source_id.as_deref(),
+            Some("orientation-device")
+        );
+        assert!(pose.position_source_capable);
+        assert!(pose.orientation_source_capable);
+
+        let control = evaluate_actions(
+            &samples,
+            &[
+                ActionBinding {
+                    action: "control_active".into(),
+                    action_type: ActionType::Boolean,
+                    source_id: "position-device".into(),
+                    component_paths: vec!["button/one".into()],
+                    invert: false,
+                },
+                ActionBinding {
+                    action: "front_pitch".into(),
+                    action_type: ActionType::Float,
+                    source_id: "orientation-device".into(),
+                    component_paths: vec!["axis/value".into()],
+                    invert: false,
+                },
+            ],
+            None,
+            1,
+            1,
+        );
+        assert!(control.control_active.value);
+        assert_eq!(control.front_pitch.value, 0.75);
+    }
+
+    #[test]
+    fn pose_source_candidates_follow_declared_capabilities() {
+        let action_only_a = source("action-only-a", false, false);
+        let action_only_b = source("action-only-b", false, false);
+        let orientation_only = source("orientation-only", false, true);
+        let full_pose = source("full-pose", true, true);
+
+        assert!(!supports_pose_component(
+            &action_only_a,
+            PoseComponent::Position
+        ));
+        assert!(!supports_pose_component(
+            &action_only_a,
+            PoseComponent::Orientation
+        ));
+        assert!(!supports_pose_component(
+            &action_only_b,
+            PoseComponent::Orientation
+        ));
+        assert!(!supports_pose_component(
+            &orientation_only,
+            PoseComponent::Position
+        ));
+        assert!(supports_pose_component(
+            &orientation_only,
+            PoseComponent::Orientation
+        ));
+        assert!(supports_pose_component(&full_pose, PoseComponent::Position));
+        assert!(supports_pose_component(
+            &full_pose,
+            PoseComponent::Orientation
+        ));
+    }
+
+    #[test]
+    fn disconnected_pose_source_emits_no_stale_capability_or_sample() {
+        let selection = PoseSourceSelection {
+            driver_id: "fixture-driver".into(),
+            device_id: "disconnected".into(),
+            source_id: "disconnected".into(),
+        };
+        let pose = combined_pose_frame(
+            Some(&selection),
+            Some(&selection),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            1,
+            1,
+        );
+
+        assert!(!pose.position_source_capable);
+        assert!(!pose.orientation_source_capable);
+        assert!(!pose.flags.position_valid);
+        assert!(!pose.flags.orientation_valid);
+    }
+
+    #[test]
+    fn haptic_intensity_maps_percent_action_feedback() {
+        assert_eq!(haptic_intensity(0.0), 0);
+        assert_eq!(haptic_intensity(50.0), 32_768);
+        assert_eq!(haptic_intensity(100.0), u16::MAX);
+    }
+
+    #[test]
+    fn trigger_feedback_reports_two_independent_bindable_capabilities() {
+        let capabilities = sdl_feedback_capabilities(true, false);
+        assert_eq!(
+            capabilities
+                .iter()
+                .map(|capability| capability.path.as_str())
+                .collect::<Vec<_>>(),
+            ["feedback/trigger_left", "feedback/trigger_right"]
+        );
+        assert!(sdl_feedback_capabilities(false, false).is_empty());
+    }
+
+    #[test]
+    fn virtual_feedback_is_an_always_applicable_binding_target() {
+        let binding = ActionFeedbackBinding {
+            action: "primary_tool".into(),
+            source_id: VIRTUAL_FEEDBACK_SOURCE_ID.into(),
+            capability_path: VIRTUAL_FEEDBACK_CAPABILITY_PATH.into(),
+        };
+
+        assert!(is_virtual_feedback(&binding));
     }
 }

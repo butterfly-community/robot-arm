@@ -416,11 +416,20 @@ class MotionNode(Node):
 
     def _apply_relative_motion(self, value: dict[str, Any]) -> None:
         session_id = value.get("control_session_id")
+        open_tool = bool(value.get("primary_tool_open"))
+        tool_value = float(value.get("primary_tool_value", 0.0))
+        if open_tool:
+            self._primary_tool_value = 0.0
+            self._publish_actuator("input-action", tool_position_rad(0.0))
+        else:
+            transition = tool_action_transition(self._primary_tool_value, tool_value)
+            self._primary_tool_value = tool_value
+            if transition is not None:
+                self._publish_actuator("input-action", tool_position_rad(transition))
         if not value.get("active"):
             self._control_session_id = None
             self._anchor_tcp = None
             self._target_tcp = None
-            self._primary_tool_value = None
             self._frozen_session = None
             self._hold_sent = False
             self._enqueue_motion_state()
@@ -433,7 +442,6 @@ class MotionNode(Node):
         if session_id != self._control_session_id:
             self._control_session_id = session_id
             self._anchor_tcp = self._current_tcp
-            self._primary_tool_value = float(value.get("primary_tool_value", 0.0))
             self._frozen_session = None
             self._hold_sent = False
         if self._frozen_session == session_id or self._anchor_tcp is None:
@@ -462,11 +470,6 @@ class MotionNode(Node):
             message.pose.orientation.w,
         ) = target.orientation_xyzw
         self._pose_publisher.publish(message)
-        tool_value = float(value.get("primary_tool_value", 0.0))
-        transition = tool_action_transition(self._primary_tool_value, tool_value)
-        self._primary_tool_value = tool_value
-        if transition is not None:
-            self._publish_actuator("input-action", tool_position_rad(transition))
         self._enqueue_motion_state()
 
     def _set_control_mode(self, request: dict[str, Any]) -> None:

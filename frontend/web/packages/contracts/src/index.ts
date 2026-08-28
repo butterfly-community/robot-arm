@@ -1,4 +1,8 @@
 export const schemaVersion = 2;
+export const virtualFeedbackTarget = {
+  sourceId: "virtual-feedback",
+  capabilityPath: "feedback/virtual",
+} as const;
 
 export type Json =
   null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -131,7 +135,10 @@ export interface AbsolutePoseFrame {
   sequence: number;
   source_time_ns: number;
   received_time_ns: number;
-  source_id: string;
+  position_source_id?: string | null;
+  orientation_source_id?: string | null;
+  position_source_capable: boolean;
+  orientation_source_capable: boolean;
   reference_space: string;
   position_m: [number, number, number];
   orientation_xyzw: [number, number, number, number];
@@ -155,15 +162,23 @@ export interface ControlInputFrame {
   sequence: number;
   source_time_ns: number;
   received_time_ns: number;
-  source_id: string;
   control_active: BooleanActionSample;
   confirm_origin: BooleanActionSample;
+  primary_tool_open: BooleanActionSample;
   primary_tool: FloatActionSample;
   move_forward_back: FloatActionSample;
   move_left_right: FloatActionSample;
   move_up_down: FloatActionSample;
   front_pitch: FloatActionSample;
   horizontal_arc: FloatActionSample;
+}
+
+export interface ActionFeedback {
+  schema_version: number;
+  sequence: number;
+  sample_time_ns: number;
+  action: string;
+  strength_percent: number;
 }
 
 export interface RelativeToolMotion {
@@ -176,5 +191,6 @@ export interface RelativeToolMotion {
   translation_m: [number, number, number];
   front_pitch_rad: number;
   horizontal_arc_rad: number;
+  primary_tool_open: boolean;
   primary_tool_value: number;
 }

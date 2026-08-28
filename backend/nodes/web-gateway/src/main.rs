@@ -182,7 +182,7 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         "discovery_state"
         | "absolute_pose"
         | "control_input"
-        | "source_request_result"
+        | "pose_source_request_result"
         | "bindings_request_result"
         | "simulation_request_result" => Some("tracking"),
         "spatial_config_state"
@@ -217,7 +217,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
     let app = Router::new()
         .route("/api/system/readiness", get(snapshot_system))
         .route("/api/tracking/state", get(snapshot_tracking))
-        .route("/api/tracking/source", post(request_source))
+        .route("/api/tracking/pose-source", post(request_pose_source))
         .route("/api/tracking/bindings", post(request_bindings))
         .route("/api/tracking/simulation", post(request_simulation))
         .route("/api/tracking/snapshot", post(request_tracking_snapshot))
@@ -314,7 +314,7 @@ macro_rules! request_handler {
         }
     };
 }
-request_handler!(request_source, "select_source_request");
+request_handler!(request_pose_source, "select_pose_source_request");
 request_handler!(request_bindings, "apply_bindings_request");
 request_handler!(request_simulation, "set_simulation_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");

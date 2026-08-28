@@ -1,13 +1,19 @@
+"use client";
+
+import { virtualFeedbackTarget, type ActionFeedback } from "@robot/contracts";
+import { useGateway } from "@robot/gateway-client";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import type {
   ButtonHTMLAttributes,
+  CSSProperties,
   HTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
 } from "react";
+import { useRef, useState } from "react";
 
 export function cn(...values: ClassValue[]) {
   return clsx(values);
@@ -255,6 +261,65 @@ const navigation = [
   ["/arm-execution/", "执行", "Execution", "04"],
 ] as const;
 
+function VirtualFeedbackOverlay() {
+  const { snapshot } = useGateway("tracking");
+  const discovery = snapshot?.values.discovery_state as
+    Record<string, unknown> | undefined;
+  const feedback = discovery?.virtual_feedback as ActionFeedback | undefined;
+  const selected = (
+    (discovery?.feedback_bindings ?? []) as Array<Record<string, unknown>>
+  ).some(
+    (binding) =>
+      binding.source_id === virtualFeedbackTarget.sourceId &&
+      binding.capability_path === virtualFeedbackTarget.capabilityPath,
+  );
+  const [position, setPosition] = useState<{ left: number; top: number }>();
+  const dragOffset = useRef<{ x: number; y: number } | undefined>(undefined);
+
+  if (!selected) return null;
+
+  const value = Math.round(feedback?.strength_percent ?? 0);
+  const style: CSSProperties & { "--feedback-value": string } = {
+    "--feedback-value": `${value * 3.6}deg`,
+    ...(position ?? { right: 18, bottom: 18 }),
+  };
+
+  return (
+    <div
+      className="virtual-feedback"
+      role="meter"
+      aria-label="网页虚拟力度反馈"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+      style={style}
+      onPointerDown={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        dragOffset.current = {
+          x: event.clientX - bounds.left,
+          y: event.clientY - bounds.top,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        if (!dragOffset.current) return;
+        setPosition({
+          left: event.clientX - dragOffset.current.x,
+          top: event.clientY - dragOffset.current.y,
+        });
+      }}
+      onPointerUp={() => {
+        dragOffset.current = undefined;
+      }}
+      onPointerCancel={() => {
+        dragOffset.current = undefined;
+      }}
+    >
+      <span>{value}</span>
+    </div>
+  );
+}
+
 export function Shell({
   title,
   description,
@@ -322,6 +387,7 @@ export function Shell({
         <p>{description}</p>
       </div>
       {children}
+      <VirtualFeedbackOverlay />
     </main>
   );
 }

@@ -138,7 +138,7 @@ class MotionCoreTests(unittest.TestCase):
         self.assertEqual(frozen_session_after_servo_status(6, None, None), None)
         self.assertEqual(frozen_session_after_servo_status(1, 5, 4), 4)
 
-    def test_tool_action_uses_a_new_session_value_as_baseline(self):
+    def test_tool_action_ignores_the_initial_sample_and_emits_changes(self):
         self.assertIsNone(tool_action_transition(None, 1.0))
         self.assertIsNone(tool_action_transition(None, 0.0))
         self.assertIsNone(tool_action_transition(0.375, 0.375))

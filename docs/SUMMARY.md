@@ -7,16 +7,14 @@ controller-input-node
   → spatial-transform-node
   → stararm-102-motion-node
   → stararm-102-execution-node
-  → controller-input-node（夹爪遥测反馈）
+  → controller-input-node（设备无关 Action 回馈）
 ```
 
 `controller-input-node` 同时承载两个硬件输入适配层和一个模拟测试源，但不分裂业务流程：NOLO CV1 使用本地 Rust HID
 协议，其他手柄使用 SDL3，并且只根据设备声明的轴、按钮、传感器和振动能力工作；带 IMU 的手柄（包括 PS4）与 NOLO CV1 都交给同一个
-`fusion-ahrs` 实现。生产代码不维护手柄型号白名单，不按型号选择行为，也不提供型号专属默认绑定；型号和 USB 信息只用于发现页面展示。没有 IMU 能力时只发布按键和轴。所有设备先发布相同的绝对位姿、
-Action 和发现消息，再进入同一个空间转换节点。
+`fusion-ahrs` 实现。生产代码不维护手柄型号白名单，不按型号选择行为，也不提供型号专属默认绑定；型号和 USB 信息只用于发现页面展示。没有 IMU 能力时仍发布按键和轴。空间位置与姿态来源分别只列出声明对应能力的设备；例如两个仅有按键和轴的设备不会产生姿态候选，此时仍可把任一设备的按键或轴绑定为俯仰和水平圆弧 Action。只要某一分量已经选择绝对来源，空间节点就不再叠加该分量的 Action。每个 Action 和反馈能力仍独立选择设备，不受位姿来源选择影响。采集节点把组合位姿和跨设备聚合 Action 送入同一个空间转换节点。
 
-输入源从实际驱动发现结果中选择，功能 Action 与设备组件的关系保存在
-`/config/controller-input.json`。模拟数据也是 `controller-input-node` 的测试功能，输出同一消息契约，
+空间位置来源、姿态来源、每个功能 Action 的输入设备与组件、每个 Action 回馈的目标设备与能力路径分别保存在 /config/controller-input.json；同一轮控制可以组合 NOLO、多个 SDL3 手柄和模拟输入。模拟数据也是 `controller-input-node` 的测试功能，输出同一消息契约，
 不会另起模拟链路。
 
 所有可修改配置都由 Compose 把宿主 `backend/config/runtime/` 挂载到容器 `/config`：采集节点保存
@@ -36,8 +34,7 @@ MoveIt、网页、`ArmCommand`、UART 命令和 Monitor 反馈随后都使用同
 `ArmCommand`、同一 execution 节点和同一反馈状态执行。采集页负责把设备输入绑定为
 `primary_tool`，手动夹爪目标与 J1–J6 一起位于运动页，执行页只负责连接、命令/反馈和舵机参数。
 StarArm-102 FL 的夹爪舵机是 ID 6、RA8-U35H-M；位置命令为它填写 2000 mW，J1–J6 仍为
-0 mW。这个值来自厂家 UART SDK 的功率限制示例；不是运行门限。Monitor 的实际功率经
-`arm_telemetry` 回到输入节点，有 trigger-rumble 能力时反馈到绑定扳机，否则使用设备整体振动。
+0 mW。这个值来自厂家 UART SDK 的功率限制示例；不是运行门限。execution 节点将 Monitor 的实际功率扣除 400 mW 空载区间后，通过设备无关的 action_feedback 输出 0～100 力度百分比；输入节点仅按独立反馈绑定路由到用户选择的能力。SDL3 运行时声明左右扳机反馈或整机振动能力，网页虚拟反馈则始终作为一个可选目标；选中后四个页面共享的小型可拖动圆环显示最新的 0～100 值。代码不假定 primary_tool 必须绑定扳机，也不在能力之间自动回退。`primary_tool_open` 是独立的按下沿 Action，可与连续 `primary_tool` 分别绑定；两者不启动整臂空间接管。
 
 Compose 启动 Dora coordinator、五个 Dora daemon、MoveIt motion 服务、dataflow、四个前端与
 统一 Web 入口。输入容器挂载主机 `/dev`、只读 udev/sys 信息，因此能够同时枚举 HID 和

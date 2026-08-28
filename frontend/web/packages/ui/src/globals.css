@@ -72,6 +72,43 @@ select {
   margin: 0 auto;
   padding: 0 28px 40px;
 }
+.virtual-feedback {
+  position: fixed;
+  z-index: 100;
+  width: 74px;
+  height: 74px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-bright);
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--cyan) var(--feedback-value),
+    var(--surface-3) 0
+  );
+  box-shadow: 0 10px 32px rgb(0 0 0 / 45%);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.virtual-feedback::before {
+  position: absolute;
+  inset: 7px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  content: "";
+}
+.virtual-feedback span {
+  position: relative;
+  color: var(--foreground);
+  font:
+    650 18px/1 ui-monospace,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+.virtual-feedback:active {
+  cursor: grabbing;
+}
 .topbar {
   position: sticky;
   top: 0;

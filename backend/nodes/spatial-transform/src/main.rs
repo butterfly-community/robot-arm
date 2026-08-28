@@ -170,8 +170,8 @@ fn load_config(path: &Path) -> Result<SpatialConfigState> {
     Ok(SpatialConfigState {
         schema_version: SCHEMA_VERSION,
         config_version: config.config_version,
-        selected_source_id: None,
-        source_has_absolute_pose: false,
+        position_source_id: None,
+        orientation_source_id: None,
         base_from_tracking_axes: config.base_from_tracking_axes,
         translation_scale: config.translation_scale,
         action_translation_m_per_s: config.action_translation_m_per_s,
@@ -217,22 +217,22 @@ mod tests {
             translation_scale: 0.25,
             origin_position_m: Some([1.0, 2.0, 3.0]),
             control_session_id: Some(9),
-            selected_source_id: Some("runtime-source".into()),
-            source_has_absolute_pose: true,
+            position_source_id: Some("position-source".into()),
+            orientation_source_id: Some("orientation-source".into()),
             ..Default::default()
         };
         save_config(&path, &configured).unwrap();
         let stored = std::fs::read_to_string(&path).unwrap();
         assert!(!stored.contains("control_session_id"));
-        assert!(!stored.contains("selected_source_id"));
-        assert!(!stored.contains("source_has_absolute_pose"));
+        assert!(!stored.contains("position_source_id"));
+        assert!(!stored.contains("orientation_source_id"));
 
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.translation_scale, 0.25);
         assert_eq!(loaded.origin_position_m, Some([1.0, 2.0, 3.0]));
         assert_eq!(loaded.control_session_id, None);
-        assert_eq!(loaded.selected_source_id, None);
-        assert!(!loaded.source_has_absolute_pose);
+        assert_eq!(loaded.position_source_id, None);
+        assert_eq!(loaded.orientation_source_id, None);
         std::fs::remove_file(path).unwrap();
     }
 }

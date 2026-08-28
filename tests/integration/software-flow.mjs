@@ -81,12 +81,31 @@ const tracking = await waitFor(
   () => snapshot("tracking"),
   (state) => state.namespace === "tracking",
 );
-const selectedInput = tracking.values.discovery_state?.selected_source;
+const discoveredSources = tracking.values.discovery_state?.sources ?? [];
+for (const [component, capability] of [
+  ["position", "position_capable"],
+  ["orientation", "orientation_capable"],
+]) {
+  const unsupported = discoveredSources.find((source) => !source[capability]);
+  if (!unsupported) continue;
+  const rejected = await request("/api/tracking/pose-source", {
+    schema_version: 2,
+    request_id: `integration-reject-${component}-source`,
+    action: "select",
+    component,
+    driver_id: unsupported.driver_id,
+    device_id: unsupported.device_id,
+    source_id: unsupported.source_id,
+  });
+  assert.match(rejected.original_error, /不提供对应位姿能力/);
+}
+const selectedInput = tracking.values.discovery_state?.position_source;
 if (selectedInput) {
-  await request("/api/tracking/source", {
+  await request("/api/tracking/pose-source", {
     schema_version: 2,
     request_id: "integration-input-unselect",
     action: "unselect",
+    component: "position",
     driver_id: selectedInput.driver_id,
     device_id: selectedInput.device_id,
     source_id: selectedInput.source_id,
@@ -95,10 +114,11 @@ if (selectedInput) {
     () => snapshot("spatial"),
     (state) => state.values.relative_motion?.active === false,
   );
-  await request("/api/tracking/source", {
+  await request("/api/tracking/pose-source", {
     schema_version: 2,
     request_id: "integration-input-restore",
     action: "select",
+    component: "position",
     driver_id: selectedInput.driver_id,
     device_id: selectedInput.device_id,
     source_id: selectedInput.source_id,
@@ -106,7 +126,7 @@ if (selectedInput) {
   await waitFor(
     () => snapshot("tracking"),
     (state) =>
-      state.values.discovery_state?.selected_source_id ===
+      state.values.discovery_state?.position_source_id ===
       selectedInput.source_id,
   );
 }
@@ -173,11 +193,11 @@ await request("/api/motion/mode", {
 });
 
 const beforeBindings = await snapshot("tracking");
-const selectedForBindings =
-  beforeBindings.values.discovery_state?.selected_source;
 const selectedRuntimeSource =
-  beforeBindings.values.discovery_state?.sources?.find(
-    (source) => source.source_id === selectedForBindings?.source_id,
+  beforeBindings.values.discovery_state?.sources?.find((source) =>
+    source.available_components?.some(
+      (component) => component.action_type === "boolean",
+    ),
   );
 const booleanComponents =
   selectedRuntimeSource?.available_components?.filter(
@@ -188,22 +208,34 @@ const originalBindings = (beforeBindings.values.discovery_state?.bindings ?? [])
   .map((binding) => ({
     action: binding.action,
     action_type: binding.action_type,
+    source_id: binding.source_id,
     component_paths: binding.configured_components,
     invert: binding.invert,
   }));
-if (selectedForBindings?.source_id && booleanComponents.length > 0) {
-  const applyBindings = (requestId, bindings) =>
-    request("/api/tracking/bindings", {
-      schema_version: 2,
-      request_id: requestId,
-      source_id: selectedForBindings.source_id,
-      bindings,
-    });
+const originalFeedbackBindings =
+  beforeBindings.values.discovery_state?.feedback_bindings?.map((binding) => ({
+    action: binding.action,
+    source_id: binding.source_id,
+    capability_path: binding.capability_path,
+  })) ?? [];
+const applyBindings = (
+  requestId,
+  bindings,
+  feedbackBindings = originalFeedbackBindings,
+) =>
+  request("/api/tracking/bindings", {
+    schema_version: 2,
+    request_id: requestId,
+    bindings,
+    feedback_bindings: feedbackBindings,
+  });
+if (selectedRuntimeSource?.source_id && booleanComponents.length > 0) {
   try {
     const booleanResult = await applyBindings("integration-binding-boolean", [
       {
         action: "control_active",
         action_type: "boolean",
+        source_id: selectedRuntimeSource.source_id,
         component_paths: [booleanComponents[0].path],
         invert: false,
       },
@@ -225,7 +257,8 @@ if (selectedForBindings?.source_id && booleanComponents.length > 0) {
       const pairResult = await applyBindings("integration-binding-pair", [
         {
           action: "move_left_right",
-          action_type: "boolean",
+          action_type: "float",
+          source_id: selectedRuntimeSource.source_id,
           component_paths: [
             booleanComponents[0].path,
             booleanComponents[1].path,
@@ -234,19 +267,17 @@ if (selectedForBindings?.source_id && booleanComponents.length > 0) {
         },
       ]);
       assert.equal(pairResult.original_error, null);
-      await waitFor(
-        () => snapshot("tracking"),
-        (state) => {
-          const binding = state.values.discovery_state?.bindings?.find(
-            (value) => value.action === "move_left_right",
-          );
-          return (
-            binding?.active === true &&
-            booleanComponents.every((component) =>
-              binding.configured_components.includes(component.path),
-            )
-          );
-        },
+      const pairBinding = pairResult.value.find(
+        (value) => value.action === "move_left_right",
+      );
+      assert.equal(pairBinding.active, true);
+      assert.equal(
+        booleanComponents
+          .slice(0, 2)
+          .every((component) =>
+            pairBinding.configured_components.includes(component.path),
+          ),
+        true,
       );
     }
   } finally {
@@ -256,6 +287,43 @@ if (selectedForBindings?.source_id && booleanComponents.length > 0) {
     );
     assert.equal(restored.original_error, null);
   }
+}
+
+try {
+  const virtualResult = await applyBindings(
+    "integration-virtual-feedback",
+    originalBindings,
+    [
+      {
+        action: "primary_tool",
+        source_id: "virtual-feedback",
+        capability_path: "feedback/virtual",
+      },
+    ],
+  );
+  assert.equal(virtualResult.original_error, null);
+  const feedbackSnapshot = await fetch(`${base}/api/arm-execution/snapshot`, {
+    method: "POST",
+  });
+  assert.equal(feedbackSnapshot.status, 202);
+  await waitFor(
+    () => snapshot("tracking"),
+    (state) =>
+      state.values.discovery_state?.feedback_bindings?.some(
+        (binding) =>
+          binding.source_id === "virtual-feedback" &&
+          binding.capability_path === "feedback/virtual" &&
+          binding.applicable === true,
+      ) &&
+      state.values.discovery_state?.virtual_feedback?.action === "primary_tool",
+  );
+} finally {
+  const restored = await applyBindings(
+    "integration-virtual-feedback-restore",
+    originalBindings,
+    originalFeedbackBindings,
+  );
+  assert.equal(restored.original_error, null);
 }
 
 const motion = await waitFor(
@@ -415,8 +483,10 @@ try {
   await waitFor(
     () => snapshot("tracking"),
     (state) =>
-      state.values.absolute_pose?.source_id ===
-      "simulation:standard-spatial-cycle",
+      state.values.absolute_pose?.position_source_id ===
+        "simulation:standard-spatial-cycle" &&
+      state.values.absolute_pose?.orientation_source_id ===
+        "simulation:standard-spatial-cycle",
   );
   const origin = await request("/api/spatial/origin", {
     schema_version: 2,
@@ -427,7 +497,9 @@ try {
   await waitFor(
     () => snapshot("spatial"),
     (state) =>
-      state.values.spatial_config_state?.selected_source_id ===
+      state.values.spatial_config_state?.position_source_id ===
+        "simulation:standard-spatial-cycle" &&
+      state.values.spatial_config_state?.orientation_source_id ===
         "simulation:standard-spatial-cycle" &&
       state.values.relative_motion?.active === true &&
       state.values.relative_motion.translation_m.some(
