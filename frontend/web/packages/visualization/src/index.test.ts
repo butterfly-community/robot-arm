@@ -16,7 +16,7 @@ function expectSameRotation(
 
 describe("robotToScenePosition", () => {
   it("renders forward, left and up on the visible front, left and vertical axes", () => {
-    expect(robotToScenePosition([0.1, 0.2, 0.3])).toEqual([-0.2, 0.3, 0.1]);
+    expect(robotToScenePosition([0.1, 0.2, 0.3])).toEqual([-0.2, 0.3, -0.1]);
   });
 });
 
@@ -34,7 +34,7 @@ describe("robotToSceneOrientation", () => {
       Math.PI / 2,
     );
     const expected = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 1, 0),
       Math.PI / 2,
     );
     expectSameRotation(robotToSceneOrientation(source.toArray()), expected);

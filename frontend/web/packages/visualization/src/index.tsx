@@ -68,8 +68,8 @@ function createOrientationBlock() {
     createFaceMaterial("左"),
     createFaceMaterial("上"),
     createFaceMaterial("下"),
-    createFaceMaterial("前"),
     createFaceMaterial("后"),
+    createFaceMaterial("前"),
   ]);
   group.add(body);
   for (const [direction, color] of [
@@ -122,7 +122,7 @@ export function robotToScenePosition([
   left,
   up,
 ]: Vector3Tuple): Vector3Tuple {
-  return [-left, up, forward];
+  return [-left, up, -forward];
 }
 
 export function robotToSceneOrientation(
@@ -138,7 +138,7 @@ export function robotToSceneOrientation(
     0,
     1,
     0,
-    1,
+    -1,
     0,
     0,
     0,
