@@ -147,9 +147,12 @@
       不是被遗漏的持续绑定动作。
 - [ ] 核对通用 `RequestAction` 中的 apply、cancel、select、unselect、connect、disconnect、
       discover、refresh，确认它们是请求管理动词，不伪装成机械臂可绑定业务动作。
-- [ ] 以 ROS `geometry_msgs/Twist` 的三个 `linear` 分量和三个 `angular` 分量确认 TCP 的六
-      个基础自由度已经全部覆盖：
-      <https://github.com/ros2/common_interfaces/blob/rolling/geometry_msgs/msg/Twist.msg>。
+- [ ] 以《Modern Robotics》第 3 章对刚体六维 twist（线速度与角速度）的定义确认 TCP 基础
+      运动由三个平移分量和三个旋转分量组成：
+      <https://modernrobotics.northwestern.edu/chapters/chapter3/>。
+- [ ] 再以项目使用的 ROS 2 Jazzy `geometry_msgs/Twist` 官方文档确认接口由 `linear` 和
+      `angular` 两个三维向量承载，不再引用会随版本移动的 `rolling` 分支源码：
+      <https://docs.ros.org/en/jazzy/p/geometry_msgs/msg/Twist.html>。
 - [ ] 以 MoveIt Servo 官方文档确认末端速度、末端位姿和单关节速度是不同命令类别，并确认
       本项目持续业务输入选择末端位姿链路、手动 J1–J6 仍属于运动页：
       <https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html>。
