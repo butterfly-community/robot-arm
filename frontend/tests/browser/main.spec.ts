@@ -115,37 +115,6 @@ for (const [path] of pages) {
   });
 }
 
-test("web coalesces live snapshots to one render per second", async ({
-  page,
-}) => {
-  await page.goto("/tracking/");
-  await page.locator(".card-toggle").filter({ hasText: "排障数据" }).click();
-  const discovery = page.locator("details.diagnostics").nth(2);
-  await discovery.locator("summary").click();
-  const observed = await page.evaluate(async () => {
-    const target = document.querySelectorAll("pre")[2];
-    if (!target) throw new Error("缺少设备发现排障数据");
-    let renders = 0;
-    let messages = 0;
-    const observer = new MutationObserver(() => renders++);
-    observer.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-    const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${scheme}://${location.host}/ws/tracking`);
-    socket.onmessage = () => messages++;
-    await new Promise((resolve) => window.setTimeout(resolve, 3200));
-    observer.disconnect();
-    socket.close();
-    return { renders, messages };
-  });
-  expect(observed.renders).toBeGreaterThanOrEqual(2);
-  expect(observed.renders).toBeLessThanOrEqual(4);
-  expect(observed.messages).toBeGreaterThan(observed.renders);
-});
-
 test("simulation control uses the normal input and spatial path", async ({
   page,
   request,
@@ -172,6 +141,36 @@ test("simulation control uses the normal input and spatial path", async ({
     await expect(
       page.getByRole("button", { name: "停止模拟数据" }),
     ).toBeVisible();
+    const renderCadence = await page.evaluate(async () => {
+      const metrics = [...document.querySelectorAll(".metric")];
+      const position = metrics
+        .find((metric) => metric.textContent?.includes("位置 Y"))
+        ?.querySelector("strong");
+      const rate = metrics
+        .find((metric) => metric.textContent?.includes("采集频率"))
+        ?.querySelector("strong");
+      if (!position || !rate) throw new Error("缺少位置或采集频率指标");
+      let positionRenders = 0;
+      let rateRenders = 0;
+      const positionObserver = new MutationObserver(() => positionRenders++);
+      const rateObserver = new MutationObserver(() => rateRenders++);
+      positionObserver.observe(position, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      rateObserver.observe(rate, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      positionObserver.disconnect();
+      rateObserver.disconnect();
+      return { positionRenders, rateRenders };
+    });
+    expect(renderCadence.positionRenders).toBeGreaterThan(10);
+    expect(renderCadence.rateRenders).toBeLessThanOrEqual(2);
     const inputTest = page.locator("section.card").filter({
       has: page.getByText("输入测试", { exact: true }),
     });

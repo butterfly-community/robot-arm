@@ -11,6 +11,7 @@ import type {
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import URDFLoader from "urdf-loader";
 import type { URDFRobot } from "urdf-loader";
 
@@ -25,6 +26,11 @@ type Props = {
 };
 
 type LinkMaterials = RobotModelInfo["visualization"]["link_materials"];
+
+type LabelMetadata = {
+  joint?: string;
+  text: string;
+};
 
 type Viewer = {
   robot?: URDFRobot;
@@ -58,6 +64,9 @@ function applyMaterials(
       opacity: preview ? 0.22 : 1,
       transparent: preview,
       depthWrite: !preview,
+      polygonOffset: preview,
+      polygonOffsetFactor: preview ? -1 : 0,
+      polygonOffsetUnits: preview ? -1 : 0,
     });
     count += 1;
   });
@@ -147,6 +156,26 @@ export function RobotViewer({
   const [modelsReady, setModelsReady] = useState(0);
   const rootPath = model.visualization.root_path;
   const materialKey = JSON.stringify(model.visualization.link_materials);
+  const labelMetadataKey = JSON.stringify([
+    ...model.joints.map((joint, index) => {
+      const label = execution?.actuator_labels[index] ?? joint.label;
+      const detail = parameterText(joint.key, parameters);
+      return {
+        joint: joint.key,
+        text: detail ? [label, detail].join("\n") : label,
+      };
+    }),
+    ...model.tool_actuators.map((actuator, index) => {
+      const label =
+        execution?.actuator_labels[model.joints.length + index] ??
+        actuator.label;
+      const detail = parameterText(actuator.key, parameters);
+      return {
+        joint: actuator.visualization_joint_key,
+        text: detail ? [label, detail].join("\n") : label,
+      };
+    }),
+  ] satisfies LabelMetadata[]);
 
   useEffect(() => {
     const element = mount.current;
@@ -158,9 +187,17 @@ export function RobotViewer({
     const camera = new THREE.PerspectiveCamera(42, 1, 0.001, 10);
     camera.up.set(0, 0, 1);
     camera.position.set(0.38, -0.48, 0.28);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: "high-performance",
+    });
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    const environmentGenerator = new THREE.PMREMGenerator(renderer);
+    const environment = environmentGenerator.fromScene(new RoomEnvironment());
+    environmentGenerator.dispose();
+    scene.environment = environment.texture;
     element.appendChild(renderer.domElement);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -250,6 +287,7 @@ export function RobotViewer({
           : [object.material];
         materials.forEach((material) => material.dispose());
       });
+      environment.dispose();
       renderer.dispose();
       renderer.domElement.remove();
       viewer.current = undefined;
@@ -260,9 +298,13 @@ export function RobotViewer({
     if (!arm) return;
     const current = viewer.current;
     setState(current?.robot, model, arm);
-    if (current?.robot) centerView(current, current.robot);
     if (mount.current) mount.current.dataset.feedbackReady = "true";
   }, [arm, model, modelsReady]);
+
+  useEffect(() => {
+    const current = viewer.current;
+    if (current?.robot) centerView(current, current.robot);
+  }, [modelsReady]);
 
   useEffect(() => {
     const robot = viewer.current?.commandRobot;
@@ -299,36 +341,20 @@ export function RobotViewer({
       sprite.material.map?.dispose();
       sprite.material.dispose();
     });
-    const metadata = [
-      ...model.joints.map((joint, index) => ({
-        key: joint.key,
-        joint: joint.key,
-        label: execution?.actuator_labels[index] ?? joint.label,
-      })),
-      ...model.tool_actuators.map((actuator, index) => ({
-        key: actuator.key,
-        joint: actuator.visualization_joint_key,
-        label:
-          execution?.actuator_labels[model.joints.length + index] ??
-          actuator.label,
-      })),
-    ];
+    const metadata = JSON.parse(labelMetadataKey) as LabelMetadata[];
     current.labels = metadata.flatMap((item) => {
       const joint = item.joint ? robot.joints[item.joint] : undefined;
       if (!joint) return [];
-      const detail = parameterText(item.key, parameters);
-      const sprite = labelSprite(
-        detail ? `${item.label}\n${detail}` : item.label,
-      );
-      sprite.visible = showLabels;
+      const sprite = labelSprite(item.text);
+      sprite.visible = false;
       joint.add(sprite);
       return [sprite];
     });
-  }, [execution, model, modelsReady, parameters, showLabels]);
+  }, [labelMetadataKey, modelsReady]);
 
   useEffect(() => {
     viewer.current?.labels.forEach((label) => (label.visible = showLabels));
-  }, [showLabels]);
+  }, [labelMetadataKey, modelsReady, showLabels]);
 
   return (
     <div

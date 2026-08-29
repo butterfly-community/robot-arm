@@ -23,7 +23,7 @@ import {
   StatusBadge,
 } from "@robot/ui";
 import { PoseViewer } from "@robot/visualization";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const feedbackActions = [["primary_tool", "夹爪力度回馈"]] as const;
 
@@ -64,6 +64,22 @@ function sampleValue(input: ControlInputFrame | undefined, key: string) {
 function positionValue(pose: AbsolutePoseFrame | undefined, index: number) {
   const value = pose?.position_m[index];
   return Number.isFinite(value) ? Number(value).toFixed(3) : "—";
+}
+
+function ObservedRate({ value }: { value: string }) {
+  const latest = useRef(value);
+  const [displayed, setDisplayed] = useState(value);
+
+  useEffect(() => {
+    latest.current = value;
+  }, [value]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setDisplayed(latest.current), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return <Metric label="Observed rate" value={displayed} unit="Hz" />;
 }
 
 export default function Page() {
@@ -318,14 +334,12 @@ export default function Page() {
             value={controlActive ? "ACTIVE" : "IDLE"}
             tone={controlActive ? "green" : undefined}
           />
-          <Metric
-            label="Observed rate"
+          <ObservedRate
             value={
               Number.isFinite(Number(diagnostics?.observed_rate_hz))
                 ? Number(diagnostics?.observed_rate_hz).toFixed(1)
                 : "—"
             }
-            unit="Hz"
           />
         </div>
 
@@ -489,7 +503,7 @@ export default function Page() {
               ))}
             </select>
             <p>
-              按住一个按钮，或推动摇杆、扳机；这里按网页的一秒刷新节拍显示设备实际上报的组件和值。
+              按住一个按钮，或推动摇杆、扳机；这里实时显示设备实际上报的组件和值。
             </p>
           </div>
           <div className="input-test-values" aria-live="polite">

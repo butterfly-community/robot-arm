@@ -2,8 +2,6 @@ import type { Json, Namespace, Snapshot } from "@robot/contracts";
 import { nanoid } from "nanoid/non-secure";
 import { useEffect, useRef, useState } from "react";
 
-const webRefreshIntervalMs = 1000;
-
 export function requestId(): string {
   return nanoid();
 }
@@ -97,17 +95,25 @@ export function useGateway(namespace: Namespace) {
   const [operationError, setOperationError] = useState<string>();
   const pending = useRef<Snapshot | undefined>(undefined);
   useEffect(() => {
-    const accept = (value: Snapshot) => {
-      pending.current = value;
-    };
+    let frame: number | undefined;
     const applyPending = () => {
-      if (window.getSelection()?.toString() || !pending.current) return;
+      frame = undefined;
+      if (!pending.current) return;
+      if (window.getSelection()?.toString()) {
+        frame = window.requestAnimationFrame(applyPending);
+        return;
+      }
       const value = pending.current;
       pending.current = undefined;
       setSnapshot(value);
       setTransportError(undefined);
     };
-    const refresh = window.setInterval(applyPending, webRefreshIntervalMs);
+    const accept = (value: Snapshot) => {
+      pending.current = value;
+      if (frame === undefined) {
+        frame = window.requestAnimationFrame(applyPending);
+      }
+    };
     const dispose = subscribe(namespace, accept, setTransportError);
     getSnapshot(namespace)
       .then(accept)
@@ -117,7 +123,7 @@ export function useGateway(namespace: Namespace) {
         ),
       );
     return () => {
-      window.clearInterval(refresh);
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
       pending.current = undefined;
       dispose();
     };

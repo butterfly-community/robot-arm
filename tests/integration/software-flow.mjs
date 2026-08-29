@@ -543,16 +543,16 @@ try {
         (component) => Math.abs(component) > 0,
       ),
   );
-  const simulationBeforeScan = await snapshot("tracking");
-  await new Promise((resolve) => setTimeout(resolve, 1_100));
-  const simulationAfterScan = await snapshot("tracking");
+  const simulationBeforeWait = await snapshot("tracking");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const simulationAfterWait = await snapshot("tracking");
   assert.equal(
-    simulationAfterScan.values.discovery_state.simulation.active,
+    simulationAfterWait.values.discovery_state.simulation.active,
     true,
   );
   assert.ok(
-    simulationAfterScan.values.absolute_pose.sequence >
-      simulationBeforeScan.values.absolute_pose.sequence,
+    simulationAfterWait.values.absolute_pose.sequence >
+      simulationBeforeWait.values.absolute_pose.sequence,
   );
   const simulatedExecution = await snapshot("arm-execution");
   const simulatedCommand =

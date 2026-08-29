@@ -13,7 +13,6 @@ nodes:
         source: dora/timer/hz/100
         queue_size: 1
         queue_policy: drop_oldest
-      scan: dora/timer/millis/1000
       snapshot: web-gateway-node/tracking_snapshot
       select_pose_source: web-gateway-node/select_pose_source_request
       apply_bindings: web-gateway-node/apply_bindings_request

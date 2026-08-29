@@ -217,7 +217,7 @@ export function PoseViewer({
     camera.up.set(0, 1, 0);
     camera.position.set(1.05, 0.72, 1.15);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     element.appendChild(renderer.domElement);
     const controls = new OrbitControls(camera, renderer.domElement);
