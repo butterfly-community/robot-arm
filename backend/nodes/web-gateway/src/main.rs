@@ -227,6 +227,10 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/spatial/snapshot", post(request_spatial_snapshot))
         .route("/api/motion/state", get(snapshot_motion))
         .route("/api/motion/mode", post(request_mode))
+        .route(
+            "/api/motion/prepare-relative",
+            post(request_prepare_relative),
+        )
         .route("/api/motion/request", post(request_motion))
         .route("/api/motion/cancel", post(request_motion))
         .route("/api/motion/actuator", post(request_actuator))
@@ -320,6 +324,7 @@ request_handler!(request_simulation, "set_simulation_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");
 request_handler!(request_origin, "confirm_origin_request");
 request_handler!(request_mode, "set_control_mode_request");
+request_handler!(request_prepare_relative, "prepare_relative_request");
 request_handler!(request_motion, "motion_request");
 request_handler!(request_actuator, "tool_actuator_request");
 request_handler!(request_execution, "execution_request");

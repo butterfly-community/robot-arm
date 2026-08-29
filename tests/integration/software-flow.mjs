@@ -476,11 +476,6 @@ await waitFor(
         before.actuators_rad[0],
     ),
 );
-await request("/api/motion/mode", {
-  schema_version: 2,
-  request_id: "integration-relative-restore",
-  mode: "relative",
-});
 
 const asset = await fetch(
   `${base}/api/motion/assets/${model.visualization.root_path}`,
@@ -489,6 +484,32 @@ assert.equal(asset.ok, true);
 assert.ok((await asset.arrayBuffer()).byteLength > 0);
 
 try {
+  const prepared = await request("/api/motion/prepare-relative", {
+    schema_version: 2,
+    request_id: "integration-prepare-relative",
+  });
+  assert.equal(prepared.value.state, "succeeded");
+  const preparedMotion = await waitFor(
+    () => snapshot("motion"),
+    (state) =>
+      state.values.motion_state?.control_mode === "relative" &&
+      state.values.motion_state?.latest_motion?.request_id ===
+        "integration-prepare-relative",
+  );
+  assert.equal(preparedMotion.values.motion_state.control_mode, "relative");
+  await waitFor(
+    () => snapshot("arm-execution"),
+    (state) =>
+      model.joints.every(
+        (joint, index) =>
+          Math.abs(
+            state.values.arm_state.joints_rad[index] -
+              start.joint_positions_rad[joint.key],
+          ) <=
+          (2 * Math.PI) / 180,
+      ) &&
+      Math.abs(state.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
+  );
   const started = await request("/api/tracking/simulation", {
     schema_version: 2,
     request_id: "integration-simulation-start",
@@ -501,7 +522,8 @@ try {
       state.values.absolute_pose?.position_source_id ===
         "simulation:generic-6dof-cycle" &&
       state.values.absolute_pose?.orientation_source_id ===
-        "simulation:generic-6dof-cycle",
+        "simulation:generic-6dof-cycle" &&
+      state.values.control_input?.primary_tool?.value === 1,
   );
   const origin = await request("/api/spatial/origin", {
     schema_version: 2,

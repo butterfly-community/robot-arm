@@ -107,7 +107,7 @@ fn sample_pose(sample_index: u64) -> ([f64; 3], [f64; 4], &'static str, f64) {
             [0.0, STARTUP_LIFT_M * amount, 0.0],
             [0.0, 0.0, 0.0, 1.0],
             "启动：向上抬起 10 cm",
-            0.0,
+            1.0,
         );
     }
     let cycle_sample = (sample_index - STARTUP_SAMPLES) % (PHASE_SAMPLES * PHASE_COUNT);
@@ -115,7 +115,7 @@ fn sample_pose(sample_index: u64) -> ([f64; 3], [f64; 4], &'static str, f64) {
     let amount = smooth((cycle_sample % PHASE_SAMPLES) as f64 / PHASE_SAMPLES as f64);
     let mut position = [0.0, STARTUP_LIFT_M, 0.0];
     let mut orientation = [0.0, 0.0, 0.0, 1.0];
-    let mut primary_tool = 0.0;
+    let mut primary_tool = 1.0;
     let name = match phase {
         0 => {
             position[1] += VERTICAL_AND_DEPTH_M * amount;
@@ -166,12 +166,12 @@ fn sample_pose(sample_index: u64) -> ([f64; 3], [f64; 4], &'static str, f64) {
             "姿态：向左侧倾回正"
         }
         12 => {
-            primary_tool = amount;
-            "夹爪：连续闭合"
-        }
-        _ => {
             primary_tool = 1.0 - amount;
             "夹爪：连续张开"
+        }
+        _ => {
+            primary_tool = amount;
+            "夹爪：连续闭合"
         }
     };
     (position, orientation, name, primary_tool)
@@ -212,8 +212,8 @@ mod tests {
             (STARTUP_SAMPLES + PHASE_SAMPLES * 9, "姿态：前部往下回正"),
             (STARTUP_SAMPLES + PHASE_SAMPLES * 10, "姿态：向右侧倾 8°"),
             (STARTUP_SAMPLES + PHASE_SAMPLES * 11, "姿态：向左侧倾回正"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 12, "夹爪：连续闭合"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 13, "夹爪：连续张开"),
+            (STARTUP_SAMPLES + PHASE_SAMPLES * 12, "夹爪：连续张开"),
+            (STARTUP_SAMPLES + PHASE_SAMPLES * 13, "夹爪：连续闭合"),
         ];
         for (sample, expected) in endpoints {
             assert_eq!(sample_pose(sample).2, expected);
@@ -222,7 +222,7 @@ mod tests {
             sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * PHASE_COUNT);
         assert_eq!(position, [0.0, STARTUP_LIFT_M, 0.0]);
         assert_eq!(orientation, [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(primary_tool, 0.0);
+        assert_eq!(primary_tool, 1.0);
     }
 
     #[test]
@@ -246,11 +246,11 @@ mod tests {
             sample_pose(cycle + PHASE_SAMPLES * 11).1,
             axis_angle([0.0, 1.0, 0.0], ORIENTATION_RAD),
         );
-        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 12).3, 0.0);
+        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 12).3, 1.0);
         assert!(
             (sample_pose(cycle + PHASE_SAMPLES * 12 + PHASE_SAMPLES / 2).3 - 0.5).abs() < 1e-12
         );
-        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 13).3, 1.0);
+        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 13).3, 0.0);
         assert!(
             (sample_pose(cycle + PHASE_SAMPLES * 13 + PHASE_SAMPLES / 2).3 - 0.5).abs() < 1e-12
         );
@@ -287,7 +287,7 @@ mod tests {
             first.raw.components,
             BTreeMap::from([
                 (CONTROL_ACTIVE_COMPONENT.into(), 1.0),
-                (PRIMARY_TOOL_COMPONENT.into(), 0.0),
+                (PRIMARY_TOOL_COMPONENT.into(), 1.0),
             ])
         );
         assert_eq!(source_info().available_components.len(), 2);

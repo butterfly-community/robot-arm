@@ -1593,7 +1593,7 @@ mod tests {
         assert!(control.control_active.is_active);
         assert!(control.control_active.value);
         assert!(control.primary_tool.is_active);
-        assert_eq!(control.primary_tool.value, 0.0);
+        assert_eq!(control.primary_tool.value, 1.0);
     }
 
     #[test]

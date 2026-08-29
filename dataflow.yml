@@ -67,6 +67,7 @@ nodes:
         queue_size: 1
         queue_policy: drop_oldest
       set_control_mode: web-gateway-node/set_control_mode_request
+      prepare_relative: web-gateway-node/prepare_relative_request
       motion_request: web-gateway-node/motion_request
       tool_actuator_request: web-gateway-node/tool_actuator_request
       model_asset_request: web-gateway-node/model_asset_request
@@ -171,6 +172,7 @@ nodes:
       - confirm_origin_request
       - motion_snapshot
       - set_control_mode_request
+      - prepare_relative_request
       - motion_request
       - tool_actuator_request
       - model_asset_request

@@ -5,6 +5,8 @@
 入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 读取持久配置，
 `commit_config()` 先写盘再替换内存配置；`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到
 新样本时生成统一位姿和 Action；select_pose_source() 分别配置空间位置与姿态来源，并按运行时对应能力筛选和校验候选；apply_bindings() 保存每个 Action 自己的 source_id、输入组件以及独立的 Action 反馈目标。测试播放和硬件驱动共用 replace_driver_sources()、accept_sample()、combined_pose_frame() 与 evaluate_actions()：启动时声明具备绝对空间、绝对姿态、接管按钮和夹爪连续轴的通用六自由度输入源，通过普通来源选择与 Action 绑定依次测试三轴空间移动、偏航/俯仰/横滚姿态和夹爪闭合/张开，并临时把夹爪力度反馈绑定到网页虚拟反馈；停止后移除测试来源并恢复启动前配置。模拟数据不会直接构造最终位姿或 Action，也不模拟某个具体手柄型号。combined_pose_frame() 从两个来源透明合成位姿；evaluate_actions() 与 binding_value() 可同时读取多个设备，把连续轴或一对方向按钮转换成功能 Action，不增加死区。能力筛选只约束绝对空间与姿态来源，不约束 Action 或反馈绑定；没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。输入源是否在线根据当前发现结果计算，不把运行时的 active 状态写盘。
+
+网页启用测试播放前只调用 `/api/motion/prepare-relative`：motion 节点复用普通模式切换和普通 MoveIt 运动链路，依次进入手动模式、执行包含夹爪闭合的默认位、在执行成功后进入相对模式；同步响应返回后，网页才启用测试输入源；运动页把同一接口显示为“准备相对控制”按钮，并与默认位、测试位放在同一按钮组。测试源每次从默认位对应的夹爪闭合值开始，末段先张开再闭合并回到同一状态。停止测试输入只停止输入源，不触发归位。
 `live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
 
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在

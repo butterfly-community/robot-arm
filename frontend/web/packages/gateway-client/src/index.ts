@@ -28,6 +28,13 @@ export async function post<T extends Json>(
   return responseValue(response);
 }
 
+export function prepareRelativeControl(): Promise<Json> {
+  return post("/api/motion/prepare-relative", {
+    schema_version: 2,
+    request_id: requestId(),
+  });
+}
+
 export async function patch<T extends Json>(
   path: string,
   value: T,

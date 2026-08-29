@@ -132,6 +132,7 @@ class MotionNode(Node):
         self._actuator_status: dict[str, Any] | None = None
         self._motion_target: list[float] | None = None
         self._motion_actuator_target: float | None = None
+        self._complete_in_relative_mode = False
         self._planned_trajectory: Any | None = None
         self._plan_goal_handle: Any | None = None
         self._execute_goal_handle: Any | None = None
@@ -244,6 +245,8 @@ class MotionNode(Node):
                 self._set_control_mode(value)
             elif input_id == "motion_request":
                 self._handle_motion_request(value)
+            elif input_id == "prepare_relative":
+                self._prepare_relative_control(value)
             elif input_id == "tool_actuator_request":
                 self._handle_actuator_request(value)
             elif input_id == "model_asset_request":
@@ -476,25 +479,7 @@ class MotionNode(Node):
 
     def _set_control_mode(self, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id", ""))
-        mode = request.get("mode")
-        error: str | None = None
-        if mode not in {"relative", "manual"}:
-            error = f"unknown control mode {mode}"
-        else:
-            next_config = MotionConfig(
-                config_version=self._config.config_version + 1,
-                control_mode=mode,
-            )
-            try:
-                save_motion_config(self._config_path, next_config)
-            except OSError as write_error:
-                error = f"保存 motion 配置失败：{write_error}"
-            else:
-                self._config = next_config
-                self._control_mode = mode
-                self._control_session_id = None
-                self._anchor_tcp = None
-                self._target_tcp = None
+        error = self._apply_control_mode(request.get("mode"))
         self._enqueue(
             "mode_request_result",
             {
@@ -506,6 +491,35 @@ class MotionNode(Node):
             },
         )
         self._enqueue_motion_state()
+
+    def _apply_control_mode(self, mode: Any) -> str | None:
+        if mode not in {"relative", "manual"}:
+            return f"unknown control mode {mode}"
+        next_config = MotionConfig(
+            config_version=self._config.config_version + 1,
+            control_mode=mode,
+        )
+        try:
+            save_motion_config(self._config_path, next_config)
+        except OSError as write_error:
+            return f"保存 motion 配置失败：{write_error}"
+        self._config = next_config
+        self._control_mode = mode
+        self._control_session_id = None
+        self._anchor_tcp = None
+        self._target_tcp = None
+        return None
+
+    def _prepare_relative_control(self, request: dict[str, Any]) -> None:
+        request_id = str(request.get("request_id", ""))
+        error = self._apply_control_mode("manual")
+        if error is not None:
+            self._set_motion_failed(request_id, error, "apply")
+            return
+        self._enqueue_motion_state()
+        self._complete_in_relative_mode = True
+        self._motion_actuator_target = CLOSED_GRIPPER_RAD
+        self._begin_motion_plan(request_id, list(START_RAD), {})
 
     def _handle_actuator_request(self, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id", ""))
@@ -572,6 +586,7 @@ class MotionNode(Node):
         if request.get("action") == "cancel":
             self._cancel_motion(request_id)
             return
+        self._complete_in_relative_mode = False
         if request.get("action") != "apply":
             self._set_motion_failed(
                 request_id,
@@ -1045,6 +1060,13 @@ class MotionNode(Node):
                 "apply",
             )
             return
+        complete_in_relative_mode = self._complete_in_relative_mode
+        self._complete_in_relative_mode = False
+        if complete_in_relative_mode:
+            error = self._apply_control_mode("relative")
+            if error is not None:
+                self._set_motion_failed(request_id, error, "apply")
+                return
         self._resume_servo()
         self._reset_relative_baseline()
         self._planned_trajectory = None
@@ -1059,6 +1081,7 @@ class MotionNode(Node):
         self._enqueue("motion_request_result", self._status_result())
 
     def _cancel_motion(self, request_id: str) -> None:
+        self._complete_in_relative_mode = False
         cancelled_request_id = self._motion_status["request_id"]
         cancelled_action = self._motion_status["acknowledged_action"]
         cancelled_was_active = self._motion_status["state"] in {"planning", "executing"}
@@ -1093,6 +1116,7 @@ class MotionNode(Node):
         self._enqueue("motion_request_result", self._status_result())
 
     def _set_motion_failed(self, request_id: str, message: str, action: str) -> None:
+        self._complete_in_relative_mode = False
         self._resume_servo()
         self._reset_relative_baseline()
         self._planned_trajectory = None

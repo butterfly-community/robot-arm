@@ -588,7 +588,7 @@ test("motion mode keyboard action round-trips through the service", async ({
   await manual.focus();
   await page.keyboard.press("Enter");
   await expect(currentMode).toHaveText("手动控制");
-  await page.getByRole("button", { name: "相对控制" }).click();
+  await page.getByRole("button", { name: "相对控制", exact: true }).click();
   await expect(currentMode).toHaveText("相对控制");
   const state = await (await request.get("/api/motion/state")).json();
   expect(state.values.motion_state.control_mode).toBe("relative");
@@ -628,6 +628,9 @@ test("motion named target is submitted by the metadata-driven page", async ({
       .toBeLessThanOrEqual((2 * Math.PI) / 180);
     await page.goto("/motion/");
     await page.getByRole("button", { name: "手动控制" }).click();
+    await expect(
+      page.getByRole("button", { name: "准备相对控制" }),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "默认位" })).toBeVisible();
     await expect(page.getByRole("button", { name: "测试位" })).toBeVisible();
     await page.getByRole("button", { name: "测试位" }).click();

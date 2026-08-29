@@ -1,7 +1,12 @@
 "use client";
 
 import type { ArmState, MotionState, RobotModelInfo } from "@robot/contracts";
-import { post, requestId, useGateway } from "@robot/gateway-client";
+import {
+  post,
+  prepareRelativeControl,
+  requestId,
+  useGateway,
+} from "@robot/gateway-client";
 import {
   Button,
   Card,
@@ -77,6 +82,15 @@ export default function Page() {
         request_id: requestId(),
         mode: value,
       });
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function prepareRelative() {
+    setError(undefined);
+    try {
+      await prepareRelativeControl();
     } catch (reason) {
       setError(String(reason));
     }
@@ -308,6 +322,7 @@ export default function Page() {
             </Field>
           ))}
           <div className="target-list">
+            <Button onClick={prepareRelative}>准备相对控制</Button>
             {(model?.named_targets ?? []).map((item) => (
               <Button
                 key={item.key}

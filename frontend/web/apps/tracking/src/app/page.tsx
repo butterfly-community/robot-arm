@@ -5,7 +5,12 @@ import {
   type AbsolutePoseFrame,
   type ControlInputFrame,
 } from "@robot/contracts";
-import { post, requestId, useGateway } from "@robot/gateway-client";
+import {
+  post,
+  prepareRelativeControl,
+  requestId,
+  useGateway,
+} from "@robot/gateway-client";
 import {
   Button,
   Card,
@@ -82,6 +87,7 @@ export default function Page() {
   const [inverted, setInverted] = useState<Record<string, boolean>>({});
   const [inputModes, setInputModes] = useState<Record<string, InputMode>>({});
   const [testSourceId, setTestSourceId] = useState("");
+  const [simulationStarting, setSimulationStarting] = useState(false);
   const [feedbackSourceIds, setFeedbackSourceIds] = useState<
     Record<string, string>
   >({});
@@ -259,13 +265,11 @@ export default function Page() {
 
   async function setSimulation(enabled: boolean) {
     setError(undefined);
+    setSimulationStarting(enabled);
     try {
-      if (enabled)
-        await post("/api/motion/mode", {
-          schema_version: 2,
-          request_id: requestId(),
-          mode: "relative",
-        });
+      if (enabled) {
+        await prepareRelativeControl();
+      }
       await post("/api/tracking/simulation", {
         schema_version: 2,
         request_id: requestId(),
@@ -273,6 +277,8 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setSimulationStarting(false);
     }
   }
 
@@ -367,8 +373,15 @@ export default function Page() {
             })}
           </div>
           <div className="card-actions">
-            <Button onClick={() => setSimulation(!Boolean(simulation.active))}>
-              {simulation.active ? "停止模拟数据" : "启动模拟数据"}
+            <Button
+              disabled={simulationStarting}
+              onClick={() => setSimulation(!Boolean(simulation.active))}
+            >
+              {simulationStarting
+                ? "正在回到默认位"
+                : simulation.active
+                  ? "停止模拟数据"
+                  : "启动模拟数据"}
             </Button>
             <StatusBadge tone={simulation.active ? "cyan" : "neutral"}>
               {simulation.active
