@@ -497,11 +497,7 @@ impl ControllerInput {
             .err()
             .map(|error| error.to_string());
         if error.is_none() {
-            let component_offsets = if self.config.bindings == request.bindings {
-                self.config.component_offsets.clone()
-            } else {
-                self.detect_component_offsets(&request.bindings)
-            };
+            let component_offsets = self.detect_component_offsets(&request.bindings);
             let mut config = self.config.clone();
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
