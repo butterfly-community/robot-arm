@@ -89,6 +89,20 @@ for (const [path, title] of pages) {
   });
 }
 
+test("cross-service navigation does not report socket teardown as an error", async ({
+  page,
+}) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await page.goto("/tracking/");
+  await page.getByRole("link", { name: /02 空间/ }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("空间转换");
+  await expect(page.locator("p.error")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
 for (const [path] of pages) {
   test(`${path} live snapshots do not clear selected text`, async ({
     page,

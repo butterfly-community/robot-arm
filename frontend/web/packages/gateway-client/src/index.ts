@@ -61,7 +61,6 @@ async function responseValue(response: Response): Promise<Json> {
 export function subscribe(
   namespace: Namespace,
   update: (snapshot: Snapshot) => void,
-  failed: (message: string) => void,
 ): () => void {
   let stopped = false;
   let socket: WebSocket | undefined;
@@ -69,7 +68,16 @@ export function subscribe(
   const stop = () => {
     stopped = true;
     if (retry) clearTimeout(retry);
-    socket?.close();
+    const current = socket;
+    socket = undefined;
+    if (!current) return;
+    current.onmessage = null;
+    current.onclose = null;
+    if (current.readyState === WebSocket.CONNECTING) {
+      current.onopen = () => current.close();
+    } else if (current.readyState === WebSocket.OPEN) {
+      current.close();
+    }
   };
   window.addEventListener("pagehide", stop);
   const connect = () => {
@@ -77,9 +85,7 @@ export function subscribe(
     socket = new WebSocket(`${scheme}://${location.host}/ws/${namespace}`);
     socket.onmessage = (event) => update(JSON.parse(event.data) as Snapshot);
     socket.onclose = () => {
-      if (stopped) return;
-      failed("状态连接已断开，正在重新连接");
-      retry = setTimeout(connect, 1000);
+      if (!stopped) retry = setTimeout(connect, 1000);
     };
   };
   connect();
@@ -114,7 +120,7 @@ export function useGateway(namespace: Namespace) {
         frame = window.requestAnimationFrame(applyPending);
       }
     };
-    const dispose = subscribe(namespace, accept, setTransportError);
+    const dispose = subscribe(namespace, accept);
     getSnapshot(namespace)
       .then(accept)
       .catch((reason: unknown) =>
