@@ -2,6 +2,7 @@ mod simulation;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -11,6 +12,7 @@ use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::Data
 use eyre::{Context, Result, eyre};
 use fusion_ahrs::{Ahrs, Offset, OffsetSettings};
 use hidapi::HidApi;
+use json_config_store::{load_or_default, save};
 use nalgebra::Vector3;
 use nolo_cv1::protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report};
 use one_euro_filter::OneEuroFilter;
@@ -28,6 +30,7 @@ use sdl3::{
     gamepad::{Axis, Button, Gamepad},
     sensor::SensorType,
 };
+use serde::{Deserialize, Serialize};
 use simulation::{
     DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
     SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT as SIMULATION_START_STOP_COMPONENT,
@@ -36,6 +39,7 @@ use simulation::{
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
+const CONFIG_SCHEMA_VERSION: u32 = 2;
 const HAPTIC_DURATION_MS: u32 = 100;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
@@ -112,7 +116,7 @@ fn main() -> Result<()> {
     spawn_nolo_driver(driver_tx.clone());
     spawn_sdl_driver(driver_tx, haptic_rx);
 
-    let mut input = ControllerInput::new(driver_rx, haptic_tx);
+    let mut input = ControllerInput::load(driver_rx, haptic_tx)?;
     publish_snapshot(&mut node, &mut input)?;
 
     while let Some(event) = events.recv() {
@@ -223,18 +227,34 @@ struct PoseSourceSelection {
     source_id: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct InputConfig {
+    #[serde(default = "config_schema_version")]
+    schema_version: u32,
+    #[serde(skip)]
     position_source: Option<PoseSourceSelection>,
+    #[serde(skip)]
     orientation_source: Option<PoseSourceSelection>,
+    #[serde(default)]
     bindings: Vec<ActionBinding>,
+    #[serde(default)]
     feedback_bindings: Vec<ActionFeedbackBinding>,
+    #[serde(default = "initial_config_version")]
     config_version: u64,
+}
+
+const fn config_schema_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
+
+const fn initial_config_version() -> u64 {
+    1
 }
 
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             position_source: None,
             orientation_source: None,
             bindings: vec![],
@@ -245,6 +265,7 @@ impl Default for InputConfig {
 }
 
 struct ControllerInput {
+    config_path: Option<PathBuf>,
     config: InputConfig,
     drivers: BTreeMap<String, InputDriverInfo>,
     sources: BTreeMap<String, InputSourceInfo>,
@@ -267,9 +288,28 @@ struct ControllerInput {
 }
 
 impl ControllerInput {
+    fn load(receiver: Receiver<DriverEvent>, haptic: Sender<HapticCommand>) -> Result<Self> {
+        let path = std::env::var_os("CONTROLLER_INPUT_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/config/controller-input.json"));
+        let config = load_input_config(&path)?;
+        Ok(Self::from_config(receiver, haptic, Some(path), config))
+    }
+
+    #[cfg(test)]
     fn new(receiver: Receiver<DriverEvent>, haptic: Sender<HapticCommand>) -> Self {
+        Self::from_config(receiver, haptic, None, InputConfig::default())
+    }
+
+    fn from_config(
+        receiver: Receiver<DriverEvent>,
+        haptic: Sender<HapticCommand>,
+        config_path: Option<PathBuf>,
+        config: InputConfig,
+    ) -> Self {
         Self {
-            config: InputConfig::default(),
+            config_path,
+            config,
             drivers: BTreeMap::new(),
             sources: BTreeMap::new(),
             diagnostics: BTreeMap::new(),
@@ -308,6 +348,14 @@ impl ControllerInput {
         }) {
             self.virtual_feedback = None;
         }
+    }
+
+    fn commit_bindings(&mut self, config: InputConfig) -> Result<()> {
+        if let Some(path) = &self.config_path {
+            save_input_config(path, &config)?;
+        }
+        self.apply_config(config);
+        Ok(())
     }
 
     fn drain(&mut self) {
@@ -588,7 +636,7 @@ impl ControllerInput {
         &mut self,
         request: ApplyInputBindingsRequest,
     ) -> RequestResult<Vec<InputBindingState>> {
-        let error = validate_bindings(&request.bindings)
+        let mut error = validate_bindings(&request.bindings)
             .err()
             .map(|error| error.to_string());
         if error.is_none() {
@@ -596,10 +644,13 @@ impl ControllerInput {
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
             config.config_version += 1;
-            self.apply_config(config);
-            self.offset_candidates.clear();
-            self.component_offsets.clear();
-            self.component_filters.clear();
+            if let Err(save_error) = self.commit_bindings(config) {
+                error = Some(format!("保存输入绑定失败：{save_error}"));
+            } else {
+                self.offset_candidates.clear();
+                self.component_offsets.clear();
+                self.component_filters.clear();
+            }
         }
         RequestResult {
             schema_version: SCHEMA_VERSION,
@@ -799,6 +850,18 @@ impl ControllerInput {
             updated_at_ns: now_ns(),
         }
     }
+}
+
+fn load_input_config(path: &Path) -> Result<InputConfig> {
+    let config: InputConfig = load_or_default(path)?;
+    if config.schema_version != CONFIG_SCHEMA_VERSION {
+        return Err(eyre!("不支持的输入配置版本 {}", config.schema_version));
+    }
+    Ok(config)
+}
+
+fn save_input_config(path: &Path, config: &InputConfig) -> Result<()> {
+    save(path, config)
 }
 
 fn simulation_config(config: &InputConfig) -> InputConfig {
@@ -1625,6 +1688,54 @@ mod tests {
                 .collect(),
         };
         BTreeMap::from([("fixture".into(), sample)])
+    }
+
+    #[test]
+    fn persisted_config_contains_only_function_and_feedback_bindings() {
+        let path = std::env::temp_dir().join(format!(
+            "controller-input-{}-{}.json",
+            std::process::id(),
+            now_ns()
+        ));
+        let function_binding = ActionBinding {
+            action: "start_stop".into(),
+            action_type: ActionType::Boolean,
+            source_id: "controller-a".into(),
+            component_paths: vec!["button/start".into()],
+            invert: false,
+        };
+        let feedback_binding = ActionFeedbackBinding {
+            action: "primary_tool".into(),
+            source_id: "controller-b".into(),
+            capability_path: "feedback/rumble".into(),
+        };
+        let config = InputConfig {
+            position_source: Some(PoseSourceSelection {
+                driver_id: "runtime-driver".into(),
+                device_id: "runtime-device".into(),
+                source_id: "runtime-source".into(),
+            }),
+            bindings: vec![function_binding.clone()],
+            feedback_bindings: vec![feedback_binding.clone()],
+            config_version: 7,
+            ..Default::default()
+        };
+
+        save_input_config(&path, &config).unwrap();
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(stored.contains("bindings"));
+        assert!(stored.contains("feedback_bindings"));
+        assert!(!stored.contains("position_source"));
+        assert!(!stored.contains("orientation_source"));
+        assert!(!stored.contains("component_offsets"));
+
+        let loaded = load_input_config(&path).unwrap();
+        assert_eq!(loaded.bindings, [function_binding]);
+        assert_eq!(loaded.feedback_bindings, [feedback_binding]);
+        assert!(loaded.position_source.is_none());
+        assert!(loaded.orientation_source.is_none());
+        assert_eq!(loaded.config_version, 7);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

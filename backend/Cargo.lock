@@ -687,6 +687,7 @@ dependencies = [
  "eyre",
  "fusion-ahrs",
  "hidapi",
+ "json-config-store",
  "nalgebra",
  "nolo-cv1",
  "one_euro_filter",
