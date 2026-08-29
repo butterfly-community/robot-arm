@@ -38,7 +38,7 @@ const actions = [
   ["horizontal_arc", "左旋 / 右旋", "float"],
 ] as const;
 
-type InputMode = "button" | "chord" | "buttons" | "axis";
+type InputMode = "button" | "buttons" | "axis";
 
 function componentLabel(component: Record<string, unknown>) {
   const path = String(component.path ?? "");
@@ -156,14 +156,11 @@ export default function Page() {
       Object.fromEntries(
         bindingStates.map((binding) => [
           String(binding.action),
-          binding.action === "start_stop"
-            ? "chord"
-            : binding.action_type === "boolean"
-              ? "button"
-              : ((binding.configured_components ?? []) as unknown[]).length ===
-                  2
-                ? "buttons"
-                : "axis",
+          binding.action_type === "boolean"
+            ? "button"
+            : ((binding.configured_components ?? []) as unknown[]).length === 2
+              ? "buttons"
+              : "axis",
         ]),
       ),
     );
@@ -515,10 +512,6 @@ export default function Page() {
               <span>按下为开，松开为关，用于独立业务动作。</span>
             </div>
             <div>
-              <strong>双按键组合</strong>
-              <span>两个按钮同时按下时触发启动或停止。</span>
-            </div>
-            <div>
               <strong>正负按钮对</strong>
               <span>第一个按钮输出负方向，第二个按钮输出正方向。</span>
             </div>
@@ -534,11 +527,9 @@ export default function Page() {
                 (candidate) => candidate.source_id === sourceIds[action],
               );
               const mode =
-                action === "start_stop"
-                  ? "chord"
-                  : actionType === "boolean"
-                    ? "button"
-                    : (inputModes[action] ?? "axis");
+                actionType === "boolean"
+                  ? "button"
+                  : (inputModes[action] ?? "axis");
               const components = (
                 (source?.available_components ?? []) as Array<
                   Record<string, unknown>
@@ -585,9 +576,7 @@ export default function Page() {
                         setPaths({ ...paths, [action]: "" });
                       }}
                     >
-                      {action === "start_stop" ? (
-                        <option value="chord">双按键组合</option>
-                      ) : actionType === "boolean" ? (
+                      {actionType === "boolean" ? (
                         <option value="button">单个按钮</option>
                       ) : null}
                       {actionType === "float" && (
@@ -599,18 +588,16 @@ export default function Page() {
                     </select>
                     <div className="binding-components">
                       {Array.from({
-                        length: mode === "buttons" || mode === "chord" ? 2 : 1,
+                        length: mode === "buttons" ? 2 : 1,
                       }).map((_, index) => (
                         <select
                           key={index}
                           aria-label={`${label}${
-                            mode === "chord"
-                              ? "组合按键 " + (index + 1)
-                              : mode === "buttons"
-                                ? index === 0
-                                  ? "负方向按钮"
-                                  : "正方向按钮"
-                                : "设备输入"
+                            mode === "buttons"
+                              ? index === 0
+                                ? "负方向按钮"
+                                : "正方向按钮"
+                              : "设备输入"
                           }`}
                           value={
                             (paths[action] ?? "").split(",")[index]?.trim() ??
@@ -621,13 +608,11 @@ export default function Page() {
                           }
                         >
                           <option value="">
-                            {mode === "chord"
-                              ? "选择组合按键 " + (index + 1)
-                              : mode === "buttons"
-                                ? index === 0
-                                  ? "负方向按钮"
-                                  : "正方向按钮"
-                                : "选择设备输入"}
+                            {mode === "buttons"
+                              ? index === 0
+                                ? "负方向按钮"
+                                : "正方向按钮"
+                              : "选择设备输入"}
                           </option>
                           {components.map((component) => (
                             <option

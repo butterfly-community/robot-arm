@@ -32,8 +32,8 @@ use sdl3::{
 use serde::{Deserialize, Serialize};
 use simulation::{
     DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
-    SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT_A as SIMULATION_START_STOP_COMPONENT_A,
-    START_STOP_COMPONENT_B as SIMULATION_START_STOP_COMPONENT_B, SimulationPlayback,
+    SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT as SIMULATION_START_STOP_COMPONENT,
+    SimulationPlayback,
 };
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
@@ -71,8 +71,8 @@ const SDL_BUTTONS: [(Button, &str, &str); 26] = [
     (Button::West, "button/west", "右侧按键组左方按钮"),
     (Button::North, "button/north", "右侧按键组上方按钮"),
     (Button::Back, "button/back", "返回按钮"),
-    (Button::Guide, "button/guide", "主菜单按钮"),
-    (Button::Start, "button/start", "开始按钮"),
+    (Button::Guide, "button/guide", "系统 / 主页按钮"),
+    (Button::Start, "button/start", "开始 / 菜单按钮"),
     (Button::LeftStick, "button/left_stick", "左摇杆按下"),
     (Button::RightStick, "button/right_stick", "右摇杆按下"),
     (Button::LeftShoulder, "button/left_shoulder", "左肩键"),
@@ -796,10 +796,7 @@ fn simulation_config(config: &InputConfig) -> InputConfig {
             action: "start_stop".into(),
             action_type: ActionType::Boolean,
             source_id: SIMULATION_SOURCE_ID.into(),
-            component_paths: vec![
-                SIMULATION_START_STOP_COMPONENT_A.into(),
-                SIMULATION_START_STOP_COMPONENT_B.into(),
-            ],
+            component_paths: vec![SIMULATION_START_STOP_COMPONENT.into()],
             invert: false,
         },
         ActionBinding {
@@ -854,8 +851,8 @@ fn validate_bindings(bindings: &[ActionBinding]) -> Result<()> {
         if binding.action_type != expected {
             return Err(eyre!("Action {} 类型不匹配", binding.action));
         }
-        if binding.action == "start_stop" && binding.component_paths.len() != 2 {
-            return Err(eyre!("启动和停止控制必须绑定两个按钮"));
+        if binding.action == "start_stop" && binding.component_paths.len() != 1 {
+            return Err(eyre!("启动和停止控制必须绑定一个按钮"));
         }
     }
     Ok(())
@@ -1593,6 +1590,20 @@ mod tests {
                 .len(),
             SDL_BUTTONS.len()
         );
+        assert_eq!(
+            SDL_BUTTONS
+                .iter()
+                .find(|(_, path, _)| *path == "button/guide")
+                .map(|(_, _, name)| *name),
+            Some("系统 / 主页按钮")
+        );
+        assert_eq!(
+            SDL_BUTTONS
+                .iter()
+                .find(|(_, path, _)| *path == "button/start")
+                .map(|(_, _, name)| *name),
+            Some("开始 / 菜单按钮")
+        );
         assert!(SDL_AXES.iter().all(|(_, _, name)| !name.is_empty()));
         assert!(SDL_BUTTONS.iter().all(|(_, _, name)| !name.is_empty()));
         assert!(
@@ -1666,10 +1677,7 @@ mod tests {
         assert_eq!(config.bindings[0].action, "start_stop");
         assert_eq!(
             config.bindings[0].component_paths,
-            [
-                SIMULATION_START_STOP_COMPONENT_A,
-                SIMULATION_START_STOP_COMPONENT_B
-            ]
+            [SIMULATION_START_STOP_COMPONENT]
         );
         assert_eq!(config.bindings[1].action, "primary_tool");
         assert_eq!(
@@ -1839,33 +1847,33 @@ mod tests {
     }
 
     #[test]
-    fn boolean_chord_requires_every_bound_button() {
+    fn start_stop_uses_one_button() {
         let binding = ActionBinding {
             action: "start_stop".into(),
             action_type: ActionType::Boolean,
             source_id: "fixture".into(),
-            component_paths: vec!["button/a".into(), "button/b".into()],
+            component_paths: vec!["button/menu".into()],
             invert: false,
         };
-        let one = evaluate_actions(
-            &sample(&[("button/a", 1.0), ("button/b", 0.0)]),
+        let released = evaluate_actions(
+            &sample(&[("button/menu", 0.0)]),
             std::slice::from_ref(&binding),
             &BTreeMap::new(),
             None,
             1,
             1,
         );
-        assert!(!one.start_stop.value);
-        let both = evaluate_actions(
-            &sample(&[("button/a", 1.0), ("button/b", 1.0)]),
+        assert!(!released.start_stop.value);
+        let pressed = evaluate_actions(
+            &sample(&[("button/menu", 1.0)]),
             &[binding],
             &BTreeMap::new(),
-            Some(&one),
+            Some(&released),
             2,
             2,
         );
-        assert!(both.start_stop.value);
-        assert!(both.start_stop.changed_since_last_sync);
+        assert!(pressed.start_stop.value);
+        assert!(pressed.start_stop.changed_since_last_sync);
     }
 
     #[test]

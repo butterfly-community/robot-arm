@@ -713,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn held_start_chord_does_not_toggle_and_emergency_stop_ends_the_process() {
+    fn held_start_button_does_not_toggle_and_emergency_stop_ends_the_process() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
         transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         assert!(transform.handle_control(control(2, true), 2).active);

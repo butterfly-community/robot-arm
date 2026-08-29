@@ -10,8 +10,7 @@ use super::RawSample;
 pub(super) const DRIVER_ID: &str = "generated-test-input";
 pub(super) const DEVICE_ID: &str = "generic-6dof-cycle";
 pub(super) const SOURCE_ID: &str = "simulation:generic-6dof-cycle";
-pub(super) const START_STOP_COMPONENT_A: &str = "button/start_stop_a";
-pub(super) const START_STOP_COMPONENT_B: &str = "button/start_stop_b";
+pub(super) const START_STOP_COMPONENT: &str = "button/start_stop";
 pub(super) const PRIMARY_TOOL_COMPONENT: &str = "axis/primary_tool";
 const SAMPLE_RATE_HZ: u64 = 100;
 const PHASE_SAMPLES: u64 = SAMPLE_RATE_HZ * 3;
@@ -56,15 +55,9 @@ pub(super) fn source_info() -> InputSourceInfo {
         active: true,
         available_components: vec![
             InputComponentInfo {
-                path: START_STOP_COMPONENT_A.into(),
+                path: START_STOP_COMPONENT.into(),
                 action_type: ActionType::Boolean,
-                localized_name: Some("启动/停止组合键 1".into()),
-                definition_source: "generated-test-input".into(),
-            },
-            InputComponentInfo {
-                path: START_STOP_COMPONENT_B.into(),
-                action_type: ActionType::Boolean,
-                localized_name: Some("启动/停止组合键 2".into()),
+                localized_name: Some("启动/停止按钮".into()),
                 definition_source: "generated-test-input".into(),
             },
             InputComponentInfo {
@@ -93,8 +86,7 @@ impl SimulationPlayback {
                 position_m: Some(position_m),
                 orientation_xyzw: Some(orientation_xyzw),
                 components: BTreeMap::from([
-                    (START_STOP_COMPONENT_A.into(), 1.0),
-                    (START_STOP_COMPONENT_B.into(), 1.0),
+                    (START_STOP_COMPONENT.into(), 1.0),
                     (PRIMARY_TOOL_COMPONENT.into(), primary_tool),
                 ]),
             },
@@ -294,22 +286,17 @@ mod tests {
         assert_eq!(
             first.raw.components,
             BTreeMap::from([
-                (START_STOP_COMPONENT_A.into(), 1.0),
-                (START_STOP_COMPONENT_B.into(), 1.0),
+                (START_STOP_COMPONENT.into(), 1.0),
                 (PRIMARY_TOOL_COMPONENT.into(), 1.0),
             ])
         );
-        assert_eq!(source_info().available_components.len(), 3);
+        assert_eq!(source_info().available_components.len(), 2);
         assert_eq!(
             source_info().available_components[0].path,
-            START_STOP_COMPONENT_A
+            START_STOP_COMPONENT
         );
         assert_eq!(
             source_info().available_components[1].path,
-            START_STOP_COMPONENT_B
-        );
-        assert_eq!(
-            source_info().available_components[2].path,
             PRIMARY_TOOL_COMPONENT
         );
         assert_eq!(first.state.elapsed_s, Some(0.0));

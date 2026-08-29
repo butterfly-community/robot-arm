@@ -182,7 +182,7 @@ test("simulation control uses the normal input and spatial path", async ({
     await inputTest
       .getByLabel("选择测试设备")
       .selectOption("simulation:generic-6dof-cycle");
-    await expect(inputTest.getByText(/button\/start_stop_a/)).toBeVisible();
+    await expect(inputTest.getByText(/button\/start_stop/)).toBeVisible();
     await expect
       .poll(async () => {
         const response = await request.get("/api/spatial/state");
@@ -228,12 +228,8 @@ test("simulation control uses the normal input and spatial path", async ({
       .toMatchObject({
         positionCapable: true,
         orientationCapable: true,
-        components: [
-          "button/start_stop_a",
-          "button/start_stop_b",
-          "axis/primary_tool",
-        ],
-        controlBinding: ["button/start_stop_a", "button/start_stop_b"],
+        components: ["button/start_stop", "axis/primary_tool"],
+        controlBinding: ["button/start_stop"],
         primaryToolBinding: ["axis/primary_tool"],
         feedbackBinding: {
           source_id: "virtual-feedback",
@@ -344,7 +340,7 @@ test("tracking page applies and displays a controller binding", async ({
     (source: { available_components?: Array<{ action_type?: string }> }) =>
       (source.available_components ?? []).filter(
         (component) => component.action_type === "boolean",
-      ).length >= 2,
+      ).length >= 1,
   );
   test.skip(
     !selectedRuntimeSource,
@@ -377,7 +373,6 @@ test("tracking page applies and displays a controller binding", async ({
     const sourceSelect = field.locator("select").nth(0);
     await sourceSelect.selectOption(selectedRuntimeSource.source_id);
     const componentSelect = field.locator("select").nth(2);
-    const secondComponentSelect = field.locator("select").nth(3);
     await expect
       .poll(() => componentSelect.locator("option").count())
       .toBeGreaterThan(1);
@@ -387,15 +382,6 @@ test("tracking page applies and displays a controller binding", async ({
       .getAttribute("value");
     expect(componentPath).toBeTruthy();
     await componentSelect.selectOption(componentPath!);
-    await expect
-      .poll(() => secondComponentSelect.locator("option").count())
-      .toBeGreaterThan(2);
-    const secondComponentPath = await secondComponentSelect
-      .locator("option")
-      .nth(2)
-      .getAttribute("value");
-    expect(secondComponentPath).toBeTruthy();
-    await secondComponentSelect.selectOption(secondComponentPath!);
     await page.getByRole("button", { name: "应用绑定" }).click();
     await expect(
       page.getByRole("button", { name: "正在检测零位（3 秒）" }),
@@ -415,7 +401,7 @@ test("tracking page applies and displays a controller binding", async ({
         };
       })
       .toEqual({
-        configured: [componentPath, secondComponentPath],
+        configured: [componentPath],
         active: true,
       });
   } finally {
