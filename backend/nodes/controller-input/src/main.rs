@@ -2,8 +2,7 @@ mod simulation;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -12,9 +11,9 @@ use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::Data
 use eyre::{Context, Result, eyre};
 use fusion_ahrs::{Ahrs, Offset, OffsetSettings};
 use hidapi::HidApi;
-use json_config_store::{load_or_default, save};
 use nalgebra::Vector3;
 use nolo_cv1::protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report};
+use one_euro_filter::OneEuroFilter;
 use robot_arm_messages::{
     AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
     ActionFeedbackBindingState, ActionType, ActuatorActions, ApplyInputBindingsRequest,
@@ -29,7 +28,6 @@ use sdl3::{
     gamepad::{Axis, Button, Gamepad},
     sensor::SensorType,
 };
-use serde::{Deserialize, Serialize};
 use simulation::{
     DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
     SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT as SIMULATION_START_STOP_COMPONENT,
@@ -38,11 +36,15 @@ use simulation::{
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
-const CONFIG_SCHEMA_VERSION: u32 = 2;
 const HAPTIC_DURATION_MS: u32 = 50;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
-const BINDING_CALIBRATION_DURATION: Duration = Duration::from_secs(3);
+const DYNAMIC_OFFSET_STABLE_DURATION: Duration = Duration::from_secs(3);
+const DYNAMIC_OFFSET_MAX_ABS: f64 = 0.1;
+const FILTER_NOMINAL_RATE_HZ: f64 = 120.0;
+const FILTER_MIN_CUTOFF_HZ: f64 = 1.0;
+const FILTER_BETA: f64 = 0.1;
+const FILTER_DERIVATIVE_CUTOFF_HZ: f64 = 1.0;
 
 const ACTIONS: [(&str, ActionType); 9] = [
     ("start_stop", ActionType::Boolean),
@@ -110,7 +112,7 @@ fn main() -> Result<()> {
     spawn_nolo_driver(driver_tx.clone());
     spawn_sdl_driver(driver_tx, haptic_rx);
 
-    let mut input = ControllerInput::load(driver_rx, haptic_tx)?;
+    let mut input = ControllerInput::new(driver_rx, haptic_tx);
     publish_snapshot(&mut node, &mut input)?;
 
     while let Some(event) = events.recv() {
@@ -190,46 +192,59 @@ struct HapticCommand {
     intensity: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug)]
+struct StableAxisSample {
+    value: f64,
+    since: Instant,
+}
+
+struct FilteredComponent {
+    filter: OneEuroFilter,
+    value: f64,
+}
+
+impl FilteredComponent {
+    fn new() -> Self {
+        Self {
+            filter: one_euro(),
+            value: 0.0,
+        }
+    }
+
+    fn update(&mut self, value: f64, timestamp_seconds: f64) {
+        self.value = self.filter.filter(value, timestamp_seconds);
+    }
+}
+
+#[derive(Clone, Debug)]
 struct PoseSourceSelection {
     driver_id: String,
     device_id: String,
     source_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 struct InputConfig {
-    #[serde(default = "config_schema_version")]
-    schema_version: u32,
     position_source: Option<PoseSourceSelection>,
     orientation_source: Option<PoseSourceSelection>,
     bindings: Vec<ActionBinding>,
     feedback_bindings: Vec<ActionFeedbackBinding>,
-    #[serde(default)]
-    component_offsets: BTreeMap<String, BTreeMap<String, f64>>,
     config_version: u64,
-}
-
-const fn config_schema_version() -> u32 {
-    CONFIG_SCHEMA_VERSION
 }
 
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
-            schema_version: CONFIG_SCHEMA_VERSION,
             position_source: None,
             orientation_source: None,
             bindings: vec![],
             feedback_bindings: vec![],
-            component_offsets: BTreeMap::new(),
             config_version: 1,
         }
     }
 }
 
 struct ControllerInput {
-    config_path: PathBuf,
     config: InputConfig,
     drivers: BTreeMap<String, InputDriverInfo>,
     sources: BTreeMap<String, InputSourceInfo>,
@@ -246,20 +261,15 @@ struct ControllerInput {
     haptic: Sender<HapticCommand>,
     virtual_feedback: Option<ActionFeedback>,
     last_error: Option<String>,
+    offset_candidates: BTreeMap<(String, String), StableAxisSample>,
+    component_offsets: BTreeMap<String, BTreeMap<String, f64>>,
+    component_filters: BTreeMap<String, BTreeMap<String, FilteredComponent>>,
 }
 
 impl ControllerInput {
-    fn load(receiver: Receiver<DriverEvent>, haptic: Sender<HapticCommand>) -> Result<Self> {
-        let config_path = std::env::var("CONTROLLER_INPUT_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/config/controller-input.json"));
-        let config: InputConfig = load_or_default(&config_path)?;
-        if config.schema_version != CONFIG_SCHEMA_VERSION {
-            return Err(eyre!("不支持的输入配置版本 {}", config.schema_version));
-        }
-        Ok(Self {
-            config_path,
-            config,
+    fn new(receiver: Receiver<DriverEvent>, haptic: Sender<HapticCommand>) -> Self {
+        Self {
+            config: InputConfig::default(),
             drivers: BTreeMap::new(),
             sources: BTreeMap::new(),
             diagnostics: BTreeMap::new(),
@@ -278,11 +288,13 @@ impl ControllerInput {
             haptic,
             virtual_feedback: None,
             last_error: None,
-        })
+            offset_candidates: BTreeMap::new(),
+            component_offsets: BTreeMap::new(),
+            component_filters: BTreeMap::new(),
+        }
     }
 
-    fn commit_config(&mut self, config: InputConfig) -> Result<()> {
-        save(&self.config_path, &config)?;
+    fn apply_config(&mut self, config: InputConfig) {
         self.config = config;
         self.last_published_sequences.clear();
         self.pose_dirty = true;
@@ -296,7 +308,6 @@ impl ControllerInput {
         }) {
             self.virtual_feedback = None;
         }
-        Ok(())
     }
 
     fn drain(&mut self) {
@@ -368,6 +379,90 @@ impl ControllerInput {
         self.samples.insert(sample.source_id.clone(), sample);
     }
 
+    fn update_continuous_inputs(&mut self, now: Instant, timestamp_seconds: f64) {
+        let observations = self
+            .config
+            .bindings
+            .iter()
+            .filter(|binding| binding.action_type == ActionType::Float)
+            .flat_map(|binding| {
+                binding.component_paths.iter().filter_map(|component| {
+                    let source = self.sources.get(&binding.source_id)?;
+                    if !source.available_components.iter().any(|available| {
+                        available.path == *component && available.action_type == ActionType::Float
+                    }) {
+                        return None;
+                    }
+                    let value = self
+                        .samples
+                        .get(&binding.source_id)?
+                        .components
+                        .get(component)
+                        .copied()?;
+                    Some((
+                        (binding.source_id.clone(), component.clone()),
+                        (value, source.driver_id == SDL_DRIVER_ID),
+                    ))
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let observed = observations.keys().cloned().collect::<BTreeSet<_>>();
+        let zero_corrected = observations
+            .iter()
+            .filter(|(_, (_, enabled))| *enabled)
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        self.offset_candidates
+            .retain(|key, _| zero_corrected.contains(key));
+        self.component_offsets.retain(|source_id, components| {
+            components.retain(|component, _| {
+                zero_corrected.contains(&(source_id.clone(), component.clone()))
+            });
+            !components.is_empty()
+        });
+        self.component_filters.retain(|source_id, components| {
+            components
+                .retain(|component, _| observed.contains(&(source_id.clone(), component.clone())));
+            !components.is_empty()
+        });
+
+        for ((source_id, component), (value, zero_correction_enabled)) in observations {
+            if zero_correction_enabled {
+                let key = (source_id.clone(), component.clone());
+                if let Some(offset) =
+                    observe_dynamic_offset(&mut self.offset_candidates, key, value, now)
+                {
+                    let previous = self
+                        .component_offsets
+                        .get(&source_id)
+                        .and_then(|components| components.get(&component))
+                        .copied();
+                    if previous != Some(offset) {
+                        self.component_offsets
+                            .entry(source_id.clone())
+                            .or_default()
+                            .insert(component.clone(), offset);
+                        if let Some(components) = self.component_filters.get_mut(&source_id) {
+                            components.remove(&component);
+                        }
+                    }
+                }
+            }
+            let offset = self
+                .component_offsets
+                .get(&source_id)
+                .and_then(|components| components.get(&component))
+                .copied()
+                .unwrap_or(0.0);
+            self.component_filters
+                .entry(source_id)
+                .or_default()
+                .entry(component)
+                .or_insert_with(FilteredComponent::new)
+                .update(value - offset, timestamp_seconds);
+        }
+    }
+
     fn tick(&mut self) -> Option<(Option<AbsolutePoseFrame>, ControlInputFrame)> {
         self.drain();
         let now = now_ns();
@@ -376,6 +471,7 @@ impl ControllerInput {
             self.simulation_state = sample.state;
             self.accept_sample(sample.raw);
         }
+        self.update_continuous_inputs(Instant::now(), monotonic_ns() as f64 / 1_000_000_000.0);
 
         let relevant = |source_id: &str| {
             self.config
@@ -429,7 +525,7 @@ impl ControllerInput {
         let control = evaluate_actions(
             &self.samples,
             &self.config.bindings,
-            &self.config.component_offsets,
+            &self.component_filters,
             self.previous_control.as_ref(),
             self.next_sequence,
             now,
@@ -458,15 +554,14 @@ impl ControllerInput {
         let change = match request.action {
             RequestAction::Select => selection
                 .ok_or_else(|| "选择的输入 source 不存在或不提供对应位姿能力".to_owned())
-                .and_then(|selection| {
+                .map(|selection| {
                     let mut config = self.config.clone();
                     match request.component {
                         PoseComponent::Position => config.position_source = Some(selection),
                         PoseComponent::Orientation => config.orientation_source = Some(selection),
                     }
                     config.config_version += 1;
-                    self.commit_config(config)
-                        .map_err(|error| error.to_string())
+                    self.apply_config(config);
                 }),
             RequestAction::Unselect => {
                 let mut config = self.config.clone();
@@ -475,8 +570,8 @@ impl ControllerInput {
                     PoseComponent::Orientation => config.orientation_source = None,
                 }
                 config.config_version += 1;
-                self.commit_config(config)
-                    .map_err(|error| error.to_string())
+                self.apply_config(config);
+                Ok(())
             }
             action => Err(format!("input 节点不处理 {action:?} pose source 请求")),
         };
@@ -497,21 +592,14 @@ impl ControllerInput {
             .err()
             .map(|error| error.to_string());
         if error.is_none() {
-            let component_offsets = self.detect_component_offsets(&request.bindings);
             let mut config = self.config.clone();
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
-            config.component_offsets = component_offsets;
             config.config_version += 1;
-            if let Err(save_error) = self.commit_config(config) {
-                return RequestResult {
-                    schema_version: SCHEMA_VERSION,
-                    request_id: request.request_id,
-                    acknowledged_action: RequestAction::Apply,
-                    value: Some(self.binding_states()),
-                    original_error: Some(save_error.to_string()),
-                };
-            }
+            self.apply_config(config);
+            self.offset_candidates.clear();
+            self.component_offsets.clear();
+            self.component_filters.clear();
         }
         RequestResult {
             schema_version: SCHEMA_VERSION,
@@ -520,69 +608,6 @@ impl ControllerInput {
             value: Some(self.binding_states()),
             original_error: error,
         }
-    }
-
-    fn detect_component_offsets(
-        &mut self,
-        bindings: &[ActionBinding],
-    ) -> BTreeMap<String, BTreeMap<String, f64>> {
-        let targets = bindings
-            .iter()
-            .filter(|binding| binding.action_type == ActionType::Float)
-            .flat_map(|binding| {
-                binding.component_paths.iter().filter_map(|component| {
-                    self.sources
-                        .get(&binding.source_id)
-                        .and_then(|source| {
-                            source
-                                .available_components
-                                .iter()
-                                .find(|available| available.path == *component)
-                        })
-                        .filter(|available| available.action_type == ActionType::Float)
-                        .map(|_| (binding.source_id.clone(), component.clone()))
-                })
-            })
-            .collect::<BTreeSet<_>>();
-        if targets.is_empty() {
-            return BTreeMap::new();
-        }
-
-        let started = Instant::now();
-        let mut totals = BTreeMap::<(String, String), (f64, u64)>::new();
-        while let Some(remaining) = BINDING_CALIBRATION_DURATION.checked_sub(started.elapsed()) {
-            match self.receiver.recv_timeout(remaining) {
-                Ok(event) => {
-                    if let DriverEvent::Sample(sample) = &event {
-                        for (source_id, component) in targets
-                            .iter()
-                            .filter(|(source_id, _)| *source_id == sample.source_id)
-                        {
-                            if let Some(value) = sample.components.get(component) {
-                                let total = totals
-                                    .entry((source_id.clone(), component.clone()))
-                                    .or_default();
-                                total.0 += value;
-                                total.1 += 1;
-                            }
-                        }
-                    }
-                    self.accept_driver_event(event);
-                }
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        let mut offsets = BTreeMap::<String, BTreeMap<String, f64>>::new();
-        for ((source_id, component), (sum, count)) in totals {
-            if count > 0 {
-                offsets
-                    .entry(source_id)
-                    .or_default()
-                    .insert(component, sum / count as f64);
-            }
-        }
-        offsets
     }
 
     fn set_simulation(
@@ -676,9 +701,7 @@ impl ControllerInput {
                     });
                 let value = binding
                     .and_then(|binding| {
-                        sample.map(|sample| {
-                            binding_value(sample, binding, &self.config.component_offsets)
-                        })
+                        sample.map(|sample| binding_value(sample, binding, &self.component_filters))
                     })
                     .unwrap_or(0.0);
                 InputBindingState {
@@ -915,7 +938,7 @@ fn combined_pose_frame(
 fn evaluate_actions(
     samples: &BTreeMap<String, RawSample>,
     bindings: &[ActionBinding],
-    component_offsets: &BTreeMap<String, BTreeMap<String, f64>>,
+    component_filters: &BTreeMap<String, BTreeMap<String, FilteredComponent>>,
     previous: Option<&ControlInputFrame>,
     sequence: u64,
     now: i64,
@@ -926,7 +949,7 @@ fn evaluate_actions(
             .and_then(|binding| {
                 samples
                     .get(&binding.source_id)
-                    .map(|sample| binding_value(sample, binding, component_offsets))
+                    .map(|sample| binding_value(sample, binding, component_filters))
             })
             .unwrap_or(0.0)
     };
@@ -1005,17 +1028,47 @@ fn evaluate_actions(
     }
 }
 
+fn one_euro() -> OneEuroFilter {
+    OneEuroFilter::new(
+        FILTER_NOMINAL_RATE_HZ,
+        FILTER_MIN_CUTOFF_HZ,
+        FILTER_BETA,
+        FILTER_DERIVATIVE_CUTOFF_HZ,
+    )
+}
+
+fn observe_dynamic_offset(
+    candidates: &mut BTreeMap<(String, String), StableAxisSample>,
+    key: (String, String),
+    value: f64,
+    now: Instant,
+) -> Option<f64> {
+    if value.abs() > DYNAMIC_OFFSET_MAX_ABS {
+        candidates.remove(&key);
+        return None;
+    }
+    match candidates.get(&key) {
+        Some(candidate) if candidate.value == value => {
+            (now.duration_since(candidate.since) >= DYNAMIC_OFFSET_STABLE_DURATION).then_some(value)
+        }
+        _ => {
+            candidates.insert(key, StableAxisSample { value, since: now });
+            None
+        }
+    }
+}
+
 fn binding_value(
     sample: &RawSample,
     binding: &ActionBinding,
-    component_offsets: &BTreeMap<String, BTreeMap<String, f64>>,
+    component_filters: &BTreeMap<String, BTreeMap<String, FilteredComponent>>,
 ) -> f64 {
-    let offset = |component: &str| {
-        component_offsets
+    let filtered = |component: &str| {
+        component_filters
             .get(&binding.source_id)
-            .and_then(|offsets| offsets.get(component))
-            .copied()
-            .unwrap_or(0.0)
+            .and_then(|components| components.get(component))
+            .map(|component| component.value)
+            .unwrap_or_else(|| sample.components.get(component).copied().unwrap_or(0.0))
     };
     let mut value =
         if binding.action_type == ActionType::Boolean {
@@ -1025,15 +1078,8 @@ fn binding_value(
                 })) as u8 as f64
         } else {
             match binding.component_paths.as_slice() {
-                [component] => {
-                    sample.components.get(component).copied().unwrap_or(0.0) - offset(component)
-                }
-                [negative, positive] => {
-                    sample.components.get(positive).copied().unwrap_or(0.0)
-                        - offset(positive)
-                        - sample.components.get(negative).copied().unwrap_or(0.0)
-                        + offset(negative)
-                }
+                [component] => filtered(component),
+                [negative, positive] => filtered(positive) - filtered(negative),
                 _ => 0.0,
             }
         };
@@ -1127,6 +1173,8 @@ fn run_nolo_driver(sender: &Sender<DriverEvent>) -> Result<()> {
         })?;
         let device = info.open_device(&api)?;
         let mut fusion = [ImuFusion::new(120.0), ImuFusion::new(120.0)];
+        let mut position_filters: [[OneEuroFilter; 3]; 2] =
+            std::array::from_fn(|_| std::array::from_fn(|_| one_euro()));
         let mut sequence = [0_u64; 2];
         let mut report = [0_u8; REPORT_SIZE];
         loop {
@@ -1139,6 +1187,11 @@ fn run_nolo_driver(sender: &Sender<DriverEvent>) -> Result<()> {
                     let index = usize::from(frame.controller_id);
                     sequence[index] += 1;
                     let time_ns = monotonic_ns();
+                    let timestamp_seconds = time_ns as f64 / 1_000_000_000.0;
+                    let position = std::array::from_fn(|axis| {
+                        position_filters[index][axis]
+                            .filter(f64::from(frame.position[axis]), timestamp_seconds)
+                    });
                     let gyro = [
                         -f32::from(frame.gyroscope[0]) * (2000.0 / 32768.0),
                         -f32::from(frame.gyroscope[1]) * (2000.0 / 32768.0),
@@ -1163,7 +1216,7 @@ fn run_nolo_driver(sender: &Sender<DriverEvent>) -> Result<()> {
                         source_time_ns: received,
                         received_time_ns: received,
                         source_id: format!("nolo:{device_id}:controller-{}", frame.controller_id),
-                        position_m: Some(frame.position.map(f64::from)),
+                        position_m: Some(position),
                         orientation_xyzw: Some(orientation),
                         components,
                     }))?;
@@ -1699,14 +1752,7 @@ mod tests {
             1,
             1,
         );
-        let control = evaluate_actions(
-            &samples,
-            &config.bindings,
-            &config.component_offsets,
-            None,
-            1,
-            1,
-        );
+        let control = evaluate_actions(&samples, &config.bindings, &BTreeMap::new(), None, 1, 1);
         assert_eq!(
             pose.position_source_id.as_deref(),
             Some(SIMULATION_SOURCE_ID)
@@ -1719,31 +1765,6 @@ mod tests {
         assert!(control.start_stop.value);
         assert!(control.actuator_actions.primary_tool.is_active);
         assert_eq!(control.actuator_actions.primary_tool.value, 1.0);
-    }
-
-    #[test]
-    fn persisted_selection_contains_identifiers_not_online_state() {
-        let path = std::env::temp_dir().join(format!(
-            "controller-input-config-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ));
-        let config = InputConfig {
-            position_source: Some(PoseSourceSelection {
-                driver_id: "driver".into(),
-                device_id: "device".into(),
-                source_id: "source".into(),
-            }),
-            ..Default::default()
-        };
-
-        save(&path, &config).unwrap();
-        let stored = std::fs::read_to_string(&path).unwrap();
-        assert!(stored.contains("driver_id"));
-        assert!(stored.contains("device_id"));
-        assert!(stored.contains("source_id"));
-        assert!(!stored.contains("active"));
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1789,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn continuous_component_offset_is_subtracted_without_a_dead_zone() {
+    fn one_euro_filters_continuous_actions_without_a_dead_zone() {
         let binding = ActionBinding {
             action: "move_up_down".into(),
             action_type: ActionType::Float,
@@ -1797,29 +1818,125 @@ mod tests {
             component_paths: vec!["axis/left_y".into()],
             invert: false,
         };
-        let offsets = BTreeMap::from([(
+        let mut component = FilteredComponent::new();
+        component.update(0.0, 0.0);
+        component.update(0.5, 1.0 / FILTER_NOMINAL_RATE_HZ);
+        assert!(component.value > 0.0 && component.value < 0.5);
+        let expected = component.value;
+        let filtered = BTreeMap::from([(
             "fixture".into(),
-            BTreeMap::from([("axis/left_y".into(), -0.06)]),
+            BTreeMap::from([("axis/left_y".into(), component)]),
         )]);
-        let centered = evaluate_actions(
-            &sample(&[("axis/left_y", -0.06)]),
-            std::slice::from_ref(&binding),
-            &offsets,
-            None,
-            1,
-            1,
-        );
-        assert_eq!(centered.move_up_down.value, 0.0);
-
-        let moved = evaluate_actions(
-            &sample(&[("axis/left_y", 0.44)]),
+        let control = evaluate_actions(
+            &sample(&[("axis/left_y", 0.5)]),
             &[binding],
-            &offsets,
+            &filtered,
             None,
             1,
             1,
         );
-        assert!((moved.move_up_down.value - 0.5).abs() < f64::EPSILON);
+        assert_eq!(control.move_up_down.value, expected);
+    }
+
+    #[test]
+    fn sdl_stable_axis_is_zero_corrected_before_filtering() {
+        let (_driver_tx, driver_rx) = mpsc::channel();
+        let (haptic_tx, _haptic_rx) = mpsc::channel();
+        let mut input = ControllerInput::new(driver_rx, haptic_tx);
+        let mut controller = source("fixture", false, false);
+        controller.driver_id = SDL_DRIVER_ID.into();
+        controller.available_components = vec![InputComponentInfo {
+            path: "axis/left_y".into(),
+            action_type: ActionType::Float,
+            localized_name: None,
+            definition_source: SDL_DRIVER_ID.into(),
+        }];
+        input.sources.insert("fixture".into(), controller);
+        input.samples = sample(&[("axis/left_y", -0.08)]);
+        input.config.bindings = vec![ActionBinding {
+            action: "move_up_down".into(),
+            action_type: ActionType::Float,
+            source_id: "fixture".into(),
+            component_paths: vec!["axis/left_y".into()],
+            invert: false,
+        }];
+        let started = Instant::now();
+        input.update_continuous_inputs(started, 0.0);
+        assert_eq!(
+            input.component_filters["fixture"]["axis/left_y"].value,
+            -0.08
+        );
+        input.update_continuous_inputs(started + Duration::from_secs(3), 3.0);
+        assert_eq!(input.component_offsets["fixture"]["axis/left_y"], -0.08);
+        assert_eq!(input.component_filters["fixture"]["axis/left_y"].value, 0.0);
+    }
+
+    #[test]
+    fn dynamic_offset_requires_three_unchanged_seconds_inside_the_requested_range() {
+        let key = ("sdl3:1".into(), "axis/left_y".into());
+        let started = Instant::now();
+        let mut candidates = BTreeMap::new();
+        assert_eq!(
+            observe_dynamic_offset(&mut candidates, key.clone(), -0.08, started),
+            None
+        );
+        assert_eq!(
+            observe_dynamic_offset(
+                &mut candidates,
+                key.clone(),
+                -0.08,
+                started + Duration::from_secs(2),
+            ),
+            None
+        );
+        assert_eq!(
+            observe_dynamic_offset(
+                &mut candidates,
+                key,
+                -0.08,
+                started + Duration::from_secs(3),
+            ),
+            Some(-0.08)
+        );
+    }
+
+    #[test]
+    fn dynamic_offset_resets_when_the_value_changes_or_leaves_the_range() {
+        let key = ("sdl3:1".into(), "axis/left_y".into());
+        let started = Instant::now();
+        let mut candidates = BTreeMap::new();
+        assert_eq!(
+            observe_dynamic_offset(&mut candidates, key.clone(), 0.08, started),
+            None
+        );
+        assert_eq!(
+            observe_dynamic_offset(
+                &mut candidates,
+                key.clone(),
+                0.07,
+                started + Duration::from_secs(2),
+            ),
+            None
+        );
+        assert_eq!(
+            observe_dynamic_offset(
+                &mut candidates,
+                key.clone(),
+                0.07,
+                started + Duration::from_secs(4),
+            ),
+            None
+        );
+        assert_eq!(
+            observe_dynamic_offset(
+                &mut candidates,
+                key.clone(),
+                0.11,
+                started + Duration::from_secs(5),
+            ),
+            None
+        );
+        assert!(!candidates.contains_key(&key));
     }
 
     #[test]

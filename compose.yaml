@@ -36,9 +36,7 @@ services:
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
-      CONTROLLER_INPUT_CONFIG: /config/controller-input.json
     volumes:
-      - ./backend/config/runtime:/config
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro

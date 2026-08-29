@@ -2,21 +2,18 @@
 
 ## controller-input-node
 
-入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 读取持久配置，
-`commit_config()` 先写盘再替换内存配置；`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到
-新样本时生成统一位姿和 Action；select_pose_source() 分别配置空间位置与姿态来源，并按运行时对应能力筛选和校验候选；apply_bindings() 保存每个 Action 自己的 source_id、输入组件以及独立的 Action 反馈目标；应用绑定时对已选连续组件采集 3 秒静止值并把均值作为零偏一同持久化。测试播放和硬件驱动共用 replace_driver_sources()、accept_sample()、combined_pose_frame() 与 evaluate_actions()：启动时声明具备绝对空间、绝对姿态、单按钮启动/停止和夹爪连续轴的通用六自由度输入源，通过普通来源选择与 Action 绑定依次测试三轴空间移动、偏航/俯仰/横滚姿态和夹爪闭合/张开，并临时把夹爪力度反馈绑定到网页虚拟反馈；停止后移除测试来源并恢复启动前配置。模拟数据不会直接构造最终位姿或 Action，也不模拟某个具体手柄型号。combined_pose_frame() 从两个来源透明合成位姿；evaluate_actions() 与 binding_value() 可同时读取多个设备，把单按钮、连续轴或一对方向按钮转换成功能 Action；连续值只减去绑定时记录的零偏，不增加死区。能力筛选只约束绝对空间与姿态来源，不约束 Action 或反馈绑定；没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。输入源是否在线根据当前发现结果计算，不把运行时的 active 状态写盘。
+入口 `main()` 只连接 Dora 输入输出。`ControllerInput::new()` 以空的内存配置启动；`apply_config()` 只替换内存中的来源选择、Action 绑定和反馈绑定，不读写配置文件。`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到新样本时生成统一位姿和 Action；`select_pose_source()` 按运行时能力选择空间位置或姿态来源；`apply_bindings()` 校验后立即应用每个 Action 的输入和反馈目标。测试播放和硬件驱动共用 `replace_driver_sources()`、`accept_sample()`、`combined_pose_frame()` 与 `evaluate_actions()`；模拟数据仍经过统一的来源选择、Action 绑定和消息生成链路，停止后只恢复启动前的内存配置。`combined_pose_frame()` 从两个来源合成位姿；`evaluate_actions()` 与 `binding_value()` 可同时读取多个设备，把按钮、连续轴或方向按钮对转换成功能 Action。能力筛选只约束绝对空间与姿态来源，没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。
 
 网页启用测试播放前只调用 `/api/motion/prepare-relative`：motion 节点复用普通模式切换和普通 MoveIt 运动链路，依次进入手动模式、执行包含夹爪闭合的默认位、在执行成功后进入相对模式；同步响应返回后，网页才启用测试输入源；运动页把同一接口显示为“准备相对控制”按钮，并与默认位、测试位放在同一按钮组。测试源每次从默认位对应的夹爪闭合值开始，末段先张开再闭合并回到同一状态。停止测试输入只停止输入源，不触发归位。
-零偏只进入 Action 求值，按钮不校正，原始输入仍保持原值。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
+原始按钮和轴始终保留给输入测试。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，则在内存中用该值作为计算零偏；值变化会重新计时。连续轴按“原始值 → 内存零偏 → One Euro → Action”处理，按钮和方向按钮对不滤波，也不引入死区。来源、绑定、反馈目标和零偏全部不持久化，节点重启后清空。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
 
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在
-`crates/nolo-cv1`。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
+`crates/nolo-cv1`；每只 NOLO 手柄分别维护三轴 One Euro 状态，统一绝对位置使用滤波结果。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
 API，并通过 `has_axis()`、`has_button()` 只发布设备实际声明的标准轴和按钮；路径、类型和中文名称来自同一能力表，网页不维护第二份组件名称映射。NOLO 将协议中已确认的触摸板、扳机、菜单、系统、侧握以及触摸板坐标转换为同样的 `button/*`、`axis/*` 组件，不发布未确认的按键位。生产代码没有手柄型号白名单、型号分支或默认按键映射，型号名称与 USB 信息只作为发现元数据展示。`ImuFusion::update()` 是两类 IMU 输入唯一的姿态融合入口，算法来自 `fusion-ahrs`，项目只做
 单位与坐标适配。apply_feedback() 按独立反馈绑定把设备无关的 Action 回馈路由到指定 source_id 和通用能力路径；haptic_intensity() 与 apply_haptic() 只完成 SDL3 归一化强度和反馈 API 的适配，不解释机械臂遥测。SDL3 按运行时实际声明发布 feedback/trigger_left、feedback/trigger_right、feedback/rumble；feedback/virtual 是始终可选的网页目标，选中时把同一 Action 回馈放进采集快照，由共享 Shell 渲染跨页面可拖动圆环。代码不根据型号猜测目标，也没有未绑定时的默认回退。
 
 手写部分：Dora 编排、消息组装、设备到统一组件的命名、用户绑定求值、NOLO 字节协议适配。
-使用库：`hidapi`、`sdl3`、`fusion-ahrs`、`nalgebra`、`serde`、Dora API，以及项目公共的
-`json-config-store`。
+使用库：`hidapi`、`sdl3`、`fusion-ahrs`、`one_euro_filter`、`nalgebra`、`serde` 和 Dora API。`one_euro_filter` 固定到算法作者仓库当前带参考数据测试的提交；NOLO 位置与通用连续轴共用其上游示例参数。
 
 ## spatial-transform-node
 
@@ -65,12 +62,11 @@ namespace 聚合快照；不解释机械臂轴数、设备类型或运动语义�
 
 ## 实现边界
 
-- 输入业务只有一个节点、一个配置文件、一套消息和一条数据流；后端差异止于采集函数。
+- 输入业务只有一个节点、一份内存状态、一套消息和一条数据流；后端差异止于采集函数。
 - 姿态融合只保留 `fusion-ahrs`，没有按手柄型号拆分实现。
 - 模拟与真机共享消息、空间转换、运动和执行状态模型；模拟只是输入测试功能。
 - 四个可修改服务共享一个宿主 bind mount，但各自拥有独立 JSON；不引入数据库、文件监听器、
   备份层或双写路径。
-- Rust 节点共用 `json-config-store` 的读取、默认值和格式化写盘方法；Python motion 节点直接使用
-  标准库 JSON，没有为一个文件引入配置框架。
+- 需要持久化的 Rust 节点共用 `json-config-store`；controller-input 不持久化，Python motion 节点直接使用标准库 JSON。
 - 业务层不实现死区、姿态门限、关节范围、起始位检查或设备保护流程。
 - 使用 SDL3、hidapi、Fusion、nalgebra、transforms3d、serialport、Axum、Dora 和 MoveIt；手写部分都是协议或业务边界，不重复实现这些库已经提供的通用能力。

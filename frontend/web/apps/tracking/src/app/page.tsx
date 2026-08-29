@@ -737,15 +737,19 @@ export default function Page() {
           </div>
           <div className="card-actions">
             <Button disabled={bindingsApplying} onClick={applyBindings}>
-              {bindingsApplying ? "正在检测零位（3 秒）" : "应用绑定"}
+              {bindingsApplying
+                ? "正在应用绑定"
+                : bindingsResult === "success"
+                  ? "绑定已应用"
+                  : bindingsResult === "error"
+                    ? "应用失败，重试"
+                    : "应用绑定"}
             </Button>
             {bindingsResult !== "idle" && (
               <StatusBadge
                 tone={bindingsResult === "success" ? "good" : "warning"}
               >
-                {bindingsResult === "success"
-                  ? "绑定已应用，连续轴零位已记录"
-                  : "应用失败"}
+                {bindingsResult === "success" ? "绑定已应用" : "应用失败"}
               </StatusBadge>
             )}
           </div>

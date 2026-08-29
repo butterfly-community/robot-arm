@@ -384,10 +384,7 @@ test("tracking page applies and displays a controller binding", async ({
     await componentSelect.selectOption(componentPath!);
     await page.getByRole("button", { name: "应用绑定" }).click();
     await expect(
-      page.getByRole("button", { name: "正在检测零位（3 秒）" }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("绑定已应用，连续轴零位已记录", { exact: true }),
+      page.getByRole("button", { name: "绑定已应用" }),
     ).toBeVisible();
     await expect
       .poll(async () => {
