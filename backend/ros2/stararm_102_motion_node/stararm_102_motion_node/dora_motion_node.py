@@ -29,8 +29,6 @@ from moveit_msgs.msg import (
     ServoStatus,
 )
 from moveit_msgs.srv import GetPlanningScene, GetStateValidity, ServoCommandType
-from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.time import Time
@@ -61,10 +59,9 @@ GRIPPER_KEY = "gripper"
 GRIPPER_JOINT = "joint7_left"
 STATE_TOPIC = "/stararm102/joint_states"
 COMMAND_TOPIC = "/stararm102/joint_commands"
-START_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -3.0, 0.0, 0.0, 0.0))
+START_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -5.0, 0.0, 0.0, 0.0))
 TEST_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -20.0, 0.0, 0.0, 0.0))
 CLOSED_GRIPPER_RAD = 0.0
-SELF_COLLISION_TOLERANCE_M = 0.002
 
 
 def arrow_encode(value: Any) -> pa.StructArray:
@@ -129,7 +126,6 @@ class MotionNode(Node):
         self._servo_code: int | None = None
         self._servo_message: str | None = None
         self._servo_paused = False
-        self._collision_checking = True
         self._pose_commands_selected = False
         self._command_request_pending = False
         self._motion_status = self._idle_motion_status()
@@ -165,9 +161,6 @@ class MotionNode(Node):
         )
         self._servo_pause_client = self.create_client(
             SetBool, "/servo_node/pause_servo"
-        )
-        self._servo_parameter_client = self.create_client(
-            SetParameters, "/servo_node/set_parameters"
         )
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._execute_client = ActionClient(
@@ -588,73 +581,10 @@ class MotionNode(Node):
             "result_message": None,
         }
 
-    def _set_collision_checking(self, request_id: str, enabled: bool) -> None:
-        action = "lock_collision" if enabled else "unlock_collision"
-        if not self._servo_parameter_client.service_is_ready():
-            self._set_motion_failed(request_id, "MoveIt Servo 参数服务尚未就绪", action)
-            return
-        self._motion_status = {
-            **self._idle_motion_status(),
-            "request_id": request_id,
-            "acknowledged_action": action,
-            "state": "executing",
-            "result_message": "正在恢复碰撞检测" if enabled else "正在解除碰撞",
-        }
-        self._enqueue("motion_status", self._motion_status)
-        self._enqueue_motion_state()
-        request = SetParameters.Request()
-        request.parameters = [
-            Parameter(
-                name="moveit_servo.check_collisions",
-                value=ParameterValue(
-                    type=ParameterType.PARAMETER_BOOL, bool_value=enabled
-                ),
-            )
-        ]
-        self._servo_parameter_client.call_async(request).add_done_callback(
-            lambda done: self._collision_checking_result(request_id, action, enabled, done)
-        )
-
-    def _collision_checking_result(
-        self, request_id: str, action: str, enabled: bool, future: Any
-    ) -> None:
-        if self._motion_status["request_id"] != request_id:
-            return
-        try:
-            results = future.result().results
-            if len(results) != 1 or not results[0].successful:
-                reason = results[0].reason if results else "没有参数响应"
-                raise RuntimeError(reason)
-        except Exception as error:
-            self._set_motion_failed(
-                request_id, f"切换 MoveIt Servo 碰撞检查失败：{error}", action
-            )
-            return
-        self._collision_checking = enabled
-        self._motion_status = {
-            **self._idle_motion_status(),
-            "request_id": request_id,
-            "acknowledged_action": action,
-            "state": "succeeded",
-            "result_message": (
-                "碰撞检测已恢复，模型容差 2 mm"
-                if enabled
-                else "碰撞已解除，可从当前位置退出"
-            ),
-        }
-        self._enqueue("motion_status", self._motion_status)
-        self._enqueue("motion_request_result", self._status_result())
-        self._enqueue_motion_state()
-
     def _handle_motion_request(self, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id", ""))
         if request.get("action") == "cancel":
             self._cancel_motion(request_id)
-            return
-        if request.get("action") in {"unlock_collision", "lock_collision"}:
-            self._set_collision_checking(
-                request_id, request["action"] == "lock_collision"
-            )
             return
         self._complete_in_relative_mode = False
         if request.get("action") != "apply":
@@ -1273,8 +1203,6 @@ class MotionNode(Node):
         return {
             "schema_version": SCHEMA_VERSION,
             "control_mode": self._control_mode,
-            "collision_checking": self._collision_checking,
-            "self_collision_tolerance_m": SELF_COLLISION_TOLERANCE_M,
             "current_tool_pose": pose(self._current_tcp),
             "target_tool_pose": pose(self._target_tcp),
             "control_session_id": self._control_session_id,

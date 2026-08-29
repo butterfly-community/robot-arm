@@ -101,8 +101,6 @@ export interface ToolPose {
 
 export interface MotionState {
   control_mode: "relative" | "manual";
-  collision_checking: boolean;
-  self_collision_tolerance_m: number;
   current_tool_pose?: ToolPose | null;
   target_tool_pose?: ToolPose | null;
 }

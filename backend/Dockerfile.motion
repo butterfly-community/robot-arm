@@ -25,16 +25,10 @@ RUN git apply --ignore-space-change --ignore-whitespace /tmp/patches/star-arm-10
     && cp ROS2_HUMBLE/src/stararm102_description/meshes/* /opt/robot-arm/model/meshes/ \
     && mv ROS2_HUMBLE/src/stararm102_description /opt/ros_ws/src/ \
     && mv ROS2_HUMBLE/src/stararm102_moveit_config /opt/ros_ws/src/
-RUN git clone --filter=blob:none https://github.com/moveit/moveit2.git /tmp/moveit2 \
-    && git -C /tmp/moveit2 checkout 1ade0e9dcf50dbbbc3a984b995c786cf12736235 \
-    && git -C /tmp/moveit2 apply /tmp/patches/moveit-servo-self-collision-tolerance.patch \
-    && mv /tmp/moveit2/moveit_ros/moveit_servo /opt/ros_ws/src/moveit_servo \
-    && rm -rf /tmp/moveit2
 COPY ros2/stararm_102_motion_node /opt/ros_ws/src/stararm_102_motion_node
 WORKDIR /opt/ros_ws
 RUN source /opt/ros/jazzy/setup.bash \
-    && colcon build --packages-select moveit_servo stararm102_description stararm102_moveit_config stararm_102_motion_node \
-       --cmake-args -DBUILD_TESTING=OFF \
+    && colcon build --packages-select stararm102_description stararm102_moveit_config stararm_102_motion_node \
        --event-handlers console_direct+ \
     && rm -rf /tmp/vendor /tmp/patches log
 COPY --chmod=755 docker/motion-entrypoint.sh /usr/local/bin/motion-entrypoint

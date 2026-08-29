@@ -41,9 +41,6 @@ export default function Page() {
   const diagnostics = (motion?.diagnostics ?? []) as Array<
     Record<string, unknown>
   >;
-  const collisionToleranceMm = motion
-    ? motion.self_collision_tolerance_m * 1000
-    : undefined;
   const armKey = JSON.stringify([
     model?.model_revision,
     arm?.joints_rad,
@@ -106,19 +103,6 @@ export default function Page() {
         schema_version: 2,
         request_id: requestId(),
         action: "cancel",
-      });
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
-
-  async function setCollisionChecking(enabled: boolean) {
-    setError(undefined);
-    try {
-      await post("/api/motion/request", {
-        schema_version: 2,
-        request_id: requestId(),
-        action: enabled ? "lock_collision" : "unlock_collision",
       });
     } catch (reason) {
       setError(String(reason));
@@ -296,30 +280,10 @@ export default function Page() {
             <Button variant="danger" onClick={cancel}>
               取消普通运动
             </Button>
-            <Button
-              variant={
-                motion?.collision_checking === false ? "outline" : "danger"
-              }
-              onClick={() =>
-                setCollisionChecking(motion?.collision_checking === false)
-              }
-            >
-              {motion?.collision_checking === false
-                ? "恢复碰撞检测"
-                : "解除碰撞"}
-            </Button>
           </div>
           <KeyValue
             label="当前"
             value={String(motion?.control_mode ?? "未知")}
-          />
-          <KeyValue
-            label="碰撞检查"
-            value={
-              motion?.collision_checking === false
-                ? "已解除"
-                : `启用 · 容差 ${collisionToleranceMm ?? "—"} mm`
-            }
           />
           <KeyValue
             label="请求"

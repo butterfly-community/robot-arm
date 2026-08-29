@@ -382,6 +382,7 @@ const atActuatorTarget = await waitFor(
 
 const start = model.named_targets.find((target) => target.key === "start");
 assert.ok(start, "model publishes the start target");
+assert.equal(start.joint_positions_rad.joint3, (-5 * Math.PI) / 180);
 const testTarget = model.named_targets.find((target) => target.key === "test");
 assert.ok(testTarget, "model publishes the test target");
 assert.equal(testTarget.joint_positions_rad.joint3, (-20 * Math.PI) / 180);

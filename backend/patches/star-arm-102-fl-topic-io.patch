@@ -35,7 +35,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
        </command_interface>
 -      <state_interface name="position"/>
 -      <state_interface name="velocity"/>
-+      <state_interface name="position"><param name="initial_value">-0.05235987755982989</param></state_interface>
++      <state_interface name="position"><param name="initial_value">-0.08726646259971647</param></state_interface>
      </joint>
      <joint name="joint4">
        <command_interface name="position">
