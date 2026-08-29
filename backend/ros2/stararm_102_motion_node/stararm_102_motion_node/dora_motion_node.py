@@ -573,7 +573,7 @@ class MotionNode(Node):
         trajectory.joint_names = [GRIPPER_JOINT]
         point = JointTrajectoryPoint()
         point.positions = [position_rad]
-        point.time_from_start.nanosec = 250_000_000
+        point.time_from_start.nanosec = 10_000_000
         trajectory.points = [point]
         self._hand_publisher.publish(trajectory)
         self._actuator_status = {
