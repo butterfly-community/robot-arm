@@ -47,18 +47,23 @@ export default function Page() {
   >({});
   const [showLabels, setShowLabels] = useState(false);
 
-  async function connection(action: "connect" | "disconnect" | "refresh") {
+  async function requestExecution(
+    action: "connect" | "disconnect" | "discover" | "refresh",
+  ) {
     setError(undefined);
     try {
-      await post(
-        `/api/arm-execution/${action === "refresh" ? "parameters" : action}`,
-        {
-          schema_version: 2,
-          request_id: requestId(),
-          action,
-          fields: connectionFields,
-        },
-      );
+      const endpoint = {
+        connect: "connect",
+        disconnect: "disconnect",
+        discover: "endpoints",
+        refresh: "parameters",
+      }[action];
+      await post(`/api/arm-execution/${endpoint}`, {
+        schema_version: 2,
+        request_id: requestId(),
+        action,
+        fields: connectionFields,
+      });
     } catch (reason) {
       setError(String(reason));
     }
@@ -253,11 +258,22 @@ export default function Page() {
             <div className="card-actions">
               <Button
                 variant={connected ? "danger" : "default"}
-                onClick={() => connection(connected ? "disconnect" : "connect")}
+                onClick={() =>
+                  requestExecution(connected ? "disconnect" : "connect")
+                }
               >
                 {connected ? "断开" : "连接真机"}
               </Button>
-              <Button variant="outline" onClick={() => connection("refresh")}>
+              <Button
+                variant="outline"
+                onClick={() => requestExecution("discover")}
+              >
+                刷新串口
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => requestExecution("refresh")}
+              >
                 读取参数
               </Button>
             </div>

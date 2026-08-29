@@ -57,10 +57,6 @@ fn main() -> Result<()> {
                         publish_state(&mut node, &execution)?;
                     }
                 }
-                "scan" => {
-                    execution.discover();
-                    publish_transport(&mut node, &execution)?;
-                }
                 "snapshot" => publish_snapshot(&mut node, &mut execution)?,
                 _ => {}
             },
@@ -264,8 +260,11 @@ impl StarArmExecution {
                 .and_then(|port| self.configure_endpoint(Some(port.clone())))
                 .err(),
             RequestAction::Disconnect => self.configure_endpoint(None).err(),
-            RequestAction::Refresh => {
+            RequestAction::Discover => {
                 self.discover();
+                None
+            }
+            RequestAction::Refresh => {
                 if let Some(bus) = self.bus.as_mut() {
                     self.transport.parameter_values = bus.read_parameters();
                     self.transport.parameter_error = self
@@ -611,7 +610,6 @@ fn encode_command(command: &ArmCommand) -> Result<[PositionCommand; 7], String> 
 }
 
 fn publish_snapshot(node: &mut DoraNode, execution: &mut StarArmExecution) -> Result<()> {
-    execution.discover();
     send(node, "execution_info", &execution.info)?;
     publish_transport(node, execution)?;
     publish_state(node, execution)
@@ -738,6 +736,24 @@ mod tests {
         let same_tenths = encode_command(&command(vec![0.1001; 6], 0.2001)).unwrap();
         assert_eq!(first, same_tenths);
     }
+    #[test]
+    fn parameter_refresh_does_not_enumerate_serial_endpoints() {
+        let mut execution = StarArmExecution::new();
+        execution.transport.discovered_endpoints = vec![ExecutionEndpoint {
+            key: "fixture".into(),
+            label: "fixture".into(),
+            properties: BTreeMap::new(),
+        }];
+        let result = execution.handle_request(ExecutionRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "refresh-parameters".into(),
+            action: RequestAction::Refresh,
+            fields: BTreeMap::new(),
+        });
+        assert_eq!(result.acknowledged_action, RequestAction::Refresh);
+        assert_eq!(execution.transport.discovered_endpoints[0].key, "fixture");
+    }
+
     #[test]
     fn initial_state_matches_the_model_start_only_before_any_input() {
         let execution = StarArmExecution::new();

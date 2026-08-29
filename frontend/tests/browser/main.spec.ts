@@ -746,7 +746,7 @@ test("motion actuator slider submits and restores a software command", async ({
   }
 });
 
-test("execution connection failure exposes the original service error", async ({
+test("execution serial discovery is explicit and connection errors stay visible", async ({
   page,
   request,
 }) => {
@@ -759,6 +759,18 @@ test("execution connection failure exposes the original service error", async ({
     },
   });
   await page.goto("/arm-execution/");
+  await page.getByRole("button", { name: "刷新串口", exact: true }).click();
+  await expect
+    .poll(async () => {
+      const state = await (
+        await request.get("/api/arm-execution/state")
+      ).json();
+      return {
+        action: state.values.execution_request_result?.acknowledged_action,
+        error: state.values.execution_request_result?.original_error,
+      };
+    })
+    .toEqual({ action: "discover", error: null });
   await page.getByRole("button", { name: "连接真机", exact: true }).click();
   await expect(page.locator(".error")).toContainText("连接请求缺少 port 字段");
 });

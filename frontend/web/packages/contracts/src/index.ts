@@ -14,6 +14,7 @@ export type RequestAction =
   | "unselect"
   | "connect"
   | "disconnect"
+  | "discover"
   | "refresh";
 
 export interface Snapshot {

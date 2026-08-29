@@ -239,6 +239,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/arm-execution/state", get(snapshot_execution))
         .route("/api/arm-execution/connect", post(request_execution))
         .route("/api/arm-execution/disconnect", post(request_execution))
+        .route("/api/arm-execution/endpoints", post(request_execution))
         .route("/api/arm-execution/parameters", post(request_execution))
         .route(
             "/api/arm-execution/snapshot",

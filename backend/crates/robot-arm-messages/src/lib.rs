@@ -75,6 +75,7 @@ pub enum RequestAction {
     Unselect,
     Connect,
     Disconnect,
+    Discover,
     Refresh,
 }
 

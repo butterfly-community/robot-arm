@@ -97,7 +97,6 @@ nodes:
         source: dora/timer/millis/10
         queue_size: 1
         queue_policy: drop_oldest
-      scan: dora/timer/millis/1000
     outputs:
       - execution_info
       - transport_state
