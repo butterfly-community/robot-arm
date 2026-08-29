@@ -36,7 +36,7 @@ use simulation::{
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
-const HAPTIC_DURATION_MS: u32 = 50;
+const HAPTIC_DURATION_MS: u32 = 100;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
 const DYNAMIC_OFFSET_STABLE_DURATION: Duration = Duration::from_secs(3);
