@@ -311,6 +311,22 @@ test("tracking page applies and displays a controller binding", async ({
       Boolean(source.orientation_capable),
     ).length,
   );
+  const sourceSummaryBox = await sourceCard
+    .locator(".key-value")
+    .last()
+    .boundingBox();
+  const firstSourceBox = await sourceCard
+    .locator(".source-item")
+    .first()
+    .boundingBox();
+  expect(sourceSummaryBox).not.toBeNull();
+  expect(firstSourceBox).not.toBeNull();
+  expect(
+    (firstSourceBox?.y ?? 0) -
+      ((sourceSummaryBox?.y ?? 0) + (sourceSummaryBox?.height ?? 0)),
+    "来源摘要分隔线与设备卡片之间应保留明确间距",
+  ).toBeGreaterThanOrEqual(16);
+
   for (const name of ["清除空间来源", "清除姿态来源"]) {
     await expect(sourceCard.getByRole("button", { name })).toHaveClass(
       /button-outline/,

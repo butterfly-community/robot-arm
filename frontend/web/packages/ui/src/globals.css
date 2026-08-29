@@ -672,6 +672,7 @@ datalist option {
   border-bottom: 0;
 }
 .key-value + .field,
+.key-value + .source-list,
 .range-stack + .key-value {
   margin-top: 20px;
 }
