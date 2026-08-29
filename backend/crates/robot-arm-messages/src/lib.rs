@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 2;
+pub const DEFAULT_ACTION_TRANSLATION_M_PER_S: f64 = 0.01;
+pub const DEFAULT_ACTION_ARC_RAD_PER_S: f64 = 0.10;
 
 #[derive(Debug, Error)]
 pub enum ArrowCodecError {
@@ -377,8 +379,8 @@ impl Default for SpatialConfigState {
             orientation_source_id: None,
             base_from_tracking_axes: [[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             translation_scale: 0.5,
-            action_translation_m_per_s: None,
-            action_arc_rad_per_s: None,
+            action_translation_m_per_s: Some(DEFAULT_ACTION_TRANSLATION_M_PER_S),
+            action_arc_rad_per_s: Some(DEFAULT_ACTION_ARC_RAD_PER_S),
             origin_position_m: None,
             switches: SpatialComponentSwitches::default(),
             control_session_id: None,

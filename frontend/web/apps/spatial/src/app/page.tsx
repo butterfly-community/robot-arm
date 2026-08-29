@@ -133,6 +133,8 @@ export default function Page() {
         >
           <PoseViewer
             pose={pose}
+            motion={motion}
+            poseCoordinates="robot"
             originM={originM}
             axes={effectiveAxes}
             translationScale={Number(config.translation_scale ?? 1)}
@@ -215,7 +217,10 @@ export default function Page() {
               ))}
             </div>
           </Field>
-          <Field label="无绝对位置时的平移速度" hint="留空表示未配置；单位 m/s">
+          <Field
+            label="无绝对位置时的平移速度"
+            hint="默认 1 cm/s；配置单位为 m/s"
+          >
             <Input
               key={String(config.action_translation_m_per_s ?? "")}
               type="number"
@@ -231,10 +236,7 @@ export default function Page() {
               }
             />
           </Field>
-          <Field
-            label="无绝对姿态时的圆弧角速度"
-            hint="留空表示未配置；单位 rad/s"
-          >
+          <Field label="无绝对姿态时的圆弧角速度" hint="默认 0.10 rad/s">
             <Input
               key={String(config.action_arc_rad_per_s ?? "")}
               type="number"

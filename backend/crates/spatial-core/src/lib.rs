@@ -593,6 +593,29 @@ mod tests {
     }
 
     #[test]
+    fn action_only_source_defaults_to_one_centimeter_per_second() {
+        let mut transform = SpatialTransform::new(SpatialConfigState::default());
+        let mut first = control(1, true);
+        first.move_up_down = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        first.front_pitch = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        transform.handle_control(first.clone(), 1);
+        let mut second = control(2, true);
+        second.move_up_down = first.move_up_down;
+        second.front_pitch = first.front_pitch;
+        let output = transform.handle_control(second, 2);
+        assert_eq!(output.translation_m, [0.0, 0.0, 0.01]);
+        assert!((output.front_pitch_rad - 0.10).abs() < 1e-12);
+    }
+
+    #[test]
     fn action_only_source_integrates_user_configured_rates() {
         let config = SpatialConfigState {
             action_translation_m_per_s: Some(0.2),

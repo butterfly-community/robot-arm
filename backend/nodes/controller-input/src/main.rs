@@ -1,9 +1,9 @@
 mod simulation;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -42,6 +42,7 @@ const CONFIG_SCHEMA_VERSION: u32 = 2;
 const HAPTIC_DURATION_MS: u32 = 50;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
+const BINDING_CALIBRATION_DURATION: Duration = Duration::from_secs(3);
 
 const ACTIONS: [(&str, ActionType); 9] = [
     ("control_active", ActionType::Boolean),
@@ -204,6 +205,8 @@ struct InputConfig {
     orientation_source: Option<PoseSourceSelection>,
     bindings: Vec<ActionBinding>,
     feedback_bindings: Vec<ActionFeedbackBinding>,
+    #[serde(default)]
+    component_offsets: BTreeMap<String, BTreeMap<String, f64>>,
     config_version: u64,
 }
 
@@ -219,6 +222,7 @@ impl Default for InputConfig {
             orientation_source: None,
             bindings: vec![],
             feedback_bindings: vec![],
+            component_offsets: BTreeMap::new(),
             config_version: 1,
         }
     }
@@ -296,27 +300,28 @@ impl ControllerInput {
     }
 
     fn drain(&mut self) {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(DriverEvent::Sources { driver, sources }) => {
-                    self.replace_driver_sources(driver, sources);
-                }
-                Ok(DriverEvent::Sample(sample)) => {
-                    self.accept_sample(sample);
-                }
-                Ok(DriverEvent::Error { driver_id, message }) => {
-                    self.last_error = Some(message.clone());
-                    self.drivers
-                        .entry(driver_id.clone())
-                        .and_modify(|driver| driver.original_error = Some(message.clone()))
-                        .or_insert(InputDriverInfo {
-                            driver_id,
-                            display_name: "Input driver".into(),
-                            version: env!("CARGO_PKG_VERSION").into(),
-                            original_error: Some(message),
-                        });
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        while let Ok(event) = self.receiver.try_recv() {
+            self.accept_driver_event(event);
+        }
+    }
+
+    fn accept_driver_event(&mut self, event: DriverEvent) {
+        match event {
+            DriverEvent::Sources { driver, sources } => {
+                self.replace_driver_sources(driver, sources);
+            }
+            DriverEvent::Sample(sample) => self.accept_sample(sample),
+            DriverEvent::Error { driver_id, message } => {
+                self.last_error = Some(message.clone());
+                self.drivers
+                    .entry(driver_id.clone())
+                    .and_modify(|driver| driver.original_error = Some(message.clone()))
+                    .or_insert(InputDriverInfo {
+                        driver_id,
+                        display_name: "Input driver".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        original_error: Some(message),
+                    });
             }
         }
     }
@@ -424,6 +429,7 @@ impl ControllerInput {
         let control = evaluate_actions(
             &self.samples,
             &self.config.bindings,
+            &self.config.component_offsets,
             self.previous_control.as_ref(),
             self.next_sequence,
             now,
@@ -494,6 +500,7 @@ impl ControllerInput {
             let mut config = self.config.clone();
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
+            config.component_offsets = self.detect_component_offsets(&request.bindings);
             config.config_version += 1;
             if let Err(save_error) = self.commit_config(config) {
                 return RequestResult {
@@ -512,6 +519,69 @@ impl ControllerInput {
             value: Some(self.binding_states()),
             original_error: error,
         }
+    }
+
+    fn detect_component_offsets(
+        &mut self,
+        bindings: &[ActionBinding],
+    ) -> BTreeMap<String, BTreeMap<String, f64>> {
+        let targets = bindings
+            .iter()
+            .filter(|binding| binding.action_type == ActionType::Float)
+            .flat_map(|binding| {
+                binding.component_paths.iter().filter_map(|component| {
+                    self.sources
+                        .get(&binding.source_id)
+                        .and_then(|source| {
+                            source
+                                .available_components
+                                .iter()
+                                .find(|available| available.path == *component)
+                        })
+                        .filter(|available| available.action_type == ActionType::Float)
+                        .map(|_| (binding.source_id.clone(), component.clone()))
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        if targets.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let started = Instant::now();
+        let mut totals = BTreeMap::<(String, String), (f64, u64)>::new();
+        while let Some(remaining) = BINDING_CALIBRATION_DURATION.checked_sub(started.elapsed()) {
+            match self.receiver.recv_timeout(remaining) {
+                Ok(event) => {
+                    if let DriverEvent::Sample(sample) = &event {
+                        for (source_id, component) in targets
+                            .iter()
+                            .filter(|(source_id, _)| *source_id == sample.source_id)
+                        {
+                            if let Some(value) = sample.components.get(component) {
+                                let total = totals
+                                    .entry((source_id.clone(), component.clone()))
+                                    .or_default();
+                                total.0 += value;
+                                total.1 += 1;
+                            }
+                        }
+                    }
+                    self.accept_driver_event(event);
+                }
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let mut offsets = BTreeMap::<String, BTreeMap<String, f64>>::new();
+        for ((source_id, component), (sum, count)) in totals {
+            if count > 0 {
+                offsets
+                    .entry(source_id)
+                    .or_default()
+                    .insert(component, sum / count as f64);
+            }
+        }
+        offsets
     }
 
     fn set_simulation(
@@ -604,7 +674,11 @@ impl ControllerInput {
                             .all(|component| value.components.contains_key(component))
                     });
                 let value = binding
-                    .and_then(|binding| sample.map(|sample| binding_value(sample, binding)))
+                    .and_then(|binding| {
+                        sample.map(|sample| {
+                            binding_value(sample, binding, &self.config.component_offsets)
+                        })
+                    })
                     .unwrap_or(0.0);
                 InputBindingState {
                     action: (*action).into(),
@@ -837,6 +911,7 @@ fn combined_pose_frame(
 fn evaluate_actions(
     samples: &BTreeMap<String, RawSample>,
     bindings: &[ActionBinding],
+    component_offsets: &BTreeMap<String, BTreeMap<String, f64>>,
     previous: Option<&ControlInputFrame>,
     sequence: u64,
     now: i64,
@@ -847,7 +922,7 @@ fn evaluate_actions(
             .and_then(|binding| {
                 samples
                     .get(&binding.source_id)
-                    .map(|sample| binding_value(sample, binding))
+                    .map(|sample| binding_value(sample, binding, component_offsets))
             })
             .unwrap_or(0.0)
     };
@@ -924,12 +999,25 @@ fn evaluate_actions(
     }
 }
 
-fn binding_value(sample: &RawSample, binding: &ActionBinding) -> f64 {
+fn binding_value(
+    sample: &RawSample,
+    binding: &ActionBinding,
+    component_offsets: &BTreeMap<String, BTreeMap<String, f64>>,
+) -> f64 {
+    let offset = |component: &str| {
+        component_offsets
+            .get(&binding.source_id)
+            .and_then(|offsets| offsets.get(component))
+            .copied()
+            .unwrap_or(0.0)
+    };
     let mut value = match binding.component_paths.as_slice() {
-        [component] => sample.components.get(component).copied().unwrap_or(0.0),
+        [component] => sample.components.get(component).copied().unwrap_or(0.0) - offset(component),
         [negative, positive] => {
             sample.components.get(positive).copied().unwrap_or(0.0)
+                - offset(positive)
                 - sample.components.get(negative).copied().unwrap_or(0.0)
+                + offset(negative)
         }
         _ => 0.0,
     };
@@ -1581,7 +1669,14 @@ mod tests {
             1,
             1,
         );
-        let control = evaluate_actions(&samples, &config.bindings, None, 1, 1);
+        let control = evaluate_actions(
+            &samples,
+            &config.bindings,
+            &config.component_offsets,
+            None,
+            1,
+            1,
+        );
         assert_eq!(
             pose.position_source_id.as_deref(),
             Some(SIMULATION_SOURCE_ID)
@@ -1631,18 +1726,60 @@ mod tests {
             invert: false,
         };
         let bindings = [binding];
-        let pressed = evaluate_actions(&sample(&[("button/south", 1.0)]), &bindings, None, 1, 1);
+        let pressed = evaluate_actions(
+            &sample(&[("button/south", 1.0)]),
+            &bindings,
+            &BTreeMap::new(),
+            None,
+            1,
+            1,
+        );
         assert!(pressed.primary_tool_open.value);
         assert!(pressed.primary_tool_open.changed_since_last_sync);
         let held = evaluate_actions(
             &sample(&[("button/south", 1.0)]),
             &bindings,
+            &BTreeMap::new(),
             Some(&pressed),
             2,
             2,
         );
         assert!(held.primary_tool_open.value);
         assert!(!held.primary_tool_open.changed_since_last_sync);
+    }
+
+    #[test]
+    fn continuous_component_offset_is_subtracted_without_a_dead_zone() {
+        let binding = ActionBinding {
+            action: "move_up_down".into(),
+            action_type: ActionType::Float,
+            source_id: "fixture".into(),
+            component_paths: vec!["axis/left_y".into()],
+            invert: false,
+        };
+        let offsets = BTreeMap::from([(
+            "fixture".into(),
+            BTreeMap::from([("axis/left_y".into(), -0.06)]),
+        )]);
+        let centered = evaluate_actions(
+            &sample(&[("axis/left_y", -0.06)]),
+            std::slice::from_ref(&binding),
+            &offsets,
+            None,
+            1,
+            1,
+        );
+        assert_eq!(centered.move_up_down.value, 0.0);
+
+        let moved = evaluate_actions(
+            &sample(&[("axis/left_y", 0.44)]),
+            &[binding],
+            &offsets,
+            None,
+            1,
+            1,
+        );
+        assert!((moved.move_up_down.value - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1657,6 +1794,7 @@ mod tests {
         let frame = evaluate_actions(
             &sample(&[("axis/right_trigger", 0.375)]),
             &[binding],
+            &BTreeMap::new(),
             None,
             1,
             1,
@@ -1676,6 +1814,7 @@ mod tests {
         let frame = evaluate_actions(
             &sample(&[("button/left", 0.0), ("button/right", 1.0)]),
             &[binding],
+            &BTreeMap::new(),
             None,
             1,
             1,
@@ -1751,6 +1890,7 @@ mod tests {
                     invert: false,
                 },
             ],
+            &BTreeMap::new(),
             None,
             1,
             1,

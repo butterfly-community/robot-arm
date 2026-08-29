@@ -84,11 +84,14 @@ function ObservedRate({ value }: { value: string }) {
 
 export default function Page() {
   const { snapshot, error, setError } = useGateway("tracking");
+  const { snapshot: spatialSnapshot } = useGateway("spatial");
   const values = snapshot?.values ?? {};
   const discovery = (values.discovery_state ?? {}) as Record<string, unknown>;
   const pose = values.absolute_pose as unknown as AbsolutePoseFrame | undefined;
   const input = values.control_input as unknown as
     ControlInputFrame | undefined;
+  const relativeMotion = spatialSnapshot?.values.relative_motion as unknown as
+    import("@robot/contracts").RelativeToolMotion | undefined;
   const sources = (discovery.sources ?? []) as Array<Record<string, unknown>>;
   const bindingStates = (discovery.bindings ?? []) as Array<
     Record<string, unknown>
@@ -104,6 +107,10 @@ export default function Page() {
   const [inputModes, setInputModes] = useState<Record<string, InputMode>>({});
   const [testSourceId, setTestSourceId] = useState("");
   const [simulationStarting, setSimulationStarting] = useState(false);
+  const [bindingsApplying, setBindingsApplying] = useState(false);
+  const [bindingsResult, setBindingsResult] = useState<
+    "idle" | "success" | "error"
+  >("idle");
   const [feedbackSourceIds, setFeedbackSourceIds] = useState<
     Record<string, string>
   >({});
@@ -225,6 +232,8 @@ export default function Page() {
 
   async function applyBindings() {
     setError(undefined);
+    setBindingsApplying(true);
+    setBindingsResult("idle");
     try {
       await post("/api/tracking/bindings", {
         schema_version: 2,
@@ -252,8 +261,12 @@ export default function Page() {
           }))
           .filter((binding) => binding.source_id && binding.capability_path),
       });
+      setBindingsResult("success");
     } catch (reason) {
+      setBindingsResult("error");
       setError(String(reason));
+    } finally {
+      setBindingsApplying(false);
     }
   }
 
@@ -357,7 +370,11 @@ export default function Page() {
             </StatusBadge>
           }
         >
-          <PoseViewer pose={pose} active={controlActive} />
+          <PoseViewer
+            pose={pose}
+            motion={relativeMotion}
+            active={controlActive}
+          />
         </Card>
 
         <Card
@@ -765,7 +782,18 @@ export default function Page() {
             })}
           </div>
           <div className="card-actions">
-            <Button onClick={applyBindings}>应用绑定</Button>
+            <Button disabled={bindingsApplying} onClick={applyBindings}>
+              {bindingsApplying ? "正在检测零位（3 秒）" : "应用绑定"}
+            </Button>
+            {bindingsResult !== "idle" && (
+              <StatusBadge
+                tone={bindingsResult === "success" ? "good" : "warning"}
+              >
+                {bindingsResult === "success"
+                  ? "绑定已应用，连续轴零位已记录"
+                  : "应用失败"}
+              </StatusBadge>
+            )}
           </div>
         </Card>
 

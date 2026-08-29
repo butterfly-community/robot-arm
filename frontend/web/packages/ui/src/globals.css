@@ -969,7 +969,7 @@ input[type="range"] {
   gap: 8px;
 }
 .binding-grid .field > legend {
-  padding-bottom: 0;
+  padding-bottom: 12px;
 }
 .binding-row {
   display: grid;

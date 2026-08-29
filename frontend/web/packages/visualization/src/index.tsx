@@ -1,6 +1,6 @@
 "use client";
 
-import type { AbsolutePoseFrame } from "@robot/contracts";
+import type { AbsolutePoseFrame, RelativeToolMotion } from "@robot/contracts";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -16,9 +16,11 @@ export type PoseVisualization = {
 
 type Props = {
   pose?: AbsolutePoseFrame | PoseVisualization;
+  motion?: RelativeToolMotion;
   originM?: Vector3Tuple;
   axes?: number[][];
   translationScale?: number;
+  poseCoordinates?: "scene" | "robot";
   active?: boolean;
   className?: string;
   ariaLabel?: string;
@@ -132,6 +134,14 @@ export function mappedPosition(
   ) as Vector3Tuple;
 }
 
+export function robotToScenePosition([
+  forward,
+  left,
+  up,
+]: Vector3Tuple): Vector3Tuple {
+  return [-left, up, forward];
+}
+
 export function mappedOrientation(
   orientation: QuaternionTuple,
   axes: number[][],
@@ -169,6 +179,7 @@ function lineGeometry(points: THREE.Vector3[]) {
 
 export function PoseViewer({
   pose,
+  motion,
   originM = [0, 0, 0],
   axes = [
     [1, 0, 0],
@@ -176,6 +187,7 @@ export function PoseViewer({
     [0, 0, 1],
   ],
   translationScale = 1,
+  poseCoordinates = "scene",
   active = false,
   className,
   ariaLabel = "三维空间位置和设备自身姿态",
@@ -370,10 +382,20 @@ export function PoseViewer({
     const current = state.current;
     const element = mount.current;
     if (!current || !element) return;
-    const valid =
+    const positionValid =
       pose != null &&
       pose.position_m.every(Number.isFinite) &&
-      pose.orientation_xyzw.every(Number.isFinite);
+      (!("flags" in pose) || pose.flags.position_valid);
+    const orientationValid =
+      pose != null &&
+      pose.orientation_xyzw.every(Number.isFinite) &&
+      (!("flags" in pose) || pose.flags.orientation_valid);
+    const motionValid =
+      motion?.active === true &&
+      motion.translation_m.every(Number.isFinite) &&
+      Number.isFinite(motion.front_pitch_rad) &&
+      Number.isFinite(motion.horizontal_arc_rad);
+    const valid = positionValid || orientationValid || motionValid;
     current.device.visible = valid;
     current.orientationDevice.visible = valid;
     current.vector.visible = valid;
@@ -381,23 +403,34 @@ export function PoseViewer({
     current.floorMarker.visible = valid;
     element.dataset.poseReady = String(valid);
     element.dataset.controlActive = String(active);
-    if (!valid || !pose) {
-      current.displacementLabel.textContent = "等待有效位姿";
+    if (!valid) {
+      current.displacementLabel.textContent = "等待有效位姿或相对运动";
       return;
     }
-    const position = mappedPosition(
-      pose.position_m,
-      originM,
-      axes,
-      translationScale,
-    );
+    const mapped =
+      positionValid && pose
+        ? mappedPosition(pose.position_m, originM, axes, translationScale)
+        : undefined;
+    const position = mapped
+      ? poseCoordinates === "robot"
+        ? robotToScenePosition(mapped)
+        : mapped
+      : motion
+        ? robotToScenePosition(motion.translation_m)
+        : [0, 0, 0];
     const point = new THREE.Vector3(...position);
-    const viewDelta = point.clone().sub(current.controls.target);
-    current.camera.position.add(viewDelta);
-    current.controls.target.copy(point);
-    current.controls.update();
     current.device.position.copy(point);
-    const orientation = mappedOrientation(pose.orientation_xyzw, axes);
+    const orientation =
+      orientationValid && pose
+        ? mappedOrientation(pose.orientation_xyzw, axes)
+        : new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(
+              motion?.front_pitch_rad ?? 0,
+              motion?.horizontal_arc_rad ?? 0,
+              0,
+              "XYZ",
+            ),
+          );
     current.device.quaternion.copy(orientation);
     current.orientationDevice.quaternion.copy(orientation);
     current.vector.geometry.dispose();
@@ -409,7 +442,7 @@ export function PoseViewer({
     current.floorMarker.position.set(floor.x, 0.004, floor.z);
     current.displacementLabel.textContent = `${active ? "控制中 · " : ""}X ${position[0].toFixed(3)} · Y ${position[1].toFixed(3)} · Z ${position[2].toFixed(3)} m`;
     element.dataset.position = position.join(",");
-  }, [active, axes, originM, pose, translationScale]);
+  }, [active, axes, motion, originM, pose, poseCoordinates, translationScale]);
 
   return (
     <div

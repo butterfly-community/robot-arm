@@ -345,14 +345,17 @@ test("tracking page applies and displays a controller binding", async ({
   const firstBindingControls = firstBinding.locator(".binding-row");
   await expect(firstBinding).toHaveCSS("border-top-width", "0px");
   await expect(firstBindingControls).toHaveCSS("border-top-width", "1px");
-  const legendBox = await firstBinding.locator("legend").boundingBox();
+  const titleBox = await firstBinding
+    .locator("legend .localized-label > span")
+    .first()
+    .boundingBox();
   const controlsBox = await firstBindingControls.boundingBox();
-  expect(legendBox).not.toBeNull();
+  expect(titleBox).not.toBeNull();
   expect(controlsBox).not.toBeNull();
   expect(
-    (legendBox?.y ?? 0) + (legendBox?.height ?? 0),
-    "功能标题应完整位于控件线框上方",
-  ).toBeLessThanOrEqual(controlsBox?.y ?? 0);
+    (controlsBox?.y ?? 0) - ((titleBox?.y ?? 0) + (titleBox?.height ?? 0)),
+    "功能标题与控件线框之间应保留明确间距",
+  ).toBeGreaterThanOrEqual(10);
 
   const selectedRuntimeSource = before.values.discovery_state?.sources?.find(
     (source: { available_components?: unknown[] }) =>
@@ -399,6 +402,12 @@ test("tracking page applies and displays a controller binding", async ({
     expect(componentPath).toBeTruthy();
     await componentSelect.selectOption(componentPath!);
     await page.getByRole("button", { name: "应用绑定" }).click();
+    await expect(
+      page.getByRole("button", { name: "正在检测零位（3 秒）" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("绑定已应用，连续轴零位已记录", { exact: true }),
+    ).toBeVisible();
     await expect
       .poll(async () => {
         const current = await (await request.get("/api/tracking/state")).json();

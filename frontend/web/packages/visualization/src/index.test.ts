@@ -1,7 +1,11 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 
-import { mappedOrientation, mappedPosition } from "./index";
+import {
+  mappedOrientation,
+  mappedPosition,
+  robotToScenePosition,
+} from "./index";
 
 const axes = [
   [0, 0, -1],
@@ -27,6 +31,12 @@ describe("mappedPosition", () => {
     expect(mappedPosition([0, 0.04, 0], [0, 0, 0], axes, 0.5)).toEqual([
       0, 0, 0.02,
     ]);
+  });
+});
+
+describe("robotToScenePosition", () => {
+  it("renders forward, left and up on the visible front, left and vertical axes", () => {
+    expect(robotToScenePosition([0.1, 0.2, 0.3])).toEqual([-0.2, 0.3, 0.1]);
   });
 });
 
