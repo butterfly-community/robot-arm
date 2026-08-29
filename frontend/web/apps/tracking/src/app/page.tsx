@@ -95,7 +95,20 @@ export default function Page() {
   const feedbackStates = (discovery.feedback_bindings ?? []) as Array<
     Record<string, unknown>
   >;
-  const configKey = JSON.stringify([bindingStates, feedbackStates]);
+  const configKey = JSON.stringify([
+    bindingStates.map((binding) => [
+      binding.action,
+      binding.action_type,
+      binding.source_id,
+      binding.invert,
+      binding.configured_components,
+    ]),
+    feedbackStates.map((binding) => [
+      binding.action,
+      binding.source_id,
+      binding.capability_path,
+    ]),
+  ]);
   const [previousConfigKey, setPreviousConfigKey] = useState("");
   const [paths, setPaths] = useState<Record<string, string>>({});
   const [sourceIds, setSourceIds] = useState<Record<string, string>>({});

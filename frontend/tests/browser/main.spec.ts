@@ -372,6 +372,8 @@ test("tracking page applies and displays a controller binding", async ({
     });
     const sourceSelect = field.locator("select").nth(0);
     await sourceSelect.selectOption(selectedRuntimeSource.source_id);
+    await page.waitForTimeout(300);
+    await expect(sourceSelect).toHaveValue(selectedRuntimeSource.source_id);
     const componentSelect = field.locator("select").nth(2);
     await expect
       .poll(() => componentSelect.locator("option").count())
