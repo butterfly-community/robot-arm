@@ -21,7 +21,7 @@ use axum::{
 };
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result};
-use robot_arm_messages::{SCHEMA_VERSION, from_arrow, to_arrow};
+use robot_arm_messages::{ExecutionRequest, SCHEMA_VERSION, from_arrow, to_arrow};
 use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
 
@@ -326,7 +326,17 @@ request_handler!(request_mode, "set_control_mode_request");
 request_handler!(request_prepare_relative, "prepare_relative_request");
 request_handler!(request_motion, "motion_request");
 request_handler!(request_actuator, "tool_actuator_request");
-request_handler!(request_execution, "execution_request");
+
+async fn request_execution(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    if let Err(error) = serde_json::from_value::<ExecutionRequest>(body.clone()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"original_error": error.to_string()})),
+        )
+            .into_response();
+    }
+    forward(state, "execution_request", body).await
+}
 
 async fn fire(state: AppState, output: &str) -> Response {
     let body = json!({"schema_version":SCHEMA_VERSION,"request_id":format!("snapshot-{output}")});

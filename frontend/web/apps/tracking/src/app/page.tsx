@@ -1,9 +1,16 @@
 "use client";
 
 import {
+  actionGroupLabels,
+  actionGroupOrder,
+  feedbackActionCatalog,
+  inputActionCatalog,
+  schemaVersion,
   virtualFeedbackTarget,
   type AbsolutePoseFrame,
   type ControlInputFrame,
+  type InputSimulationItem,
+  type InputSimulationState,
 } from "@robot/contracts";
 import {
   post,
@@ -14,7 +21,6 @@ import {
 import {
   Button,
   Card,
-  Field,
   JsonView,
   KeyValue,
   LocalizedLabel,
@@ -22,91 +28,59 @@ import {
   Shell,
   StatusBadge,
 } from "@robot/ui";
-import { useEffect, useRef, useState } from "react";
-
-const feedbackActions = [["primary_tool", "夹爪力度回馈"]] as const;
-
-const actions = [
-  ["start_stop", "启动和停止控制", "boolean"],
-  ["emergency_stop", "急停", "boolean"],
-  ["primary_tool_open", "打开夹爪", "boolean"],
-  ["primary_tool", "夹爪连续控制", "float"],
-  ["move_forward_back", "前后移动", "float"],
-  ["move_left_right", "左右移动", "float"],
-  ["move_up_down", "上下移动", "float"],
-  ["front_pitch", "前部抬起 / 往下", "float"],
-  ["horizontal_arc", "左旋 / 右旋", "float"],
-] as const;
-
-const actionDirections: Partial<
-  Record<(typeof actions)[number][0], readonly [string, string]>
-> = {
-  move_forward_back: ["后退", "前进"],
-  move_left_right: ["右移", "左移"],
-  move_up_down: ["下移", "上移"],
-  front_pitch: ["前部往下", "前部抬起"],
-  horizontal_arc: ["右旋", "左旋"],
-};
-
-const armMotionSemantics = [
-  [
-    "启动和停止控制",
-    "每按下一次切换开始或停止",
-    "开始时以当前夹爪末端位置和姿态建立本轮相对原点",
-    "按钮本身不产生位移；停止后不再发送新的相对目标",
-  ],
-  [
-    "急停",
-    "按下时结束当前控制过程",
-    "停止发送本轮相对运动目标",
-    "下一次启动会重新建立相对原点",
-  ],
-  ["打开夹爪", "按下时触发一次", "夹爪张开到机械角 90°", "J1–J6 的目标不变"],
-  [
-    "夹爪连续控制",
-    "0 为张开，1 为闭合",
-    "输入从 0 到 1，对应夹爪从 90° 到 0° 线性运动",
-    "J1–J6 的目标不变",
-  ],
-  [
-    "前后移动",
-    "正向前进，负向后退",
-    "夹爪末端沿机器人前后方向直线平移",
-    "左右位置、高度和夹爪朝向不变",
-  ],
-  [
-    "左右移动",
-    "正向左移，负向右移",
-    "夹爪末端沿机器人左右方向直线平移",
-    "前后位置、高度和夹爪朝向不变",
-  ],
-  [
-    "上下移动",
-    "正向上移，负向下移",
-    "夹爪末端沿竖直方向直线平移",
-    "水平面内的前后、左右位置和夹爪朝向不变",
-  ],
-  [
-    "前部抬起 / 往下",
-    "正向抬起，负向往下",
-    "夹爪尖端绕工具后部枢轴在竖直平面走圆弧",
-    "后部枢轴不动；不是夹爪整体上下平移",
-  ],
-  [
-    "左旋 / 右旋",
-    "正向左旋，负向右旋",
-    "夹爪尖端绕工具后部枢轴在水平面走圆弧",
-    "后部枢轴和尖端高度不变；不是夹爪自身旋转",
-  ],
-  [
-    "夹爪力度反馈",
-    "输出 0–100 的力度值",
-    "不驱动机械臂，只把当前夹爪力度发送到所选反馈目标",
-    "可以绑定扳机反馈、手柄振动或网页浮动圆环",
-  ],
-] as const;
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type InputMode = "button" | "buttons" | "axis";
+type ActionDefinition = (typeof inputActionCatalog)[number];
+type BindingDraft = {
+  configKey: string;
+  paths: Record<string, string>;
+  sourceIds: Record<string, string>;
+  inverted: Record<string, boolean>;
+  inputModes: Record<string, InputMode>;
+  feedbackSourceIds: Record<string, string>;
+  feedbackPaths: Record<string, string>;
+};
+
+function decodeBindingDraft(configKey: string): BindingDraft {
+  type SerializedBinding = [string, string, string | null, boolean, string[]];
+  type SerializedFeedback = [string, string | null, string | null];
+  const [bindings, feedback] = JSON.parse(configKey) as [
+    SerializedBinding[],
+    SerializedFeedback[],
+  ];
+  return {
+    configKey,
+    paths: Object.fromEntries(
+      bindings.map(([action, , , , components]) => [
+        action,
+        components.join(", "),
+      ]),
+    ),
+    sourceIds: Object.fromEntries(
+      bindings.map(([action, , sourceId]) => [action, sourceId ?? ""]),
+    ),
+    inverted: Object.fromEntries(
+      bindings.map(([action, , , invert]) => [action, invert]),
+    ),
+    inputModes: Object.fromEntries(
+      bindings.map(([action, actionType, , , components]) => [
+        action,
+        actionType === "boolean"
+          ? "button"
+          : components.length === 2
+            ? "buttons"
+            : "axis",
+      ]),
+    ),
+    feedbackSourceIds: Object.fromEntries(
+      feedback.map(([action, sourceId]) => [action, sourceId ?? ""]),
+    ),
+    feedbackPaths: Object.fromEntries(
+      feedback.map(([action, , path]) => [action, path ?? ""]),
+    ),
+  };
+}
 
 function componentLabel(component: Record<string, unknown>) {
   const path = String(component.path ?? "");
@@ -145,7 +119,7 @@ function ObservedRate({ value }: { value: string }) {
     return () => window.clearInterval(timer);
   }, []);
 
-  return <Metric label="Observed rate" value={displayed} unit="Hz" />;
+  return <Metric label="采集频率" value={displayed} unit="Hz" />;
 }
 
 export default function Page() {
@@ -163,6 +137,15 @@ export default function Page() {
   const feedbackStates = (discovery.feedback_bindings ?? []) as Array<
     Record<string, unknown>
   >;
+  const simulation = (discovery.simulation ??
+    {}) as unknown as InputSimulationState;
+  const diagnostics = (
+    (discovery.diagnostics ?? []) as Array<Record<string, unknown>>
+  )[0];
+  const liveValues = (discovery.live_component_values ?? {}) as Record<
+    string,
+    Record<string, number>
+  >;
   const configKey = JSON.stringify([
     bindingStates.map((binding) => [
       binding.action,
@@ -177,91 +160,39 @@ export default function Page() {
       binding.capability_path,
     ]),
   ]);
-  const [previousConfigKey, setPreviousConfigKey] = useState("");
-  const [paths, setPaths] = useState<Record<string, string>>({});
-  const [sourceIds, setSourceIds] = useState<Record<string, string>>({});
-  const [inverted, setInverted] = useState<Record<string, boolean>>({});
-  const [inputModes, setInputModes] = useState<Record<string, InputMode>>({});
+  const backendDraft = useMemo(
+    () => decodeBindingDraft(configKey),
+    [configKey],
+  );
+  const [editedDraft, setEditedDraft] = useState<BindingDraft>();
+  const draft =
+    editedDraft?.configKey === configKey ? editedDraft : backendDraft;
+  const {
+    paths,
+    sourceIds,
+    inverted,
+    inputModes,
+    feedbackSourceIds,
+    feedbackPaths,
+  } = draft;
+  const updateDraft = (patch: Partial<BindingDraft>) =>
+    setEditedDraft({ ...draft, ...patch, configKey });
   const [testSourceId, setTestSourceId] = useState("");
-  const [simulationStarting, setSimulationStarting] = useState(false);
+  const [simulationRequest, setSimulationRequest] = useState<string>();
   const [bindingsApplying, setBindingsApplying] = useState(false);
   const [bindingsResult, setBindingsResult] = useState<
     "idle" | "success" | "error"
   >("idle");
-  const [feedbackSourceIds, setFeedbackSourceIds] = useState<
-    Record<string, string>
-  >({});
-  const [feedbackPaths, setFeedbackPaths] = useState<Record<string, string>>(
-    {},
-  );
+
   const positionSource = sources.find(
     (source) => source.source_id === discovery.position_source_id,
   );
   const orientationSource = sources.find(
     (source) => source.source_id === discovery.orientation_source_id,
   );
-  const simulation = (discovery.simulation ?? {}) as Record<string, unknown>;
-  const diagnostics = (
-    (discovery.diagnostics ?? []) as Array<Record<string, unknown>>
-  )[0];
-
-  if (previousConfigKey !== configKey) {
-    setPreviousConfigKey(configKey);
-    setPaths(
-      Object.fromEntries(
-        bindingStates.map((binding) => [
-          String(binding.action),
-          ((binding.configured_components ?? []) as unknown[])
-            .map(String)
-            .join(", "),
-        ]),
-      ),
-    );
-    setSourceIds(
-      Object.fromEntries(
-        bindingStates.map((binding) => [
-          String(binding.action),
-          String(binding.source_id ?? ""),
-        ]),
-      ),
-    );
-    setInverted(
-      Object.fromEntries(
-        bindingStates.map((binding) => [
-          String(binding.action),
-          Boolean(binding.invert),
-        ]),
-      ),
-    );
-    setInputModes(
-      Object.fromEntries(
-        bindingStates.map((binding) => [
-          String(binding.action),
-          binding.action_type === "boolean"
-            ? "button"
-            : ((binding.configured_components ?? []) as unknown[]).length === 2
-              ? "buttons"
-              : "axis",
-        ]),
-      ),
-    );
-    setFeedbackSourceIds(
-      Object.fromEntries(
-        feedbackStates.map((binding) => [
-          String(binding.action),
-          String(binding.source_id ?? ""),
-        ]),
-      ),
-    );
-    setFeedbackPaths(
-      Object.fromEntries(
-        feedbackStates.map((binding) => [
-          String(binding.action),
-          String(binding.capability_path ?? ""),
-        ]),
-      ),
-    );
-  }
+  const bindingStateByAction = Object.fromEntries(
+    bindingStates.map((binding) => [String(binding.action), binding]),
+  );
 
   async function select(
     component: "position" | "orientation",
@@ -270,7 +201,7 @@ export default function Page() {
     setError(undefined);
     try {
       await post("/api/tracking/pose-source", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         action: "select",
         component,
@@ -287,7 +218,7 @@ export default function Page() {
     setError(undefined);
     try {
       await post("/api/tracking/pose-source", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         action: "unselect",
         component,
@@ -303,7 +234,7 @@ export default function Page() {
   function setPath(action: string, index: number, value: string) {
     const next = (paths[action] ?? "").split(",").map((item) => item.trim());
     next[index] = value;
-    setPaths({ ...paths, [action]: next.join(", ") });
+    updateDraft({ paths: { ...paths, [action]: next.join(", ") } });
   }
 
   async function applyBindings() {
@@ -312,28 +243,30 @@ export default function Page() {
     setBindingsResult("idle");
     try {
       await post("/api/tracking/bindings", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
-        bindings: actions
-          .map(([action, , actionType]) => ({
-            action,
-            action_type: actionType,
-            source_id: sourceIds[action] ?? "",
-            component_paths: (paths[action] ?? "")
+        bindings: inputActionCatalog
+          .map((definition) => ({
+            action: definition.key,
+            action_type: definition.actionType,
+            source_id: sourceIds[definition.key] ?? "",
+            component_paths: (paths[definition.key] ?? "")
               .split(",")
               .map((value) => value.trim())
               .filter(Boolean),
-            invert: actionType === "float" && Boolean(inverted[action]),
+            invert:
+              definition.actionType === "float" &&
+              Boolean(inverted[definition.key]),
           }))
           .filter(
             (binding) =>
               binding.source_id && binding.component_paths.length > 0,
           ),
-        feedback_bindings: feedbackActions
-          .map(([action]) => ({
-            action,
-            source_id: feedbackSourceIds[action] ?? "",
-            capability_path: feedbackPaths[action] ?? "",
+        feedback_bindings: feedbackActionCatalog
+          .map((definition) => ({
+            action: definition.key,
+            source_id: feedbackSourceIds[definition.key] ?? "",
+            capability_path: feedbackPaths[definition.key] ?? "",
           }))
           .filter((binding) => binding.source_id && binding.capability_path),
       });
@@ -346,6 +279,33 @@ export default function Page() {
     }
   }
 
+  async function runSimulation(item: InputSimulationItem, prepare: boolean) {
+    setError(undefined);
+    setSimulationRequest(item);
+    try {
+      if (simulation.active) {
+        await post("/api/tracking/simulation", {
+          schema_version: schemaVersion,
+          request_id: requestId(),
+          enabled: false,
+          item: null,
+        });
+        if (simulation.item === item) return;
+      }
+      if (prepare) await prepareRelativeControl();
+      await post("/api/tracking/simulation", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        enabled: true,
+        item,
+      });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSimulationRequest(undefined);
+    }
+  }
+
   const actionSources = sources.filter((source) => source.action_capable);
   const currentTestSourceId = actionSources.some(
     (source) => source.source_id === testSourceId,
@@ -355,10 +315,6 @@ export default function Page() {
   const testSource = actionSources.find(
     (source) => source.source_id === currentTestSourceId,
   );
-  const liveValues = (discovery.live_component_values ?? {}) as Record<
-    string,
-    Record<string, number>
-  >;
   const testComponents = (
     (testSource?.available_components ?? []) as Array<Record<string, unknown>>
   ).filter((component) => {
@@ -368,23 +324,165 @@ export default function Page() {
     return value !== 0;
   });
 
-  async function setSimulation(enabled: boolean) {
-    setError(undefined);
-    setSimulationStarting(enabled);
-    try {
-      if (enabled) {
-        await prepareRelativeControl();
+  function bindingSummary(definition: ActionDefinition) {
+    const state = bindingStateByAction[definition.key];
+    if (!state?.source_id) return "未绑定";
+    const source = sources.find(
+      (candidate) => candidate.source_id === state.source_id,
+    );
+    return `${String(source?.display_name ?? state.source_id)} · ${(
+      (state.configured_components ?? []) as unknown[]
+    )
+      .map(String)
+      .join(" / ")}`;
+  }
+
+  function arbitrationSummary(definition: ActionDefinition) {
+    const occupied = definition.domains.flatMap((domain) => {
+      if (domain === "position" && positionSource) {
+        return [
+          String(positionSource.display_name ?? positionSource.source_id),
+        ];
       }
-      await post("/api/tracking/simulation", {
-        schema_version: 2,
-        request_id: requestId(),
-        enabled,
-      });
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setSimulationStarting(false);
+      if (domain === "orientation" && orientationSource) {
+        return [
+          String(orientationSource.display_name ?? orientationSource.source_id),
+        ];
+      }
+      return [];
+    });
+    if (occupied.length) {
+      return `位姿域已由 ${[...new Set(occupied)].join("、")} 接管，按钮/轴不叠加`;
     }
+    return definition.domains.length
+      ? "当前按钮/轴绑定可生效"
+      : "不参与位姿来源仲裁";
+  }
+
+  function bindingEditor(definition: ActionDefinition) {
+    const key = definition.key;
+    const mode: InputMode =
+      definition.actionType === "boolean"
+        ? "button"
+        : (inputModes[key] ?? "axis");
+    const requiredComponentType = mode === "axis" ? "float" : "boolean";
+    const candidateSources = actionSources.filter((source) =>
+      (
+        (source.available_components ?? []) as Array<Record<string, unknown>>
+      ).some((component) => component.action_type === requiredComponentType),
+    );
+    const source = candidateSources.find(
+      (candidate) => candidate.source_id === sourceIds[key],
+    );
+    const components = (
+      (source?.available_components ?? []) as Array<Record<string, unknown>>
+    ).filter((component) => component.action_type === requiredComponentType);
+    const directions = "directions" in definition ? definition.directions : [];
+
+    return (
+      <div className="action-binding-editor">
+        <label>
+          <span>输入设备</span>
+          <select
+            aria-label={`${definition.label}输入设备`}
+            value={sourceIds[key] ?? ""}
+            onChange={(event) => {
+              updateDraft({
+                sourceIds: {
+                  ...sourceIds,
+                  [key]: event.currentTarget.value,
+                },
+                paths: { ...paths, [key]: "" },
+              });
+            }}
+          >
+            <option value="">选择输入设备</option>
+            {candidateSources.map((candidate) => (
+              <option
+                key={String(candidate.source_id)}
+                value={String(candidate.source_id)}
+              >
+                {String(candidate.display_name ?? candidate.source_id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>输入方式</span>
+          <select
+            aria-label={`${definition.label}输入方式`}
+            value={mode}
+            disabled={definition.actionType === "boolean"}
+            onChange={(event) => {
+              updateDraft({
+                inputModes: {
+                  ...inputModes,
+                  [key]: event.currentTarget.value as InputMode,
+                },
+                sourceIds: { ...sourceIds, [key]: "" },
+                paths: { ...paths, [key]: "" },
+              });
+            }}
+          >
+            {definition.actionType === "boolean" ? (
+              <option value="button">单个按钮</option>
+            ) : (
+              <>
+                <option value="axis">连续轴</option>
+                <option value="buttons">正负按钮对</option>
+              </>
+            )}
+          </select>
+        </label>
+        {Array.from({ length: mode === "buttons" ? 2 : 1 }).map((_, index) => {
+          const direction =
+            mode === "buttons"
+              ? index === 0
+                ? (directions[0] ?? "负向")
+                : (directions[1] ?? "正向")
+              : "设备输入";
+          return (
+            <label key={index}>
+              <span>{direction}</span>
+              <select
+                aria-label={`${definition.label}${direction}`}
+                value={(paths[key] ?? "").split(",")[index]?.trim() ?? ""}
+                onChange={(event) =>
+                  setPath(key, index, event.currentTarget.value)
+                }
+              >
+                <option value="">选择{direction}</option>
+                {components.map((component) => (
+                  <option
+                    key={String(component.path)}
+                    value={String(component.path)}
+                  >
+                    {componentLabel(component)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
+        {definition.actionType === "float" && (
+          <label className="compact-check action-invert">
+            <input
+              type="checkbox"
+              checked={Boolean(inverted[key])}
+              onChange={(event) =>
+                updateDraft({
+                  inverted: {
+                    ...inverted,
+                    [key]: event.currentTarget.checked,
+                  },
+                })
+              }
+            />
+            {mode === "buttons" ? "交换两侧" : "反转方向"}
+          </label>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -415,47 +513,6 @@ export default function Page() {
             }
           />
         </div>
-
-        <Card
-          className="span-12"
-          eyebrow="Semantic actions"
-          title="控制分量"
-          action={<StatusBadge tone="neutral">业务动作</StatusBadge>}
-        >
-          <div className="action-list">
-            {actions.map(([key, label]) => {
-              const sample = sampleValue(input, key);
-              return (
-                <div className="action-item" key={key}>
-                  <LocalizedLabel text={label} english={key} />
-                  <div className="action-meter">
-                    <i style={{ width: `${Math.abs(sample.value) * 100}%` }} />
-                  </div>
-                  <StatusBadge tone={sample.active ? "cyan" : "neutral"}>
-                    {sample.value.toFixed(2)}
-                  </StatusBadge>
-                </div>
-              );
-            })}
-          </div>
-          <div className="card-actions">
-            <Button
-              disabled={simulationStarting}
-              onClick={() => setSimulation(!Boolean(simulation.active))}
-            >
-              {simulationStarting
-                ? "正在回到默认位"
-                : simulation.active
-                  ? "停止模拟数据"
-                  : "启动模拟数据"}
-            </Button>
-            <StatusBadge tone={simulation.active ? "cyan" : "neutral"}>
-              {simulation.active
-                ? String(simulation.phase ?? "运行中")
-                : "模拟关闭"}
-            </StatusBadge>
-          </div>
-        </Card>
 
         <Card className="span-4" eyebrow="Controller devices" title="输入源">
           <KeyValue
@@ -555,7 +612,7 @@ export default function Page() {
               ))}
             </select>
             <p>
-              按住一个按钮，或推动摇杆、扳机；这里实时显示设备实际上报的组件和值。
+              按住按钮或推动摇杆、扳机，这里实时显示设备实际触发的组件和值。
             </p>
           </div>
           <div className="input-test-values" aria-live="polite">
@@ -586,264 +643,278 @@ export default function Page() {
           className="span-12"
           eyebrow="Action mapping"
           title="功能与反馈绑定"
+          action={
+            simulation.active ? (
+              <StatusBadge tone="cyan">
+                {String(simulation.phase ?? "演示中")}
+              </StatusBadge>
+            ) : undefined
+          }
         >
           <div className="binding-guide">
             <div>
               <strong>单个按钮</strong>
-              <span>按下为开，松开为关，用于独立业务动作。</span>
+              <span>按下触发离散动作。</span>
             </div>
             <div>
               <strong>正负按钮对</strong>
-              <span>第一个按钮输出负方向，第二个按钮输出正方向。</span>
+              <span>两个按钮分别对应详情中的两个人类方向。</span>
             </div>
             <div>
               <strong>连续轴</strong>
-              <span>摇杆或扳机的连续数值；反转方向会把输出乘以 -1。</span>
+              <span>摇杆或扳机的连续值；反转只交换动作方向。</span>
             </div>
           </div>
-          <h3 className="binding-section-heading">机械臂动作语义</h3>
-          <p className="binding-section-description">
-            方向以机器人底座为准：前后、左右位于水平面，上下是竖直方向；不是屏幕或手柄自身方向。
-          </p>
-          <div className="table-scroll">
-            <table className="telemetry-table motion-semantics-table">
-              <thead>
-                <tr>
-                  <th>功能</th>
-                  <th>输入 / 输出含义</th>
-                  <th>机械臂实际动作</th>
-                  <th>保持不变 / 补充</th>
-                </tr>
-              </thead>
-              <tbody>
-                {armMotionSemantics.map(([name, direction, motion, fixed]) => (
-                  <tr key={name}>
-                    <td>{name}</td>
-                    <td>{direction}</td>
-                    <td>{motion}</td>
-                    <td>{fixed}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <h3 className="binding-section-heading">功能输入</h3>
-          <div className="binding-grid">
-            {actions.map(([action, label, actionType]) => {
-              const directions = actionDirections[action];
-              const source = sources.find(
-                (candidate) => candidate.source_id === sourceIds[action],
+
+          <div className="action-groups">
+            {actionGroupOrder.map((group) => {
+              const definitions = inputActionCatalog.filter(
+                (definition) => definition.group === group,
               );
-              const mode =
-                actionType === "boolean"
-                  ? "button"
-                  : (inputModes[action] ?? "axis");
-              const components = (
-                (source?.available_components ?? []) as Array<
-                  Record<string, unknown>
-                >
-              ).filter((component) =>
-                mode === "axis"
-                  ? component.action_type === "float"
-                  : component.action_type === "boolean",
-              );
-              return (
-                <Field key={action} label={label} englishLabel={action}>
-                  <div className="binding-row">
-                    <select
-                      value={sourceIds[action] ?? ""}
-                      onChange={(event) => {
-                        setSourceIds({
-                          ...sourceIds,
-                          [action]: event.currentTarget.value,
-                        });
-                        setPaths({ ...paths, [action]: "" });
-                      }}
-                    >
-                      <option value="">选择输入设备</option>
-                      {actionSources.map((candidate) => (
-                        <option
-                          key={String(candidate.source_id)}
-                          value={String(candidate.source_id)}
-                        >
-                          {String(
-                            candidate.display_name ?? candidate.source_id,
-                          )}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      aria-label={`${label}输入方式`}
-                      value={mode}
-                      disabled={actionType === "boolean"}
-                      onChange={(event) => {
-                        setInputModes({
-                          ...inputModes,
-                          [action]: event.currentTarget.value as InputMode,
-                        });
-                        setPaths({ ...paths, [action]: "" });
-                      }}
-                    >
-                      {actionType === "boolean" ? (
-                        <option value="button">单个按钮</option>
-                      ) : null}
-                      {actionType === "float" && (
-                        <>
-                          <option value="axis">连续轴</option>
-                          <option value="buttons">正负按钮对</option>
-                        </>
-                      )}
-                    </select>
-                    <div className="binding-components">
-                      {Array.from({
-                        length: mode === "buttons" ? 2 : 1,
-                      }).map((_, index) => (
-                        <select
-                          key={index}
-                          aria-label={`${label}${
-                            mode === "buttons"
-                              ? index === 0
-                                ? `${directions?.[0] ?? "负方向"}按钮`
-                                : `${directions?.[1] ?? "正方向"}按钮`
-                              : "设备输入"
-                          }`}
-                          value={
-                            (paths[action] ?? "").split(",")[index]?.trim() ??
-                            ""
-                          }
-                          onChange={(event) =>
-                            setPath(action, index, event.currentTarget.value)
-                          }
-                        >
-                          <option value="">
-                            {mode === "buttons"
-                              ? index === 0
-                                ? `${directions?.[0] ?? "负方向"}按钮`
-                                : `${directions?.[1] ?? "正方向"}按钮`
-                              : "选择设备输入"}
-                          </option>
-                          {components.map((component) => (
-                            <option
-                              key={String(component.path)}
-                              value={String(component.path)}
+              if (group === "feedback") {
+                const feedback = feedbackActionCatalog[0];
+                const selectedSource = sources.find(
+                  (source) =>
+                    source.source_id === feedbackSourceIds[feedback.key],
+                );
+                const virtualSelected =
+                  feedbackSourceIds[feedback.key] ===
+                  virtualFeedbackTarget.sourceId;
+                const capabilities = virtualSelected
+                  ? [
+                      {
+                        path: virtualFeedbackTarget.capabilityPath,
+                        localized_name: "全局浮动圆环",
+                      },
+                    ]
+                  : ((selectedSource?.available_feedback_capabilities ??
+                      []) as Array<Record<string, unknown>>);
+                return (
+                  <section className="action-group" key={group}>
+                    <h3>{actionGroupLabels[group]}</h3>
+                    <details className="action-binding-item">
+                      <summary>
+                        <span>
+                          <strong>{feedback.label}</strong>
+                          <small>
+                            {feedbackSourceIds[feedback.key]
+                              ? String(
+                                  selectedSource?.display_name ??
+                                    (virtualSelected
+                                      ? "网页虚拟反馈"
+                                      : feedbackSourceIds[feedback.key]),
+                                )
+                              : "未绑定"}
+                          </small>
+                        </span>
+                        <StatusBadge tone="neutral">输出</StatusBadge>
+                      </summary>
+                      <div className="action-binding-content">
+                        <dl className="action-description">
+                          <div>
+                            <dt>数值语义</dt>
+                            <dd>{feedback.semantics}</dd>
+                          </div>
+                          <div>
+                            <dt>系统行为</dt>
+                            <dd>{feedback.motion}</dd>
+                          </div>
+                          <div>
+                            <dt>保持不变</dt>
+                            <dd>{feedback.invariant}</dd>
+                          </div>
+                          <div>
+                            <dt>目标</dt>
+                            <dd>{feedback.reference}</dd>
+                          </div>
+                        </dl>
+                        <div className="action-binding-editor feedback-editor">
+                          <label>
+                            <span>反馈设备</span>
+                            <select
+                              aria-label="夹爪力度反馈设备"
+                              value={feedbackSourceIds[feedback.key] ?? ""}
+                              onChange={(event) => {
+                                const sourceId = event.currentTarget.value;
+                                updateDraft({
+                                  feedbackSourceIds: {
+                                    ...feedbackSourceIds,
+                                    [feedback.key]: sourceId,
+                                  },
+                                  feedbackPaths: {
+                                    ...feedbackPaths,
+                                    [feedback.key]:
+                                      sourceId ===
+                                      virtualFeedbackTarget.sourceId
+                                        ? virtualFeedbackTarget.capabilityPath
+                                        : "",
+                                  },
+                                });
+                              }}
                             >
-                              {componentLabel(component)}
-                            </option>
-                          ))}
-                        </select>
-                      ))}
-                    </div>
-                    {actionType === "float" && (
-                      <label className="compact-check">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(inverted[action])}
-                          onChange={(event) =>
-                            setInverted({
-                              ...inverted,
-                              [action]: event.currentTarget.checked,
-                            })
-                          }
-                        />
-                        {mode === "buttons" ? "交换正负" : "反转方向"}
-                      </label>
-                    )}
-                  </div>
-                </Field>
-              );
-            })}
-          </div>
-          <h3 className="binding-section-heading">力度反馈目标</h3>
-          <div className="feedback-binding-grid">
-            {feedbackActions.map(([action, label]) => {
-              const virtualSelected =
-                feedbackSourceIds[action] === virtualFeedbackTarget.sourceId;
-              const source = sources.find(
-                (candidate) =>
-                  candidate.source_id === feedbackSourceIds[action],
-              );
-              const capabilities = virtualSelected
-                ? [
-                    {
-                      path: virtualFeedbackTarget.capabilityPath,
-                      localized_name: "全局浮动圆环",
-                    },
-                  ]
-                : ((source?.available_feedback_capabilities ?? []) as Array<
-                    Record<string, unknown>
-                  >);
-              return (
-                <Field
-                  key={action}
-                  label={label}
-                  englishLabel={action + "_feedback"}
-                >
-                  <div className="feedback-binding-row">
-                    <select
-                      value={feedbackSourceIds[action] ?? ""}
-                      onChange={(event) => {
-                        const sourceId = event.currentTarget.value;
-                        setFeedbackSourceIds({
-                          ...feedbackSourceIds,
-                          [action]: sourceId,
-                        });
-                        setFeedbackPaths({
-                          ...feedbackPaths,
-                          [action]:
-                            sourceId === virtualFeedbackTarget.sourceId
-                              ? virtualFeedbackTarget.capabilityPath
-                              : "",
-                        });
-                      }}
-                    >
-                      <option value="">选择反馈设备</option>
-                      <option value={virtualFeedbackTarget.sourceId}>
-                        网页虚拟反馈
-                      </option>
-                      {sources
-                        .filter(
-                          (candidate) =>
-                            (
-                              candidate.available_feedback_capabilities as
-                                unknown[] | undefined
-                            )?.length,
-                        )
-                        .map((candidate) => (
-                          <option
-                            key={String(candidate.source_id)}
-                            value={String(candidate.source_id)}
+                              <option value="">选择反馈设备</option>
+                              <option value={virtualFeedbackTarget.sourceId}>
+                                网页虚拟反馈
+                              </option>
+                              {sources
+                                .filter(
+                                  (source) =>
+                                    (
+                                      source.available_feedback_capabilities as
+                                        unknown[] | undefined
+                                    )?.length,
+                                )
+                                .map((source) => (
+                                  <option
+                                    key={String(source.source_id)}
+                                    value={String(source.source_id)}
+                                  >
+                                    {String(
+                                      source.display_name ?? source.source_id,
+                                    )}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span>反馈能力</span>
+                            <select
+                              aria-label="夹爪力度反馈能力"
+                              value={feedbackPaths[feedback.key] ?? ""}
+                              onChange={(event) =>
+                                updateDraft({
+                                  feedbackPaths: {
+                                    ...feedbackPaths,
+                                    [feedback.key]: event.currentTarget.value,
+                                  },
+                                })
+                              }
+                            >
+                              <option value="">选择反馈能力</option>
+                              {capabilities.map((capability) => (
+                                <option
+                                  key={String(capability.path)}
+                                  value={String(capability.path)}
+                                >
+                                  {String(
+                                    capability.localized_name ??
+                                      capability.path,
+                                  )}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="action-detail-actions">
+                          <Button
+                            variant="outline"
+                            disabled={Boolean(simulationRequest)}
+                            onClick={() =>
+                              runSimulation(feedback.item, feedback.prepare)
+                            }
                           >
-                            {String(
-                              candidate.display_name ?? candidate.source_id,
-                            )}
-                          </option>
-                        ))}
-                    </select>
-                    <select
-                      value={feedbackPaths[action] ?? ""}
-                      onChange={(event) =>
-                        setFeedbackPaths({
-                          ...feedbackPaths,
-                          [action]: event.currentTarget.value,
-                        })
-                      }
-                    >
-                      <option value="">选择设备反馈能力</option>
-                      {capabilities.map((capability) => (
-                        <option
-                          key={String(capability.path)}
-                          value={String(capability.path)}
+                            {simulation.active &&
+                            simulation.item === feedback.item
+                              ? "停止测试"
+                              : "测试反馈"}
+                          </Button>
+                        </div>
+                      </div>
+                    </details>
+                  </section>
+                );
+              }
+              if (!definitions.length) return null;
+              return (
+                <section className="action-group" key={group}>
+                  <h3>{actionGroupLabels[group]}</h3>
+                  <div className="action-group-items">
+                    {definitions.map((definition) => {
+                      const sample = sampleValue(input, definition.key);
+                      return (
+                        <details
+                          className="action-binding-item"
+                          key={definition.key}
                         >
-                          {String(capability.localized_name ?? capability.path)}
-                        </option>
-                      ))}
-                    </select>
+                          <summary>
+                            <span>
+                              <strong>{definition.label}</strong>
+                              <small>{bindingSummary(definition)}</small>
+                            </span>
+                            <StatusBadge
+                              tone={sample.active ? "cyan" : "neutral"}
+                            >
+                              {sample.active
+                                ? sample.value.toFixed(2)
+                                : "未触发"}
+                            </StatusBadge>
+                          </summary>
+                          <div className="action-binding-content">
+                            <dl className="action-description">
+                              <div>
+                                <dt>输入语义</dt>
+                                <dd>{definition.semantics}</dd>
+                              </div>
+                              <div>
+                                <dt>机械臂动作</dt>
+                                <dd>{definition.motion}</dd>
+                              </div>
+                              <div>
+                                <dt>保持不变</dt>
+                                <dd>{definition.invariant}</dd>
+                              </div>
+                              <div>
+                                <dt>参考</dt>
+                                <dd>{definition.reference}</dd>
+                              </div>
+                              <div>
+                                <dt>当前来源</dt>
+                                <dd>{arbitrationSummary(definition)}</dd>
+                              </div>
+                              {"components" in definition && (
+                                <div>
+                                  <dt>组成分量</dt>
+                                  <dd>{definition.components.join(" + ")}</dd>
+                                </div>
+                              )}
+                            </dl>
+                            {bindingEditor(definition)}
+                            <div className="action-detail-actions">
+                              <Button
+                                variant="outline"
+                                disabled={Boolean(simulationRequest)}
+                                onClick={() =>
+                                  runSimulation(
+                                    definition.key as InputSimulationItem,
+                                    definition.prepare,
+                                  )
+                                }
+                              >
+                                {simulation.active &&
+                                simulation.item === definition.key
+                                  ? "停止演示"
+                                  : definition.actionType === "boolean"
+                                    ? "测试动作"
+                                    : "演示动作"}
+                              </Button>
+                              {simulation.active &&
+                                simulation.item === definition.key && (
+                                  <StatusBadge tone="cyan">
+                                    {String(simulation.phase ?? "运行中")}
+                                  </StatusBadge>
+                                )}
+                            </div>
+                          </div>
+                        </details>
+                      );
+                    })}
                   </div>
-                </Field>
+                </section>
               );
             })}
           </div>
-          <div className="card-actions">
+
+          <div className="card-actions binding-submit">
             <Button disabled={bindingsApplying} onClick={applyBindings}>
               {bindingsApplying
                 ? "正在应用绑定"
@@ -865,14 +936,37 @@ export default function Page() {
 
         <Card
           className="span-12"
-          eyebrow="Troubleshooting"
-          title="排障数据"
+          eyebrow="Live diagnostics"
+          title="实时诊断"
           defaultOpen={false}
         >
+          <div className="action-list">
+            {inputActionCatalog.map((definition) => {
+              const sample = sampleValue(input, definition.key);
+              return (
+                <div className="action-item" key={definition.key}>
+                  <LocalizedLabel
+                    text={definition.label}
+                    english={definition.key}
+                  />
+                  <div className="action-meter">
+                    <i
+                      style={{
+                        width: `${Math.min(Math.abs(sample.value) * 100, 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <StatusBadge tone={sample.active ? "cyan" : "neutral"}>
+                    {sample.value.toFixed(2)}
+                  </StatusBadge>
+                </div>
+              );
+            })}
+          </div>
           <div className="diagnostic-grid">
             <JsonView title="原始绝对位姿" value={pose} />
-            <JsonView title="原始 Action" value={input} />
-            <JsonView title="设备发现" value={discovery} />
+            <JsonView title="控制输入" value={input} />
+            <JsonView title="设备发现与请求状态" value={discovery} />
           </div>
         </Card>
       </div>

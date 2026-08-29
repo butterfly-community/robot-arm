@@ -7,7 +7,7 @@ use arrow::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_ACTION_TRANSLATION_M_PER_S: f64 = 0.01;
 pub const DEFAULT_ACTION_ARC_RAD_PER_S: f64 = 0.10;
 
@@ -166,6 +166,142 @@ pub enum ActionType {
     Float,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionDomains {
+    pub position: bool,
+    pub orientation: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputActionSpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub action_type: ActionType,
+    pub domains: ActionDomains,
+}
+
+const CONTROL_DOMAINS: ActionDomains = ActionDomains {
+    position: false,
+    orientation: false,
+};
+const POSITION_DOMAIN: ActionDomains = ActionDomains {
+    position: true,
+    orientation: false,
+};
+const ORIENTATION_DOMAIN: ActionDomains = ActionDomains {
+    position: false,
+    orientation: true,
+};
+const POSE_DOMAINS: ActionDomains = ActionDomains {
+    position: true,
+    orientation: true,
+};
+
+pub const INPUT_ACTIONS: [InputActionSpec; 14] = [
+    input_action(
+        "start_stop",
+        "接管控制",
+        ActionType::Boolean,
+        CONTROL_DOMAINS,
+    ),
+    input_action(
+        "emergency_stop",
+        "急停",
+        ActionType::Boolean,
+        CONTROL_DOMAINS,
+    ),
+    input_action(
+        "primary_tool_open",
+        "夹爪张开",
+        ActionType::Boolean,
+        CONTROL_DOMAINS,
+    ),
+    input_action(
+        "primary_tool",
+        "夹爪开合",
+        ActionType::Float,
+        CONTROL_DOMAINS,
+    ),
+    input_action(
+        "move_forward_back",
+        "纵向平移",
+        ActionType::Float,
+        POSITION_DOMAIN,
+    ),
+    input_action(
+        "move_left_right",
+        "横向平移",
+        ActionType::Float,
+        POSITION_DOMAIN,
+    ),
+    input_action(
+        "move_up_down",
+        "垂直平移",
+        ActionType::Float,
+        POSITION_DOMAIN,
+    ),
+    input_action(
+        "front_pitch",
+        "垂直圆弧",
+        ActionType::Float,
+        ORIENTATION_DOMAIN,
+    ),
+    input_action(
+        "horizontal_arc",
+        "水平圆弧",
+        ActionType::Float,
+        ORIENTATION_DOMAIN,
+    ),
+    input_action(
+        "tool_pitch",
+        "定点垂直旋转",
+        ActionType::Float,
+        ORIENTATION_DOMAIN,
+    ),
+    input_action(
+        "tool_yaw",
+        "定点水平旋转",
+        ActionType::Float,
+        ORIENTATION_DOMAIN,
+    ),
+    input_action(
+        "tool_roll",
+        "轴向旋转",
+        ActionType::Float,
+        ORIENTATION_DOMAIN,
+    ),
+    input_action(
+        "tool_axis_translation",
+        "工具轴向平移",
+        ActionType::Float,
+        POSITION_DOMAIN,
+    ),
+    input_action(
+        "tool_helical_motion",
+        "工具轴向螺旋",
+        ActionType::Float,
+        POSE_DOMAINS,
+    ),
+];
+
+const fn input_action(
+    key: &'static str,
+    label: &'static str,
+    action_type: ActionType,
+    domains: ActionDomains,
+) -> InputActionSpec {
+    InputActionSpec {
+        key,
+        label,
+        action_type,
+        domains,
+    }
+}
+
+pub fn input_action_spec(key: &str) -> Option<&'static InputActionSpec> {
+    INPUT_ACTIONS.iter().find(|action| action.key == key)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputBindingState {
     pub action: String,
@@ -222,6 +358,7 @@ pub struct InputDiscoveryState {
 pub struct InputSimulationState {
     pub schema_version: u32,
     pub active: bool,
+    pub item: Option<InputSimulationItem>,
     pub phase: Option<String>,
     pub elapsed_s: Option<f64>,
 }
@@ -231,6 +368,27 @@ pub struct InputSimulationRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub enabled: bool,
+    pub item: Option<InputSimulationItem>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputSimulationItem {
+    MoveForwardBack,
+    MoveLeftRight,
+    MoveUpDown,
+    ToolPitch,
+    ToolYaw,
+    ToolRoll,
+    FrontPitch,
+    HorizontalArc,
+    PrimaryToolOpen,
+    PrimaryTool,
+    StartStop,
+    EmergencyStop,
+    PrimaryToolFeedback,
+    ToolAxisTranslation,
+    ToolHelicalMotion,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -341,6 +499,11 @@ pub struct ControlInputFrame {
     pub move_up_down: FloatActionSample,
     pub front_pitch: FloatActionSample,
     pub horizontal_arc: FloatActionSample,
+    pub tool_pitch: FloatActionSample,
+    pub tool_yaw: FloatActionSample,
+    pub tool_roll: FloatActionSample,
+    pub tool_axis_translation: FloatActionSample,
+    pub tool_helical_motion: FloatActionSample,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -348,6 +511,20 @@ pub struct SpatialComponentSwitches {
     pub translation: bool,
     pub front_pitch: bool,
     pub horizontal_arc: bool,
+    #[serde(default = "enabled")]
+    pub tool_pitch: bool,
+    #[serde(default = "enabled")]
+    pub tool_yaw: bool,
+    #[serde(default = "enabled")]
+    pub tool_roll: bool,
+    #[serde(default = "enabled")]
+    pub tool_axis_translation: bool,
+    #[serde(default = "enabled")]
+    pub tool_helical_motion: bool,
+}
+
+const fn enabled() -> bool {
+    true
 }
 
 impl Default for SpatialComponentSwitches {
@@ -356,8 +533,35 @@ impl Default for SpatialComponentSwitches {
             translation: true,
             front_pitch: true,
             horizontal_arc: true,
+            tool_pitch: true,
+            tool_yaw: true,
+            tool_roll: true,
+            tool_axis_translation: true,
+            tool_helical_motion: true,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerticalOrientationMapping {
+    #[default]
+    FrontPitch,
+    ToolPitch,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizontalOrientationMapping {
+    #[default]
+    HorizontalArc,
+    ToolYaw,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientationActionMapping {
+    pub vertical: VerticalOrientationMapping,
+    pub horizontal: HorizontalOrientationMapping,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -370,6 +574,7 @@ pub struct SpatialConfigState {
     pub translation_scale: f64,
     pub action_translation_m_per_s: Option<f64>,
     pub action_arc_rad_per_s: Option<f64>,
+    pub orientation_mapping: OrientationActionMapping,
     pub switches: SpatialComponentSwitches,
     pub control_session_id: Option<u64>,
 }
@@ -385,6 +590,7 @@ impl Default for SpatialConfigState {
             translation_scale: 0.5,
             action_translation_m_per_s: Some(DEFAULT_ACTION_TRANSLATION_M_PER_S),
             action_arc_rad_per_s: Some(DEFAULT_ACTION_ARC_RAD_PER_S),
+            orientation_mapping: OrientationActionMapping::default(),
             switches: SpatialComponentSwitches::default(),
             control_session_id: None,
         }
@@ -402,6 +608,12 @@ pub struct TransformedControlFrame {
     pub translation_m: [f64; 3],
     pub front_pitch_rad: f64,
     pub horizontal_arc_rad: f64,
+    pub tool_pitch_rad: f64,
+    pub tool_yaw_rad: f64,
+    pub tool_roll_rad: f64,
+    pub tool_axis_translation_m: f64,
+    pub tool_helical_translation_m: f64,
+    pub tool_helical_roll_rad: f64,
     pub actuator_actions: ActuatorActions,
 }
 
@@ -421,6 +633,7 @@ pub struct SpatialConfigPatch {
         with = "serde_with::rust::double_option"
     )]
     pub action_arc_rad_per_s: Option<Option<f64>>,
+    pub orientation_mapping: Option<OrientationActionMapping>,
     pub switches: Option<SpatialComponentSwitches>,
 }
 
@@ -835,6 +1048,48 @@ mod tests {
         assert!(json.get("device_id").is_none());
         assert!(json.get("vendor_id").is_none());
         assert!(json.get("model_revision").is_none());
+    }
+
+    #[test]
+    fn complete_control_contract_round_trips_all_tool_actions_and_simulation_item() {
+        let control = ControlInputFrame {
+            schema_version: SCHEMA_VERSION,
+            tool_pitch: FloatActionSample {
+                is_active: true,
+                changed_since_last_sync: true,
+                value: 0.1,
+            },
+            tool_yaw: FloatActionSample {
+                value: 0.2,
+                ..Default::default()
+            },
+            tool_roll: FloatActionSample {
+                value: 0.3,
+                ..Default::default()
+            },
+            tool_axis_translation: FloatActionSample {
+                value: 0.4,
+                ..Default::default()
+            },
+            tool_helical_motion: FloatActionSample {
+                value: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let encoded = to_arrow(&control).unwrap();
+        let decoded: ControlInputFrame = from_arrow(encoded.as_ref()).unwrap();
+        assert_eq!(decoded, control);
+
+        let request = InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "fixture".into(),
+            enabled: true,
+            item: Some(InputSimulationItem::ToolHelicalMotion),
+        };
+        let encoded = to_arrow(&request).unwrap();
+        let decoded: InputSimulationRequest = from_arrow(encoded.as_ref()).unwrap();
+        assert_eq!(decoded, request);
     }
 
     #[test]

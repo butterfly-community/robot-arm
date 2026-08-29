@@ -96,18 +96,35 @@ def target_pose(
     translation_m: list[float],
     front_pitch_rad: float,
     horizontal_arc_rad: float,
+    tool_pitch_rad: float = 0.0,
+    tool_yaw_rad: float = 0.0,
+    tool_roll_rad: float = 0.0,
+    tool_axis_translation_m: float = 0.0,
+    tool_helical_translation_m: float = 0.0,
+    tool_helical_roll_rad: float = 0.0,
 ) -> Pose:
     anchor_rotation = _wxyz(anchor.orientation_xyzw)
-    pitch = axangle2quat((1.0, 0.0, 0.0), front_pitch_rad)
-    turn = axangle2quat((0.0, 0.0, 1.0), horizontal_arc_rad)
-    target_rotation = qmult(qmult(turn, anchor_rotation), pitch)
+    arc_pitch = axangle2quat((1.0, 0.0, 0.0), front_pitch_rad)
+    arc_turn = axangle2quat((0.0, 0.0, 1.0), horizontal_arc_rad)
+    arc_rotation = qmult(qmult(arc_turn, anchor_rotation), arc_pitch)
+    fixed_pitch = axangle2quat((1.0, 0.0, 0.0), tool_pitch_rad)
+    fixed_yaw = axangle2quat((0.0, 0.0, 1.0), tool_yaw_rad)
+    fixed_roll = axangle2quat((0.0, 0.0, 1.0), tool_roll_rad)
+    tool_rotation = qmult(
+        qmult(qmult(fixed_yaw, arc_rotation), fixed_pitch), fixed_roll
+    )
+    helical_roll = axangle2quat((0.0, 0.0, 1.0), tool_helical_roll_rad)
+    target_rotation = qmult(tool_rotation, helical_roll)
     anchor_offset = quat2mat(anchor_rotation).dot(PIVOT_TO_TCP_M)
-    target_offset = quat2mat(target_rotation).dot(PIVOT_TO_TCP_M)
+    arc_offset = quat2mat(arc_rotation).dot(PIVOT_TO_TCP_M)
+    tool_axis = quat2mat(tool_rotation).dot((0.0, 0.0, 1.0))
+    tool_distance = tool_axis_translation_m + tool_helical_translation_m
     target_position = tuple(
         anchor.position_m[index]
         + float(translation_m[index])
-        + target_offset[index]
+        + arc_offset[index]
         - anchor_offset[index]
+        + tool_axis[index] * tool_distance
         for index in range(3)
     )
     return Pose(target_position, _xyzw(target_rotation))

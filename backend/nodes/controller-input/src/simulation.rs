@@ -1,34 +1,31 @@
 use std::collections::BTreeMap;
 
 use robot_arm_messages::{
-    ActionType, InputComponentInfo, InputDriverInfo, InputSimulationState, InputSourceInfo,
-    SCHEMA_VERSION,
+    ActionFeedback, DEFAULT_ACTION_ARC_RAD_PER_S, DEFAULT_ACTION_TRANSLATION_M_PER_S,
+    INPUT_ACTIONS, InputComponentInfo, InputDriverInfo, InputSimulationItem, InputSimulationState,
+    InputSourceInfo, SCHEMA_VERSION,
 };
 
 use super::RawSample;
 
 pub(super) const DRIVER_ID: &str = "generated-test-input";
-pub(super) const DEVICE_ID: &str = "generic-6dof-cycle";
-pub(super) const SOURCE_ID: &str = "simulation:generic-6dof-cycle";
-pub(super) const START_STOP_COMPONENT: &str = "button/start_stop";
-pub(super) const PRIMARY_TOOL_COMPONENT: &str = "axis/primary_tool";
+pub(super) const DEVICE_ID: &str = "generic-action-source";
+pub(super) const SOURCE_ID: &str = "simulation:generic-action-source";
+pub(super) const START_STOP_COMPONENT: &str = "action/start_stop";
 const SAMPLE_RATE_HZ: u64 = 100;
 const PHASE_SAMPLES: u64 = SAMPLE_RATE_HZ * 3;
-const STARTUP_SAMPLES: u64 = PHASE_SAMPLES;
-const PHASE_COUNT: u64 = 14;
-const VERTICAL_AND_DEPTH_M: f64 = 0.05;
-const LATERAL_M: f64 = 0.02;
-const STARTUP_LIFT_M: f64 = 0.10;
 const ORIENTATION_RAD: f64 = 8.0_f64.to_radians();
 
-#[derive(Default)]
 pub(super) struct SimulationPlayback {
+    item: InputSimulationItem,
     sample_index: u64,
 }
 
 pub(super) struct SimulationSample {
     pub(super) raw: RawSample,
     pub(super) state: InputSimulationState,
+    pub(super) feedback: Option<ActionFeedback>,
+    pub(super) complete: bool,
 }
 
 pub(super) fn driver_info() -> InputDriverInfo {
@@ -45,36 +42,38 @@ pub(super) fn source_info() -> InputSourceInfo {
         source_id: SOURCE_ID.into(),
         driver_id: DRIVER_ID.into(),
         device_id: DEVICE_ID.into(),
-        display_name: "通用六自由度测试源".into(),
+        display_name: "通用动作测试源".into(),
         vendor_id: None,
         product_id: None,
         serial: None,
-        position_capable: true,
-        orientation_capable: true,
+        position_capable: false,
+        orientation_capable: false,
         action_capable: true,
         active: true,
-        available_components: vec![
-            InputComponentInfo {
-                path: START_STOP_COMPONENT.into(),
-                action_type: ActionType::Boolean,
-                localized_name: Some("启动/停止按钮".into()),
-                definition_source: "generated-test-input".into(),
-            },
-            InputComponentInfo {
-                path: PRIMARY_TOOL_COMPONENT.into(),
-                action_type: ActionType::Float,
-                localized_name: Some("夹爪连续控制".into()),
-                definition_source: "generated-test-input".into(),
-            },
-        ],
+        available_components: INPUT_ACTIONS
+            .iter()
+            .map(|action| InputComponentInfo {
+                path: format!("action/{}", action.key),
+                action_type: action.action_type,
+                localized_name: Some(action.label.into()),
+                definition_source: DRIVER_ID.into(),
+            })
+            .collect(),
         available_feedback_capabilities: vec![],
         original_error: None,
     }
 }
 
 impl SimulationPlayback {
+    pub(super) fn new(item: InputSimulationItem) -> Self {
+        Self {
+            item,
+            sample_index: 0,
+        }
+    }
+
     pub(super) fn sample(&mut self, sequence: u64, now_ns: i64) -> SimulationSample {
-        let (position_m, orientation_xyzw, phase, primary_tool) = sample_pose(self.sample_index);
+        let generated = generate(self.item, self.sample_index);
         let elapsed_s = self.sample_index as f64 / SAMPLE_RATE_HZ as f64;
         self.sample_index += 1;
         SimulationSample {
@@ -83,223 +82,309 @@ impl SimulationPlayback {
                 source_time_ns: now_ns,
                 received_time_ns: now_ns,
                 source_id: SOURCE_ID.into(),
-                position_m: Some(position_m),
-                orientation_xyzw: Some(orientation_xyzw),
-                components: BTreeMap::from([
-                    (START_STOP_COMPONENT.into(), 1.0),
-                    (PRIMARY_TOOL_COMPONENT.into(), primary_tool),
-                ]),
+                position_m: None,
+                orientation_xyzw: None,
+                components: generated.components,
             },
             state: InputSimulationState {
                 schema_version: SCHEMA_VERSION,
-                active: true,
-                phase: Some(phase.into()),
+                active: !generated.complete,
+                item: Some(self.item),
+                phase: Some(generated.phase.into()),
                 elapsed_s: Some(elapsed_s),
             },
+            feedback: generated.feedback.map(|strength_percent| ActionFeedback {
+                schema_version: SCHEMA_VERSION,
+                sequence,
+                sample_time_ns: now_ns,
+                action: "primary_tool".into(),
+                strength_percent,
+            }),
+            complete: generated.complete,
         }
     }
 }
 
-fn sample_pose(sample_index: u64) -> ([f64; 3], [f64; 4], &'static str, f64) {
-    if sample_index < STARTUP_SAMPLES {
-        let amount = smooth(sample_index as f64 / STARTUP_SAMPLES as f64);
-        return (
-            [0.0, STARTUP_LIFT_M * amount, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-            "启动：向上抬起 10 cm",
-            1.0,
-        );
+struct GeneratedSample {
+    components: BTreeMap<String, f64>,
+    feedback: Option<f64>,
+    phase: &'static str,
+    complete: bool,
+}
+
+fn generate(item: InputSimulationItem, sample_index: u64) -> GeneratedSample {
+    match item {
+        InputSimulationItem::PrimaryToolFeedback => feedback_sample(sample_index),
+        InputSimulationItem::StartStop => control_sample(sample_index, false),
+        InputSimulationItem::EmergencyStop => control_sample(sample_index, true),
+        InputSimulationItem::PrimaryToolOpen => open_tool_sample(sample_index),
+        InputSimulationItem::PrimaryTool => continuous_tool_sample(sample_index),
+        _ => continuous_motion_sample(item, sample_index),
     }
-    let cycle_sample = (sample_index - STARTUP_SAMPLES) % (PHASE_SAMPLES * PHASE_COUNT);
-    let phase = cycle_sample / PHASE_SAMPLES;
-    let amount = smooth((cycle_sample % PHASE_SAMPLES) as f64 / PHASE_SAMPLES as f64);
-    let mut position = [0.0, STARTUP_LIFT_M, 0.0];
-    let mut orientation = [0.0, 0.0, 0.0, 1.0];
-    let mut primary_tool = 1.0;
-    let name = match phase {
-        0 => {
-            position[1] += VERTICAL_AND_DEPTH_M * amount;
-            "向上移动 5 cm"
-        }
-        1 => {
-            position[1] += VERTICAL_AND_DEPTH_M * (1.0 - amount);
-            "向下移动 5 cm"
-        }
-        2 => {
-            position[0] -= LATERAL_M * amount;
-            "向左移动 2 cm"
-        }
-        3 => {
-            position[0] -= LATERAL_M * (1.0 - amount);
-            "向右移动 2 cm"
-        }
-        4 => {
-            position[2] -= VERTICAL_AND_DEPTH_M * amount;
-            "向前移动 5 cm"
-        }
-        5 => {
-            position[2] -= VERTICAL_AND_DEPTH_M * (1.0 - amount);
-            "向后移动 5 cm"
-        }
-        6 => {
-            orientation = axis_angle([0.0, 0.0, 1.0], ORIENTATION_RAD * amount);
-            "姿态：向左转向 8°"
-        }
-        7 => {
-            orientation = axis_angle([0.0, 0.0, 1.0], ORIENTATION_RAD * (1.0 - amount));
-            "姿态：向右转向回正"
-        }
-        8 => {
-            orientation = axis_angle([-1.0, 0.0, 0.0], ORIENTATION_RAD * amount);
-            "姿态：前部抬起 8°"
-        }
-        9 => {
-            orientation = axis_angle([-1.0, 0.0, 0.0], ORIENTATION_RAD * (1.0 - amount));
-            "姿态：前部往下回正"
-        }
-        10 => {
-            orientation = axis_angle([0.0, 1.0, 0.0], ORIENTATION_RAD * amount);
-            "姿态：向右侧倾 8°"
-        }
-        11 => {
-            orientation = axis_angle([0.0, 1.0, 0.0], ORIENTATION_RAD * (1.0 - amount));
-            "姿态：向左侧倾回正"
-        }
-        12 => {
-            primary_tool = 1.0 - amount;
-            "夹爪：连续张开"
-        }
-        _ => {
-            primary_tool = amount;
-            "夹爪：连续闭合"
-        }
+}
+
+fn continuous_motion_sample(item: InputSimulationItem, sample_index: u64) -> GeneratedSample {
+    let action_path = component_path(item).expect("motion item has a component");
+    let amplitude = input_amplitude(item);
+    let (value, phase, complete, start_stop) = if sample_index == 0 {
+        (0.0, "starting", false, 1.0)
+    } else if sample_index <= PHASE_SAMPLES {
+        (
+            amplitude * motion_profile(sample_index - 1),
+            "outbound",
+            false,
+            0.0,
+        )
+    } else if sample_index <= PHASE_SAMPLES * 2 {
+        (
+            -amplitude * motion_profile(sample_index - PHASE_SAMPLES - 1),
+            "return",
+            false,
+            0.0,
+        )
+    } else {
+        (0.0, "complete", true, 1.0)
     };
-    (position, orientation, name, primary_tool)
+    GeneratedSample {
+        components: BTreeMap::from([
+            (START_STOP_COMPONENT.into(), start_stop),
+            (action_path.into(), value),
+        ]),
+        feedback: None,
+        phase,
+        complete,
+    }
+}
+
+fn continuous_tool_sample(sample_index: u64) -> GeneratedSample {
+    let (value, phase, complete, start_stop) = if sample_index == 0 {
+        (1.0, "starting", false, 1.0)
+    } else if sample_index <= PHASE_SAMPLES {
+        (
+            1.0 - smooth(progress(sample_index - 1)),
+            "opening",
+            false,
+            0.0,
+        )
+    } else if sample_index <= PHASE_SAMPLES * 2 {
+        (
+            smooth(progress(sample_index - PHASE_SAMPLES - 1)),
+            "closing",
+            false,
+            0.0,
+        )
+    } else {
+        (1.0, "complete", true, 1.0)
+    };
+    GeneratedSample {
+        components: BTreeMap::from([
+            (START_STOP_COMPONENT.into(), start_stop),
+            ("action/primary_tool".into(), value),
+        ]),
+        feedback: None,
+        phase,
+        complete,
+    }
+}
+
+fn open_tool_sample(sample_index: u64) -> GeneratedSample {
+    let (start_stop, open, phase, complete) = match sample_index {
+        0 => (1.0, 0.0, "starting", false),
+        1 => (0.0, 1.0, "opening", false),
+        2 => (0.0, 0.0, "opened", false),
+        _ => (1.0, 0.0, "complete", true),
+    };
+    GeneratedSample {
+        components: BTreeMap::from([
+            (START_STOP_COMPONENT.into(), start_stop),
+            ("action/primary_tool_open".into(), open),
+        ]),
+        feedback: None,
+        phase,
+        complete,
+    }
+}
+
+fn control_sample(sample_index: u64, emergency: bool) -> GeneratedSample {
+    let complete = sample_index >= PHASE_SAMPLES;
+    let start_stop = (sample_index == 0 || (complete && !emergency)) as u8 as f64;
+    let emergency_stop = (complete && emergency) as u8 as f64;
+    GeneratedSample {
+        components: BTreeMap::from([
+            (START_STOP_COMPONENT.into(), start_stop),
+            ("action/emergency_stop".into(), emergency_stop),
+        ]),
+        feedback: None,
+        phase: if complete { "complete" } else { "active" },
+        complete,
+    }
+}
+
+fn feedback_sample(sample_index: u64) -> GeneratedSample {
+    let complete = sample_index > PHASE_SAMPLES * 2;
+    let strength = if sample_index <= PHASE_SAMPLES {
+        smooth(progress(sample_index)) * 100.0
+    } else if sample_index <= PHASE_SAMPLES * 2 {
+        (1.0 - smooth(progress(sample_index - PHASE_SAMPLES))) * 100.0
+    } else {
+        0.0
+    };
+    GeneratedSample {
+        components: BTreeMap::new(),
+        feedback: Some(strength),
+        phase: if complete {
+            "complete"
+        } else if sample_index <= PHASE_SAMPLES {
+            "increasing"
+        } else {
+            "decreasing"
+        },
+        complete,
+    }
+}
+
+pub(super) fn component_path(item: InputSimulationItem) -> Option<&'static str> {
+    Some(match item {
+        InputSimulationItem::MoveForwardBack => "action/move_forward_back",
+        InputSimulationItem::MoveLeftRight => "action/move_left_right",
+        InputSimulationItem::MoveUpDown => "action/move_up_down",
+        InputSimulationItem::ToolPitch => "action/tool_pitch",
+        InputSimulationItem::ToolYaw => "action/tool_yaw",
+        InputSimulationItem::ToolRoll => "action/tool_roll",
+        InputSimulationItem::FrontPitch => "action/front_pitch",
+        InputSimulationItem::HorizontalArc => "action/horizontal_arc",
+        InputSimulationItem::PrimaryToolOpen => "action/primary_tool_open",
+        InputSimulationItem::PrimaryTool => "action/primary_tool",
+        InputSimulationItem::StartStop => START_STOP_COMPONENT,
+        InputSimulationItem::EmergencyStop => "action/emergency_stop",
+        InputSimulationItem::ToolAxisTranslation => "action/tool_axis_translation",
+        InputSimulationItem::ToolHelicalMotion => "action/tool_helical_motion",
+        InputSimulationItem::PrimaryToolFeedback => return None,
+    })
+}
+
+pub(super) fn action_key(item: InputSimulationItem) -> Option<&'static str> {
+    component_path(item).map(|path| path.trim_start_matches("action/"))
+}
+
+fn input_amplitude(item: InputSimulationItem) -> f64 {
+    let phase_seconds = PHASE_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
+    match item {
+        InputSimulationItem::MoveLeftRight | InputSimulationItem::ToolAxisTranslation => {
+            0.02 / (DEFAULT_ACTION_TRANSLATION_M_PER_S * phase_seconds)
+        }
+        InputSimulationItem::MoveForwardBack | InputSimulationItem::MoveUpDown => {
+            0.05 / (DEFAULT_ACTION_TRANSLATION_M_PER_S * phase_seconds)
+        }
+        InputSimulationItem::ToolPitch
+        | InputSimulationItem::ToolYaw
+        | InputSimulationItem::ToolRoll
+        | InputSimulationItem::FrontPitch
+        | InputSimulationItem::HorizontalArc => {
+            ORIENTATION_RAD / (DEFAULT_ACTION_ARC_RAD_PER_S * phase_seconds)
+        }
+        InputSimulationItem::ToolHelicalMotion => {
+            0.02 / (DEFAULT_ACTION_TRANSLATION_M_PER_S * phase_seconds)
+        }
+        _ => 0.0,
+    }
+}
+
+fn progress(sample_index: u64) -> f64 {
+    sample_index.min(PHASE_SAMPLES) as f64 / PHASE_SAMPLES as f64
+}
+
+fn motion_profile(sample_index: u64) -> f64 {
+    1.0 - (std::f64::consts::TAU * progress(sample_index)).cos()
 }
 
 fn smooth(progress: f64) -> f64 {
     0.5 - 0.5 * (std::f64::consts::PI * progress).cos()
 }
 
-fn axis_angle(axis: [f64; 3], angle: f64) -> [f64; 4] {
-    let half = angle * 0.5;
-    let sine = half.sin();
-    [axis[0] * sine, axis[1] * sine, axis[2] * sine, half.cos()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn assert_components_close<const N: usize>(actual: [f64; N], expected: [f64; N]) {
-        for (actual, expected) in actual.into_iter().zip(expected) {
-            assert!((actual - expected).abs() <= f64::EPSILON * 16.0);
+    const ITEMS: [InputSimulationItem; 15] = [
+        InputSimulationItem::MoveForwardBack,
+        InputSimulationItem::MoveLeftRight,
+        InputSimulationItem::MoveUpDown,
+        InputSimulationItem::ToolPitch,
+        InputSimulationItem::ToolYaw,
+        InputSimulationItem::ToolRoll,
+        InputSimulationItem::FrontPitch,
+        InputSimulationItem::HorizontalArc,
+        InputSimulationItem::PrimaryToolOpen,
+        InputSimulationItem::PrimaryTool,
+        InputSimulationItem::StartStop,
+        InputSimulationItem::EmergencyStop,
+        InputSimulationItem::PrimaryToolFeedback,
+        InputSimulationItem::ToolAxisTranslation,
+        InputSimulationItem::ToolHelicalMotion,
+    ];
+
+    #[test]
+    fn test_source_reports_exactly_the_fourteen_input_actions() {
+        let source = source_info();
+        assert!(!source.position_capable);
+        assert!(!source.orientation_capable);
+        assert_eq!(source.available_components.len(), 14);
+        assert_eq!(
+            source
+                .available_components
+                .iter()
+                .map(|component| component.path.as_str())
+                .collect::<Vec<_>>(),
+            INPUT_ACTIONS
+                .iter()
+                .map(|action| format!("action/{}", action.key))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn all_fifteen_items_generate_their_own_contract() {
+        for item in ITEMS {
+            let mut playback = SimulationPlayback::new(item);
+            let first = playback.sample(1, 10);
+            assert_eq!(first.state.item, Some(item));
+            if item == InputSimulationItem::PrimaryToolFeedback {
+                assert!(first.feedback.is_some());
+            } else {
+                assert!(component_path(item).is_some());
+                assert!(first.feedback.is_none());
+            }
         }
     }
 
     #[test]
-    fn cycle_preserves_all_phases_and_returns() {
-        let endpoints = [
-            (STARTUP_SAMPLES, "向上移动 5 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES, "向下移动 5 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 2, "向左移动 2 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 3, "向右移动 2 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 4, "向前移动 5 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 5, "向后移动 5 cm"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 6, "姿态：向左转向 8°"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 7, "姿态：向右转向回正"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 8, "姿态：前部抬起 8°"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 9, "姿态：前部往下回正"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 10, "姿态：向右侧倾 8°"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 11, "姿态：向左侧倾回正"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 12, "夹爪：连续张开"),
-            (STARTUP_SAMPLES + PHASE_SAMPLES * 13, "夹爪：连续闭合"),
-        ];
-        for (sample, expected) in endpoints {
-            assert_eq!(sample_pose(sample).2, expected);
-        }
-        let (position, orientation, _, primary_tool) =
-            sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * PHASE_COUNT);
-        assert_eq!(position, [0.0, STARTUP_LIFT_M, 0.0]);
-        assert_eq!(orientation, [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(primary_tool, 1.0);
-    }
-
-    #[test]
-    fn cycle_keeps_configured_distances_and_angles() {
-        let cycle = STARTUP_SAMPLES;
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES).0, [0.0, 0.15, 0.0]);
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES * 2).0, [0.0, 0.10, 0.0]);
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES * 3).0, [-0.02, 0.10, 0.0]);
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES * 4).0, [0.0, 0.10, 0.0]);
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES * 5).0, [0.0, 0.10, -0.05]);
-        assert_components_close(sample_pose(cycle + PHASE_SAMPLES * 6).0, [0.0, 0.10, 0.0]);
-        assert_components_close(
-            sample_pose(cycle + PHASE_SAMPLES * 7).1,
-            axis_angle([0.0, 0.0, 1.0], ORIENTATION_RAD),
-        );
-        assert_components_close(
-            sample_pose(cycle + PHASE_SAMPLES * 9).1,
-            axis_angle([-1.0, 0.0, 0.0], ORIENTATION_RAD),
-        );
-        assert_components_close(
-            sample_pose(cycle + PHASE_SAMPLES * 11).1,
-            axis_angle([0.0, 1.0, 0.0], ORIENTATION_RAD),
-        );
-        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 12).3, 1.0);
-        assert!(
-            (sample_pose(cycle + PHASE_SAMPLES * 12 + PHASE_SAMPLES / 2).3 - 0.5).abs() < 1e-12
-        );
-        assert_eq!(sample_pose(cycle + PHASE_SAMPLES * 13).3, 0.0);
-        assert!(
-            (sample_pose(cycle + PHASE_SAMPLES * 13 + PHASE_SAMPLES / 2).3 - 0.5).abs() < 1e-12
-        );
-    }
-
-    #[test]
-    fn return_phases_retrace_the_rotation_phases() {
-        for sample in [30, 75, 150, 225, 270] {
-            let reverse_sample = PHASE_SAMPLES - sample;
-            let left = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 6 + sample).1;
-            let right = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 7 + reverse_sample).1;
-            assert_components_close(left, right);
-
-            let up = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 8 + sample).1;
-            let down = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 9 + reverse_sample).1;
-            assert_components_close(up, down);
-
-            let roll = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 10 + sample).1;
-            let roll_return = sample_pose(STARTUP_SAMPLES + PHASE_SAMPLES * 11 + reverse_sample).1;
-            assert_components_close(roll, roll_return);
+    fn continuous_motion_has_a_smooth_opposite_return() {
+        let item = InputSimulationItem::MoveLeftRight;
+        for sample in [0, 30, 75, 150, 225, 300] {
+            let outbound = generate(item, sample + 1);
+            let returned = generate(item, PHASE_SAMPLES + sample + 1);
+            let path = component_path(item).unwrap();
+            assert!((outbound.components[path] + returned.components[path]).abs() < 1e-12);
         }
     }
 
     #[test]
-    fn playback_emits_one_declared_raw_sample_contract() {
-        let mut playback = SimulationPlayback::default();
-        let first = playback.sample(4, 100);
-        let second = playback.sample(5, 200);
-        assert_eq!(first.raw.sequence, 4);
-        assert_eq!(first.raw.source_id, SOURCE_ID);
-        assert!(first.raw.position_m.is_some());
-        assert!(first.raw.orientation_xyzw.is_some());
-        assert_eq!(
-            first.raw.components,
-            BTreeMap::from([
-                (START_STOP_COMPONENT.into(), 1.0),
-                (PRIMARY_TOOL_COMPONENT.into(), 1.0),
-            ])
+    fn continuous_items_finish_with_a_stop_toggle() {
+        let sample = generate(
+            InputSimulationItem::ToolHelicalMotion,
+            PHASE_SAMPLES * 2 + 1,
         );
-        assert_eq!(source_info().available_components.len(), 2);
-        assert_eq!(
-            source_info().available_components[0].path,
-            START_STOP_COMPONENT
-        );
-        assert_eq!(
-            source_info().available_components[1].path,
-            PRIMARY_TOOL_COMPONENT
-        );
-        assert_eq!(first.state.elapsed_s, Some(0.0));
-        assert_eq!(second.state.elapsed_s, Some(0.01));
+        assert!(sample.complete);
+        assert_eq!(sample.components[START_STOP_COMPONENT], 1.0);
+        assert_eq!(sample.components["action/tool_helical_motion"], 0.0);
+    }
+
+    #[test]
+    fn feedback_runs_zero_to_one_hundred_to_zero() {
+        assert_eq!(feedback_sample(0).feedback, Some(0.0));
+        assert_eq!(feedback_sample(PHASE_SAMPLES).feedback, Some(100.0));
+        assert_eq!(feedback_sample(PHASE_SAMPLES * 2).feedback, Some(0.0));
+        assert!(feedback_sample(PHASE_SAMPLES * 2 + 1).complete);
     }
 }

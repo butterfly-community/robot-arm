@@ -1,39 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-type DiscoveryConfig = {
-  position_source_id?: string;
-  orientation_source_id?: string;
-  bindings?: Array<{
-    action: string;
-    source_id?: string;
-    configured_components: string[];
-    invert: boolean;
-  }>;
-  feedback_bindings?: Array<{
-    action: string;
-    source_id?: string;
-    capability_path?: string;
-  }>;
-};
-
-function inputConfig(discovery: DiscoveryConfig) {
-  return {
-    positionSource: discovery.position_source_id ?? null,
-    orientationSource: discovery.orientation_source_id ?? null,
-    bindings: (discovery.bindings ?? []).map((binding) => ({
-      action: binding.action,
-      sourceId: binding.source_id ?? null,
-      components: binding.configured_components,
-      invert: binding.invert,
-    })),
-    feedbackBindings: (discovery.feedback_bindings ?? []).map((binding) => ({
-      action: binding.action,
-      sourceId: binding.source_id ?? null,
-      capabilityPath: binding.capability_path ?? null,
-    })),
-  };
-}
-
 test.beforeEach(async ({ request }) => {
   await expect
     .poll(
@@ -72,9 +38,10 @@ for (const [path, title] of pages) {
     await expect(card.locator(".card-content")).toBeHidden();
     await toggle.click();
     await expect(card.locator(".card-content")).toBeVisible();
+    const diagnosticsTitle = path === "tracking" ? "实时诊断" : "排障数据";
     const diagnostics = page
       .locator(".card-toggle")
-      .filter({ hasText: "排障数据" });
+      .filter({ hasText: diagnosticsTitle });
     await expect(diagnostics).toHaveAttribute("aria-expanded", "false");
     await diagnostics.click();
     await expect(
@@ -108,7 +75,11 @@ for (const [path] of pages) {
     page,
   }) => {
     await page.goto(`/${path}/`);
-    await page.locator(".card-toggle").filter({ hasText: "排障数据" }).click();
+    const diagnosticsTitle = path === "tracking" ? "实时诊断" : "排障数据";
+    await page
+      .locator(".card-toggle")
+      .filter({ hasText: diagnosticsTitle })
+      .click();
     const details = page.locator("details.diagnostics").first();
     await details.locator("summary").click();
     const state = page.locator("pre").first();
@@ -129,158 +100,103 @@ for (const [path] of pages) {
   });
 }
 
-test("simulation control uses the normal input and spatial path", async ({
+test("tracking exposes the complete action catalog and sends every demo item", async ({
   page,
-  request,
 }) => {
-  const initialTracking = await (
-    await request.get("/api/tracking/state")
-  ).json();
-  const initialDiscovery = initialTracking.values.discovery_state;
-  const originalInputConfig = inputConfig(initialDiscovery);
-  await request.post("/api/arm-execution/disconnect", {
-    data: {
-      schema_version: 2,
-      request_id: "browser-simulation-disconnect",
-      action: "disconnect",
-      fields: {},
-    },
+  const actions = [
+    ["纵向平移", "move_forward_back", true, "演示动作"],
+    ["横向平移", "move_left_right", true, "演示动作"],
+    ["垂直平移", "move_up_down", true, "演示动作"],
+    ["定点垂直旋转", "tool_pitch", true, "演示动作"],
+    ["定点水平旋转", "tool_yaw", true, "演示动作"],
+    ["轴向旋转", "tool_roll", true, "演示动作"],
+    ["垂直圆弧", "front_pitch", true, "演示动作"],
+    ["水平圆弧", "horizontal_arc", true, "演示动作"],
+    ["夹爪张开", "primary_tool_open", true, "测试动作"],
+    ["夹爪开合", "primary_tool", true, "演示动作"],
+    ["接管控制", "start_stop", false, "测试动作"],
+    ["急停", "emergency_stop", false, "测试动作"],
+    ["工具轴向平移", "tool_axis_translation", true, "演示动作"],
+    ["工具轴向螺旋", "tool_helical_motion", true, "演示动作"],
+  ] as const;
+  const simulationRequests: Array<Record<string, unknown>> = [];
+  let prepareRequests = 0;
+  await page.route("**/api/motion/prepare-relative", async (route) => {
+    prepareRequests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ original_error: null }),
+    });
+  });
+  await page.route("**/api/tracking/simulation", async (route) => {
+    simulationRequests.push(route.request().postDataJSON());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ original_error: null }),
+    });
   });
   await page.goto("/tracking/");
-  try {
-    const simulationStarted = page.waitForResponse(
-      (response) =>
-        response.url().endsWith("/api/tracking/simulation") &&
-        response.request().method() === "POST",
-    );
-    await page.getByRole("button", { name: "启动模拟数据" }).click();
-    await simulationStarted;
-    await expect(
-      page.getByRole("button", { name: "停止模拟数据" }),
-    ).toBeVisible();
-    const renderCadence = await page.evaluate(async () => {
-      const metrics = [...document.querySelectorAll(".metric")];
-      const rate = metrics
-        .find((metric) => metric.textContent?.includes("采集频率"))
-        ?.querySelector("strong");
-      if (!rate) throw new Error("缺少采集频率指标");
-      let rateRenders = 0;
-      const rateObserver = new MutationObserver(() => rateRenders++);
-      rateObserver.observe(rate, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-      await new Promise((resolve) => window.setTimeout(resolve, 1200));
-      rateObserver.disconnect();
-      return { rateRenders };
-    });
-    expect(renderCadence.rateRenders).toBeLessThanOrEqual(2);
-    const inputTest = page.locator("section.card").filter({
-      has: page.getByText("输入测试", { exact: true }),
-    });
-    await inputTest
-      .getByLabel("选择测试设备")
-      .selectOption("simulation:generic-6dof-cycle");
-    await expect(inputTest.getByText(/button\/start_stop/)).toBeVisible();
-    await expect
-      .poll(async () => {
-        const response = await request.get("/api/spatial/state");
-        const state = await response.json();
-        return {
-          positionSource: state.values.spatial_config_state?.position_source_id,
-          orientationSource:
-            state.values.spatial_config_state?.orientation_source_id,
-          active: state.values.transformed_control?.active,
-        };
-      })
-      .toEqual({
-        positionSource: "simulation:generic-6dof-cycle",
-        orientationSource: "simulation:generic-6dof-cycle",
-        active: true,
-      });
-    await expect
-      .poll(async () => {
-        const response = await request.get("/api/tracking/state");
-        const state = await response.json();
-        const discovery = state.values.discovery_state;
-        const source = discovery.sources.find(
-          (candidate: { source_id: string }) =>
-            candidate.source_id === "simulation:generic-6dof-cycle",
-        );
-        return {
-          positionCapable: source?.position_capable,
-          orientationCapable: source?.orientation_capable,
-          components: source?.available_components?.map(
-            (component: { path: string }) => component.path,
-          ),
-          controlBinding: discovery.bindings.find(
-            (binding: { action: string }) => binding.action === "start_stop",
-          )?.configured_components,
-          primaryToolBinding: discovery.bindings.find(
-            (binding: { action: string }) => binding.action === "primary_tool",
-          )?.configured_components,
-          feedbackBinding: discovery.feedback_bindings.find(
-            (binding: { action: string }) => binding.action === "primary_tool",
-          ),
-        };
-      })
-      .toMatchObject({
-        positionCapable: true,
-        orientationCapable: true,
-        components: ["button/start_stop", "axis/primary_tool"],
-        controlBinding: ["button/start_stop"],
-        primaryToolBinding: ["axis/primary_tool"],
-        feedbackBinding: {
-          source_id: "virtual-feedback",
-          capability_path: "feedback/virtual",
-          applicable: true,
-        },
-      });
-    await expect(
-      page.getByRole("meter", { name: "网页虚拟力度反馈" }),
-    ).toBeVisible();
-    await expect(page.getByLabel("三维空间位置和设备自身姿态")).toHaveCount(0);
-    await page.goto("/spatial/");
-    const spatialViewer = page.getByLabel(
-      "空间节点转换后的空间位置和设备自身姿态",
-    );
-    await expect(spatialViewer).toHaveAttribute("data-pose-ready", "true");
-    for (const label of ["前后", "左右", "上下"]) {
-      await expect(page.getByText(label, { exact: true })).toBeVisible();
-    }
-  } finally {
-    await request.post("/api/tracking/simulation", {
-      data: {
-        schema_version: 2,
-        request_id: "browser-simulation-stop",
-        enabled: false,
-      },
-    });
+
+  const bindingCard = page.locator("section.card").filter({
+    has: page.getByText("功能与反馈绑定", { exact: true }),
+  });
+  await expect(bindingCard.locator(".action-group > h3")).toHaveText([
+    "TCP 基础自由度",
+    "圆弧复合",
+    "夹爪动作",
+    "控制动作",
+    "力度反馈",
+    "其他复合",
+  ]);
+  const details = bindingCard.locator("details.action-binding-item");
+  await expect(details).toHaveCount(15);
+  for (let index = 0; index < 15; index += 1) {
+    await expect(details.nth(index)).not.toHaveAttribute("open", "");
   }
-  await page.goto("/tracking/");
-  await expect(
-    page.getByRole("button", { name: "启动模拟数据" }),
-  ).toBeVisible();
-  await expect
-    .poll(async () => {
-      const response = await request.get("/api/tracking/state");
-      const state = await response.json();
-      const discovery = state.values.discovery_state;
-      return {
-        active: discovery?.simulation?.active,
-        hasSimulationSource: discovery?.sources?.some(
-          (source: { source_id: string }) =>
-            source.source_id === "simulation:generic-6dof-cycle",
-        ),
-        inputConfig: inputConfig(discovery),
-      };
-    })
-    .toEqual({
-      active: false,
-      hasSimulationSource: false,
-      inputConfig: originalInputConfig,
+
+  for (const [label, item, , buttonName] of actions) {
+    const previousRequestCount = simulationRequests.length;
+    const detail = details.filter({
+      has: page.getByText(label, { exact: true }),
     });
+    await detail.locator("summary").click();
+    await expect(detail.getByText("输入语义", { exact: true })).toBeVisible();
+    await expect(detail.getByText("保持不变", { exact: true })).toBeVisible();
+    await detail.getByRole("button", { name: buttonName }).click();
+    await expect
+      .poll(() => simulationRequests.length)
+      .toBe(previousRequestCount + 1);
+    expect(simulationRequests.at(-1)).toMatchObject({
+      schema_version: 3,
+      enabled: true,
+      item,
+    });
+    await detail.locator("summary").click();
+  }
+
+  const feedbackDetail = details.filter({
+    has: page.getByText("夹爪力度反馈", { exact: true }),
+  });
+  await feedbackDetail.locator("summary").click();
+  await feedbackDetail.getByRole("button", { name: "测试反馈" }).click();
+  expect(simulationRequests.at(-1)).toMatchObject({
+    schema_version: 3,
+    enabled: true,
+    item: "primary_tool_feedback",
+  });
+  expect(simulationRequests).toHaveLength(15);
+  expect(prepareRequests).toBe(
+    actions.filter(([, , prepare]) => prepare).length,
+  );
+
+  const diagnostics = page
+    .locator("section.card")
+    .filter({ has: page.getByText("实时诊断", { exact: true }) });
+  await expect(diagnostics.locator(".card-toggle")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(page.getByText("启动模拟数据", { exact: true })).toHaveCount(0);
 });
 
 test("tracking page applies and displays a controller binding", async ({
@@ -336,53 +252,29 @@ test("tracking page applies and displays a controller binding", async ({
   const bindingCard = page.locator("section.card").filter({
     has: page.getByText("功能与反馈绑定", { exact: true }),
   });
-  const semantics = bindingCard.locator(".motion-semantics-table");
+  const verticalBinding = bindingCard
+    .locator("details.action-binding-item")
+    .filter({
+      has: page.getByText("垂直平移", { exact: true }),
+    });
+  await verticalBinding.locator("summary").click();
+  await expect(verticalBinding.getByText("正向上移，负向下移")).toBeVisible();
   await expect(
-    bindingCard.getByText(
-      "方向以机器人底座为准：前后、左右位于水平面，上下是竖直方向；不是屏幕或手柄自身方向。",
-      { exact: true },
-    ),
+    verticalBinding.getByText("TCP 沿竖直方向直线平移"),
   ).toBeVisible();
-  const verticalSemantics = semantics
-    .locator("tbody tr")
-    .filter({ hasText: "上下移动" });
-  await expect(verticalSemantics.locator("td").nth(2)).toHaveText(
-    "夹爪末端沿竖直方向直线平移",
-  );
-  await expect(verticalSemantics.locator("td").nth(3)).toHaveText(
-    "水平面内的前后、左右位置和夹爪朝向不变",
-  );
-  await expect(
-    semantics.locator("tbody tr").filter({ hasText: "左旋 / 右旋" }),
-  ).toContainText("绕工具后部枢轴在水平面走圆弧");
-  await expect(
-    semantics.locator("tbody tr").filter({ hasText: "夹爪连续控制" }),
-  ).toContainText("输入从 0 到 1，对应夹爪从 90° 到 0° 线性运动");
-  const verticalBinding = bindingCard.locator("fieldset.field").filter({
-    has: page.getByText("上下移动", { exact: true }),
-  });
-  await verticalBinding.locator("select").nth(1).selectOption("buttons");
-  await expect(verticalBinding.locator("select").nth(2)).toHaveAccessibleName(
-    "上下移动下移按钮",
-  );
-  await expect(verticalBinding.locator("select").nth(3)).toHaveAccessibleName(
-    "上下移动上移按钮",
-  );
-  const firstBinding = bindingCard.locator(".binding-grid .field").first();
-  const firstBindingControls = firstBinding.locator(".binding-row");
-  await expect(firstBinding).toHaveCSS("border-top-width", "0px");
-  await expect(firstBindingControls).toHaveCSS("border-top-width", "1px");
-  const titleBox = await firstBinding
-    .locator("legend .localized-label > span")
-    .first()
+  await verticalBinding.getByLabel("垂直平移输入方式").selectOption("buttons");
+  await expect(verticalBinding.getByLabel("垂直平移下移")).toBeVisible();
+  await expect(verticalBinding.getByLabel("垂直平移上移")).toBeVisible();
+  const summaryBox = await verticalBinding.locator("summary").boundingBox();
+  const contentBox = await verticalBinding
+    .locator(".action-description")
     .boundingBox();
-  const controlsBox = await firstBindingControls.boundingBox();
-  expect(titleBox).not.toBeNull();
-  expect(controlsBox).not.toBeNull();
+  expect(summaryBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
   expect(
-    (controlsBox?.y ?? 0) - ((titleBox?.y ?? 0) + (titleBox?.height ?? 0)),
-    "功能标题与控件线框之间应保留明确间距",
-  ).toBeGreaterThanOrEqual(10);
+    (contentBox?.y ?? 0) - ((summaryBox?.y ?? 0) + (summaryBox?.height ?? 0)),
+    "动作摘要与展开内容之间应保留明确间距",
+  ).toBeGreaterThanOrEqual(8);
 
   const selectedRuntimeSource = before.values.discovery_state?.sources?.find(
     (source: { available_components?: Array<{ action_type?: string }> }) =>
@@ -415,14 +307,14 @@ test("tracking page applies and displays a controller binding", async ({
       }),
     );
   try {
-    const field = page.locator("fieldset.field").filter({
-      has: page.getByText("启动和停止控制", { exact: true }),
+    const field = bindingCard.locator("details.action-binding-item").filter({
+      has: page.getByText("接管控制", { exact: true }),
     });
-    const sourceSelect = field.locator("select").nth(0);
+    await field.locator("summary").click();
+    const sourceSelect = field.getByLabel("接管控制输入设备");
     await sourceSelect.selectOption(selectedRuntimeSource.source_id);
-    await page.waitForTimeout(300);
     await expect(sourceSelect).toHaveValue(selectedRuntimeSource.source_id);
-    const componentSelect = field.locator("select").nth(2);
+    const componentSelect = field.getByLabel("接管控制设备输入");
     await expect
       .poll(() => componentSelect.locator("option").count())
       .toBeGreaterThan(1);
@@ -467,7 +359,7 @@ test("tracking page applies and displays a controller binding", async ({
       ) ?? [];
     await request.post("/api/tracking/bindings", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-bindings-restore",
         bindings: original,
         feedback_bindings: feedbackBindings,
@@ -517,10 +409,11 @@ test("virtual feedback is selectable, draggable, and visible across pages", asyn
 
   try {
     await page.goto("/tracking/");
-    const field = page.locator("fieldset.field").filter({
-      has: page.getByText("夹爪力度回馈", { exact: true }),
+    const field = page.locator("details.action-binding-item").filter({
+      has: page.getByText("夹爪力度反馈", { exact: true }),
     });
-    await field.locator("select").first().selectOption("virtual-feedback");
+    await field.locator("summary").click();
+    await field.getByLabel("夹爪力度反馈设备").selectOption("virtual-feedback");
     const applied = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/tracking/bindings") &&
@@ -548,7 +441,7 @@ test("virtual feedback is selectable, draggable, and visible across pages", asyn
   } finally {
     await request.post("/api/tracking/bindings", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-virtual-feedback-restore",
         bindings: inputBindings,
         feedback_bindings: feedbackBindings,
@@ -563,7 +456,7 @@ test("execution page renders colored feedback and command models", async ({
 }) => {
   await request.post("/api/arm-execution/disconnect", {
     data: {
-      schema_version: 2,
+      schema_version: 3,
       request_id: "browser-disconnect",
       action: "disconnect",
       fields: {},
@@ -594,7 +487,7 @@ test("spatial component switches use the server state and keyboard", async ({
   const initial = await (await request.get("/api/spatial/state")).json();
   const original = initial.values.spatial_config_state.switches;
   await page.goto("/spatial/");
-  const translation = page.getByRole("checkbox", { name: "空间位置移动" });
+  const translation = page.getByRole("checkbox", { name: "底座坐标平移" });
   try {
     await expect(translation).toBeChecked({ checked: original.translation });
     await translation.focus();
@@ -609,7 +502,7 @@ test("spatial component switches use the server state and keyboard", async ({
   } finally {
     await request.patch("/api/spatial/config", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-switch-restore",
         patch: { switches: original },
       },
@@ -642,7 +535,7 @@ test("motion named target is submitted by the metadata-driven page", async ({
 }) => {
   await request.post("/api/arm-execution/disconnect", {
     data: {
-      schema_version: 2,
+      schema_version: 3,
       request_id: "browser-motion-disconnect",
       action: "disconnect",
       fields: {},
@@ -655,7 +548,7 @@ test("motion named target is submitted by the metadata-driven page", async ({
   try {
     await request.post("/api/motion/actuator", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-named-target-open-tool",
         model_revision: model.model_revision,
         actuator_key: model.tool_actuators[0].key,
@@ -696,7 +589,7 @@ test("motion named target is submitted by the metadata-driven page", async ({
   } finally {
     await request.post("/api/motion/mode", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-motion-mode-restore",
         mode: originalMode,
       },
@@ -710,7 +603,7 @@ test("motion actuator slider submits and restores a software command", async ({
 }) => {
   await request.post("/api/arm-execution/disconnect", {
     data: {
-      schema_version: 2,
+      schema_version: 3,
       request_id: "browser-actuator-disconnect",
       action: "disconnect",
       fields: {},
@@ -771,7 +664,7 @@ test("motion actuator slider submits and restores a software command", async ({
     ).json();
     await request.post("/api/motion/actuator", {
       data: {
-        schema_version: 2,
+        schema_version: 3,
         request_id: "browser-actuator-restore",
         model_revision: current.values.robot_model_info.model_revision,
         actuator_key: current.values.robot_model_info.tool_actuators.at(-1).key,
@@ -795,7 +688,7 @@ test("execution serial discovery is explicit and connection errors stay visible"
 }) => {
   await request.post("/api/arm-execution/disconnect", {
     data: {
-      schema_version: 2,
+      schema_version: 3,
       request_id: "browser-error-disconnect",
       action: "disconnect",
       fields: {},

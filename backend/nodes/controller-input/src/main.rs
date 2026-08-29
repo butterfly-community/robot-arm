@@ -19,11 +19,12 @@ use one_euro_filter::OneEuroFilter;
 use robot_arm_messages::{
     AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
     ActionFeedbackBindingState, ActionType, ActuatorActions, ApplyInputBindingsRequest,
-    BooleanActionSample, ControlInputFrame, FloatActionSample, InputBindingState,
+    BooleanActionSample, ControlInputFrame, FloatActionSample, INPUT_ACTIONS, InputBindingState,
     InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo,
-    InputSimulationRequest, InputSimulationState, InputSourceInfo, InputStreamDiagnostics,
-    PoseComponent, PoseFlags, RequestAction, RequestResult, SCHEMA_VERSION,
-    SelectPoseSourceRequest, SelectedInputSourceState, ServiceState, from_arrow, to_arrow,
+    InputSimulationItem, InputSimulationRequest, InputSimulationState, InputSourceInfo,
+    InputStreamDiagnostics, PoseComponent, PoseFlags, RequestAction, RequestResult, SCHEMA_VERSION,
+    SelectPoseSourceRequest, SelectedInputSourceState, ServiceState, from_arrow, input_action_spec,
+    to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -32,7 +33,6 @@ use sdl3::{
 };
 use serde::{Deserialize, Serialize};
 use simulation::{
-    DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
     SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT as SIMULATION_START_STOP_COMPONENT,
     SimulationPlayback,
 };
@@ -49,18 +49,6 @@ const FILTER_NOMINAL_RATE_HZ: f64 = 120.0;
 const FILTER_MIN_CUTOFF_HZ: f64 = 1.0;
 const FILTER_BETA: f64 = 0.1;
 const FILTER_DERIVATIVE_CUTOFF_HZ: f64 = 1.0;
-
-const ACTIONS: [(&str, ActionType); 9] = [
-    ("start_stop", ActionType::Boolean),
-    ("emergency_stop", ActionType::Boolean),
-    ("primary_tool_open", ActionType::Boolean),
-    ("primary_tool", ActionType::Float),
-    ("move_forward_back", ActionType::Float),
-    ("move_left_right", ActionType::Float),
-    ("move_up_down", ActionType::Float),
-    ("front_pitch", ActionType::Float),
-    ("horizontal_arc", ActionType::Float),
-];
 
 const SDL_AXES: [(Axis, &str, &str); 6] = [
     (Axis::LeftX, "axis/left_x", "左摇杆横向"),
@@ -514,9 +502,17 @@ impl ControllerInput {
     fn tick(&mut self) -> Option<(Option<AbsolutePoseFrame>, ControlInputFrame)> {
         self.drain();
         let now = now_ns();
-        if let Some(simulation) = self.simulation.as_mut() {
-            let sample = simulation.sample(self.next_sequence, now);
+        let simulation_sample = self
+            .simulation
+            .as_mut()
+            .map(|simulation| simulation.sample(self.next_sequence, now));
+        let mut finish_simulation = false;
+        if let Some(sample) = simulation_sample {
             self.simulation_state = sample.state;
+            if let Some(feedback) = sample.feedback {
+                self.apply_feedback(feedback);
+            }
+            finish_simulation = sample.complete;
             self.accept_sample(sample.raw);
         }
         self.update_continuous_inputs(Instant::now(), monotonic_ns() as f64 / 1_000_000_000.0);
@@ -536,6 +532,7 @@ impl ControllerInput {
                     .bindings
                     .iter()
                     .any(|binding| binding.source_id == source_id)
+                || (self.simulation.is_some() && source_id == SIMULATION_SOURCE_ID)
         };
         let changed = self.samples.iter().any(|(source_id, sample)| {
             relevant(source_id)
@@ -580,6 +577,9 @@ impl ControllerInput {
         );
         self.next_sequence += 1;
         self.previous_control = Some(control.clone());
+        if finish_simulation {
+            self.stop_simulation();
+        }
         Some((pose, control))
     }
 
@@ -665,47 +665,69 @@ impl ControllerInput {
         &mut self,
         request: InputSimulationRequest,
     ) -> RequestResult<InputSimulationState> {
-        if request.enabled && self.simulation.is_none() {
+        let error = if request.enabled {
+            let Some(item) = request.item else {
+                return RequestResult {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    acknowledged_action: RequestAction::Apply,
+                    value: Some(self.simulation_state.clone()),
+                    original_error: Some("启动演示必须指定测试项目".into()),
+                };
+            };
+            if self.simulation.is_some() {
+                self.stop_simulation();
+            }
             self.config_before_simulation = Some(self.config.clone());
-            self.config = simulation_config(&self.config);
+            self.config = simulation_config(&self.config, item);
             self.replace_driver_sources(simulation::driver_info(), vec![simulation::source_info()]);
-            self.simulation = Some(SimulationPlayback::default());
+            self.simulation = Some(SimulationPlayback::new(item));
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 active: true,
+                item: Some(item),
                 phase: Some("starting".into()),
                 elapsed_s: Some(0.0),
             };
             self.last_published_sequences.clear();
             self.previous_control = None;
             self.virtual_feedback = None;
-        } else if !request.enabled && self.simulation.take().is_some() {
-            self.replace_driver_sources(simulation::driver_info(), vec![]);
-            if let Some(config) = self.config_before_simulation.take() {
-                self.config = config;
-            }
-            self.simulation_state = InputSimulationState {
-                schema_version: SCHEMA_VERSION,
-                ..Default::default()
-            };
-            self.last_published_sequences.clear();
-            self.pose_dirty = true;
-            self.previous_control = None;
-            if !self
-                .config
-                .feedback_bindings
-                .iter()
-                .any(is_virtual_feedback)
-            {
-                self.virtual_feedback = None;
-            }
-        }
+            None
+        } else {
+            self.stop_simulation();
+            None
+        };
         RequestResult {
             schema_version: SCHEMA_VERSION,
             request_id: request.request_id,
             acknowledged_action: RequestAction::Apply,
             value: Some(self.simulation_state.clone()),
-            original_error: None,
+            original_error: error,
+        }
+    }
+
+    fn stop_simulation(&mut self) {
+        if self.simulation.take().is_none() {
+            return;
+        }
+        self.replace_driver_sources(simulation::driver_info(), vec![]);
+        if let Some(config) = self.config_before_simulation.take() {
+            self.config = config;
+        }
+        self.simulation_state = InputSimulationState {
+            schema_version: SCHEMA_VERSION,
+            ..Default::default()
+        };
+        self.last_published_sequences.clear();
+        self.pose_dirty = true;
+        self.previous_control = None;
+        if !self
+            .config
+            .feedback_bindings
+            .iter()
+            .any(is_virtual_feedback)
+        {
+            self.virtual_feedback = None;
         }
     }
 
@@ -732,14 +754,14 @@ impl ControllerInput {
     }
 
     fn binding_states(&self) -> Vec<InputBindingState> {
-        ACTIONS
+        INPUT_ACTIONS
             .iter()
-            .map(|(action, action_type)| {
+            .map(|spec| {
                 let binding = self
                     .config
                     .bindings
                     .iter()
-                    .find(|value| value.action == *action);
+                    .find(|value| value.action == spec.key);
                 let sample = binding.and_then(|value| self.samples.get(&value.source_id));
                 let components = binding
                     .map(|value| value.component_paths.clone())
@@ -756,8 +778,8 @@ impl ControllerInput {
                     })
                     .unwrap_or(0.0);
                 InputBindingState {
-                    action: (*action).into(),
-                    action_type: *action_type,
+                    action: spec.key.into(),
+                    action_type: spec.action_type,
                     source_id: binding.map(|value| value.source_id.clone()),
                     invert: binding.is_some_and(|value| value.invert),
                     configured_components: components,
@@ -864,36 +886,46 @@ fn save_input_config(path: &Path, config: &InputConfig) -> Result<()> {
     save(path, config)
 }
 
-fn simulation_config(config: &InputConfig) -> InputConfig {
+fn simulation_config(config: &InputConfig, item: InputSimulationItem) -> InputConfig {
     let mut config = config.clone();
-    let selection = PoseSourceSelection {
-        driver_id: SIMULATION_DRIVER_ID.into(),
-        device_id: simulation::DEVICE_ID.into(),
-        source_id: SIMULATION_SOURCE_ID.into(),
-    };
-    config.position_source = Some(selection.clone());
-    config.orientation_source = Some(selection);
-    config.bindings = vec![
-        ActionBinding {
+    config.position_source = None;
+    config.orientation_source = None;
+    config.bindings = if item == InputSimulationItem::PrimaryToolFeedback {
+        vec![]
+    } else {
+        let action = simulation::action_key(item).expect("input item has an action");
+        let action_type = input_action_spec(action)
+            .map(|spec| spec.action_type)
+            .expect("simulation item is declared in the action catalog");
+        let mut bindings = vec![ActionBinding {
             action: "start_stop".into(),
             action_type: ActionType::Boolean,
             source_id: SIMULATION_SOURCE_ID.into(),
             component_paths: vec![SIMULATION_START_STOP_COMPONENT.into()],
             invert: false,
-        },
-        ActionBinding {
+        }];
+        if action != "start_stop" {
+            bindings.push(ActionBinding {
+                action: action.into(),
+                action_type,
+                source_id: SIMULATION_SOURCE_ID.into(),
+                component_paths: vec![
+                    simulation::component_path(item)
+                        .expect("input item has a component")
+                        .into(),
+                ],
+                invert: false,
+            });
+        }
+        bindings
+    };
+    if config.feedback_bindings.is_empty() {
+        config.feedback_bindings.push(ActionFeedbackBinding {
             action: "primary_tool".into(),
-            action_type: ActionType::Float,
-            source_id: SIMULATION_SOURCE_ID.into(),
-            component_paths: vec![SIMULATION_PRIMARY_TOOL_COMPONENT.into()],
-            invert: false,
-        },
-    ];
-    config.feedback_bindings = vec![ActionFeedbackBinding {
-        action: "primary_tool".into(),
-        source_id: VIRTUAL_FEEDBACK_SOURCE_ID.into(),
-        capability_path: VIRTUAL_FEEDBACK_CAPABILITY_PATH.into(),
-    }];
+            source_id: VIRTUAL_FEEDBACK_SOURCE_ID.into(),
+            capability_path: VIRTUAL_FEEDBACK_CAPABILITY_PATH.into(),
+        });
+    }
     config
 }
 
@@ -925,16 +957,18 @@ fn request_result(
 
 fn validate_bindings(bindings: &[ActionBinding]) -> Result<()> {
     for binding in bindings {
-        let expected = ACTIONS
-            .iter()
-            .find(|(action, _)| *action == binding.action)
+        let expected = input_action_spec(&binding.action)
             .ok_or_else(|| eyre!("未知 Action {}", binding.action))?
-            .1;
+            .action_type;
         if binding.action_type != expected {
             return Err(eyre!("Action {} 类型不匹配", binding.action));
         }
-        if binding.action == "start_stop" && binding.component_paths.len() != 1 {
-            return Err(eyre!("启动和停止控制必须绑定一个按钮"));
+        let component_count = binding.component_paths.len();
+        if expected == ActionType::Boolean && component_count != 1 {
+            return Err(eyre!("Action {} 必须绑定一个按钮", binding.action));
+        }
+        if expected == ActionType::Float && !matches!(component_count, 1 | 2) {
+            return Err(eyre!("Action {} 必须绑定一个轴或一对按钮", binding.action));
         }
     }
     Ok(())
@@ -1086,6 +1120,30 @@ fn evaluate_actions(
             "horizontal_arc",
             previous
                 .map(|frame| frame.horizontal_arc.value)
+                .unwrap_or(0.0),
+        ),
+        tool_pitch: float(
+            "tool_pitch",
+            previous.map(|frame| frame.tool_pitch.value).unwrap_or(0.0),
+        ),
+        tool_yaw: float(
+            "tool_yaw",
+            previous.map(|frame| frame.tool_yaw.value).unwrap_or(0.0),
+        ),
+        tool_roll: float(
+            "tool_roll",
+            previous.map(|frame| frame.tool_roll.value).unwrap_or(0.0),
+        ),
+        tool_axis_translation: float(
+            "tool_axis_translation",
+            previous
+                .map(|frame| frame.tool_axis_translation.value)
+                .unwrap_or(0.0),
+        ),
+        tool_helical_motion: float(
+            "tool_helical_motion",
+            previous
+                .map(|frame| frame.tool_helical_motion.value)
                 .unwrap_or(0.0),
         ),
     }
@@ -1807,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn simulation_uses_declared_pose_action_and_virtual_feedback_bindings() {
+    fn simulation_uses_one_declared_action_and_virtual_feedback_binding() {
         let original = InputConfig {
             position_source: Some(PoseSourceSelection {
                 driver_id: "physical-driver".into(),
@@ -1823,16 +1881,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let config = simulation_config(&original);
-        let selection = config.position_source.as_ref().unwrap();
-        assert_eq!(selection.source_id, SIMULATION_SOURCE_ID);
-        assert_eq!(
-            config
-                .orientation_source
-                .as_ref()
-                .map(|source| source.source_id.as_str()),
-            Some(SIMULATION_SOURCE_ID)
-        );
+        let config = simulation_config(&original, InputSimulationItem::PrimaryTool);
+        assert!(config.position_source.is_none());
+        assert!(config.orientation_source.is_none());
         assert_eq!(config.bindings.len(), 2);
         assert_eq!(config.bindings[0].action, "start_stop");
         assert_eq!(
@@ -1840,10 +1891,7 @@ mod tests {
             [SIMULATION_START_STOP_COMPONENT]
         );
         assert_eq!(config.bindings[1].action, "primary_tool");
-        assert_eq!(
-            config.bindings[1].component_paths,
-            [SIMULATION_PRIMARY_TOOL_COMPONENT]
-        );
+        assert_eq!(config.bindings[1].component_paths, ["action/primary_tool"]);
         assert_eq!(config.feedback_bindings.len(), 1);
         assert!(is_virtual_feedback(&config.feedback_bindings[0]));
         assert_eq!(
@@ -1851,31 +1899,30 @@ mod tests {
             "physical-source"
         );
 
-        let source = simulation::source_info();
-        let sample = SimulationPlayback::default().sample(1, 1).raw;
-        let sources = BTreeMap::from([(source.source_id.clone(), source)]);
+        let sample = SimulationPlayback::new(InputSimulationItem::PrimaryTool)
+            .sample(1, 1)
+            .raw;
         let samples = BTreeMap::from([(sample.source_id.clone(), sample)]);
-        let pose = combined_pose_frame(
-            config.position_source.as_ref(),
-            config.orientation_source.as_ref(),
-            &sources,
-            &samples,
-            1,
-            1,
-        );
         let control = evaluate_actions(&samples, &config.bindings, &BTreeMap::new(), None, 1, 1);
-        assert_eq!(
-            pose.position_source_id.as_deref(),
-            Some(SIMULATION_SOURCE_ID)
-        );
-        assert_eq!(
-            pose.orientation_source_id.as_deref(),
-            Some(SIMULATION_SOURCE_ID)
-        );
         assert!(control.start_stop.is_active);
         assert!(control.start_stop.value);
         assert!(control.actuator_actions.primary_tool.is_active);
         assert_eq!(control.actuator_actions.primary_tool.value, 1.0);
+
+        let selected_feedback = ActionFeedbackBinding {
+            action: "primary_tool".into(),
+            source_id: "physical-source".into(),
+            capability_path: "feedback/trigger".into(),
+        };
+        let configured = InputConfig {
+            feedback_bindings: vec![selected_feedback.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            simulation_config(&configured, InputSimulationItem::PrimaryToolFeedback)
+                .feedback_bindings,
+            [selected_feedback]
+        );
     }
 
     #[test]
@@ -2282,5 +2329,45 @@ mod tests {
         };
 
         assert!(is_virtual_feedback(&binding));
+    }
+
+    #[test]
+    fn action_catalog_contains_the_fourteen_business_inputs_once() {
+        let actual = INPUT_ACTIONS
+            .iter()
+            .map(|action| action.key)
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from([
+            "start_stop",
+            "emergency_stop",
+            "primary_tool_open",
+            "primary_tool",
+            "move_forward_back",
+            "move_left_right",
+            "move_up_down",
+            "front_pitch",
+            "horizontal_arc",
+            "tool_pitch",
+            "tool_yaw",
+            "tool_roll",
+            "tool_axis_translation",
+            "tool_helical_motion",
+        ]);
+        assert_eq!(INPUT_ACTIONS.len(), 14);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            input_action_spec("tool_axis_translation").unwrap().domains,
+            robot_arm_messages::ActionDomains {
+                position: true,
+                orientation: false,
+            }
+        );
+        assert_eq!(
+            input_action_spec("tool_helical_motion").unwrap().domains,
+            robot_arm_messages::ActionDomains {
+                position: true,
+                orientation: true,
+            }
+        );
     }
 }

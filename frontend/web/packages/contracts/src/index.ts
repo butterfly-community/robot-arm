@@ -1,4 +1,4 @@
-export const schemaVersion = 2;
+export const schemaVersion = 3;
 export const virtualFeedbackTarget = {
   sourceId: "virtual-feedback",
   capabilityPath: "feedback/virtual",
@@ -177,6 +177,257 @@ export interface ControlInputFrame {
   move_up_down: FloatActionSample;
   front_pitch: FloatActionSample;
   horizontal_arc: FloatActionSample;
+  tool_pitch: FloatActionSample;
+  tool_yaw: FloatActionSample;
+  tool_roll: FloatActionSample;
+  tool_axis_translation: FloatActionSample;
+  tool_helical_motion: FloatActionSample;
+}
+
+export type InputSimulationItem =
+  | "move_forward_back"
+  | "move_left_right"
+  | "move_up_down"
+  | "tool_pitch"
+  | "tool_yaw"
+  | "tool_roll"
+  | "front_pitch"
+  | "horizontal_arc"
+  | "primary_tool_open"
+  | "primary_tool"
+  | "start_stop"
+  | "emergency_stop"
+  | "primary_tool_feedback"
+  | "tool_axis_translation"
+  | "tool_helical_motion";
+
+export const actionGroupOrder = [
+  "tcp",
+  "arc",
+  "gripper",
+  "control",
+  "feedback",
+  "compound",
+] as const;
+
+export const actionGroupLabels: Record<
+  (typeof actionGroupOrder)[number],
+  string
+> = {
+  tcp: "TCP 基础自由度",
+  arc: "圆弧复合",
+  gripper: "夹爪动作",
+  control: "控制动作",
+  feedback: "力度反馈",
+  compound: "其他复合",
+};
+
+export const inputActionCatalog = [
+  {
+    key: "move_forward_back",
+    group: "tcp",
+    label: "纵向平移",
+    actionType: "float",
+    domains: ["position"],
+    directions: ["后退", "前进"],
+    semantics: "正向前进，负向后退",
+    motion: "TCP 沿机器人前后方向直线平移",
+    invariant: "左右位置、高度和工具朝向不变",
+    reference: "机器人底座",
+    prepare: true,
+  },
+  {
+    key: "move_left_right",
+    group: "tcp",
+    label: "横向平移",
+    actionType: "float",
+    domains: ["position"],
+    directions: ["右移", "左移"],
+    semantics: "正向左移，负向右移",
+    motion: "TCP 沿机器人左右方向直线平移",
+    invariant: "前后位置、高度和工具朝向不变",
+    reference: "机器人底座",
+    prepare: true,
+  },
+  {
+    key: "move_up_down",
+    group: "tcp",
+    label: "垂直平移",
+    actionType: "float",
+    domains: ["position"],
+    directions: ["下移", "上移"],
+    semantics: "正向上移，负向下移",
+    motion: "TCP 沿竖直方向直线平移",
+    invariant: "前后位置、左右位置和工具朝向不变",
+    reference: "机器人底座",
+    prepare: true,
+  },
+  {
+    key: "tool_pitch",
+    group: "tcp",
+    label: "定点垂直旋转",
+    actionType: "float",
+    domains: ["orientation"],
+    directions: ["往下", "抬起"],
+    semantics: "正向抬起，负向往下",
+    motion: "工具以 TCP 为中心在竖直平面转动",
+    invariant: "TCP 三个位置分量不变",
+    reference: "最终 TCP",
+    prepare: true,
+  },
+  {
+    key: "tool_yaw",
+    group: "tcp",
+    label: "定点水平旋转",
+    actionType: "float",
+    domains: ["orientation"],
+    directions: ["向右", "向左"],
+    semantics: "正向向左，负向向右",
+    motion: "工具以 TCP 为中心在水平面转动",
+    invariant: "TCP 三个位置分量不变",
+    reference: "最终 TCP",
+    prepare: true,
+  },
+  {
+    key: "tool_roll",
+    group: "tcp",
+    label: "轴向旋转",
+    actionType: "float",
+    domains: ["orientation"],
+    directions: ["顺时针", "逆时针"],
+    semantics: "从机械臂后部朝尖端观察，正向逆时针、负向顺时针",
+    motion: "工具以 TCP 为中心绕自身前后轴旋转",
+    invariant: "TCP 三个位置分量不变",
+    reference: "工具自身轴",
+    prepare: true,
+  },
+  {
+    key: "front_pitch",
+    group: "arc",
+    label: "垂直圆弧",
+    actionType: "float",
+    domains: ["orientation"],
+    directions: ["前部往下", "前部抬起"],
+    semantics: "正向抬起，负向往下",
+    motion: "TCP 绕工具后部枢轴在竖直平面走圆弧",
+    components: ["TCP 垂直/纵向平移", "工具垂直姿态"],
+    invariant: "后部枢轴位置不变；不是整体上下平移",
+    reference: "工具后部枢轴",
+    prepare: true,
+  },
+  {
+    key: "horizontal_arc",
+    group: "arc",
+    label: "水平圆弧",
+    actionType: "float",
+    domains: ["orientation"],
+    directions: ["右旋", "左旋"],
+    semantics: "正向左旋，负向右旋",
+    motion: "TCP 绕工具后部枢轴在水平面走圆弧",
+    components: ["TCP 水平面平移", "工具水平姿态"],
+    invariant: "后部枢轴和 TCP 高度不变；不是自身轴旋转",
+    reference: "工具后部枢轴",
+    prepare: true,
+  },
+  {
+    key: "primary_tool_open",
+    group: "gripper",
+    label: "夹爪张开",
+    actionType: "boolean",
+    domains: [],
+    semantics: "按下触发",
+    motion: "夹爪打开到机械角 90°",
+    invariant: "J1–J6 目标不变",
+    reference: "夹爪执行器",
+    prepare: true,
+  },
+  {
+    key: "primary_tool",
+    group: "gripper",
+    label: "夹爪开合",
+    actionType: "float",
+    domains: [],
+    directions: ["张开", "闭合"],
+    semantics: "0 为张开，1 为闭合",
+    motion: "输入 0→1 对应机械角 90°→0°",
+    invariant: "J1–J6 目标不变",
+    reference: "夹爪执行器",
+    prepare: true,
+  },
+  {
+    key: "start_stop",
+    group: "control",
+    label: "接管控制",
+    actionType: "boolean",
+    domains: [],
+    semantics: "每次按下切换开始或结束",
+    motion: "开始时建立本轮相对原点，结束后停止相对控制",
+    invariant: "按键本身不产生位移",
+    reference: "控制过程",
+    prepare: false,
+  },
+  {
+    key: "emergency_stop",
+    group: "control",
+    label: "急停",
+    actionType: "boolean",
+    domains: [],
+    semantics: "按下触发",
+    motion: "结束当前控制过程",
+    invariant: "不产生新的相对目标；重新接管后可继续",
+    reference: "控制过程",
+    prepare: false,
+  },
+  {
+    key: "tool_axis_translation",
+    group: "compound",
+    label: "工具轴向平移",
+    actionType: "float",
+    domains: ["position"],
+    directions: ["向后", "向前"],
+    semantics: "正向由工具后部向尖端，负向相反",
+    motion: "TCP 沿当前工具前后轴直线平移",
+    components: ["工具轴方向平移"],
+    invariant: "工具朝向及垂直于工具轴的位移不变",
+    reference: "最终工具轴",
+    prepare: true,
+  },
+  {
+    key: "tool_helical_motion",
+    group: "compound",
+    label: "工具轴向螺旋",
+    actionType: "float",
+    domains: ["position", "orientation"],
+    directions: ["后退并顺时针", "前进并逆时针"],
+    semantics: "正向前进并逆时针旋转，负向反向返回",
+    motion: "TCP 沿当前工具轴平移并同时绕该轴旋转",
+    components: ["工具轴方向平移", "工具自身轴旋转"],
+    invariant: "垂直于工具轴的位移不变",
+    reference: "最终工具轴",
+    prepare: true,
+  },
+] as const;
+
+export const feedbackActionCatalog = [
+  {
+    key: "primary_tool",
+    item: "primary_tool_feedback",
+    group: "feedback",
+    label: "夹爪力度反馈",
+    semantics: "输出 0–100 的力度值",
+    motion: "不驱动机械臂，只发送到当前反馈目标",
+    invariant: "输入设备与反馈设备相互独立",
+    reference: "所选反馈能力",
+    prepare: false,
+  },
+] as const;
+
+export interface InputSimulationState {
+  schema_version: number;
+  active: boolean;
+  item?: InputSimulationItem | null;
+  phase?: string | null;
+  elapsed_s?: number | null;
 }
 
 export interface ActionFeedback {
@@ -197,5 +448,11 @@ export interface TransformedControlFrame {
   translation_m: [number, number, number];
   front_pitch_rad: number;
   horizontal_arc_rad: number;
+  tool_pitch_rad: number;
+  tool_yaw_rad: number;
+  tool_roll_rad: number;
+  tool_axis_translation_m: number;
+  tool_helical_translation_m: number;
+  tool_helical_roll_rad: number;
   actuator_actions: ActuatorActions;
 }

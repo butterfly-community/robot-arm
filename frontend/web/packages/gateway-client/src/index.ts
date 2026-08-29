@@ -1,4 +1,9 @@
-import type { Json, Namespace, Snapshot } from "@robot/contracts";
+import {
+  schemaVersion,
+  type Json,
+  type Namespace,
+  type Snapshot,
+} from "@robot/contracts";
 import { nanoid } from "nanoid/non-secure";
 import { useEffect, useRef, useState } from "react";
 
@@ -28,7 +33,7 @@ export async function post<T extends Json>(
 
 export function prepareRelativeControl(): Promise<Json> {
   return post("/api/motion/prepare-relative", {
-    schema_version: 2,
+    schema_version: schemaVersion,
     request_id: requestId(),
   });
 }

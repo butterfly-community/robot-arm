@@ -1,7 +1,8 @@
 use nalgebra::{Matrix3, Quaternion, Rotation3, UnitQuaternion, Vector3};
 use robot_arm_messages::{
-    AbsolutePoseFrame, ControlInputFrame, SCHEMA_VERSION, SpatialConfigPatch, SpatialConfigState,
-    TransformedControlFrame,
+    AbsolutePoseFrame, ActionDomains, ControlInputFrame, HorizontalOrientationMapping,
+    SCHEMA_VERSION, SpatialConfigPatch, SpatialConfigState, TransformedControlFrame,
+    VerticalOrientationMapping, input_action_spec,
 };
 
 #[derive(Clone, Debug)]
@@ -20,6 +21,12 @@ struct SessionAnchor {
     action_translation_m: [f64; 3],
     action_front_pitch_rad: f64,
     action_horizontal_arc_rad: f64,
+    action_tool_pitch_rad: f64,
+    action_tool_yaw_rad: f64,
+    action_tool_roll_rad: f64,
+    action_tool_axis_translation_m: f64,
+    action_tool_helical_translation_m: f64,
+    action_tool_helical_roll_rad: f64,
     last_action_time_ns: i64,
 }
 
@@ -61,6 +68,9 @@ impl SpatialTransform {
         }
         if let Some(value) = patch.action_arc_rad_per_s {
             self.config.action_arc_rad_per_s = value;
+        }
+        if let Some(value) = patch.orientation_mapping {
+            self.config.orientation_mapping = value;
         }
         if let Some(value) = patch.switches {
             self.config.switches = value;
@@ -173,6 +183,12 @@ impl SpatialTransform {
             action_translation_m: [0.0; 3],
             action_front_pitch_rad: 0.0,
             action_horizontal_arc_rad: 0.0,
+            action_tool_pitch_rad: 0.0,
+            action_tool_yaw_rad: 0.0,
+            action_tool_roll_rad: 0.0,
+            action_tool_axis_translation_m: 0.0,
+            action_tool_helical_translation_m: 0.0,
+            action_tool_helical_roll_rad: 0.0,
             last_action_time_ns: source_time_ns,
         });
         self.config.control_session_id = Some(id);
@@ -202,7 +218,12 @@ impl SpatialTransform {
             .current_pose
             .as_ref()
             .is_some_and(|value| value.orientation_source_capable);
-        if !has_absolute_position && let Some(rate) = self.config.action_translation_m_per_s {
+        if action_domains_available(
+            "move_forward_back",
+            has_absolute_position,
+            has_absolute_orientation,
+        ) && let Some(rate) = self.config.action_translation_m_per_s
+        {
             session.action_translation_m[0] +=
                 active_value(self.current_input.move_forward_back) * rate * elapsed_s;
             session.action_translation_m[1] +=
@@ -210,11 +231,44 @@ impl SpatialTransform {
             session.action_translation_m[2] +=
                 active_value(self.current_input.move_up_down) * rate * elapsed_s;
         }
-        if !has_absolute_orientation && let Some(rate) = self.config.action_arc_rad_per_s {
+        if action_domains_available(
+            "tool_axis_translation",
+            has_absolute_position,
+            has_absolute_orientation,
+        ) && let Some(rate) = self.config.action_translation_m_per_s
+        {
+            session.action_tool_axis_translation_m +=
+                active_value(self.current_input.tool_axis_translation) * rate * elapsed_s;
+        }
+        if action_domains_available(
+            "tool_pitch",
+            has_absolute_position,
+            has_absolute_orientation,
+        ) && let Some(rate) = self.config.action_arc_rad_per_s
+        {
             session.action_front_pitch_rad +=
                 active_value(self.current_input.front_pitch) * rate * elapsed_s;
             session.action_horizontal_arc_rad +=
                 active_value(self.current_input.horizontal_arc) * rate * elapsed_s;
+            session.action_tool_pitch_rad +=
+                active_value(self.current_input.tool_pitch) * rate * elapsed_s;
+            session.action_tool_yaw_rad +=
+                active_value(self.current_input.tool_yaw) * rate * elapsed_s;
+            session.action_tool_roll_rad +=
+                active_value(self.current_input.tool_roll) * rate * elapsed_s;
+        }
+        if action_domains_available(
+            "tool_helical_motion",
+            has_absolute_position,
+            has_absolute_orientation,
+        ) {
+            let value = active_value(self.current_input.tool_helical_motion) * elapsed_s;
+            if let Some(rate) = self.config.action_translation_m_per_s {
+                session.action_tool_helical_translation_m += value * rate;
+            }
+            if let Some(rate) = self.config.action_arc_rad_per_s {
+                session.action_tool_helical_roll_rad += value * rate;
+            }
         }
     }
 
@@ -239,27 +293,55 @@ impl SpatialTransform {
             },
             _ => session.action_translation_m,
         };
-        let (mut front_pitch_rad, mut horizontal_arc_rad) =
-            match (&session.pose, &self.current_pose) {
-                (Some(anchor), Some(current)) => {
-                    match (&anchor.orientation, &current.orientation) {
-                        (Some(anchor_orientation), Some(current_orientation)) => {
-                            let relative_rotation =
-                                anchor_orientation.inverse() * current_orientation;
-                            let local_scaled_axis = relative_rotation.scaled_axis();
-                            (-local_scaled_axis.x, local_scaled_axis.z)
-                        }
-                        _ => (
-                            session.action_front_pitch_rad,
-                            session.action_horizontal_arc_rad,
-                        ),
-                    }
+        let (
+            mut front_pitch_rad,
+            mut horizontal_arc_rad,
+            mut tool_pitch_rad,
+            mut tool_yaw_rad,
+            mut tool_roll_rad,
+        ) = match (&session.pose, &self.current_pose) {
+            (Some(anchor), Some(current)) => match (&anchor.orientation, &current.orientation) {
+                (Some(anchor_orientation), Some(current_orientation)) => {
+                    let relative_rotation = anchor_orientation.inverse() * current_orientation;
+                    let local_scaled_axis = relative_rotation.scaled_axis();
+                    let vertical = -local_scaled_axis.x;
+                    let horizontal = local_scaled_axis.z;
+                    let (front_pitch, tool_pitch) = match self.config.orientation_mapping.vertical {
+                        VerticalOrientationMapping::FrontPitch => (vertical, 0.0),
+                        VerticalOrientationMapping::ToolPitch => (0.0, vertical),
+                    };
+                    let (horizontal_arc, tool_yaw) =
+                        match self.config.orientation_mapping.horizontal {
+                            HorizontalOrientationMapping::HorizontalArc => (horizontal, 0.0),
+                            HorizontalOrientationMapping::ToolYaw => (0.0, horizontal),
+                        };
+                    (
+                        front_pitch,
+                        horizontal_arc,
+                        tool_pitch,
+                        tool_yaw,
+                        local_scaled_axis.y,
+                    )
                 }
                 _ => (
                     session.action_front_pitch_rad,
                     session.action_horizontal_arc_rad,
+                    session.action_tool_pitch_rad,
+                    session.action_tool_yaw_rad,
+                    session.action_tool_roll_rad,
                 ),
-            };
+            },
+            _ => (
+                session.action_front_pitch_rad,
+                session.action_horizontal_arc_rad,
+                session.action_tool_pitch_rad,
+                session.action_tool_yaw_rad,
+                session.action_tool_roll_rad,
+            ),
+        };
+        let mut tool_axis_translation_m = session.action_tool_axis_translation_m;
+        let mut tool_helical_translation_m = session.action_tool_helical_translation_m;
+        let mut tool_helical_roll_rad = session.action_tool_helical_roll_rad;
 
         if !self.config.switches.translation {
             translation_m = [0.0; 3];
@@ -269,6 +351,22 @@ impl SpatialTransform {
         }
         if !self.config.switches.horizontal_arc {
             horizontal_arc_rad = 0.0;
+        }
+        if !self.config.switches.tool_pitch {
+            tool_pitch_rad = 0.0;
+        }
+        if !self.config.switches.tool_yaw {
+            tool_yaw_rad = 0.0;
+        }
+        if !self.config.switches.tool_roll {
+            tool_roll_rad = 0.0;
+        }
+        if !self.config.switches.tool_axis_translation {
+            tool_axis_translation_m = 0.0;
+        }
+        if !self.config.switches.tool_helical_motion {
+            tool_helical_translation_m = 0.0;
+            tool_helical_roll_rad = 0.0;
         }
 
         TransformedControlFrame {
@@ -281,6 +379,12 @@ impl SpatialTransform {
             translation_m,
             front_pitch_rad,
             horizontal_arc_rad,
+            tool_pitch_rad,
+            tool_yaw_rad,
+            tool_roll_rad,
+            tool_axis_translation_m,
+            tool_helical_translation_m,
+            tool_helical_roll_rad,
             actuator_actions: self.current_input.actuator_actions.clone(),
         }
     }
@@ -301,6 +405,12 @@ impl SpatialTransform {
             translation_m: [0.0; 3],
             front_pitch_rad: 0.0,
             horizontal_arc_rad: 0.0,
+            tool_pitch_rad: 0.0,
+            tool_yaw_rad: 0.0,
+            tool_roll_rad: 0.0,
+            tool_axis_translation_m: 0.0,
+            tool_helical_translation_m: 0.0,
+            tool_helical_roll_rad: 0.0,
             actuator_actions: self.current_input.actuator_actions.clone(),
         }
     }
@@ -316,6 +426,20 @@ fn pressed(sample: robot_arm_messages::BooleanActionSample) -> bool {
 
 fn active_value(sample: robot_arm_messages::FloatActionSample) -> f64 {
     if sample.is_active { sample.value } else { 0.0 }
+}
+
+fn action_domains_available(
+    action: &str,
+    has_absolute_position: bool,
+    has_absolute_orientation: bool,
+) -> bool {
+    let ActionDomains {
+        position,
+        orientation,
+    } = input_action_spec(action)
+        .expect("spatial action is declared in the input action catalog")
+        .domains;
+    (!position || !has_absolute_position) && (!orientation || !has_absolute_orientation)
 }
 
 #[cfg(test)]
@@ -440,7 +564,7 @@ mod tests {
     fn generated_controller_cycle_covers_all_spatial_semantics() {
         let fixture: SyntheticFixture = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../tests/fixtures/controller-input-synthetic-cycle.json"
+            "/../../../tests/fixtures/controller-input-spatial-actions.json"
         )))
         .unwrap();
         assert_eq!(fixture.schema_version, SCHEMA_VERSION);
@@ -608,6 +732,7 @@ mod tests {
                 translation: false,
                 front_pitch: true,
                 horizontal_arc: false,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -677,6 +802,93 @@ mod tests {
         let output = transform.handle_control(second, 2);
         assert_eq!(output.translation_m, [0.2, 0.0, 0.0]);
         assert_eq!(output.front_pitch_rad, -0.5);
+    }
+
+    #[test]
+    fn action_only_source_integrates_all_new_tool_actions() {
+        let mut transform = SpatialTransform::new(SpatialConfigState::default());
+        let active = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        let mut first = control(1, true);
+        first.tool_pitch = active;
+        first.tool_yaw = active;
+        first.tool_roll = active;
+        first.tool_axis_translation = active;
+        first.tool_helical_motion = active;
+        transform.handle_control(first.clone(), 1);
+
+        let mut second = control(2, false);
+        second.tool_pitch = active;
+        second.tool_yaw = active;
+        second.tool_roll = active;
+        second.tool_axis_translation = active;
+        second.tool_helical_motion = active;
+        let output = transform.handle_control(second, 2);
+
+        assert_eq!(output.tool_pitch_rad, 0.1);
+        assert_eq!(output.tool_yaw_rad, 0.1);
+        assert_eq!(output.tool_roll_rad, 0.1);
+        assert_eq!(output.tool_axis_translation_m, 0.01);
+        assert_eq!(output.tool_helical_translation_m, 0.01);
+        assert_eq!(output.tool_helical_roll_rad, 0.1);
+    }
+
+    #[test]
+    fn absolute_orientation_uses_the_configured_action_semantics() {
+        let config = SpatialConfigState {
+            orientation_mapping: robot_arm_messages::OrientationActionMapping {
+                vertical: VerticalOrientationMapping::ToolPitch,
+                horizontal: HorizontalOrientationMapping::ToolYaw,
+            },
+            ..Default::default()
+        };
+        let mut transform = SpatialTransform::new(config);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
+        transform.handle_control(control(2, true), 2);
+        let output = output_after_pose(
+            &mut transform,
+            pose(
+                3,
+                [0.0; 3],
+                UnitQuaternion::from_scaled_axis(Vector3::new(-0.2, 0.0, 0.3)),
+            ),
+            3,
+        );
+        assert_eq!(output.front_pitch_rad, 0.0);
+        assert_eq!(output.horizontal_arc_rad, 0.0);
+        assert!(output.tool_pitch_rad > 0.0);
+        assert!(output.tool_yaw_rad > 0.0);
+    }
+
+    #[test]
+    fn helical_action_is_atomic_when_an_absolute_domain_is_selected() {
+        let mut transform = SpatialTransform::new(SpatialConfigState::default());
+        let mut position_only = pose(1, [0.0; 3], UnitQuaternion::identity());
+        position_only.orientation_source_capable = false;
+        position_only.flags.orientation_valid = false;
+        position_only.flags.orientation_tracked = false;
+        transform.update_pose(position_only);
+
+        let active = FloatActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: 1.0,
+        };
+        let mut first = control(2, true);
+        first.tool_pitch = active;
+        first.tool_helical_motion = active;
+        transform.handle_control(first, 2);
+        let mut second = control(3, false);
+        second.tool_pitch = active;
+        second.tool_helical_motion = active;
+        let output = transform.handle_control(second, 3);
+
+        assert_eq!(output.tool_pitch_rad, 0.1);
+        assert_eq!(output.tool_helical_translation_m, 0.0);
+        assert_eq!(output.tool_helical_roll_rad, 0.0);
     }
 
     #[test]

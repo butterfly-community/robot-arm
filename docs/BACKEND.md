@@ -4,13 +4,19 @@
 
 入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 通过公共 `json-config-store` 读取功能 Action 与反馈绑定；`apply_config()` 只替换运行时状态，`commit_bindings()` 先写盘成功再替换内存配置。`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到新样本时生成统一位姿和 Action；`select_pose_source()` 按运行时能力选择空间位置或姿态来源且不持久化；`apply_bindings()` 校验并持久化每个 Action 的输入和反馈目标。测试播放和硬件驱动共用 `replace_driver_sources()`、`accept_sample()`、`combined_pose_frame()` 与 `evaluate_actions()`；模拟数据仍经过统一的来源选择、Action 绑定和消息生成链路，停止后只恢复启动前的内存配置。`combined_pose_frame()` 从两个来源合成位姿；`evaluate_actions()` 与 `binding_value()` 可同时读取多个设备，把按钮、连续轴或方向按钮对转换成功能 Action。能力筛选只约束绝对空间与姿态来源，没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。
 
-网页启用测试播放前只调用 `/api/motion/prepare-relative`：motion 节点复用普通模式切换和普通 MoveIt 运动链路，依次进入手动模式、执行包含夹爪闭合的默认位、在执行成功后进入相对模式；同步响应返回后，网页才启用测试输入源；运动页把同一接口显示为“准备相对控制”按钮，并与默认位、测试位放在同一按钮组。测试源每次从默认位对应的夹爪闭合值开始，末段先张开再闭合并回到同一状态。停止测试输入只停止输入源，不触发归位。
+采集节点的统一目录包含十四个输入 Action：TCP 三轴平移与三轴定点旋转、两种枢轴圆弧、
+两个夹爪动作、接管与急停、工具轴向平移和工具轴向螺旋。采集页按动作选择演示时仍调用
+同一个 `/api/tracking/simulation`；生成源只声明这十四项 Action，不声明虚假的绝对位置或姿态。
+TCP、圆弧、夹爪和其他复合演示开始前调用 `/api/motion/prepare-relative`：motion 节点依次进入
+手动模式、经普通 MoveIt 链路执行包含夹爪闭合的默认位，然后进入相对模式。控制动作测试不
+先移动机械臂，力度反馈测试只使用现有 Action 反馈路由。每个连续演示独立完成去程、反向回程
+和控制结束，随后从同一清理出口恢复演示前的内存配置；用户主动停止也走同一出口且不归位。
 原始按钮和轴始终保留给输入测试。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，则在内存中用该值作为计算零偏；值变化会重新计时。连续轴按“原始值 → 内存零偏 → One Euro → Action”处理，按钮和方向按钮对不滤波，也不引入死区。功能 Action 绑定和反馈目标写入 `/config/controller-input.json`；空间与姿态来源、动态零偏、滤波状态仍只存在内存，节点重启后重新建立。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
 
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在
 `crates/nolo-cv1`；每只 NOLO 手柄分别维护三轴 One Euro 状态，统一绝对位置使用滤波结果。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
 API，并通过 `has_axis()`、`has_button()` 只发布设备实际声明的标准轴和按钮；路径、类型和中文名称来自同一能力表，网页不维护第二份组件名称映射。NOLO 将协议中已确认的触摸板、扳机、菜单、系统、侧握以及触摸板坐标转换为同样的 `button/*`、`axis/*` 组件，不发布未确认的按键位。生产代码没有手柄型号白名单、型号分支或默认按键映射，型号名称与 USB 信息只作为发现元数据展示。`ImuFusion::update()` 是两类 IMU 输入唯一的姿态融合入口，算法来自 `fusion-ahrs`，项目只做
-单位与坐标适配。apply_feedback() 按独立反馈绑定把设备无关的 Action 回馈路由到指定 source_id 和通用能力路径；haptic_intensity() 与 apply_haptic() 只完成 SDL3 归一化强度和反馈 API 的适配，不解释机械臂遥测。SDL3 按运行时实际声明发布 feedback/trigger_left、feedback/trigger_right、feedback/rumble；feedback/virtual 是始终可选的网页目标，选中时把同一 Action 回馈放进采集快照，由共享 Shell 渲染跨页面可拖动圆环。代码不根据型号猜测目标，也没有未绑定时的默认回退。
+单位与坐标适配。apply_feedback() 按独立反馈绑定把设备无关的 Action 回馈路由到指定 source_id 和通用能力路径；haptic_intensity() 与 apply_haptic() 只完成 SDL3 归一化强度和反馈 API 的适配，不解释机械臂遥测。SDL3 按运行时实际声明发布 feedback/trigger_left、feedback/trigger_right、feedback/rumble；feedback/virtual 是始终可选的网页目标，选中时把同一 Action 回馈放进采集快照，由共享 Shell 渲染跨页面可拖动圆环。代码不根据型号猜测反馈目标；只有生成式反馈测试在没有已选目标时临时使用网页虚拟反馈，测试结束后恢复原绑定。
 
 手写部分：Dora 编排、消息组装、设备到统一组件的命名、用户绑定求值、NOLO 字节协议适配。
 使用库：`hidapi`、`sdl3`、`fusion-ahrs`、`one_euro_filter`、`nalgebra`、`serde`、Dora API 和项目公共的 `json-config-store`。`one_euro_filter` 固定到算法作者仓库当前带参考数据测试的提交；NOLO 位置与通用连续轴共用其上游示例参数。
@@ -20,15 +26,17 @@ API，并通过 `has_axis()`、`has_button()` 只发布设备实际声明的标�
 节点外壳负责持久化配置和 Dora I/O；磁盘 `SpatialConfig` 只含轴映射、比例、Action 速率和分量
 开关，更新时复制、写盘成功后再替换运行配置。全部转换状态机在
 `crates/spatial-core::SpatialTransform`。
-update_pose() 接收已经分别标明空间来源和姿态来源的组合位姿，handle_control() 接收与设备无关的聚合 Action；两者不要求同源。采集节点每个周期先发布位姿、再发布控制帧，空间节点只在控制帧到达时输出一次运动消息，避免同一采样重复进入运动节点。current_output() 以每次按下启动/停止按钮开始时的位置和姿态为本轮原点输出相对平移、前部圆弧和水平圆弧；未选择绝对位置或姿态来源的分量分别按用户配置速率积分对应 Action；平移默认满输入 1 cm/s；圆弧默认角速度为 0.10 rad/s，选择后则只消费该绝对分量。空间节点不解释执行器动作，只把夹爪连续值和打开按下沿作为统一控制帧的透明载荷传给 motion 节点。矩阵与四元数运算使用 `nalgebra`。可清除的 Action 速率配置由 `serde_with::rust::double_option` 表达，没有自写 JSON 解析分支。
+update_pose() 接收已经分别标明空间来源和姿态来源的组合位姿，handle_control() 接收与设备无关的聚合 Action；两者不要求同源。采集节点每个周期先发布位姿、再发布控制帧，空间节点只在控制帧到达时输出一次运动消息，避免同一采样重复进入运动节点。current_output() 以每次接管开始时的位置和姿态为本轮原点；未选择绝对位置时积分底座三轴平移和工具轴向平移，未选择绝对姿态时积分两种圆弧与三个定点旋转。工具轴向螺旋只在位置和姿态都没有绝对来源时原子地积分距离和轴向角度，不能只输出半个动作。绝对姿态的垂直、水平分量分别按配置映射到圆弧或定点旋转，轴向分量映射到工具轴旋转。平移默认满输入 1 cm/s，所有角向动作共用 0.10 rad/s。空间节点不解释执行器动作，只把夹爪连续值和打开按下沿作为统一控制帧的透明载荷传给 motion 节点。矩阵与四元数运算使用 `nalgebra`。可清除的 Action 速率配置由 `serde_with::rust::double_option` 表达，没有自写 JSON 解析分支。
 
 ## stararm-102-motion-node
 
 这是设备专属运动学节点。Dora 外壳处理请求和状态；`load_motion_config()`、
 `save_motion_config()` 使用 Python 标准库 JSON 保存控制模式，写盘成功后才替换内存状态。
 MoveIt/Servo 负责规划、逆运动学、控制器同步
-和碰撞模型。`motion_core.target_pose()` 仅构造绕机械臂工具后部枢轴的目标；四元数运算使用
-`transforms3d`。`tool_position_rad()` 把连续夹爪值线性映射到厂家定义的 90°→0° 行程。
+和碰撞模型。`motion_core.target_pose()` 先构造两种绕工具后部枢轴的圆弧，再以得到的 TCP 为
+中心组合定点俯仰、偏航和轴向旋转，最后沿最终工具轴组合轴向平移与螺旋；定点旋转不改变
+TCP，工具轴动作不退化成底座固定轴。旋转和四元数组合使用 `transforms3d`。
+`tool_position_rad()` 把连续夹爪值线性映射到厂家定义的 90°→0° 行程。
 `_apply_transformed_control()` 只在这个设备专属节点解释透明传入的夹爪 Action，并且只在控制过程处于启动状态时执行。
 `ModelCatalog` 从镜像中实际运行的最终 URDF 读取关节范围并生成资源清单；命名目标和显示信息
 只是本型号 motion 节点发布通用契约所需的行为元数据，不另建一份模型定义。前端不包含

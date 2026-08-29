@@ -158,18 +158,31 @@ export function robotToSceneOrientation(
 export function relativeMotionPose(
   motion: TransformedControlFrame,
 ): PoseVisualization {
+  const axisAngle = (axis: THREE.Vector3, angle: number) =>
+    new THREE.Quaternion().setFromAxisAngle(axis, angle);
+  const x = new THREE.Vector3(1, 0, 0);
+  const z = new THREE.Vector3(0, 0, 1);
+  const arcRotation = axisAngle(z, motion.horizontal_arc_rad).multiply(
+    axisAngle(x, motion.front_pitch_rad),
+  );
+  const toolRotation = axisAngle(z, motion.tool_yaw_rad)
+    .multiply(arcRotation)
+    .multiply(axisAngle(x, motion.tool_pitch_rad))
+    .multiply(axisAngle(z, motion.tool_roll_rad));
+  const orientation = toolRotation
+    .clone()
+    .multiply(axisAngle(z, motion.tool_helical_roll_rad));
+  const toolTranslation = z
+    .clone()
+    .applyQuaternion(toolRotation)
+    .multiplyScalar(
+      motion.tool_axis_translation_m + motion.tool_helical_translation_m,
+    );
   return {
-    position_m: motion.translation_m,
-    orientation_xyzw: new THREE.Quaternion()
-      .setFromEuler(
-        new THREE.Euler(
-          motion.front_pitch_rad,
-          motion.horizontal_arc_rad,
-          0,
-          "XYZ",
-        ),
-      )
+    position_m: new THREE.Vector3(...motion.translation_m)
+      .add(toolTranslation)
       .toArray(),
+    orientation_xyzw: orientation.toArray(),
   };
 }
 

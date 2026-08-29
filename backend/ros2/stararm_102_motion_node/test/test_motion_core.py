@@ -178,3 +178,91 @@ class MotionCoreTests(unittest.TestCase):
             returned.orientation_xyzw, anchor.orientation_xyzw, strict=True
         ):
             self.assertAlmostEqual(actual, expected)
+
+    def test_fixed_tcp_rotations_do_not_move_tcp(self) -> None:
+        anchor = Pose((0.2, -0.1, 0.3), axis_angle((1.0, 0.0, 0.0), -math.pi / 2))
+        targets = [
+            target_pose(anchor, [0.0, 0.0, 0.0], 0.0, 0.0, tool_pitch_rad=0.2),
+            target_pose(anchor, [0.0, 0.0, 0.0], 0.0, 0.0, tool_yaw_rad=0.2),
+            target_pose(anchor, [0.0, 0.0, 0.0], 0.0, 0.0, tool_roll_rad=0.2),
+        ]
+        for target in targets:
+            self.assertEqual(target.position_m, anchor.position_m)
+            self.assertNotEqual(target.orientation_xyzw, anchor.orientation_xyzw)
+
+    def test_fixed_rotation_after_arc_keeps_the_arc_tcp_position(self) -> None:
+        anchor = Pose((0.2, -0.1, 0.3), axis_angle((1.0, 0.0, 0.0), -math.pi / 2))
+        arc = target_pose(anchor, [0.0, 0.0, 0.0], 0.15, -0.1)
+        combined = target_pose(
+            anchor,
+            [0.0, 0.0, 0.0],
+            0.15,
+            -0.1,
+            tool_pitch_rad=0.2,
+            tool_yaw_rad=-0.25,
+            tool_roll_rad=0.3,
+        )
+        for actual, expected in zip(combined.position_m, arc.position_m, strict=True):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_tool_axis_translation_uses_the_rotated_tool_axis(self) -> None:
+        anchor = Pose((0.2, -0.1, 0.3), axis_angle((1.0, 0.0, 0.0), -math.pi / 2))
+        target = target_pose(
+            anchor,
+            [0.0, 0.0, 0.0],
+            0.0,
+            0.0,
+            tool_axis_translation_m=0.02,
+        )
+        expected_axis = rotate(anchor.orientation_xyzw, (0.0, 0.0, 1.0))
+        for index in range(3):
+            self.assertAlmostEqual(
+                target.position_m[index],
+                anchor.position_m[index] + expected_axis[index] * 0.02,
+            )
+        self.assertEqual(target.orientation_xyzw, anchor.orientation_xyzw)
+
+    def test_helical_motion_translates_and_rotates_around_one_tool_axis(self) -> None:
+        anchor = Pose((0.2, -0.1, 0.3), axis_angle((1.0, 0.0, 0.0), -math.pi / 2))
+        target = target_pose(
+            anchor,
+            [0.0, 0.0, 0.0],
+            0.0,
+            0.0,
+            tool_helical_translation_m=0.02,
+            tool_helical_roll_rad=0.2,
+        )
+        translated = target_pose(
+            anchor,
+            [0.0, 0.0, 0.0],
+            0.0,
+            0.0,
+            tool_axis_translation_m=0.02,
+        )
+        self.assertEqual(target.position_m, translated.position_m)
+        self.assertNotEqual(target.orientation_xyzw, translated.orientation_xyzw)
+
+    def test_all_relative_components_return_when_accumulated_values_return_to_zero(
+        self,
+    ) -> None:
+        anchor = Pose((0.2, -0.1, 0.3), axis_angle((1.0, 0.0, 0.0), -math.pi / 2))
+        moved = target_pose(
+            anchor,
+            [0.02, -0.01, 0.03],
+            0.1,
+            -0.2,
+            0.15,
+            -0.1,
+            0.05,
+            0.02,
+            0.01,
+            0.1,
+        )
+        returned = target_pose(anchor, [0.0, 0.0, 0.0], 0.0, 0.0)
+        self.assertNotEqual(moved, anchor)
+        for actual, expected in zip(returned.position_m, anchor.position_m, strict=True):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(
+            returned.orientation_xyzw, anchor.orientation_xyzw, strict=True
+        ):
+            self.assertAlmostEqual(actual, expected)

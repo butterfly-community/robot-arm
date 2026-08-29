@@ -7,9 +7,9 @@ use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::Data
 use eyre::{Context, Result, eyre};
 use json_config_store::{load_or_default, save};
 use robot_arm_messages::{
-    AbsolutePoseFrame, ControlInputFrame, RequestAction, RequestResult, SCHEMA_VERSION,
-    ServiceState, SpatialComponentSwitches, SpatialConfigState, UpdateSpatialConfigRequest,
-    from_arrow, to_arrow,
+    AbsolutePoseFrame, ControlInputFrame, OrientationActionMapping, RequestAction, RequestResult,
+    SCHEMA_VERSION, ServiceState, SpatialComponentSwitches, SpatialConfigState,
+    UpdateSpatialConfigRequest, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
 use spatial_core::SpatialTransform;
@@ -110,6 +110,9 @@ struct SpatialConfig {
     translation_scale: f64,
     action_translation_m_per_s: Option<f64>,
     action_arc_rad_per_s: Option<f64>,
+    #[serde(default)]
+    orientation_mapping: OrientationActionMapping,
+    #[serde(default)]
     switches: SpatialComponentSwitches,
 }
 
@@ -128,6 +131,7 @@ impl From<&SpatialConfigState> for SpatialConfig {
             translation_scale: config.translation_scale,
             action_translation_m_per_s: config.action_translation_m_per_s,
             action_arc_rad_per_s: config.action_arc_rad_per_s,
+            orientation_mapping: config.orientation_mapping,
             switches: config.switches,
         }
     }
@@ -147,6 +151,7 @@ fn load_config(path: &Path) -> Result<SpatialConfigState> {
         translation_scale: config.translation_scale,
         action_translation_m_per_s: config.action_translation_m_per_s,
         action_arc_rad_per_s: config.action_arc_rad_per_s,
+        orientation_mapping: config.orientation_mapping,
         switches: config.switches,
         control_session_id: None,
     })

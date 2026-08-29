@@ -1,6 +1,11 @@
 "use client";
 
-import type { ArmState, MotionState, RobotModelInfo } from "@robot/contracts";
+import {
+  schemaVersion,
+  type ArmState,
+  type MotionState,
+  type RobotModelInfo,
+} from "@robot/contracts";
 import {
   post,
   prepareRelativeControl,
@@ -78,7 +83,7 @@ export default function Page() {
     setError(undefined);
     try {
       await post("/api/motion/mode", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         mode: value,
       });
@@ -100,7 +105,7 @@ export default function Page() {
     setError(undefined);
     try {
       await post("/api/motion/cancel", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         action: "cancel",
       });
@@ -114,7 +119,7 @@ export default function Page() {
     setError(undefined);
     try {
       await post("/api/motion/request", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         model_revision: model.model_revision,
         joints: Object.entries(jointTarget).map(
@@ -244,7 +249,7 @@ export default function Page() {
               setEditing(undefined);
               setError(undefined);
               void post("/api/motion/actuator", {
-                schema_version: 2,
+                schema_version: schemaVersion,
                 request_id: requestId(),
                 model_revision: model!.model_revision,
                 actuator_key: key,

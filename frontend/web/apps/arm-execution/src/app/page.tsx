@@ -8,6 +8,7 @@ import type {
   ParameterValue,
   RobotModelInfo,
 } from "@robot/contracts";
+import { schemaVersion } from "@robot/contracts";
 import { post, requestId, useGateway } from "@robot/gateway-client";
 import {
   Button,
@@ -59,7 +60,7 @@ export default function Page() {
         refresh: "parameters",
       }[action];
       await post(`/api/arm-execution/${endpoint}`, {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         action,
         fields: connectionFields,

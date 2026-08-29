@@ -72,6 +72,21 @@ for (const page of ["tracking", "spatial", "motion", "arm-execution"]) {
   assert.match(response.headers.get("content-type") ?? "", /text\/html/);
 }
 
+const malformedExecution = await fetch(`${base}/api/arm-execution/connect`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    schema_version: 3,
+    request_id: "integration-malformed-execution",
+    fields: { port: "/dev/ttyUSB0" },
+  }),
+});
+assert.equal(malformedExecution.status, 400);
+assert.match(
+  (await malformedExecution.json()).original_error,
+  /missing field `action`/,
+);
+
 await waitFor(
   () => json("/api/system/readiness"),
   (state) => state.values.system_readiness?.ready === true,
@@ -89,7 +104,7 @@ for (const [component, capability] of [
   const unsupported = discoveredSources.find((source) => !source[capability]);
   if (!unsupported) continue;
   const rejected = await request("/api/tracking/pose-source", {
-    schema_version: 2,
+    schema_version: 3,
     request_id: `integration-reject-${component}-source`,
     action: "select",
     component,
@@ -102,7 +117,7 @@ for (const [component, capability] of [
 const selectedInput = tracking.values.discovery_state?.position_source;
 if (selectedInput) {
   await request("/api/tracking/pose-source", {
-    schema_version: 2,
+    schema_version: 3,
     request_id: "integration-input-unselect",
     action: "unselect",
     component: "position",
@@ -115,7 +130,7 @@ if (selectedInput) {
     (state) => state.values.transformed_control?.active === false,
   );
   await request("/api/tracking/pose-source", {
-    schema_version: 2,
+    schema_version: 3,
     request_id: "integration-input-restore",
     action: "select",
     component: "position",
@@ -155,7 +170,7 @@ await new Promise((resolve, reject) => {
 });
 
 await request("/api/arm-execution/disconnect", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-disconnect",
   action: "disconnect",
   fields: {},
@@ -167,7 +182,7 @@ const originalScale =
 const changed = await request(
   "/api/spatial/config",
   {
-    schema_version: 2,
+    schema_version: 3,
     request_id: "integration-scale",
     patch: { translation_scale: 0.25 },
   },
@@ -177,7 +192,7 @@ assert.equal(changed.value.translation_scale, 0.25);
 await request(
   "/api/spatial/config",
   {
-    schema_version: 2,
+    schema_version: 3,
     request_id: "integration-scale-restore",
     patch: { translation_scale: originalScale },
   },
@@ -185,7 +200,7 @@ await request(
 );
 
 await request("/api/motion/mode", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-manual",
   mode: "manual",
 });
@@ -222,19 +237,19 @@ const applyBindings = (
   feedbackBindings = originalFeedbackBindings,
 ) =>
   request("/api/tracking/bindings", {
-    schema_version: 2,
+    schema_version: 3,
     request_id: requestId,
     bindings,
     feedback_bindings: feedbackBindings,
   });
-if (selectedRuntimeSource?.source_id && booleanComponents.length > 1) {
+if (selectedRuntimeSource?.source_id && booleanComponents.length > 0) {
   try {
     const booleanResult = await applyBindings("integration-binding-boolean", [
       {
         action: "start_stop",
         action_type: "boolean",
         source_id: selectedRuntimeSource.source_id,
-        component_paths: [booleanComponents[0].path, booleanComponents[1].path],
+        component_paths: [booleanComponents[0].path],
         invert: false,
       },
     ]);
@@ -247,8 +262,7 @@ if (selectedRuntimeSource?.source_id && booleanComponents.length > 1) {
         );
         return (
           binding?.active === true &&
-          binding.configured_components.includes(booleanComponents[0].path) &&
-          binding.configured_components.includes(booleanComponents[1].path)
+          binding.configured_components.includes(booleanComponents[0].path)
         );
       },
     );
@@ -342,7 +356,7 @@ const motionResult = await observeMotionRequest(
   "integration-joint-five-degrees",
   () =>
     request("/api/motion/request", {
-      schema_version: 2,
+      schema_version: 3,
       request_id: "integration-joint-five-degrees",
       model_revision: model.model_revision,
       joints: model.joints.map((joint, index) => ({
@@ -367,7 +381,7 @@ const actuator = model.tool_actuators[0];
 assert.ok(actuator, "fixture model publishes an actuator");
 const actuatorTarget = before.actuators_rad[0] + Math.PI / 36;
 const actuatorResult = await request("/api/motion/actuator", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-actuator-five-degrees",
   model_revision: model.model_revision,
   actuator_key: actuator.key,
@@ -391,7 +405,7 @@ assert.equal(
 );
 assert.equal(testTarget.actuator_positions_rad.gripper, 0);
 const startResult = await request("/api/motion/request", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-start",
   model_revision: model.model_revision,
   joints: model.joints.map((joint) => ({
@@ -422,7 +436,7 @@ const atStart = await waitFor(
 const cancellable = [...atStart.values.arm_state.joints_rad];
 cancellable[0] += Math.PI / 18;
 const interruptedRequest = request("/api/motion/request", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-interrupted-motion",
   model_revision: model.model_revision,
   joints: model.joints.map((joint, index) => ({
@@ -446,7 +460,7 @@ await waitFor(
     ),
 );
 const cancelResult = await request("/api/motion/cancel", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-cancel",
   action: "cancel",
 });
@@ -457,7 +471,7 @@ assert.equal(interruptedResult.request_id, "integration-interrupted-motion");
 assert.equal(interruptedResult.value.state, "cancelled");
 
 await request("/api/motion/actuator", {
-  schema_version: 2,
+  schema_version: 3,
   request_id: "integration-actuator-restore",
   model_revision: model.model_revision,
   actuator_key: actuator.key,
@@ -481,89 +495,79 @@ const asset = await fetch(
 assert.equal(asset.ok, true);
 assert.ok((await asset.arrayBuffer()).byteLength > 0);
 
-try {
-  const prepared = await request("/api/motion/prepare-relative", {
-    schema_version: 2,
-    request_id: "integration-prepare-relative",
-  });
-  assert.equal(prepared.value.state, "succeeded");
-  const preparedMotion = await waitFor(
-    () => snapshot("motion"),
-    (state) =>
-      state.values.motion_state?.control_mode === "relative" &&
-      state.values.motion_state?.latest_motion?.request_id ===
-        "integration-prepare-relative",
-  );
-  assert.equal(preparedMotion.values.motion_state.control_mode, "relative");
-  await waitFor(
-    () => snapshot("arm-execution"),
-    (state) =>
-      model.joints.every(
-        (joint, index) =>
-          Math.abs(
-            state.values.arm_state.joints_rad[index] -
-              start.joint_positions_rad[joint.key],
-          ) <=
-          (2 * Math.PI) / 180,
-      ) &&
-      Math.abs(state.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
-  );
+const simulationItems = [
+  ["move_forward_back", true],
+  ["move_left_right", true],
+  ["move_up_down", true],
+  ["tool_pitch", true],
+  ["tool_yaw", true],
+  ["tool_roll", true],
+  ["front_pitch", true],
+  ["horizontal_arc", true],
+  ["primary_tool_open", true],
+  ["primary_tool", true],
+  ["start_stop", false],
+  ["emergency_stop", false],
+  ["primary_tool_feedback", false],
+  ["tool_axis_translation", true],
+  ["tool_helical_motion", true],
+];
+
+for (const [item, prepare] of simulationItems) {
+  if (prepare) {
+    const prepared = await request("/api/motion/prepare-relative", {
+      schema_version: 3,
+      request_id: `integration-prepare-${item}`,
+    });
+    assert.equal(prepared.value.state, "succeeded");
+  }
   const started = await request("/api/tracking/simulation", {
-    schema_version: 2,
-    request_id: "integration-simulation-start",
+    schema_version: 3,
+    request_id: `integration-simulation-${item}`,
     enabled: true,
+    item,
   });
   assert.equal(started.value.active, true);
+  assert.equal(started.value.item, item);
   await waitFor(
     () => snapshot("tracking"),
     (state) =>
-      state.values.absolute_pose?.position_source_id ===
-        "simulation:generic-6dof-cycle" &&
-      state.values.absolute_pose?.orientation_source_id ===
-        "simulation:generic-6dof-cycle" &&
-      state.values.control_input?.actuator_actions?.primary_tool?.value === 1,
-  );
-  await waitFor(
-    () => snapshot("spatial"),
-    (state) =>
-      state.values.spatial_config_state?.position_source_id ===
-        "simulation:generic-6dof-cycle" &&
-      state.values.spatial_config_state?.orientation_source_id ===
-        "simulation:generic-6dof-cycle" &&
-      state.values.transformed_control?.active === true &&
-      state.values.transformed_control.translation_m.some(
-        (component) => Math.abs(component) > 0,
+      state.values.discovery_state?.simulation?.active === true &&
+      state.values.discovery_state.simulation.item === item &&
+      state.values.discovery_state.sources.some(
+        (source) => source.source_id === "simulation:generic-action-source",
       ),
   );
-  const simulationBeforeWait = await snapshot("tracking");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const simulationAfterWait = await snapshot("tracking");
-  assert.equal(
-    simulationAfterWait.values.discovery_state.simulation.active,
-    true,
-  );
-  assert.ok(
-    simulationAfterWait.values.absolute_pose.sequence >
-      simulationBeforeWait.values.absolute_pose.sequence,
-  );
-  const simulatedExecution = await snapshot("arm-execution");
-  const simulatedCommand =
-    simulatedExecution.values.transport_state.last_command;
-  assert.equal(simulatedCommand.model_revision, "stararm-102-fl-v1");
-  assert.equal(simulatedCommand.joints_rad.length, 6);
-  assert.equal(simulatedCommand.actuators_rad.length, 1);
-} finally {
-  const stopped = await request("/api/tracking/simulation", {
-    schema_version: 2,
-    request_id: "integration-simulation-stop",
-    enabled: false,
-  });
-  assert.equal(stopped.value.active, false);
   await waitFor(
-    () => snapshot("spatial"),
-    (state) => state.values.transformed_control?.active === false,
+    () => snapshot("tracking"),
+    (state) => state.values.discovery_state?.simulation?.active === false,
+  );
+  const restoredTracking = await snapshot("tracking");
+  assert.deepEqual(
+    restoredTracking.values.discovery_state.bindings
+      .filter((binding) => binding.configured_components.length > 0)
+      .map((binding) => ({
+        action: binding.action,
+        action_type: binding.action_type,
+        source_id: binding.source_id,
+        component_paths: binding.configured_components,
+        invert: binding.invert,
+      })),
+    originalBindings,
+  );
+  assert.equal(
+    restoredTracking.values.discovery_state.sources.some(
+      (source) => source.source_id === "simulation:generic-action-source",
+    ),
+    false,
   );
 }
+
+const simulatedExecution = await snapshot("arm-execution");
+const simulatedCommand = simulatedExecution.values.transport_state.last_command;
+assert.equal(simulatedCommand.model_revision, "stararm-102-fl-v1");
+assert.equal(simulatedCommand.joints_rad.length, 6);
+assert.equal(simulatedCommand.actuators_rad.length, 1);
 
 const execution = await snapshot("arm-execution");
 assert.equal(execution.values.transport_state.connected, false);

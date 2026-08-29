@@ -5,6 +5,7 @@ import type {
   Json,
   TransformedControlFrame,
 } from "@robot/contracts";
+import { schemaVersion } from "@robot/contracts";
 import { patch, requestId, useGateway } from "@robot/gateway-client";
 import {
   Card,
@@ -28,6 +29,17 @@ function degrees(value: number | undefined) {
     : "—";
 }
 
+const componentSwitches = [
+  ["translation", "底座坐标平移"],
+  ["front_pitch", "垂直圆弧"],
+  ["horizontal_arc", "水平圆弧"],
+  ["tool_pitch", "定点垂直旋转"],
+  ["tool_yaw", "定点水平旋转"],
+  ["tool_roll", "轴向旋转"],
+  ["tool_axis_translation", "工具轴向平移"],
+  ["tool_helical_motion", "工具轴向螺旋"],
+] as const;
+
 export default function Page() {
   const { snapshot, error, setError } = useGateway("spatial");
   const values = snapshot?.values ?? {};
@@ -46,7 +58,7 @@ export default function Page() {
     setError(undefined);
     try {
       await patch("/api/spatial/config", {
-        schema_version: 2,
+        schema_version: schemaVersion,
         request_id: requestId(),
         patch: patchValue,
       });
@@ -86,13 +98,13 @@ export default function Page() {
             tone="blue"
           />
           <Metric
-            label="前部抬起 / 往下"
+            label="垂直圆弧"
             value={degrees(motion?.front_pitch_rad)}
             unit="deg"
             tone="amber"
           />
           <Metric
-            label="左旋 / 右旋"
+            label="水平圆弧"
             value={degrees(motion?.horizontal_arc_rad)}
             unit="deg"
             tone="cyan"
@@ -172,11 +184,7 @@ export default function Page() {
           </Field>
           <Field label="采集分量">
             <div className="switch-stack">
-              {[
-                ["translation", "空间位置移动"],
-                ["front_pitch", "前部抬起 / 前部往下"],
-                ["horizontal_arc", "左旋 / 右旋"],
-              ].map(([key, label]) => (
+              {componentSwitches.map(([key, label]) => (
                 <label key={key} className="switch-row">
                   <span>{label}</span>
                   <input
@@ -184,18 +192,66 @@ export default function Page() {
                     checked={Boolean(switches[key])}
                     onChange={(event) =>
                       update({
-                        switches: {
-                          translation: Boolean(switches.translation),
-                          front_pitch: Boolean(switches.front_pitch),
-                          horizontal_arc: Boolean(switches.horizontal_arc),
-                          [key]: event.currentTarget.checked,
-                        },
+                        switches: Object.fromEntries(
+                          componentSwitches.map(([switchKey]) => [
+                            switchKey,
+                            switchKey === key
+                              ? event.currentTarget.checked
+                              : Boolean(switches[switchKey]),
+                          ]),
+                        ),
                       })
                     }
                   />
                 </label>
               ))}
             </div>
+          </Field>
+          <Field label="设备垂直姿态语义">
+            <select
+              aria-label="设备垂直姿态语义"
+              value={String(
+                (config.orientation_mapping as Record<string, unknown>)
+                  ?.vertical ?? "front_pitch",
+              )}
+              onChange={(event) =>
+                update({
+                  orientation_mapping: {
+                    vertical: event.currentTarget.value,
+                    horizontal: String(
+                      (config.orientation_mapping as Record<string, unknown>)
+                        ?.horizontal ?? "horizontal_arc",
+                    ),
+                  },
+                })
+              }
+            >
+              <option value="front_pitch">垂直圆弧</option>
+              <option value="tool_pitch">定点垂直旋转</option>
+            </select>
+          </Field>
+          <Field label="设备水平姿态语义">
+            <select
+              aria-label="设备水平姿态语义"
+              value={String(
+                (config.orientation_mapping as Record<string, unknown>)
+                  ?.horizontal ?? "horizontal_arc",
+              )}
+              onChange={(event) =>
+                update({
+                  orientation_mapping: {
+                    vertical: String(
+                      (config.orientation_mapping as Record<string, unknown>)
+                        ?.vertical ?? "front_pitch",
+                    ),
+                    horizontal: event.currentTarget.value,
+                  },
+                })
+              }
+            >
+              <option value="horizontal_arc">水平圆弧</option>
+              <option value="tool_yaw">定点水平旋转</option>
+            </select>
           </Field>
           <Field
             label="无绝对位置时的平移速度"

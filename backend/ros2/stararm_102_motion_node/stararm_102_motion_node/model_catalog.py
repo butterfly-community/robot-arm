@@ -81,7 +81,7 @@ class ModelCatalog:
 
     def model_info(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_id": MODEL_ID,
             "model_revision": MODEL_REVISION,
             "display_name": "StarArm-102",
@@ -141,7 +141,7 @@ class ModelCatalog:
     def asset_response(self, request: dict[str, Any]) -> dict[str, Any]:
         relative = Path(str(request.get("relative_path", "")))
         response = {
-            "schema_version": 2,
+            "schema_version": 3,
             "request_id": str(request.get("request_id", "")),
             "model_revision": MODEL_REVISION,
             "manifest_hash": self.manifest_hash,

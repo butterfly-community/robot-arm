@@ -49,7 +49,7 @@ from .motion_core import (
 )
 from .moveit_backend import MoveItBackend, PlanningError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATE_TOPIC = "/stararm102/joint_states"
 COMMAND_TOPIC = "/stararm102/joint_commands"
 START_RAD, CLOSED_GRIPPER_RAD = NAMED_TARGETS["start"]
@@ -427,8 +427,14 @@ class MotionNode(Node):
         target = target_pose(
             self._anchor_tcp,
             translation,
-            float(value.get("front_pitch_rad", 0.0)),
-            float(value.get("horizontal_arc_rad", 0.0)),
+            float(value["front_pitch_rad"]),
+            float(value["horizontal_arc_rad"]),
+            float(value["tool_pitch_rad"]),
+            float(value["tool_yaw_rad"]),
+            float(value["tool_roll_rad"]),
+            float(value["tool_axis_translation_m"]),
+            float(value["tool_helical_translation_m"]),
+            float(value["tool_helical_roll_rad"]),
         )
         self._target_tcp = target
         self._controller_output_armed = True
