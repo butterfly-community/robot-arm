@@ -47,7 +47,8 @@ export interface RobotModelInfo {
   named_targets: Array<{
     key: string;
     label: string;
-    positions_rad: Record<string, number>;
+    joint_positions_rad: Record<string, number>;
+    actuator_positions_rad: Record<string, number>;
   }>;
   motion_options: Array<FieldSchema>;
   diagnostics: Array<FieldSchema>;

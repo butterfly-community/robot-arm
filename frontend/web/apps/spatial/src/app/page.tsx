@@ -83,19 +83,19 @@ export default function Page() {
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
           <Metric
-            label="左右"
+            label="前后"
             value={centimeters(translation?.[0])}
             unit="cm"
             tone="red"
           />
           <Metric
-            label="上下"
+            label="左右"
             value={centimeters(translation?.[1])}
             unit="cm"
             tone="green"
           />
           <Metric
-            label="前后"
+            label="上下"
             value={centimeters(translation?.[2])}
             unit="cm"
             tone="blue"

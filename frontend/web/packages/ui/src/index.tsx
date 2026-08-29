@@ -24,7 +24,6 @@ const buttonVariants = cva("button", {
     variant: {
       default: "button-default",
       outline: "button-outline",
-      ghost: "button-ghost",
       danger: "button-danger",
     },
   },

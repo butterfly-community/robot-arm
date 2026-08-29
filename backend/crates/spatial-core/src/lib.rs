@@ -90,11 +90,7 @@ impl SpatialTransform {
         true
     }
 
-    pub fn handle_pose(
-        &mut self,
-        frame: AbsolutePoseFrame,
-        transformed_time_ns: i64,
-    ) -> Option<RelativeToolMotion> {
+    pub fn update_pose(&mut self, frame: AbsolutePoseFrame) {
         let source_changed = self.config.position_source_id != frame.position_source_id
             || self.config.orientation_source_id != frame.orientation_source_id;
         if source_changed {
@@ -112,12 +108,6 @@ impl SpatialTransform {
             position_source_capable: frame.position_source_capable,
             orientation_source_capable: frame.orientation_source_capable,
         });
-
-        if !self.current_input.control_active.value {
-            return None;
-        }
-        self.ensure_session(frame.source_time_ns);
-        Some(self.current_output(frame.source_time_ns, transformed_time_ns))
     }
 
     pub fn handle_control(
@@ -402,6 +392,18 @@ mod tests {
         }
     }
 
+    fn output_after_pose(
+        transform: &mut SpatialTransform,
+        frame: AbsolutePoseFrame,
+        transformed_time_ns: i64,
+    ) -> RelativeToolMotion {
+        let mut input = control(frame.sequence, true);
+        input.source_time_ns = frame.source_time_ns;
+        input.received_time_ns = frame.received_time_ns;
+        transform.update_pose(frame);
+        transform.handle_control(input, transformed_time_ns)
+    }
+
     fn assert_close(actual: f64, expected: f64, case: &str) {
         assert!(
             (actual - expected).abs() < 1e-12,
@@ -423,21 +425,20 @@ mod tests {
                 translation_scale: fixture.translation_scale,
                 ..Default::default()
             });
-            transform.handle_pose(fixture_pose(1, &fixture.baseline), 10_000_000);
+            transform.update_pose(fixture_pose(1, &fixture.baseline));
             let active = control(2, true);
             transform.handle_control(active, 20_000_000);
-            let output = transform
-                .handle_pose(
-                    fixture_pose(
-                        index as u64 + 3,
-                        &SyntheticPose {
-                            position_m: case.position_m,
-                            orientation_xyzw: case.orientation_xyzw,
-                        },
-                    ),
-                    (index as i64 + 3) * 10_000_000,
-                )
-                .unwrap();
+            let output = output_after_pose(
+                &mut transform,
+                fixture_pose(
+                    index as u64 + 3,
+                    &SyntheticPose {
+                        position_m: case.position_m,
+                        orientation_xyzw: case.orientation_xyzw,
+                    },
+                ),
+                (index as i64 + 3) * 10_000_000,
+            );
             for (actual, expected) in output
                 .translation_m
                 .into_iter()
@@ -481,7 +482,7 @@ mod tests {
     #[test]
     fn first_active_frame_is_a_zero_relative_anchor() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [1.0, 2.0, 3.0], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [1.0, 2.0, 3.0], UnitQuaternion::identity()));
         let output = transform.handle_control(control(2, true), 2);
         assert!(output.active);
         assert_eq!(output.translation_m, [0.0; 3]);
@@ -492,24 +493,28 @@ mod tests {
     #[test]
     fn translation_mapping_and_half_scale_are_applied_once() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(2, true), 2);
-        let output = transform
-            .handle_pose(pose(3, [0.2, 0.4, -0.6], UnitQuaternion::identity()), 3)
-            .unwrap();
+        let output = output_after_pose(
+            &mut transform,
+            pose(3, [0.2, 0.4, -0.6], UnitQuaternion::identity()),
+            3,
+        );
         assert_eq!(output.translation_m, [0.3, -0.1, 0.2]);
     }
 
     #[test]
     fn origin_confirmation_does_not_create_motion_or_change_session_delta() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [1.0, 0.0, 0.0], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [1.0, 0.0, 0.0], UnitQuaternion::identity()));
         assert!(transform.confirm_origin());
         let anchor = transform.handle_control(control(2, true), 2);
         assert_eq!(anchor.translation_m, [0.0; 3]);
-        let output = transform
-            .handle_pose(pose(3, [1.0, 0.0, -0.2], UnitQuaternion::identity()), 3)
-            .unwrap();
+        let output = output_after_pose(
+            &mut transform,
+            pose(3, [1.0, 0.0, -0.2], UnitQuaternion::identity()),
+            3,
+        );
         assert_eq!(output.translation_m, [0.1, 0.0, 0.0]);
     }
 
@@ -529,35 +534,33 @@ mod tests {
     #[test]
     fn local_pitch_and_horizontal_arc_keep_their_independent_semantics() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(2, true), 2);
 
-        let pitch = transform
-            .handle_pose(
-                pose(
-                    3,
-                    [0.0; 3],
-                    UnitQuaternion::from_scaled_axis(Vector3::new(-FRAC_PI_2, 0.0, 0.0)),
-                ),
+        let pitch = output_after_pose(
+            &mut transform,
+            pose(
                 3,
-            )
-            .unwrap();
+                [0.0; 3],
+                UnitQuaternion::from_scaled_axis(Vector3::new(-FRAC_PI_2, 0.0, 0.0)),
+            ),
+            3,
+        );
         assert!((pitch.front_pitch_rad - FRAC_PI_2).abs() < 1e-12);
         assert!(pitch.horizontal_arc_rad.abs() < 1e-12);
 
         transform.handle_control(control(4, false), 4);
-        transform.handle_pose(pose(5, [0.0; 3], UnitQuaternion::identity()), 5);
+        transform.update_pose(pose(5, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(6, true), 6);
-        let arc = transform
-            .handle_pose(
-                pose(
-                    7,
-                    [0.0; 3],
-                    UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, FRAC_PI_2)),
-                ),
+        let arc = output_after_pose(
+            &mut transform,
+            pose(
                 7,
-            )
-            .unwrap();
+                [0.0; 3],
+                UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, FRAC_PI_2)),
+            ),
+            7,
+        );
         assert!(arc.front_pitch_rad.abs() < 1e-12);
         assert!((arc.horizontal_arc_rad - FRAC_PI_2).abs() < 1e-12);
     }
@@ -573,18 +576,17 @@ mod tests {
             ..Default::default()
         };
         let mut transform = SpatialTransform::new(config);
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(2, true), 2);
-        let output = transform
-            .handle_pose(
-                pose(
-                    3,
-                    [1.0, 2.0, 3.0],
-                    UnitQuaternion::from_scaled_axis(Vector3::new(-0.4, 0.0, 0.6)),
-                ),
+        let output = output_after_pose(
+            &mut transform,
+            pose(
                 3,
-            )
-            .unwrap();
+                [1.0, 2.0, 3.0],
+                UnitQuaternion::from_scaled_axis(Vector3::new(-0.4, 0.0, 0.6)),
+            ),
+            3,
+        );
         assert_eq!(output.translation_m, [0.0; 3]);
         assert!(output.front_pitch_rad != 0.0);
         assert_eq!(output.horizontal_arc_rad, 0.0);
@@ -626,7 +628,7 @@ mod tests {
             ..Default::default()
         };
         let mut transform = SpatialTransform::new(config);
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
 
         let mut first = control(2, true);
         first.move_forward_back = FloatActionSample {
@@ -654,11 +656,11 @@ mod tests {
     #[test]
     fn release_and_reacquire_create_a_new_pose_baseline() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         let first = transform.handle_control(control(2, true), 2);
-        transform.handle_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()), 3);
+        transform.update_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()));
         transform.handle_control(control(4, false), 4);
-        transform.handle_pose(pose(5, [0.0, 0.0, -1.0], UnitQuaternion::identity()), 5);
+        transform.update_pose(pose(5, [0.0, 0.0, -1.0], UnitQuaternion::identity()));
         let second = transform.handle_control(control(6, true), 6);
         assert_ne!(first.control_session_id, second.control_session_id);
         assert_eq!(second.translation_m, [0.0; 3]);
@@ -667,14 +669,14 @@ mod tests {
     #[test]
     fn changing_input_source_cannot_reuse_the_previous_source_baseline() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.handle_pose(pose(1, [0.0; 3], UnitQuaternion::identity()), 1);
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(2, true), 2);
-        transform.handle_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()), 3);
+        transform.update_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()));
 
         let mut next_pose = pose(4, [5.0, 6.0, 7.0], UnitQuaternion::identity());
         next_pose.position_source_id = Some("another-source".into());
         next_pose.orientation_source_id = Some("another-source".into());
-        transform.handle_pose(next_pose, 4);
+        transform.update_pose(next_pose);
         let output = transform.handle_control(control(5, true), 5);
         assert_eq!(output.translation_m, [0.0; 3]);
     }

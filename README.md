@@ -16,6 +16,7 @@ docker compose down
 ```
 
 重启就是依次执行上面的 `down` 和 `up -d`。项目不提供管理脚本，也不维护单服务重启状态。
+Compose 停止 dataflow 时会向 Dora attach 会话发送 `SIGINT`，由 Dora 自己停止全部节点，避免下次启动重复部署。
 需要重新构建时使用：
 
 ```bash

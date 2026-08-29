@@ -95,7 +95,7 @@ export default function Page() {
     }
   }
 
-  async function move(target = positions) {
+  async function move(jointTarget = positions, actuatorTarget = actuators) {
     if (!model) return;
     setError(undefined);
     try {
@@ -103,10 +103,18 @@ export default function Page() {
         schema_version: 2,
         request_id: requestId(),
         model_revision: model.model_revision,
-        joints: Object.entries(target).map(([joint_key, position_rad]) => ({
-          joint_key,
-          position_rad,
-        })),
+        joints: Object.entries(jointTarget).map(
+          ([joint_key, position_rad]) => ({
+            joint_key,
+            position_rad,
+          }),
+        ),
+        actuators: Object.entries(actuatorTarget).map(
+          ([actuator_key, position_rad]) => ({
+            actuator_key,
+            position_rad,
+          }),
+        ),
         options: Object.fromEntries(
           Object.entries(options).filter((entry): entry is [string, number] =>
             Number.isFinite(entry[1]),
@@ -304,8 +312,12 @@ export default function Page() {
               <Button
                 key={item.key}
                 onClick={() => {
-                  setPositions(item.positions_rad);
-                  void move(item.positions_rad);
+                  setPositions(item.joint_positions_rad);
+                  setActuators(item.actuator_positions_rad);
+                  void move(
+                    item.joint_positions_rad,
+                    item.actuator_positions_rad,
+                  );
                 }}
               >
                 {item.label}

@@ -350,6 +350,10 @@ const motionResult = await observeMotionRequest(
         joint_key: joint.key,
         position_rad: moved[index],
       })),
+      actuators: model.tool_actuators.map((item, index) => ({
+        actuator_key: item.key,
+        position_rad: before.actuators_rad[index],
+      })),
       options: {},
       action: "apply",
     }),
@@ -380,15 +384,23 @@ const start = model.named_targets.find((target) => target.key === "start");
 assert.ok(start, "model publishes the start target");
 const testTarget = model.named_targets.find((target) => target.key === "test");
 assert.ok(testTarget, "model publishes the test target");
-assert.equal(testTarget.positions_rad.joint3, (-20 * Math.PI) / 180);
-assert.equal(Object.keys(testTarget.positions_rad).length, model.joints.length);
+assert.equal(testTarget.joint_positions_rad.joint3, (-20 * Math.PI) / 180);
+assert.equal(
+  Object.keys(testTarget.joint_positions_rad).length,
+  model.joints.length,
+);
+assert.equal(testTarget.actuator_positions_rad.gripper, 0);
 const startResult = await request("/api/motion/request", {
   schema_version: 2,
   request_id: "integration-start",
   model_revision: model.model_revision,
   joints: model.joints.map((joint) => ({
     joint_key: joint.key,
-    position_rad: start.positions_rad[joint.key],
+    position_rad: start.joint_positions_rad[joint.key],
+  })),
+  actuators: model.tool_actuators.map((item) => ({
+    actuator_key: item.key,
+    position_rad: start.actuator_positions_rad[item.key],
   })),
   options: {},
   action: "apply",
@@ -401,13 +413,12 @@ const atStart = await waitFor(
       (joint, index) =>
         Math.abs(
           state.values.arm_state.joints_rad[index] -
-            start.positions_rad[joint.key],
+            start.joint_positions_rad[joint.key],
         ) < 1e-9,
     ),
 );
 assert.ok(
-  atStart.values.arm_state.actuators_rad[0] > before.actuators_rad[0],
-  "the start target must not reset the independently controlled actuator",
+  Math.abs(atStart.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
 );
 
 const cancellable = [...atStart.values.arm_state.joints_rad];
@@ -419,6 +430,10 @@ const interruptedRequest = request("/api/motion/request", {
   joints: model.joints.map((joint, index) => ({
     joint_key: joint.key,
     position_rad: cancellable[index],
+  })),
+  actuators: model.tool_actuators.map((item, index) => ({
+    actuator_key: item.key,
+    position_rad: atStart.values.arm_state.actuators_rad[index],
   })),
   options: {},
   action: "apply",
@@ -484,9 +499,9 @@ try {
     () => snapshot("tracking"),
     (state) =>
       state.values.absolute_pose?.position_source_id ===
-        "simulation:standard-spatial-cycle" &&
+        "simulation:generic-6dof-cycle" &&
       state.values.absolute_pose?.orientation_source_id ===
-        "simulation:standard-spatial-cycle",
+        "simulation:generic-6dof-cycle",
   );
   const origin = await request("/api/spatial/origin", {
     schema_version: 2,
@@ -498,9 +513,9 @@ try {
     () => snapshot("spatial"),
     (state) =>
       state.values.spatial_config_state?.position_source_id ===
-        "simulation:standard-spatial-cycle" &&
+        "simulation:generic-6dof-cycle" &&
       state.values.spatial_config_state?.orientation_source_id ===
-        "simulation:standard-spatial-cycle" &&
+        "simulation:generic-6dof-cycle" &&
       state.values.relative_motion?.active === true &&
       state.values.relative_motion.translation_m.some(
         (component) => Math.abs(component) > 0,

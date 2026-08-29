@@ -81,11 +81,11 @@ def merge_controller_command(
     positions: list[float],
     joint_names: tuple[str, ...],
     actuator_name: str,
-    feedback_joints: list[float],
-    feedback_actuator: float,
+    current_joints: list[float],
+    current_actuator: float,
 ) -> tuple[list[float], float] | None:
-    """Merge independent controller outputs with the latest execution feedback."""
-    if len(names) != len(positions) or len(feedback_joints) != len(joint_names):
+    """Merge independent controller outputs into one complete current command."""
+    if len(names) != len(positions) or len(current_joints) != len(joint_names):
         return None
     indices = {name: index for index, name in enumerate(names)}
     if any(name not in indices for name in (*joint_names, actuator_name)):
@@ -93,11 +93,11 @@ def merge_controller_command(
     joints = [
         positions[indices[name]]
         if math.isfinite(positions[indices[name]])
-        else feedback_joints[index]
+        else current_joints[index]
         for index, name in enumerate(joint_names)
     ]
     actuator_value = positions[indices[actuator_name]]
-    actuator = actuator_value if math.isfinite(actuator_value) else feedback_actuator
+    actuator = actuator_value if math.isfinite(actuator_value) else current_actuator
     if not all(math.isfinite(value) for value in (*joints, actuator)):
         return None
     return joints, actuator

@@ -2,6 +2,8 @@ import type { Json, Namespace, Snapshot } from "@robot/contracts";
 import { nanoid } from "nanoid/non-secure";
 import { useEffect, useRef, useState } from "react";
 
+const webRefreshIntervalMs = 1000;
+
 export function requestId(): string {
   return nanoid();
 }
@@ -89,12 +91,7 @@ export function useGateway(namespace: Namespace) {
   const pending = useRef<Snapshot | undefined>(undefined);
   useEffect(() => {
     const accept = (value: Snapshot) => {
-      if (window.getSelection()?.toString()) {
-        pending.current = value;
-        return;
-      }
-      setSnapshot(value);
-      setTransportError(undefined);
+      pending.current = value;
     };
     const applyPending = () => {
       if (window.getSelection()?.toString() || !pending.current) return;
@@ -103,7 +100,7 @@ export function useGateway(namespace: Namespace) {
       setSnapshot(value);
       setTransportError(undefined);
     };
-    document.addEventListener("selectionchange", applyPending);
+    const refresh = window.setInterval(applyPending, webRefreshIntervalMs);
     const dispose = subscribe(namespace, accept, setTransportError);
     getSnapshot(namespace)
       .then(accept)
@@ -113,7 +110,7 @@ export function useGateway(namespace: Namespace) {
         ),
       );
     return () => {
-      document.removeEventListener("selectionchange", applyPending);
+      window.clearInterval(refresh);
       pending.current = undefined;
       dispose();
     };

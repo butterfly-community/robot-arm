@@ -33,11 +33,8 @@ fn main() -> Result<()> {
                 "absolute_pose" => {
                     let frame: AbsolutePoseFrame =
                         from_arrow(data.as_array()).context("decode absolute_pose")?;
-                    if let Some(output) = transform.handle_pose(frame, now_ns()) {
-                        send_json(&mut node, "relative_motion", &output)?;
-                        service.has_input = true;
-                        service.has_output = true;
-                    }
+                    transform.update_pose(frame);
+                    service.has_input = true;
                 }
                 "control_input" => {
                     let frame: ControlInputFrame =

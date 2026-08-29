@@ -30,7 +30,11 @@ use sdl3::{
     sensor::SensorType,
 };
 use serde::{Deserialize, Serialize};
-use simulation::{SimulationPlayback, inactive_input};
+use simulation::{
+    CONTROL_ACTIVE_COMPONENT as SIMULATION_CONTROL_ACTIVE_COMPONENT,
+    DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
+    SOURCE_ID as SIMULATION_SOURCE_ID, SimulationPlayback,
+};
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
@@ -51,42 +55,42 @@ const ACTIONS: [(&str, ActionType); 9] = [
     ("horizontal_arc", ActionType::Float),
 ];
 
-const SDL_AXES: [(Axis, &str); 6] = [
-    (Axis::LeftX, "axis/left_x"),
-    (Axis::LeftY, "axis/left_y"),
-    (Axis::RightX, "axis/right_x"),
-    (Axis::RightY, "axis/right_y"),
-    (Axis::TriggerLeft, "axis/left_trigger"),
-    (Axis::TriggerRight, "axis/right_trigger"),
+const SDL_AXES: [(Axis, &str, &str); 6] = [
+    (Axis::LeftX, "axis/left_x", "左摇杆横向"),
+    (Axis::LeftY, "axis/left_y", "左摇杆纵向"),
+    (Axis::RightX, "axis/right_x", "右摇杆横向"),
+    (Axis::RightY, "axis/right_y", "右摇杆纵向"),
+    (Axis::TriggerLeft, "axis/left_trigger", "左扳机行程"),
+    (Axis::TriggerRight, "axis/right_trigger", "右扳机行程"),
 ];
 
-const SDL_BUTTONS: [(Button, &str); 26] = [
-    (Button::South, "button/south"),
-    (Button::East, "button/east"),
-    (Button::West, "button/west"),
-    (Button::North, "button/north"),
-    (Button::Back, "button/back"),
-    (Button::Guide, "button/guide"),
-    (Button::Start, "button/start"),
-    (Button::LeftStick, "button/left_stick"),
-    (Button::RightStick, "button/right_stick"),
-    (Button::LeftShoulder, "button/left_shoulder"),
-    (Button::RightShoulder, "button/right_shoulder"),
-    (Button::DPadUp, "button/dpad_up"),
-    (Button::DPadDown, "button/dpad_down"),
-    (Button::DPadLeft, "button/dpad_left"),
-    (Button::DPadRight, "button/dpad_right"),
-    (Button::Misc1, "button/misc1"),
-    (Button::Misc2, "button/misc2"),
-    (Button::Misc3, "button/misc3"),
-    (Button::Misc4, "button/misc4"),
-    (Button::Misc5, "button/misc5"),
-    (Button::Misc6, "button/misc6"),
-    (Button::LeftPaddle1, "button/left_paddle1"),
-    (Button::RightPaddle1, "button/right_paddle1"),
-    (Button::LeftPaddle2, "button/left_paddle2"),
-    (Button::RightPaddle2, "button/right_paddle2"),
-    (Button::Touchpad, "button/touchpad"),
+const SDL_BUTTONS: [(Button, &str, &str); 26] = [
+    (Button::South, "button/south", "右侧按键组下方按钮"),
+    (Button::East, "button/east", "右侧按键组右方按钮"),
+    (Button::West, "button/west", "右侧按键组左方按钮"),
+    (Button::North, "button/north", "右侧按键组上方按钮"),
+    (Button::Back, "button/back", "返回按钮"),
+    (Button::Guide, "button/guide", "主菜单按钮"),
+    (Button::Start, "button/start", "开始按钮"),
+    (Button::LeftStick, "button/left_stick", "左摇杆按下"),
+    (Button::RightStick, "button/right_stick", "右摇杆按下"),
+    (Button::LeftShoulder, "button/left_shoulder", "左肩键"),
+    (Button::RightShoulder, "button/right_shoulder", "右肩键"),
+    (Button::DPadUp, "button/dpad_up", "方向键上"),
+    (Button::DPadDown, "button/dpad_down", "方向键下"),
+    (Button::DPadLeft, "button/dpad_left", "方向键左"),
+    (Button::DPadRight, "button/dpad_right", "方向键右"),
+    (Button::Misc1, "button/misc1", "附加按钮 1"),
+    (Button::Misc2, "button/misc2", "附加按钮 2"),
+    (Button::Misc3, "button/misc3", "附加按钮 3"),
+    (Button::Misc4, "button/misc4", "附加按钮 4"),
+    (Button::Misc5, "button/misc5", "附加按钮 5"),
+    (Button::Misc6, "button/misc6", "附加按钮 6"),
+    (Button::LeftPaddle1, "button/left_paddle1", "左背键 1"),
+    (Button::RightPaddle1, "button/right_paddle1", "右背键 1"),
+    (Button::LeftPaddle2, "button/left_paddle2", "左背键 2"),
+    (Button::RightPaddle2, "button/right_paddle2", "右背键 2"),
+    (Button::Touchpad, "button/touchpad", "触摸板按下"),
 ];
 
 const NOLO_BUTTONS: [(u8, &str, &str); 6] = [
@@ -138,11 +142,8 @@ fn main() -> Result<()> {
                 "set_simulation" => {
                     let request: InputSimulationRequest =
                         from_arrow(data.as_array()).context("decode set_simulation")?;
-                    let (result, inactive) = input.set_simulation(request);
+                    let result = input.set_simulation(request);
                     send(&mut node, "simulation_request_result", &result)?;
-                    if let Some(control) = inactive {
-                        send(&mut node, "control_input", &control)?;
-                    }
                     publish_snapshot(&mut node, &mut input)?;
                 }
                 "action_feedback" => {
@@ -234,6 +235,7 @@ struct ControllerInput {
     pose_dirty: bool,
     previous_control: Option<ControlInputFrame>,
     simulation: Option<SimulationPlayback>,
+    config_before_simulation: Option<InputConfig>,
     simulation_state: InputSimulationState,
     next_sequence: u64,
     receiver: Receiver<DriverEvent>,
@@ -262,6 +264,7 @@ impl ControllerInput {
             pose_dirty: true,
             previous_control: None,
             simulation: None,
+            config_before_simulation: None,
             simulation_state: InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 ..Default::default()
@@ -296,45 +299,10 @@ impl ControllerInput {
         loop {
             match self.receiver.try_recv() {
                 Ok(DriverEvent::Sources { driver, sources }) => {
-                    let driver_id = driver.driver_id.clone();
-                    self.drivers.insert(driver_id.clone(), driver);
-                    self.sources
-                        .retain(|_, source| source.driver_id != driver_id);
-                    for source in sources {
-                        self.diagnostics
-                            .entry(source.source_id.clone())
-                            .or_insert_with(|| InputStreamDiagnostics {
-                                source_id: source.source_id.clone(),
-                                ..Default::default()
-                            });
-                        self.sources.insert(source.source_id.clone(), source);
-                    }
-                    self.samples
-                        .retain(|source_id, _| self.sources.contains_key(source_id));
-                    self.last_published_sequences
-                        .retain(|source_id, _| self.sources.contains_key(source_id));
-                    self.pose_dirty = true;
+                    self.replace_driver_sources(driver, sources);
                 }
                 Ok(DriverEvent::Sample(sample)) => {
-                    let diagnostics = self
-                        .diagnostics
-                        .entry(sample.source_id.clone())
-                        .or_insert_with(|| InputStreamDiagnostics {
-                            source_id: sample.source_id.clone(),
-                            ..Default::default()
-                        });
-                    diagnostics.received_frames += 1;
-                    diagnostics.last_source_time_ns = Some(sample.source_time_ns);
-                    diagnostics.last_received_time_ns = Some(sample.received_time_ns);
-                    if let Some(previous) = self.samples.get(&sample.source_id) {
-                        let elapsed = sample.source_time_ns - previous.source_time_ns;
-                        if elapsed > 0 {
-                            diagnostics.observed_rate_hz = Some(1_000_000_000.0 / elapsed as f64);
-                        }
-                        diagnostics.sequence_gaps +=
-                            sample.sequence.saturating_sub(previous.sequence + 1);
-                    }
-                    self.samples.insert(sample.source_id.clone(), sample);
+                    self.accept_sample(sample);
                 }
                 Ok(DriverEvent::Error { driver_id, message }) => {
                     self.last_error = Some(message.clone());
@@ -353,15 +321,55 @@ impl ControllerInput {
         }
     }
 
+    fn replace_driver_sources(&mut self, driver: InputDriverInfo, sources: Vec<InputSourceInfo>) {
+        let driver_id = driver.driver_id.clone();
+        self.drivers.insert(driver_id.clone(), driver);
+        self.sources
+            .retain(|_, source| source.driver_id != driver_id);
+        for source in sources {
+            self.diagnostics
+                .entry(source.source_id.clone())
+                .or_insert_with(|| InputStreamDiagnostics {
+                    source_id: source.source_id.clone(),
+                    ..Default::default()
+                });
+            self.sources.insert(source.source_id.clone(), source);
+        }
+        self.samples
+            .retain(|source_id, _| self.sources.contains_key(source_id));
+        self.last_published_sequences
+            .retain(|source_id, _| self.sources.contains_key(source_id));
+        self.pose_dirty = true;
+    }
+
+    fn accept_sample(&mut self, sample: RawSample) {
+        let diagnostics = self
+            .diagnostics
+            .entry(sample.source_id.clone())
+            .or_insert_with(|| InputStreamDiagnostics {
+                source_id: sample.source_id.clone(),
+                ..Default::default()
+            });
+        diagnostics.received_frames += 1;
+        diagnostics.last_source_time_ns = Some(sample.source_time_ns);
+        diagnostics.last_received_time_ns = Some(sample.received_time_ns);
+        if let Some(previous) = self.samples.get(&sample.source_id) {
+            let elapsed = sample.source_time_ns - previous.source_time_ns;
+            if elapsed > 0 {
+                diagnostics.observed_rate_hz = Some(1_000_000_000.0 / elapsed as f64);
+            }
+            diagnostics.sequence_gaps += sample.sequence.saturating_sub(previous.sequence + 1);
+        }
+        self.samples.insert(sample.source_id.clone(), sample);
+    }
+
     fn tick(&mut self) -> Option<(Option<AbsolutePoseFrame>, ControlInputFrame)> {
         self.drain();
         let now = now_ns();
         if let Some(simulation) = self.simulation.as_mut() {
             let sample = simulation.sample(self.next_sequence, now);
-            self.next_sequence += 1;
             self.simulation_state = sample.state;
-            self.previous_control = Some(sample.input.clone());
-            return Some((Some(sample.pose), sample.input));
+            self.accept_sample(sample.raw);
         }
 
         let relevant = |source_id: &str| {
@@ -509,11 +517,11 @@ impl ControllerInput {
     fn set_simulation(
         &mut self,
         request: InputSimulationRequest,
-    ) -> (
-        RequestResult<InputSimulationState>,
-        Option<ControlInputFrame>,
-    ) {
-        let inactive = if request.enabled {
+    ) -> RequestResult<InputSimulationState> {
+        if request.enabled && self.simulation.is_none() {
+            self.config_before_simulation = Some(self.config.clone());
+            self.config = simulation_config(&self.config);
+            self.replace_driver_sources(simulation::driver_info(), vec![simulation::source_info()]);
             self.simulation = Some(SimulationPlayback::default());
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
@@ -521,29 +529,37 @@ impl ControllerInput {
                 phase: Some("starting".into()),
                 elapsed_s: Some(0.0),
             };
-            None
-        } else {
-            self.simulation = None;
-            self.pose_dirty = true;
+            self.last_published_sequences.clear();
+            self.previous_control = None;
+            self.virtual_feedback = None;
+        } else if !request.enabled && self.simulation.take().is_some() {
+            self.replace_driver_sources(simulation::driver_info(), vec![]);
+            if let Some(config) = self.config_before_simulation.take() {
+                self.config = config;
+            }
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 ..Default::default()
             };
-            let control = inactive_input(self.next_sequence, now_ns());
-            self.next_sequence += 1;
-            self.previous_control = Some(control.clone());
-            Some(control)
-        };
-        (
-            RequestResult {
-                schema_version: SCHEMA_VERSION,
-                request_id: request.request_id,
-                acknowledged_action: RequestAction::Apply,
-                value: Some(self.simulation_state.clone()),
-                original_error: None,
-            },
-            inactive,
-        )
+            self.last_published_sequences.clear();
+            self.pose_dirty = true;
+            self.previous_control = None;
+            if !self
+                .config
+                .feedback_bindings
+                .iter()
+                .any(is_virtual_feedback)
+            {
+                self.virtual_feedback = None;
+            }
+        }
+        RequestResult {
+            schema_version: SCHEMA_VERSION,
+            request_id: request.request_id,
+            acknowledged_action: RequestAction::Apply,
+            value: Some(self.simulation_state.clone()),
+            original_error: None,
+        }
     }
 
     fn apply_feedback(&mut self, feedback: ActionFeedback) {
@@ -665,6 +681,7 @@ impl ControllerInput {
             orientation_source: self.source_state(self.config.orientation_source.as_ref()),
             bindings: self.binding_states(),
             feedback_bindings: self.feedback_binding_states(),
+            live_component_values: live_component_values(&self.samples),
             virtual_feedback: self.virtual_feedback.clone(),
             diagnostics: self.diagnostics.values().cloned().collect(),
             simulation: self.simulation_state.clone(),
@@ -684,6 +701,39 @@ impl ControllerInput {
             updated_at_ns: now_ns(),
         }
     }
+}
+
+fn simulation_config(config: &InputConfig) -> InputConfig {
+    let mut config = config.clone();
+    let selection = PoseSourceSelection {
+        driver_id: SIMULATION_DRIVER_ID.into(),
+        device_id: simulation::DEVICE_ID.into(),
+        source_id: SIMULATION_SOURCE_ID.into(),
+    };
+    config.position_source = Some(selection.clone());
+    config.orientation_source = Some(selection);
+    config.bindings = vec![
+        ActionBinding {
+            action: "control_active".into(),
+            action_type: ActionType::Boolean,
+            source_id: SIMULATION_SOURCE_ID.into(),
+            component_paths: vec![SIMULATION_CONTROL_ACTIVE_COMPONENT.into()],
+            invert: false,
+        },
+        ActionBinding {
+            action: "primary_tool".into(),
+            action_type: ActionType::Float,
+            source_id: SIMULATION_SOURCE_ID.into(),
+            component_paths: vec![SIMULATION_PRIMARY_TOOL_COMPONENT.into()],
+            invert: false,
+        },
+    ];
+    config.feedback_bindings = vec![ActionFeedbackBinding {
+        action: "primary_tool".into(),
+        source_id: VIRTUAL_FEEDBACK_SOURCE_ID.into(),
+        capability_path: VIRTUAL_FEEDBACK_CAPABILITY_PATH.into(),
+    }];
+    config
 }
 
 fn is_virtual_feedback(binding: &ActionFeedbackBinding) -> bool {
@@ -724,6 +774,15 @@ fn validate_bindings(bindings: &[ActionBinding]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn live_component_values(
+    samples: &BTreeMap<String, RawSample>,
+) -> BTreeMap<String, BTreeMap<String, f64>> {
+    samples
+        .iter()
+        .map(|(source_id, sample)| (source_id.clone(), sample.components.clone()))
+        .collect()
 }
 
 fn combined_pose_frame(
@@ -1151,7 +1210,7 @@ fn run_sdl_driver(sender: &Sender<DriverEvent>, haptic: &Receiver<HapticCommand>
         for state in gamepads.values_mut() {
             state.sequence += 1;
             let mut components = BTreeMap::new();
-            for (axis, path) in SDL_AXES {
+            for (axis, path, _) in SDL_AXES {
                 if state.gamepad.has_axis(axis) {
                     let raw = state.gamepad.axis(axis);
                     let value = match axis {
@@ -1162,7 +1221,7 @@ fn run_sdl_driver(sender: &Sender<DriverEvent>, haptic: &Receiver<HapticCommand>
                     components.insert(path.into(), value);
                 }
             }
-            for (button, path) in SDL_BUTTONS {
+            for (button, path, _) in SDL_BUTTONS {
                 if state.gamepad.has_button(button) {
                     components.insert(path.into(), f64::from(state.gamepad.button(button)));
                 }
@@ -1205,21 +1264,21 @@ fn open_sdl_gamepad(
     let has_trigger_rumble = unsafe { gamepad.has_rumble_triggers() };
     let components = SDL_AXES
         .iter()
-        .filter(|(axis, _)| gamepad.has_axis(*axis))
-        .map(|(_, path)| InputComponentInfo {
+        .filter(|(axis, _, _)| gamepad.has_axis(*axis))
+        .map(|(_, path, localized_name)| InputComponentInfo {
             path: (*path).into(),
             action_type: ActionType::Float,
-            localized_name: Some((*path).into()),
+            localized_name: Some((*localized_name).into()),
             definition_source: "sdl3-gamepad".into(),
         })
         .chain(
             SDL_BUTTONS
                 .iter()
-                .filter(|(button, _)| gamepad.has_button(*button))
-                .map(|(_, path)| InputComponentInfo {
+                .filter(|(button, _, _)| gamepad.has_button(*button))
+                .map(|(_, path, localized_name)| InputComponentInfo {
                     path: (*path).into(),
                     action_type: ActionType::Boolean,
-                    localized_name: Some((*path).into()),
+                    localized_name: Some((*localized_name).into()),
                     definition_source: "sdl3-gamepad".into(),
                 }),
         )
@@ -1270,18 +1329,18 @@ fn sdl_feedback_capabilities(
         feedback_capabilities.extend([
             InputFeedbackCapabilityInfo {
                 path: "feedback/trigger_left".into(),
-                localized_name: Some("Left trigger force".into()),
+                localized_name: Some("左扳机力度反馈".into()),
             },
             InputFeedbackCapabilityInfo {
                 path: "feedback/trigger_right".into(),
-                localized_name: Some("Right trigger force".into()),
+                localized_name: Some("右扳机力度反馈".into()),
             },
         ]);
     }
     if has_controller_rumble {
         feedback_capabilities.push(InputFeedbackCapabilityInfo {
             path: "feedback/rumble".into(),
-            localized_name: Some("Controller rumble".into()),
+            localized_name: Some("手柄振动".into()),
         });
     }
     feedback_capabilities
@@ -1418,21 +1477,27 @@ mod tests {
         assert_eq!(
             SDL_BUTTONS
                 .iter()
-                .map(|(_, path)| *path)
+                .map(|(_, path, _)| *path)
                 .collect::<BTreeSet<_>>()
                 .len(),
             SDL_BUTTONS.len()
         );
-        assert!(SDL_BUTTONS.iter().any(|(_, path)| *path == "button/misc6"));
+        assert!(SDL_AXES.iter().all(|(_, _, name)| !name.is_empty()));
+        assert!(SDL_BUTTONS.iter().all(|(_, _, name)| !name.is_empty()));
         assert!(
             SDL_BUTTONS
                 .iter()
-                .any(|(_, path)| *path == "button/left_paddle2")
+                .any(|(_, path, _)| *path == "button/misc6")
         );
         assert!(
             SDL_BUTTONS
                 .iter()
-                .any(|(_, path)| *path == "button/right_paddle2")
+                .any(|(_, path, _)| *path == "button/left_paddle2")
+        );
+        assert!(
+            SDL_BUTTONS
+                .iter()
+                .any(|(_, path, _)| *path == "button/right_paddle2")
         );
 
         assert_eq!(NOLO_BUTTONS.map(|(bit, _, _)| bit), [0, 1, 2, 3, 4, 5]);
@@ -1447,6 +1512,88 @@ mod tests {
                 "button/touchpad_touch",
             ]
         );
+    }
+
+    #[test]
+    fn discovery_keeps_exact_live_component_values() {
+        let values = live_component_values(&sample(&[
+            ("button/south", 1.0),
+            ("axis/right_trigger", 0.0),
+        ]));
+        assert_eq!(values["fixture"]["button/south"], 1.0);
+        assert_eq!(values["fixture"]["axis/right_trigger"], 0.0);
+    }
+
+    #[test]
+    fn simulation_uses_declared_pose_action_and_virtual_feedback_bindings() {
+        let original = InputConfig {
+            position_source: Some(PoseSourceSelection {
+                driver_id: "physical-driver".into(),
+                device_id: "physical-device".into(),
+                source_id: "physical-source".into(),
+            }),
+            bindings: vec![ActionBinding {
+                action: "primary_tool".into(),
+                action_type: ActionType::Float,
+                source_id: "physical-source".into(),
+                component_paths: vec!["axis/trigger".into()],
+                invert: false,
+            }],
+            ..Default::default()
+        };
+        let config = simulation_config(&original);
+        let selection = config.position_source.as_ref().unwrap();
+        assert_eq!(selection.source_id, SIMULATION_SOURCE_ID);
+        assert_eq!(
+            config
+                .orientation_source
+                .as_ref()
+                .map(|source| source.source_id.as_str()),
+            Some(SIMULATION_SOURCE_ID)
+        );
+        assert_eq!(config.bindings.len(), 2);
+        assert_eq!(config.bindings[0].action, "control_active");
+        assert_eq!(
+            config.bindings[0].component_paths,
+            [SIMULATION_CONTROL_ACTIVE_COMPONENT]
+        );
+        assert_eq!(config.bindings[1].action, "primary_tool");
+        assert_eq!(
+            config.bindings[1].component_paths,
+            [SIMULATION_PRIMARY_TOOL_COMPONENT]
+        );
+        assert_eq!(config.feedback_bindings.len(), 1);
+        assert!(is_virtual_feedback(&config.feedback_bindings[0]));
+        assert_eq!(
+            original.position_source.unwrap().source_id,
+            "physical-source"
+        );
+
+        let source = simulation::source_info();
+        let sample = SimulationPlayback::default().sample(1, 1).raw;
+        let sources = BTreeMap::from([(source.source_id.clone(), source)]);
+        let samples = BTreeMap::from([(sample.source_id.clone(), sample)]);
+        let pose = combined_pose_frame(
+            config.position_source.as_ref(),
+            config.orientation_source.as_ref(),
+            &sources,
+            &samples,
+            1,
+            1,
+        );
+        let control = evaluate_actions(&samples, &config.bindings, None, 1, 1);
+        assert_eq!(
+            pose.position_source_id.as_deref(),
+            Some(SIMULATION_SOURCE_ID)
+        );
+        assert_eq!(
+            pose.orientation_source_id.as_deref(),
+            Some(SIMULATION_SOURCE_ID)
+        );
+        assert!(control.control_active.is_active);
+        assert!(control.control_active.value);
+        assert!(control.primary_tool.is_active);
+        assert_eq!(control.primary_tool.value, 0.0);
     }
 
     #[test]

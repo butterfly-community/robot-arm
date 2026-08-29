@@ -34,6 +34,14 @@ const actions = [
   ["horizontal_arc", "左旋 / 右旋", "float"],
 ] as const;
 
+type InputMode = "button" | "buttons" | "axis";
+
+function componentLabel(component: Record<string, unknown>) {
+  const path = String(component.path ?? "");
+  const localized = String(component.localized_name ?? "");
+  return localized && localized !== path ? `${localized} · ${path}` : path;
+}
+
 function sampleValue(input: ControlInputFrame | undefined, key: string) {
   const sample = input?.[key as keyof ControlInputFrame] as
     { value?: number | boolean; is_active?: boolean } | undefined;
@@ -72,7 +80,8 @@ export default function Page() {
   const [paths, setPaths] = useState<Record<string, string>>({});
   const [sourceIds, setSourceIds] = useState<Record<string, string>>({});
   const [inverted, setInverted] = useState<Record<string, boolean>>({});
-  const [types, setTypes] = useState<Record<string, "boolean" | "float">>({});
+  const [inputModes, setInputModes] = useState<Record<string, InputMode>>({});
+  const [testSourceId, setTestSourceId] = useState("");
   const [feedbackSourceIds, setFeedbackSourceIds] = useState<
     Record<string, string>
   >({});
@@ -119,11 +128,15 @@ export default function Page() {
         ]),
       ),
     );
-    setTypes(
+    setInputModes(
       Object.fromEntries(
         bindingStates.map((binding) => [
           String(binding.action),
-          binding.action_type === "boolean" ? "boolean" : "float",
+          binding.action_type === "boolean"
+            ? "button"
+            : ((binding.configured_components ?? []) as unknown[]).length === 2
+              ? "buttons"
+              : "axis",
         ]),
       ),
     );
@@ -185,7 +198,7 @@ export default function Page() {
   function setPath(action: string, index: number, value: string) {
     const next = (paths[action] ?? "").split(",").map((item) => item.trim());
     next[index] = value;
-    setPaths({ ...paths, [action]: next.filter(Boolean).join(", ") });
+    setPaths({ ...paths, [action]: next.join(", ") });
   }
 
   async function applyBindings() {
@@ -195,15 +208,15 @@ export default function Page() {
         schema_version: 2,
         request_id: requestId(),
         bindings: actions
-          .map(([action, , defaultType]) => ({
+          .map(([action, , actionType]) => ({
             action,
-            action_type: types[action] ?? defaultType,
+            action_type: actionType,
             source_id: sourceIds[action] ?? "",
             component_paths: (paths[action] ?? "")
               .split(",")
               .map((value) => value.trim())
               .filter(Boolean),
-            invert: Boolean(inverted[action]),
+            invert: actionType === "float" && Boolean(inverted[action]),
           }))
           .filter(
             (binding) =>
@@ -221,6 +234,28 @@ export default function Page() {
       setError(String(reason));
     }
   }
+
+  const actionSources = sources.filter((source) => source.action_capable);
+  const currentTestSourceId = actionSources.some(
+    (source) => source.source_id === testSourceId,
+  )
+    ? testSourceId
+    : String(actionSources[0]?.source_id ?? "");
+  const testSource = actionSources.find(
+    (source) => source.source_id === currentTestSourceId,
+  );
+  const liveValues = (discovery.live_component_values ?? {}) as Record<
+    string,
+    Record<string, number>
+  >;
+  const testComponents = (
+    (testSource?.available_components ?? []) as Array<Record<string, unknown>>
+  ).filter((component) => {
+    const value = Number(
+      liveValues[currentTestSourceId]?.[String(component.path)] ?? 0,
+    );
+    return value !== 0;
+  });
 
   async function setSimulation(enabled: boolean) {
     setError(undefined);
@@ -403,10 +438,10 @@ export default function Page() {
             })}
           </div>
           <div className="card-actions">
-            <Button variant="ghost" onClick={() => unselect("position")}>
+            <Button variant="outline" onClick={() => unselect("position")}>
               清除空间来源
             </Button>
-            <Button variant="ghost" onClick={() => unselect("orientation")}>
+            <Button variant="outline" onClick={() => unselect("orientation")}>
               清除姿态来源
             </Button>
           </div>
@@ -414,17 +449,98 @@ export default function Page() {
 
         <Card
           className="span-8"
+          eyebrow="Live input inspector"
+          title="输入测试"
+          action={
+            <StatusBadge tone={testComponents.length ? "cyan" : "neutral"}>
+              {testComponents.length
+                ? `${testComponents.length} 个输入有值`
+                : "等待输入"}
+            </StatusBadge>
+          }
+        >
+          <div className="input-test-toolbar">
+            <select
+              aria-label="选择测试设备"
+              value={currentTestSourceId}
+              onChange={(event) => setTestSourceId(event.currentTarget.value)}
+            >
+              <option value="">选择要测试的输入设备</option>
+              {actionSources.map((source) => (
+                <option
+                  key={String(source.source_id)}
+                  value={String(source.source_id)}
+                >
+                  {String(source.display_name ?? source.source_id)}
+                </option>
+              ))}
+            </select>
+            <p>
+              按住一个按钮，或推动摇杆、扳机；这里按网页的一秒刷新节拍显示设备实际上报的组件和值。
+            </p>
+          </div>
+          <div className="input-test-values" aria-live="polite">
+            {testComponents.length ? (
+              testComponents.map((component) => {
+                const path = String(component.path);
+                const value = Number(
+                  liveValues[currentTestSourceId]?.[path] ?? 0,
+                );
+                return (
+                  <div className="input-test-value" key={path}>
+                    <span>{componentLabel(component)}</span>
+                    <strong>{value.toFixed(3)}</strong>
+                  </div>
+                );
+              })
+            ) : (
+              <p className="empty-state">
+                {testSource
+                  ? "当前没有按钮按下，轴也位于零位"
+                  : "没有可测试的输入设备"}
+              </p>
+            )}
+          </div>
+        </Card>
+
+        <Card
+          className="span-12"
           eyebrow="Action mapping"
           title="功能与反馈绑定"
         >
+          <div className="binding-guide">
+            <div>
+              <strong>单个按钮</strong>
+              <span>按下为开，松开为关，用于接管或确认等开关功能。</span>
+            </div>
+            <div>
+              <strong>正负按钮对</strong>
+              <span>第一个按钮输出负方向，第二个按钮输出正方向。</span>
+            </div>
+            <div>
+              <strong>连续轴</strong>
+              <span>摇杆或扳机的连续数值；反转方向会把输出乘以 -1。</span>
+            </div>
+          </div>
+          <h3 className="binding-section-heading">功能输入</h3>
           <div className="binding-grid">
-            {actions.map(([action, label, defaultType]) => {
+            {actions.map(([action, label, actionType]) => {
               const source = sources.find(
                 (candidate) => candidate.source_id === sourceIds[action],
               );
-              const components = (source?.available_components ?? []) as Array<
-                Record<string, unknown>
-              >;
+              const mode =
+                actionType === "boolean"
+                  ? "button"
+                  : (inputModes[action] ?? "axis");
+              const components = (
+                (source?.available_components ?? []) as Array<
+                  Record<string, unknown>
+                >
+              ).filter((component) =>
+                mode === "axis"
+                  ? component.action_type === "float"
+                  : component.action_type === "boolean",
+              );
               return (
                 <Field key={action} label={label} englishLabel={action}>
                   <div className="binding-row">
@@ -439,7 +555,7 @@ export default function Page() {
                       }}
                     >
                       <option value="">选择输入设备</option>
-                      {sources.map((candidate) => (
+                      {actionSources.map((candidate) => (
                         <option
                           key={String(candidate.source_id)}
                           value={String(candidate.source_id)}
@@ -451,72 +567,88 @@ export default function Page() {
                       ))}
                     </select>
                     <select
-                      value={types[action] ?? defaultType}
-                      disabled={defaultType === "boolean"}
-                      onChange={(event) =>
-                        setTypes({
-                          ...types,
-                          [action]: event.currentTarget.value as
-                            "boolean" | "float",
-                        })
-                      }
+                      aria-label={`${label}输入方式`}
+                      value={mode}
+                      disabled={actionType === "boolean"}
+                      onChange={(event) => {
+                        setInputModes({
+                          ...inputModes,
+                          [action]: event.currentTarget.value as InputMode,
+                        });
+                        setPaths({ ...paths, [action]: "" });
+                      }}
                     >
-                      <option value="boolean">开关 / 正负按钮对</option>
-                      <option value="float">连续轴</option>
+                      {actionType === "boolean" && (
+                        <option value="button">单个按钮</option>
+                      )}
+                      {actionType === "float" && (
+                        <>
+                          <option value="axis">连续轴</option>
+                          <option value="buttons">正负按钮对</option>
+                        </>
+                      )}
                     </select>
-                    {Array.from({
-                      length:
-                        defaultType === "float" && types[action] === "boolean"
-                          ? 2
-                          : 1,
-                    }).map((_, index) => (
-                      <select
-                        key={index}
-                        value={
-                          (paths[action] ?? "").split(",")[index]?.trim() ?? ""
-                        }
-                        onChange={(event) =>
-                          setPath(action, index, event.currentTarget.value)
-                        }
-                      >
-                        <option value="">
-                          {index === 0 &&
-                          types[action] === "boolean" &&
-                          defaultType === "float"
-                            ? "负方向按钮"
-                            : index === 1
-                              ? "正方向按钮"
-                              : "选择设备输入"}
-                        </option>
-                        {components.map((component) => (
-                          <option
-                            key={String(component.path)}
-                            value={String(component.path)}
+                    <div className="binding-components">
+                      {Array.from({ length: mode === "buttons" ? 2 : 1 }).map(
+                        (_, index) => (
+                          <select
+                            key={index}
+                            aria-label={`${label}${
+                              mode === "buttons"
+                                ? index === 0
+                                  ? "负方向按钮"
+                                  : "正方向按钮"
+                                : "设备输入"
+                            }`}
+                            value={
+                              (paths[action] ?? "").split(",")[index]?.trim() ??
+                              ""
+                            }
+                            onChange={(event) =>
+                              setPath(action, index, event.currentTarget.value)
+                            }
                           >
-                            {String(component.localized_name ?? component.path)}
-                          </option>
-                        ))}
-                      </select>
-                    ))}
-                    <label className="compact-check">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(inverted[action])}
-                        onChange={(event) =>
-                          setInverted({
-                            ...inverted,
-                            [action]: event.currentTarget.checked,
-                          })
-                        }
-                      />
-                      反向
-                    </label>
+                            <option value="">
+                              {mode === "buttons"
+                                ? index === 0
+                                  ? "负方向按钮"
+                                  : "正方向按钮"
+                                : "选择设备输入"}
+                            </option>
+                            {components.map((component) => (
+                              <option
+                                key={String(component.path)}
+                                value={String(component.path)}
+                              >
+                                {componentLabel(component)}
+                              </option>
+                            ))}
+                          </select>
+                        ),
+                      )}
+                    </div>
+                    {actionType === "float" && (
+                      <label className="compact-check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(inverted[action])}
+                          onChange={(event) =>
+                            setInverted({
+                              ...inverted,
+                              [action]: event.currentTarget.checked,
+                            })
+                          }
+                        />
+                        {mode === "buttons" ? "交换正负" : "反转方向"}
+                      </label>
+                    )}
                   </div>
                 </Field>
               );
             })}
           </div>
-          <div className="binding-grid">
+          <h3 className="binding-section-heading">力度反馈目标</h3>
+          <div className="feedback-binding-grid">
             {feedbackActions.map(([action, label]) => {
               const virtualSelected =
                 feedbackSourceIds[action] === virtualFeedbackTarget.sourceId;
@@ -540,7 +672,7 @@ export default function Page() {
                   label={label}
                   englishLabel={action + "_feedback"}
                 >
-                  <div className="binding-row">
+                  <div className="feedback-binding-row">
                     <select
                       value={feedbackSourceIds[action] ?? ""}
                       onChange={(event) => {

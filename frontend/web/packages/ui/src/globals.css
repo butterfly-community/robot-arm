@@ -484,14 +484,6 @@ nav a > span:first-child {
   border-color: #4d5b6c;
   background: rgb(255 255 255 / 4%);
 }
-.button-ghost {
-  background: transparent;
-  color: var(--muted-strong);
-}
-.button-ghost:hover {
-  color: var(--foreground);
-  background: rgb(255 255 255 / 4%);
-}
 .button-danger {
   border-color: #654148;
   background: transparent;
@@ -827,6 +819,35 @@ input[type="range"] {
   left: 13px;
   color: var(--muted);
 }
+.pose-viewer-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 13px;
+  z-index: 3;
+  display: flex;
+  gap: 4px;
+  border: 1px solid var(--line-bright);
+  border-radius: 6px;
+  padding: 3px;
+  background: rgb(12 15 19 / 88%);
+}
+.pose-view-button {
+  min-width: 48px;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: var(--text-caption);
+  line-height: 1;
+  cursor: pointer;
+}
+.pose-view-button:hover,
+.pose-view-button[aria-pressed="true"] {
+  background: #1b2733;
+  color: var(--text);
+}
 .pose-viewer-inset-label {
   right: 25px;
   bottom: 176px;
@@ -941,16 +962,111 @@ input[type="range"] {
 .binding-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 22px 16px;
+  gap: 12px;
 }
 .binding-grid .field {
   margin-bottom: 0;
+  gap: 8px;
+}
+.binding-grid .field > legend {
+  padding-bottom: 0;
 }
 .binding-row {
   display: grid;
-  grid-template-columns: minmax(115px, 0.7fr) minmax(170px, 1.3fr) auto;
+  grid-template-columns:
+    minmax(150px, 0.8fr) minmax(140px, 0.65fr) minmax(190px, 1.25fr)
+    auto;
   gap: 10px;
   align-items: center;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1014;
+}
+.binding-components {
+  display: grid;
+  gap: 8px;
+}
+.binding-guide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.binding-guide > div {
+  display: grid;
+  gap: 5px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1014;
+}
+.binding-guide strong,
+.binding-section-heading {
+  color: var(--foreground);
+  font-size: var(--text-label);
+}
+.binding-guide span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+.binding-section-heading {
+  margin: 24px 0 12px;
+}
+.binding-guide + .binding-section-heading {
+  margin-top: 0;
+}
+.feedback-binding-grid {
+  max-width: 900px;
+}
+.feedback-binding-grid .field {
+  margin-bottom: 0;
+}
+.feedback-binding-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
+  gap: 10px;
+}
+.input-test-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(280px, 1.3fr);
+  gap: 16px;
+  align-items: center;
+}
+.input-test-toolbar p,
+.empty-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.55;
+}
+.input-test-values {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1014;
+  flex-wrap: wrap;
+}
+.input-test-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-bright);
+  border-radius: 7px;
+  color: var(--muted-strong);
+  font-size: var(--text-caption);
+}
+.input-test-value strong {
+  color: var(--cyan);
+  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 .compact-check {
   display: inline-flex;
@@ -1094,6 +1210,10 @@ input[type="range"] {
   .topbar-state {
     display: none;
   }
+  .binding-grid,
+  .binding-guide {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 720px) {
   .console-shell {
@@ -1139,6 +1259,9 @@ input[type="range"] {
   .robot-viewer {
     min-height: 340px;
   }
+  .pose-viewer-toolbar {
+    top: 42px;
+  }
   .action-item {
     grid-template-columns: 1fr;
   }
@@ -1148,7 +1271,10 @@ input[type="range"] {
   .binding-grid {
     grid-template-columns: 1fr;
   }
-  .binding-row {
+  .binding-row,
+  .feedback-binding-row,
+  .input-test-toolbar,
+  .binding-guide {
     grid-template-columns: 1fr;
   }
   .pose-comparison {

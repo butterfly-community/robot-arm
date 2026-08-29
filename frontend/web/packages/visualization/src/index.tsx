@@ -1,12 +1,13 @@
 "use client";
 
 import type { AbsolutePoseFrame } from "@robot/contracts";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 type Vector3Tuple = [number, number, number];
 type QuaternionTuple = [number, number, number, number];
+type CameraView = "perspective" | "top" | "front" | "right";
 
 export type PoseVisualization = {
   position_m: Vector3Tuple;
@@ -34,52 +35,88 @@ type SceneState = {
   controls: OrbitControls;
 };
 
-function createDeviceModel() {
+function createFaceMaterial(label: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 256;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("无法创建姿态标记纹理");
+  context.fillStyle = "#17212b";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.strokeStyle = "#52616c";
+  context.lineWidth = 10;
+  context.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
+  context.fillStyle = "#f4f7fa";
+  context.font = "700 112px sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, canvas.width / 2, canvas.height / 2 + 4);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.MeshStandardMaterial({
+    map: texture,
+    metalness: 0,
+    roughness: 0.62,
+  });
+}
+
+function createOrientationBlock() {
   const group = new THREE.Group();
-  const shell = new THREE.MeshStandardMaterial({
-    color: 0xd8e1e8,
-    metalness: 0.2,
-    roughness: 0.38,
-  });
-  const dark = new THREE.MeshStandardMaterial({
-    color: 0x111820,
-    metalness: 0.1,
-    roughness: 0.55,
-  });
-  const cyan = new THREE.MeshStandardMaterial({
-    color: 0x43d9e6,
-    emissive: 0x123d43,
-    emissiveIntensity: 1.4,
-    roughness: 0.32,
-  });
-  const handle = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.024, 0.032, 0.14, 28),
-    shell,
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.13), [
+    createFaceMaterial("右"),
+    createFaceMaterial("左"),
+    createFaceMaterial("上"),
+    createFaceMaterial("下"),
+    createFaceMaterial("前"),
+    createFaceMaterial("后"),
+  ]);
+  group.add(body);
+  for (const [direction, color] of [
+    [new THREE.Vector3(1, 0, 0), 0xff5a5f],
+    [new THREE.Vector3(0, 1, 0), 0x4bd37b],
+    [new THREE.Vector3(0, 0, 1), 0x5794ff],
+  ] as const) {
+    const length = 0.27;
+    const headLength = 0.035;
+    const material = new THREE.MeshBasicMaterial({ color, depthTest: false });
+    const rotation = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      direction,
+    );
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.004, 0.004, length - headLength, 12),
+      material,
+    );
+    shaft.position.copy(direction).multiplyScalar((length - headLength) / 2);
+    shaft.quaternion.copy(rotation);
+    shaft.renderOrder = 3;
+    group.add(shaft);
+    const head = new THREE.Mesh(
+      new THREE.ConeGeometry(0.014, headLength, 16),
+      material,
+    );
+    head.position.copy(direction).multiplyScalar(length - headLength / 2);
+    head.quaternion.copy(rotation);
+    head.renderOrder = 3;
+    group.add(head);
+  }
+  const center = new THREE.Mesh(
+    new THREE.SphereGeometry(0.009, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xf4f7fa, depthTest: false }),
   );
-  handle.rotation.x = Math.PI / 2;
-  handle.position.z = 0.025;
-  group.add(handle);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.042, 32, 20), shell);
-  head.scale.set(1, 0.72, 1.18);
-  head.position.z = -0.065;
-  group.add(head);
-  const pad = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.021, 0.021, 0.007, 32),
-    dark,
-  );
-  pad.position.set(0, 0.034, -0.038);
-  group.add(pad);
-  const front = new THREE.Mesh(new THREE.ConeGeometry(0.012, 0.035, 24), cyan);
-  front.rotation.x = -Math.PI / 2;
-  front.position.z = -0.118;
-  group.add(front);
-  const top = new THREE.Mesh(new THREE.ConeGeometry(0.008, 0.025, 20), cyan);
-  top.position.set(0, 0.066, -0.035);
-  group.add(top);
+  center.renderOrder = 4;
+  group.add(center);
   return group;
 }
 
-function mappedPosition(
+const cameraViews: Array<{ id: CameraView; label: string }> = [
+  { id: "perspective", label: "透视" },
+  { id: "top", label: "俯视" },
+  { id: "front", label: "正视" },
+  { id: "right", label: "右视" },
+];
+
+export function mappedPosition(
   position: Vector3Tuple,
   origin: Vector3Tuple,
   axes: number[][],
@@ -95,7 +132,10 @@ function mappedPosition(
   ) as Vector3Tuple;
 }
 
-function mappedOrientation(orientation: QuaternionTuple, axes: number[][]) {
+export function mappedOrientation(
+  orientation: QuaternionTuple,
+  axes: number[][],
+) {
   const source = new THREE.Quaternion().fromArray(orientation).normalize();
   if (axes.length !== 3 || axes.some((row) => row.length !== 3)) {
     return source;
@@ -118,10 +158,9 @@ function mappedOrientation(orientation: QuaternionTuple, axes: number[][]) {
     0,
     1,
   );
-  return new THREE.Quaternion()
-    .setFromRotationMatrix(basis)
-    .multiply(source)
-    .normalize();
+  const basisRotation = new THREE.Quaternion().setFromRotationMatrix(basis);
+  const inverseBasis = basisRotation.clone().invert();
+  return basisRotation.multiply(source).multiply(inverseBasis).normalize();
 }
 
 function lineGeometry(points: THREE.Vector3[]) {
@@ -143,6 +182,29 @@ export function PoseViewer({
 }: Props) {
   const mount = useRef<HTMLDivElement>(null);
   const state = useRef<SceneState | undefined>(undefined);
+  const [cameraView, setCameraView] = useState<CameraView>("perspective");
+
+  const selectCameraView = (view: CameraView) => {
+    const current = state.current;
+    if (!current) return;
+    const presets: Record<
+      CameraView,
+      { offset: Vector3Tuple; up: Vector3Tuple }
+    > = {
+      perspective: { offset: [1.05, 0.72, 1.15], up: [0, 1, 0] },
+      top: { offset: [0, 1.65, 0], up: [0, 0, 1] },
+      front: { offset: [0, 0, 1.65], up: [0, 1, 0] },
+      right: { offset: [1.65, 0, 0], up: [0, 1, 0] },
+    };
+    const preset = presets[view];
+    current.camera.up.set(...preset.up);
+    current.camera.position
+      .copy(current.controls.target)
+      .add(new THREE.Vector3(...preset.offset));
+    current.camera.lookAt(current.controls.target);
+    current.controls.update();
+    setCameraView(view);
+  };
 
   useEffect(() => {
     const element = mount.current;
@@ -163,19 +225,16 @@ export function PoseViewer({
     controls.target.set(0, 0.08, 0);
     controls.update();
 
-    scene.add(new THREE.HemisphereLight(0xbdeeff, 0x111820, 2.2));
-    const key = new THREE.DirectionalLight(0xffffff, 3.4);
+    scene.add(new THREE.HemisphereLight(0xdce8ee, 0x111820, 1.3));
+    const key = new THREE.DirectionalLight(0xffffff, 1.7);
     key.position.set(0.7, 1.1, 0.8);
     scene.add(key);
-    const rim = new THREE.PointLight(0x43d9e6, 8, 3);
+    const rim = new THREE.PointLight(0x43d9e6, 1.2, 3);
     rim.position.set(-0.8, 0.45, -0.7);
     scene.add(rim);
 
     const grid = new THREE.GridHelper(2, 20, 0x315761, 0x16242b);
     scene.add(grid);
-    const axesHelper = new THREE.AxesHelper(0.22);
-    axesHelper.position.y = 0.004;
-    scene.add(axesHelper);
     const origin = new THREE.Mesh(
       new THREE.RingGeometry(0.035, 0.052, 40),
       new THREE.MeshBasicMaterial({ color: 0x43d9e6, side: THREE.DoubleSide }),
@@ -184,7 +243,7 @@ export function PoseViewer({
     origin.position.y = 0.003;
     scene.add(origin);
 
-    const device = createDeviceModel();
+    const device = createOrientationBlock();
     scene.add(device);
     const vector = new THREE.Line(
       lineGeometry([new THREE.Vector3(), new THREE.Vector3()]),
@@ -214,12 +273,10 @@ export function PoseViewer({
     const orientationKey = new THREE.DirectionalLight(0xffffff, 2.8);
     orientationKey.position.set(1, 1, 1);
     orientationScene.add(orientationKey);
-    orientationScene.add(new THREE.AxesHelper(0.12));
-    const orientationDevice = createDeviceModel();
-    orientationDevice.scale.setScalar(1.35);
+    const orientationDevice = createOrientationBlock();
     orientationScene.add(orientationDevice);
     const orientationCamera = new THREE.PerspectiveCamera(34, 1, 0.01, 5);
-    orientationCamera.position.set(0.3, 0.22, 0.38);
+    orientationCamera.position.set(0.55, 0.4, 0.7);
     orientationCamera.lookAt(0, 0, 0);
 
     const displacementLabel = document.createElement("div");
@@ -281,7 +338,12 @@ export function PoseViewer({
         const materials = Array.isArray(object.material)
           ? object.material
           : [object.material];
-        materials.forEach((material) => material.dispose());
+        materials.forEach((material) => {
+          if (material instanceof THREE.MeshStandardMaterial) {
+            material.map?.dispose();
+          }
+          material.dispose();
+        });
       });
       orientationScene.traverse((object) => {
         if (!(object instanceof THREE.Mesh || object instanceof THREE.Line))
@@ -290,7 +352,12 @@ export function PoseViewer({
         const materials = Array.isArray(object.material)
           ? object.material
           : [object.material];
-        materials.forEach((material) => material.dispose());
+        materials.forEach((material) => {
+          if (material instanceof THREE.MeshStandardMaterial) {
+            material.map?.dispose();
+          }
+          material.dispose();
+        });
       });
       renderer.dispose();
       renderer.domElement.remove();
@@ -358,6 +425,19 @@ export function PoseViewer({
           title="Space / self orientation"
           aria-label="英文：Space / self orientation"
         />
+      </div>
+      <div className="pose-viewer-toolbar" aria-label="三维视角">
+        {cameraViews.map((view) => (
+          <button
+            key={view.id}
+            type="button"
+            className="pose-view-button"
+            aria-pressed={cameraView === view.id}
+            onClick={() => selectCameraView(view.id)}
+          >
+            {view.label}
+          </button>
+        ))}
       </div>
       <div className="pose-viewer-inset-label">自身姿态</div>
     </div>

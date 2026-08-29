@@ -61,6 +61,7 @@ STATE_TOPIC = "/stararm102/joint_states"
 COMMAND_TOPIC = "/stararm102/joint_commands"
 START_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -3.0, 0.0, 0.0, 0.0))
 TEST_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -20.0, 0.0, 0.0, 0.0))
+CLOSED_GRIPPER_RAD = 0.0
 
 
 def arrow_encode(value: Any) -> pa.StructArray:
@@ -130,6 +131,7 @@ class MotionNode(Node):
         self._motion_status = self._idle_motion_status()
         self._actuator_status: dict[str, Any] | None = None
         self._motion_target: list[float] | None = None
+        self._motion_actuator_target: float | None = None
         self._planned_trajectory: Any | None = None
         self._plan_goal_handle: Any | None = None
         self._execute_goal_handle: Any | None = None
@@ -301,18 +303,18 @@ class MotionNode(Node):
             ):
                 return
             if self._last_controller_command is None:
-                fallback_joints = list(self._latest_arm_state["joints_rad"])
-                fallback_actuator = float(self._latest_arm_state["actuators_rad"][0])
+                current_joints = list(self._latest_arm_state["joints_rad"])
+                current_actuator = float(self._latest_arm_state["actuators_rad"][0])
             else:
-                fallback_joints = list(self._last_controller_command[0])
-                fallback_actuator = self._last_controller_command[1]
+                current_joints = list(self._last_controller_command[0])
+                current_actuator = self._last_controller_command[1]
             merged = merge_controller_command(
                 list(message.name),
                 list(message.position),
                 JOINTS,
                 GRIPPER_JOINT,
-                fallback_joints,
-                fallback_actuator,
+                current_joints,
+                current_actuator,
             )
             if merged is None:
                 return
@@ -644,6 +646,46 @@ class MotionNode(Node):
                 return
             seen.add(key)
             target_by_key[key] = float(position)
+        actuator_by_key = {
+            GRIPPER_KEY: float(self._latest_arm_state["actuators_rad"][0])
+        }
+        actuators = request.get("actuators", [])
+        if not isinstance(actuators, list):
+            self._set_motion_failed(request_id, "actuators must be a list", "apply")
+            return
+        seen.clear()
+        for item in actuators:
+            if not isinstance(item, dict):
+                self._set_motion_failed(
+                    request_id, "actuator target must be an object", "apply"
+                )
+                return
+            key = item.get("actuator_key")
+            if key not in actuator_by_key:
+                self._set_motion_failed(
+                    request_id, f"unknown actuator key {key}", "apply"
+                )
+                return
+            if key in seen:
+                self._set_motion_failed(
+                    request_id, f"duplicate actuator key {key}", "apply"
+                )
+                return
+            position = item.get("position_rad")
+            if (
+                not isinstance(position, (int, float))
+                or isinstance(position, bool)
+                or not math.isfinite(position)
+            ):
+                self._set_motion_failed(
+                    request_id,
+                    f"actuator {key} position must be a finite number",
+                    "apply",
+                )
+                return
+            seen.add(key)
+            actuator_by_key[key] = float(position)
+        self._motion_actuator_target = actuator_by_key[GRIPPER_KEY]
         self._begin_motion_plan(
             request_id, [target_by_key[key] for key in JOINTS], options
         )
@@ -959,6 +1001,8 @@ class MotionNode(Node):
             state="executing", result_message="正在执行普通关节轨迹"
         )
         self._enqueue("motion_status", self._motion_status)
+        if self._motion_actuator_target is not None:
+            self._publish_actuator(request_id, self._motion_actuator_target)
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = self._planned_trajectory
         goal.controller_names = ["arm_controller"]
@@ -1005,6 +1049,7 @@ class MotionNode(Node):
         self._reset_relative_baseline()
         self._planned_trajectory = None
         self._motion_target = None
+        self._motion_actuator_target = None
         self._motion_status.update(
             state="succeeded",
             result_code=str(result.error_code.val),
@@ -1027,6 +1072,7 @@ class MotionNode(Node):
         self._reset_relative_baseline()
         self._planned_trajectory = None
         self._motion_target = None
+        self._motion_actuator_target = None
         if cancelled_was_active and cancelled_request_id != request_id:
             cancelled = {
                 **self._idle_motion_status(),
@@ -1051,6 +1097,7 @@ class MotionNode(Node):
         self._reset_relative_baseline()
         self._planned_trajectory = None
         self._motion_target = None
+        self._motion_actuator_target = None
         self._motion_status = {
             **self._idle_motion_status(),
             "request_id": request_id,
@@ -1230,12 +1277,14 @@ class MotionNode(Node):
                 {
                     "key": "start",
                     "label": "默认位",
-                    "positions_rad": dict(zip(JOINTS, START_RAD, strict=True)),
+                    "joint_positions_rad": dict(zip(JOINTS, START_RAD, strict=True)),
+                    "actuator_positions_rad": {GRIPPER_KEY: CLOSED_GRIPPER_RAD},
                 },
                 {
                     "key": "test",
                     "label": "测试位",
-                    "positions_rad": dict(zip(JOINTS, TEST_RAD, strict=True)),
+                    "joint_positions_rad": dict(zip(JOINTS, TEST_RAD, strict=True)),
+                    "actuator_positions_rad": {GRIPPER_KEY: CLOSED_GRIPPER_RAD},
                 },
             ],
             "motion_options": [

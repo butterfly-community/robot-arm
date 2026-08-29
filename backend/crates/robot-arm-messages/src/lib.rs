@@ -208,6 +208,7 @@ pub struct InputDiscoveryState {
     pub orientation_source: Option<SelectedInputSourceState>,
     pub bindings: Vec<InputBindingState>,
     pub feedback_bindings: Vec<ActionFeedbackBindingState>,
+    pub live_component_values: BTreeMap<String, BTreeMap<String, f64>>,
     pub virtual_feedback: Option<ActionFeedback>,
     pub diagnostics: Vec<InputStreamDiagnostics>,
     pub simulation: InputSimulationState,
@@ -480,10 +481,11 @@ pub struct ActuatorMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NamedJointTarget {
+pub struct NamedMotionTarget {
     pub key: String,
     pub label: String,
-    pub positions_rad: BTreeMap<String, f64>,
+    pub joint_positions_rad: BTreeMap<String, f64>,
+    pub actuator_positions_rad: BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -511,7 +513,7 @@ pub struct RobotModelInfo {
     pub tcp_frame: String,
     pub joints: Vec<JointMetadata>,
     pub tool_actuators: Vec<ActuatorMetadata>,
-    pub named_targets: Vec<NamedJointTarget>,
+    pub named_targets: Vec<NamedMotionTarget>,
     pub motion_options: Vec<NumericFieldSchema>,
     pub diagnostics: Vec<NumericFieldSchema>,
     pub visualization: VisualizationManifest,
@@ -535,6 +537,7 @@ pub struct MotionRequest {
     pub request_id: String,
     pub model_revision: String,
     pub joints: Vec<JointPosition>,
+    pub actuators: Vec<ActuatorPosition>,
     pub options: BTreeMap<String, f64>,
     pub action: RequestAction,
 }
@@ -925,7 +928,12 @@ mod tests {
                     visualization_joint_key: Some("tool_joint_b".into()),
                 },
             ],
-            named_targets: vec![],
+            named_targets: vec![NamedMotionTarget {
+                key: "ready".into(),
+                label: "Ready".into(),
+                joint_positions_rad: BTreeMap::from([("axis-0".into(), 0.25)]),
+                actuator_positions_rad: BTreeMap::from([("tool-a".into(), 0.0)]),
+            }],
             motion_options: vec![],
             diagnostics: vec![],
             visualization: VisualizationManifest {
@@ -946,6 +954,11 @@ mod tests {
         let decoded: RobotModelInfo = from_arrow(encoded.as_ref()).unwrap();
         assert_eq!(decoded.joints.len(), 4);
         assert_eq!(decoded.tool_actuators.len(), 2);
+        assert_eq!(decoded.named_targets[0].joint_positions_rad["axis-0"], 0.25);
+        assert_eq!(
+            decoded.named_targets[0].actuator_positions_rad["tool-a"],
+            0.0
+        );
         assert_eq!(
             decoded.visualization.link_materials["fixture-link"].color_rgb,
             [0.2, 0.4, 0.6]
