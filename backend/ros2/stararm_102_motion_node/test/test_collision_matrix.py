@@ -1,8 +1,7 @@
 import unittest
 
 from moveit_msgs.msg import AllowedCollisionEntry, AllowedCollisionMatrix
-
-from stararm_102_motion_node.dora_motion_node import MotionNode
+from stararm_102_motion_node.moveit_backend import MoveItBackend
 
 
 class CollisionMatrixTests(unittest.TestCase):
@@ -15,7 +14,7 @@ class CollisionMatrixTests(unittest.TestCase):
         second.enabled = [False, False]
         matrix.entry_values = [first, second]
 
-        MotionNode._allow_collision_pairs(
+        MoveItBackend.allow_pairs(
             matrix,
             (("base_link", "link1"), ("link2", "link3")),
         )
@@ -33,11 +32,11 @@ class CollisionMatrixTests(unittest.TestCase):
             {("base_link", "link1"), ("link2", "link3")},
         )
 
-    def test_non_square_source_matrix_is_returned_as_an_error(self) -> None:
+    def test_non_square_source_matrix_is_an_error(self) -> None:
         matrix = AllowedCollisionMatrix()
         matrix.entry_names = ["base_link"]
         with self.assertRaisesRegex(ValueError, "不是方阵"):
-            MotionNode._allow_collision_pairs(matrix, (("base_link", "link1"),))
+            MoveItBackend.allow_pairs(matrix, (("base_link", "link1"),))
 
 
 if __name__ == "__main__":

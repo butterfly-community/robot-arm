@@ -1,11 +1,12 @@
-use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Quaternion, Rotation3, UnitQuaternion, Vector3};
 use robot_arm_messages::{
-    AbsolutePoseFrame, ControlInputFrame, RelativeToolMotion, SCHEMA_VERSION, SpatialConfigPatch,
-    SpatialConfigState,
+    AbsolutePoseFrame, ControlInputFrame, SCHEMA_VERSION, SpatialConfigPatch, SpatialConfigState,
+    TransformedControlFrame,
 };
 
 #[derive(Clone, Debug)]
 struct PoseSample {
+    frame: AbsolutePoseFrame,
     position_m: Option<[f64; 3]>,
     orientation: Option<UnitQuaternion<f64>>,
     position_source_capable: bool,
@@ -27,7 +28,6 @@ pub struct SpatialTransform {
     config: SpatialConfigState,
     current_pose: Option<PoseSample>,
     current_input: ControlInputFrame,
-    previous_confirm_origin: bool,
     session: Option<SessionAnchor>,
     next_session_id: u64,
     output_sequence: u64,
@@ -39,7 +39,6 @@ impl SpatialTransform {
             config,
             current_pose: None,
             current_input: ControlInputFrame::default(),
-            previous_confirm_origin: false,
             session: None,
             next_session_id: 1,
             output_sequence: 0,
@@ -51,12 +50,6 @@ impl SpatialTransform {
     }
 
     pub fn apply_config(&mut self, patch: SpatialConfigPatch) {
-        if let Some(value) = patch.position_source_id {
-            self.config.position_source_id = value;
-        }
-        if let Some(value) = patch.orientation_source_id {
-            self.config.orientation_source_id = value;
-        }
         if let Some(value) = patch.base_from_tracking_axes {
             self.config.base_from_tracking_axes = value;
         }
@@ -69,25 +62,10 @@ impl SpatialTransform {
         if let Some(value) = patch.action_arc_rad_per_s {
             self.config.action_arc_rad_per_s = value;
         }
-        if let Some(value) = patch.origin_position_m {
-            self.config.origin_position_m = value;
-        }
         if let Some(value) = patch.switches {
             self.config.switches = value;
         }
         self.config.config_version += 1;
-    }
-
-    pub fn confirm_origin(&mut self) -> bool {
-        let Some(pose) = &self.current_pose else {
-            return false;
-        };
-        let Some(position) = pose.position_m else {
-            return false;
-        };
-        self.config.origin_position_m = Some(position);
-        self.config.config_version += 1;
-        true
     }
 
     pub fn update_pose(&mut self, frame: AbsolutePoseFrame) {
@@ -100,6 +78,7 @@ impl SpatialTransform {
         self.config.position_source_id = frame.position_source_id.clone();
         self.config.orientation_source_id = frame.orientation_source_id.clone();
         self.current_pose = Some(PoseSample {
+            frame: frame.clone(),
             position_m: frame.flags.position_valid.then_some(frame.position_m),
             orientation: frame
                 .flags
@@ -110,26 +89,74 @@ impl SpatialTransform {
         });
     }
 
+    pub fn spatial_pose(&self) -> Option<AbsolutePoseFrame> {
+        let pose = self.current_pose.as_ref()?;
+        let anchor = self
+            .session
+            .as_ref()
+            .and_then(|session| session.pose.as_ref())
+            .unwrap_or(pose);
+        let axes = Matrix3::from_row_slice(self.config.base_from_tracking_axes.as_flattened());
+        let position_m = match (anchor.position_m, pose.position_m) {
+            (Some(origin), Some(position)) => (axes
+                * (Vector3::from(position) - Vector3::from(origin))
+                * self.config.translation_scale)
+                .into(),
+            _ => [0.0; 3],
+        };
+        let orientation_xyzw = match (&anchor.orientation, &pose.orientation) {
+            (Some(origin), Some(orientation)) => {
+                let relative = origin.inverse() * orientation;
+                let source = relative.to_rotation_matrix();
+                let mapped = axes * source.matrix() * axes.transpose();
+                let mapped =
+                    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(mapped));
+                let value = mapped.quaternion();
+                [value.i, value.j, value.k, value.w]
+            }
+            _ => [0.0, 0.0, 0.0, 1.0],
+        };
+        Some(AbsolutePoseFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence: pose.frame.sequence,
+            source_time_ns: pose.frame.source_time_ns,
+            received_time_ns: pose.frame.received_time_ns,
+            position_source_id: pose.frame.position_source_id.clone(),
+            orientation_source_id: pose.frame.orientation_source_id.clone(),
+            position_source_capable: pose.frame.position_source_capable,
+            orientation_source_capable: pose.frame.orientation_source_capable,
+            reference_space: "robot-relative".into(),
+            position_m,
+            orientation_xyzw,
+            flags: pose.frame.flags,
+        })
+    }
+
     pub fn handle_control(
         &mut self,
         frame: ControlInputFrame,
         transformed_time_ns: i64,
-    ) -> RelativeToolMotion {
-        let confirm_now = frame.confirm_origin.is_active && frame.confirm_origin.value;
-        if confirm_now && !self.previous_confirm_origin {
-            self.confirm_origin();
-        }
-        self.previous_confirm_origin = confirm_now;
-
-        if !frame.control_active.is_active || !frame.control_active.value {
-            self.current_input = frame;
-            self.end_session();
-            return self.inactive_output(self.current_input.source_time_ns, transformed_time_ns);
-        }
-
+    ) -> TransformedControlFrame {
         let source_time_ns = frame.source_time_ns;
+        let toggle = pressed(frame.start_stop);
+        let emergency = pressed(frame.emergency_stop);
         self.current_input = frame;
-        self.ensure_session(source_time_ns);
+
+        if emergency {
+            self.end_session();
+            return self.inactive_output(source_time_ns, transformed_time_ns);
+        }
+        if toggle {
+            if self.session.is_some() {
+                self.end_session();
+                return self.inactive_output(source_time_ns, transformed_time_ns);
+            }
+            self.ensure_session(source_time_ns);
+        }
+        if self.session.is_none() {
+            return self.inactive_output(source_time_ns, transformed_time_ns);
+        }
+
         self.integrate_action_only(source_time_ns);
         self.current_output(source_time_ns, transformed_time_ns)
     }
@@ -195,7 +222,7 @@ impl SpatialTransform {
         &mut self,
         source_time_ns: i64,
         transformed_time_ns: i64,
-    ) -> RelativeToolMotion {
+    ) -> TransformedControlFrame {
         self.output_sequence += 1;
         let session = self.session.as_ref().expect("active output has a session");
 
@@ -244,7 +271,7 @@ impl SpatialTransform {
             horizontal_arc_rad = 0.0;
         }
 
-        RelativeToolMotion {
+        TransformedControlFrame {
             schema_version: SCHEMA_VERSION,
             sequence: self.output_sequence,
             source_time_ns,
@@ -254,8 +281,7 @@ impl SpatialTransform {
             translation_m,
             front_pitch_rad,
             horizontal_arc_rad,
-            primary_tool_open: pressed(self.current_input.primary_tool_open),
-            primary_tool_value: active_value(self.current_input.primary_tool),
+            actuator_actions: self.current_input.actuator_actions.clone(),
         }
     }
 
@@ -263,9 +289,9 @@ impl SpatialTransform {
         &mut self,
         source_time_ns: i64,
         transformed_time_ns: i64,
-    ) -> RelativeToolMotion {
+    ) -> TransformedControlFrame {
         self.output_sequence += 1;
-        RelativeToolMotion {
+        TransformedControlFrame {
             schema_version: SCHEMA_VERSION,
             sequence: self.output_sequence,
             source_time_ns,
@@ -275,8 +301,7 @@ impl SpatialTransform {
             translation_m: [0.0; 3],
             front_pitch_rad: 0.0,
             horizontal_arc_rad: 0.0,
-            primary_tool_open: pressed(self.current_input.primary_tool_open),
-            primary_tool_value: active_value(self.current_input.primary_tool),
+            actuator_actions: self.current_input.actuator_actions.clone(),
         }
     }
 }
@@ -361,9 +386,9 @@ mod tests {
             sequence,
             source_time_ns: sequence as i64 * 1_000_000_000,
             received_time_ns: sequence as i64 * 1_000_000_000,
-            control_active: BooleanActionSample {
+            start_stop: BooleanActionSample {
                 is_active: true,
-                changed_since_last_sync: true,
+                changed_since_last_sync: active,
                 value: active,
             },
             ..ControlInputFrame::default()
@@ -396,8 +421,8 @@ mod tests {
         transform: &mut SpatialTransform,
         frame: AbsolutePoseFrame,
         transformed_time_ns: i64,
-    ) -> RelativeToolMotion {
-        let mut input = control(frame.sequence, true);
+    ) -> TransformedControlFrame {
+        let mut input = control(frame.sequence, false);
         input.source_time_ns = frame.source_time_ns;
         input.received_time_ns = frame.received_time_ns;
         transform.update_pose(frame);
@@ -460,23 +485,36 @@ mod tests {
     }
 
     #[test]
-    fn tool_open_press_is_forwarded_once_even_without_spatial_control() {
+    fn actuator_actions_are_forwarded_unchanged_without_spatial_interpretation() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
         let mut press = control(1, false);
-        press.primary_tool_open = BooleanActionSample {
+        press.actuator_actions.primary_tool_open = BooleanActionSample {
             is_active: true,
             changed_since_last_sync: true,
             value: true,
         };
-        assert!(transform.handle_control(press, 1).primary_tool_open);
+        assert!(
+            transform
+                .handle_control(press, 1)
+                .actuator_actions
+                .primary_tool_open
+                .value
+        );
 
         let mut held = control(2, false);
-        held.primary_tool_open = BooleanActionSample {
+        held.actuator_actions.primary_tool_open = BooleanActionSample {
             is_active: true,
             changed_since_last_sync: false,
             value: true,
         };
-        assert!(!transform.handle_control(held, 2).primary_tool_open);
+        let forwarded = transform.handle_control(held, 2);
+        assert!(forwarded.actuator_actions.primary_tool_open.value);
+        assert!(
+            !forwarded
+                .actuator_actions
+                .primary_tool_open
+                .changed_since_last_sync
+        );
     }
 
     #[test]
@@ -504,31 +542,29 @@ mod tests {
     }
 
     #[test]
-    fn origin_confirmation_does_not_create_motion_or_change_session_delta() {
+    fn each_start_uses_the_current_pose_as_position_and_orientation_origin() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
-        transform.update_pose(pose(1, [1.0, 0.0, 0.0], UnitQuaternion::identity()));
-        assert!(transform.confirm_origin());
-        let anchor = transform.handle_control(control(2, true), 2);
-        assert_eq!(anchor.translation_m, [0.0; 3]);
-        let output = output_after_pose(
-            &mut transform,
-            pose(3, [1.0, 0.0, -0.2], UnitQuaternion::identity()),
-            3,
-        );
-        assert_eq!(output.translation_m, [0.1, 0.0, 0.0]);
-    }
+        transform.update_pose(pose(1, [1.0, 2.0, 3.0], UnitQuaternion::identity()));
+        transform.handle_control(control(2, true), 2);
+        let started_pose = transform.spatial_pose().unwrap();
+        assert_eq!(started_pose.position_m, [0.0; 3]);
+        assert_eq!(started_pose.orientation_xyzw, [0.0, 0.0, 0.0, 1.0]);
 
-    #[test]
-    fn origin_can_be_cleared_through_the_same_config_patch() {
-        let mut transform = SpatialTransform::new(SpatialConfigState {
-            origin_position_m: Some([1.0, 2.0, 3.0]),
-            ..Default::default()
-        });
-        transform.apply_config(SpatialConfigPatch {
-            origin_position_m: Some(None),
-            ..Default::default()
-        });
-        assert_eq!(transform.config().origin_position_m, None);
+        transform.update_pose(pose(
+            3,
+            [2.0, 2.0, 3.0],
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, 0.5)),
+        ));
+        transform.handle_control(control(4, true), 4);
+        transform.handle_control(control(5, true), 5);
+        let restarted_pose = transform.spatial_pose().unwrap();
+        assert_eq!(restarted_pose.position_m, [0.0; 3]);
+        assert!(
+            restarted_pose.orientation_xyzw[0..3]
+                .iter()
+                .all(|value| value.abs() < 1e-12)
+        );
+        assert!((restarted_pose.orientation_xyzw[3] - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -549,7 +585,7 @@ mod tests {
         assert!((pitch.front_pitch_rad - FRAC_PI_2).abs() < 1e-12);
         assert!(pitch.horizontal_arc_rad.abs() < 1e-12);
 
-        transform.handle_control(control(4, false), 4);
+        transform.handle_control(control(4, true), 4);
         transform.update_pose(pose(5, [0.0; 3], UnitQuaternion::identity()));
         transform.handle_control(control(6, true), 6);
         let arc = output_after_pose(
@@ -607,7 +643,7 @@ mod tests {
             value: 1.0,
         };
         transform.handle_control(first.clone(), 1);
-        let mut second = control(2, true);
+        let mut second = control(2, false);
         second.move_up_down = first.move_up_down;
         second.front_pitch = first.front_pitch;
         let output = transform.handle_control(second, 2);
@@ -635,7 +671,7 @@ mod tests {
             value: -1.0,
         };
         transform.handle_control(first.clone(), 1);
-        let mut second = control(2, true);
+        let mut second = control(2, false);
         second.move_forward_back = first.move_forward_back;
         second.front_pitch = first.front_pitch;
         let output = transform.handle_control(second, 2);
@@ -666,7 +702,7 @@ mod tests {
         };
         transform.handle_control(first.clone(), 2);
 
-        let mut second = control(3, true);
+        let mut second = control(3, false);
         second.move_forward_back = first.move_forward_back;
         second.front_pitch = first.front_pitch;
         let output = transform.handle_control(second, 3);
@@ -677,12 +713,37 @@ mod tests {
     }
 
     #[test]
+    fn held_start_chord_does_not_toggle_and_emergency_stop_ends_the_process() {
+        let mut transform = SpatialTransform::new(SpatialConfigState::default());
+        transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
+        assert!(transform.handle_control(control(2, true), 2).active);
+
+        let mut held = control(3, false);
+        held.start_stop = BooleanActionSample {
+            is_active: true,
+            changed_since_last_sync: false,
+            value: true,
+        };
+        assert!(transform.handle_control(held, 3).active);
+
+        let mut emergency = control(4, false);
+        emergency.emergency_stop = BooleanActionSample {
+            is_active: true,
+            changed_since_last_sync: true,
+            value: true,
+        };
+        let stopped = transform.handle_control(emergency, 4);
+        assert!(!stopped.active);
+        assert_eq!(stopped.control_session_id, None);
+    }
+
+    #[test]
     fn release_and_reacquire_create_a_new_pose_baseline() {
         let mut transform = SpatialTransform::new(SpatialConfigState::default());
         transform.update_pose(pose(1, [0.0; 3], UnitQuaternion::identity()));
         let first = transform.handle_control(control(2, true), 2);
         transform.update_pose(pose(3, [0.0, 0.0, -0.2], UnitQuaternion::identity()));
-        transform.handle_control(control(4, false), 4);
+        transform.handle_control(control(4, true), 4);
         transform.update_pose(pose(5, [0.0, 0.0, -1.0], UnitQuaternion::identity()));
         let second = transform.handle_control(control(6, true), 6);
         assert_ne!(first.control_session_id, second.control_session_id);

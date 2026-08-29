@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
 import queue
-import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -19,16 +18,8 @@ from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import SwitchController
 from dora import Node as DoraNode
 from geometry_msgs.msg import PoseStamped
-from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-from moveit_msgs.msg import (
-    AllowedCollisionEntry,
-    Constraints,
-    JointConstraint,
-    MoveItErrorCodes,
-    PlanningSceneComponents,
-    ServoStatus,
-)
-from moveit_msgs.srv import GetPlanningScene, GetStateValidity, ServoCommandType
+from moveit_msgs.msg import ServoStatus
+from moveit_msgs.srv import ServoCommandType
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.time import Time
@@ -37,6 +28,14 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from .model_catalog import (
+    GRIPPER_JOINT,
+    GRIPPER_KEY,
+    JOINTS,
+    MODEL_REVISION,
+    NAMED_TARGETS,
+    ModelCatalog,
+)
 from .motion_core import (
     MotionConfig,
     Pose,
@@ -50,18 +49,12 @@ from .motion_core import (
     tool_action_transition,
     tool_position_rad,
 )
+from .moveit_backend import MoveItBackend, PlanningError
 
 SCHEMA_VERSION = 2
-MODEL_ID = "stararm-102-fl"
-MODEL_REVISION = "stararm-102-fl-v1"
-JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
-GRIPPER_KEY = "gripper"
-GRIPPER_JOINT = "joint7_left"
 STATE_TOPIC = "/stararm102/joint_states"
 COMMAND_TOPIC = "/stararm102/joint_commands"
-START_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -5.0, 0.0, 0.0, 0.0))
-TEST_RAD = tuple(math.radians(value) for value in (0.0, 0.0, -20.0, 0.0, 0.0, 0.0))
-CLOSED_GRIPPER_RAD = 0.0
+START_RAD, CLOSED_GRIPPER_RAD = NAMED_TARGETS["start"]
 
 
 def arrow_encode(value: Any) -> pa.StructArray:
@@ -107,6 +100,12 @@ class MotionNode(Node):
         self._outgoing: queue.SimpleQueue[tuple[str, dict[str, Any]]] = (
             queue.SimpleQueue()
         )
+        self._latest_outgoing: dict[str, dict[str, Any]] = {}
+        self._outgoing_lock = threading.Lock()
+        self._last_service_state: dict[str, Any] | None = None
+        self._motion_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="stararm-moveit"
+        )
         self._stop = threading.Event()
         self._latest_arm_state: dict[str, Any] | None = None
         self._feedback_source: str | None = None
@@ -130,12 +129,7 @@ class MotionNode(Node):
         self._command_request_pending = False
         self._motion_status = self._idle_motion_status()
         self._actuator_status: dict[str, Any] | None = None
-        self._motion_target: list[float] | None = None
         self._motion_actuator_target: float | None = None
-        self._complete_in_relative_mode = False
-        self._planned_trajectory: Any | None = None
-        self._plan_goal_handle: Any | None = None
-        self._execute_goal_handle: Any | None = None
 
         self._pose_publisher = self.create_publisher(
             PoseStamped, "/servo_node/pose_target_cmds", 1
@@ -162,28 +156,20 @@ class MotionNode(Node):
         self._servo_pause_client = self.create_client(
             SetBool, "/servo_node/pause_servo"
         )
-        self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
-        self._execute_client = ActionClient(
-            self, ExecuteTrajectory, "/execute_trajectory"
-        )
         self._arm_trajectory_client = ActionClient(
             self, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory"
         )
         self._hand_trajectory_client = ActionClient(
             self, FollowJointTrajectory, "/hand_controller/follow_joint_trajectory"
         )
-        self._state_validity_client = self.create_client(
-            GetStateValidity, "/check_state_validity"
-        )
-        self._planning_scene_client = self.create_client(
-            GetPlanningScene, "/get_planning_scene"
-        )
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self.create_timer(0.2, self._maintain_ros_interfaces)
-        self._model_info = self._build_model_info()
+        self._moveit = MoveItBackend(self)
+        self._catalog = ModelCatalog()
+        self._model_info = self._catalog.model_info()
         self._enqueue("robot_model_info", self._model_info)
-        self._enqueue_motion_state()
+        self._enqueue_motion_state(force_service=True)
         self._dora_thread = threading.Thread(
             target=self._dora_loop, name="stararm-motion-dora", daemon=True
         )
@@ -191,6 +177,8 @@ class MotionNode(Node):
 
     def destroy_node(self) -> bool:
         self._stop.set()
+        self._moveit.cancel()
+        self._motion_executor.shutdown(wait=True, cancel_futures=True)
         self._dora_thread.join()
         return super().destroy_node()
 
@@ -209,38 +197,47 @@ class MotionNode(Node):
         }
 
     def _enqueue(self, output: str, value: dict[str, Any]) -> None:
+        if output in {"motion_state", "service_state", "robot_model_info"}:
+            with self._outgoing_lock:
+                self._latest_outgoing[output] = value
+            return
         self._outgoing.put((output, value))
+
+    def _next_output(self) -> tuple[str, dict[str, Any]] | None:
+        try:
+            return self._outgoing.get_nowait()
+        except queue.Empty:
+            pass
+        with self._outgoing_lock:
+            if not self._latest_outgoing:
+                return None
+            return self._latest_outgoing.popitem()
 
     def _dora_loop(self) -> None:
         dora = DoraNode()
         while not self._stop.is_set():
-            while True:
-                try:
-                    output, value = self._outgoing.get_nowait()
-                except queue.Empty:
-                    break
-                dora.send_output(output, arrow_encode(value))
             event = dora.next(0.01)
-            if event is None:
-                continue
-            if event["type"] == "STOP":
+            if event is not None and event["type"] == "STOP":
                 self._stop.set()
                 if rclpy.ok():
                     rclpy.shutdown()
                 break
-            if event["type"] != "INPUT":
-                continue
-            try:
-                self._handle_dora_input(event["id"], arrow_decode(event["value"]))
-            except Exception as error:
-                self.get_logger().error(f"Dora input {event.get('id')} failed: {error}")
+            if event is not None and event["type"] == "INPUT":
+                try:
+                    self._handle_dora_input(event["id"], arrow_decode(event["value"]))
+                except Exception as error:
+                    self.get_logger().error(
+                        f"Dora input {event.get('id')} failed: {error}"
+                    )
+            if pending := self._next_output():
+                dora.send_output(pending[0], arrow_encode(pending[1]))
 
     def _handle_dora_input(self, input_id: str, value: dict[str, Any]) -> None:
         with self._lock:
             if input_id == "arm_state":
                 self._apply_arm_state(value)
-            elif input_id == "relative_motion":
-                self._apply_relative_motion(value)
+            elif input_id == "transformed_control":
+                self._apply_transformed_control(value)
             elif input_id == "set_control_mode":
                 self._set_control_mode(value)
             elif input_id == "motion_request":
@@ -253,7 +250,7 @@ class MotionNode(Node):
                 self._handle_asset_request(value)
             elif input_id == "snapshot":
                 self._enqueue("robot_model_info", self._model_info)
-                self._enqueue_motion_state()
+                self._enqueue_motion_state(force_service=True)
 
     def _apply_arm_state(self, value: dict[str, Any]) -> None:
         if (
@@ -419,18 +416,8 @@ class MotionNode(Node):
             },
         )
 
-    def _apply_relative_motion(self, value: dict[str, Any]) -> None:
+    def _apply_transformed_control(self, value: dict[str, Any]) -> None:
         session_id = value.get("control_session_id")
-        open_tool = bool(value.get("primary_tool_open"))
-        tool_value = float(value.get("primary_tool_value", 0.0))
-        if open_tool:
-            self._primary_tool_value = 0.0
-            self._publish_actuator("input-action", tool_position_rad(0.0))
-        else:
-            transition = tool_action_transition(self._primary_tool_value, tool_value)
-            self._primary_tool_value = tool_value
-            if transition is not None:
-                self._publish_actuator("input-action", tool_position_rad(transition))
         if not value.get("active"):
             self._control_session_id = None
             self._anchor_tcp = None
@@ -439,6 +426,22 @@ class MotionNode(Node):
             self._hold_sent = False
             self._enqueue_motion_state()
             return
+        actuator_actions = value.get("actuator_actions", {})
+        open_tool = actuator_actions.get("primary_tool_open", {})
+        tool = actuator_actions.get("primary_tool", {})
+        if (
+            open_tool.get("is_active")
+            and open_tool.get("changed_since_last_sync")
+            and open_tool.get("value")
+        ):
+            self._primary_tool_value = 0.0
+            self._publish_actuator("input-action", tool_position_rad(0.0))
+        elif tool.get("is_active"):
+            tool_value = float(tool.get("value", 0.0))
+            transition = tool_action_transition(self._primary_tool_value, tool_value)
+            self._primary_tool_value = tool_value
+            if transition is not None:
+                self._publish_actuator("input-action", tool_position_rad(transition))
         if self._control_mode != "relative" or self._motion_status["state"] in {
             "planning",
             "executing",
@@ -453,7 +456,7 @@ class MotionNode(Node):
             return
         translation = value.get("translation_m")
         if not finite(translation, 3):
-            raise ValueError("RelativeToolMotion translation is invalid")
+            raise ValueError("TransformedControlFrame translation is invalid")
         target = target_pose(
             self._anchor_tcp,
             translation,
@@ -517,9 +520,10 @@ class MotionNode(Node):
             self._set_motion_failed(request_id, error, "apply")
             return
         self._enqueue_motion_state()
-        self._complete_in_relative_mode = True
         self._motion_actuator_target = CLOSED_GRIPPER_RAD
-        self._begin_motion_plan(request_id, list(START_RAD), {})
+        self._begin_motion_plan(
+            request_id, list(START_RAD), {}, complete_in_relative_mode=True
+        )
 
     def _handle_actuator_request(self, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id", ""))
@@ -586,7 +590,6 @@ class MotionNode(Node):
         if request.get("action") == "cancel":
             self._cancel_motion(request_id)
             return
-        self._complete_in_relative_mode = False
         if request.get("action") != "apply":
             self._set_motion_failed(
                 request_id,
@@ -706,41 +709,42 @@ class MotionNode(Node):
         )
 
     def _begin_motion_plan(
-        self, request_id: str, target: list[float], options: dict[str, Any]
+        self,
+        request_id: str,
+        target: list[float],
+        options: dict[str, Any],
+        *,
+        complete_in_relative_mode: bool = False,
     ) -> None:
-        current = (
-            None
-            if self._latest_arm_state is None
-            else list(self._latest_arm_state["joints_rad"])
-        )
         if (
-            current is None
-            or not self._move_group_client.server_is_ready()
+            self._latest_arm_state is None
+            or not self._moveit.ready()
             or not self._arm_trajectory_client.server_is_ready()
+            or not self._hand_trajectory_client.server_is_ready()
             or not self._servo_pause_client.service_is_ready()
         ):
             self._set_motion_failed(
-                request_id, "缺少当前关节反馈或 MoveGroup 尚未就绪", "apply"
+                request_id, "缺少当前关节反馈或轨迹控制器尚未就绪", "apply"
             )
             return
-        self._motion_target = target
+        current = list(self._latest_arm_state["joints_rad"])
         self._motion_status = {
-            "schema_version": SCHEMA_VERSION,
+            **self._idle_motion_status(),
             "request_id": request_id,
-            "acknowledged_action": "apply",
             "state": "planning",
-            "backend_name": "moveit",
-            "result_code": None,
             "result_message": "MoveIt 正在规划普通关节目标",
-            "trajectory_points": None,
-            "planned_duration_s": None,
         }
         self._enqueue("motion_status", self._motion_status)
         request = SetBool.Request()
         request.data = True
         self._servo_pause_client.call_async(request).add_done_callback(
             lambda done: self._servo_plan_pause_response(
-                request_id, current, target, options, done
+                request_id,
+                current,
+                target,
+                options,
+                complete_in_relative_mode,
+                done,
             )
         )
 
@@ -750,351 +754,131 @@ class MotionNode(Node):
         current: list[float],
         target: list[float],
         options: dict[str, Any],
+        complete_in_relative_mode: bool,
         future: Any,
     ) -> None:
-        try:
-            response = future.result()
-        except Exception as error:
-            self._set_motion_failed(
-                request_id, f"暂停 MoveIt Servo 失败：{error}", "apply"
+        with self._lock:
+            try:
+                response = future.result()
+            except Exception as error:
+                self._set_motion_failed(
+                    request_id, f"暂停 MoveIt Servo 失败：{error}", "apply"
+                )
+                return
+            if not response.success:
+                self._set_motion_failed(
+                    request_id, f"MoveIt Servo 拒绝暂停：{response.message}", "apply"
+                )
+                return
+            self._servo_paused = True
+            if not self._motion_is(request_id, "planning"):
+                self._resume_servo()
+                return
+            self._motion_executor.submit(
+                self._run_motion,
+                request_id,
+                current,
+                target,
+                options,
+                complete_in_relative_mode,
             )
-            return
-        if not response.success:
-            self._set_motion_failed(
-                request_id, f"MoveIt Servo 拒绝暂停：{response.message}", "apply"
-            )
-            return
-        self._servo_paused = True
-        if (
-            self._motion_status["request_id"] != request_id
-            or self._motion_status["state"] != "planning"
-        ):
-            self._resume_servo()
-            return
-        self._send_motion_plan(request_id, current, target, options, None, ())
 
-    def _send_motion_plan(
+    def _run_motion(
         self,
         request_id: str,
         current: list[float],
         target: list[float],
         options: dict[str, Any],
-        matrix: Any | None,
-        collision_pairs: tuple[tuple[str, str], ...],
-    ) -> None:
-        goal = MoveGroup.Goal()
-        goal.request.group_name = "arm"
-        goal.request.pipeline_id = "ompl"
-        goal.request.start_state.joint_state.name = list(JOINTS)
-        goal.request.start_state.joint_state.position = current
-        goal.request.start_state.is_diff = False
-        if "velocity_scaling" in options:
-            goal.request.max_velocity_scaling_factor = float(
-                options["velocity_scaling"]
-            )
-        if "acceleration_scaling" in options:
-            goal.request.max_acceleration_scaling_factor = float(
-                options["acceleration_scaling"]
-            )
-        constraints = Constraints()
-        constraints.name = "joint_target"
-        for name, position in zip(JOINTS, target, strict=True):
-            joint = JointConstraint()
-            joint.joint_name = name
-            joint.position = position
-            joint.weight = 1.0
-            constraints.joint_constraints.append(joint)
-        goal.request.goal_constraints = [constraints]
-        goal.planning_options.plan_only = True
-        goal.planning_options.replan = False
-        if matrix is not None:
-            goal.planning_options.planning_scene_diff.is_diff = True
-            goal.planning_options.planning_scene_diff.allowed_collision_matrix = matrix
-        future = self._move_group_client.send_goal_async(goal)
-        future.add_done_callback(
-            lambda done: self._plan_goal_response(
-                request_id, options, collision_pairs, done
-            )
-        )
-
-    def _plan_goal_response(
-        self,
-        request_id: str,
-        options: dict[str, Any],
-        pairs: tuple[tuple[str, str], ...],
-        future: Any,
+        complete_in_relative_mode: bool,
     ) -> None:
         try:
-            handle = future.result()
+            plan = self._moveit.plan(current, target, options)
+        except PlanningError as error:
+            message = str(error)
+            if error.collision_pairs:
+                message += (
+                    f"；本次已临时放行 {self._format_pairs(error.collision_pairs)}"
+                )
+            self._fail_active_motion(request_id, message)
+            return
         except Exception as error:
-            self._set_motion_failed(request_id, f"提交规划失败：{error}", "apply")
+            self._fail_active_motion(request_id, f"MoveIt 规划失败：{error}")
             return
-        if (
-            self._motion_status["request_id"] != request_id
-            or self._motion_status["state"] == "cancelled"
-        ):
-            if handle.accepted:
-                handle.cancel_goal_async()
-            return
-        if not handle.accepted:
-            self._set_motion_failed(request_id, "MoveGroup 拒绝普通运动规划", "apply")
-            return
-        self._plan_goal_handle = handle
-        handle.get_result_async().add_done_callback(
-            lambda done: self._plan_result(request_id, options, pairs, done)
-        )
 
-    def _plan_result(
-        self,
-        request_id: str,
-        options: dict[str, Any],
-        pairs: tuple[tuple[str, str], ...],
-        future: Any,
-    ) -> None:
-        if (
-            self._motion_status["request_id"] != request_id
-            or self._motion_status["state"] == "cancelled"
-        ):
-            return
-        self._plan_goal_handle = None
+        with self._lock:
+            if not self._motion_is(request_id, "planning"):
+                return
+            message = "普通运动规划通过"
+            if plan.collision_pairs:
+                message += f"；本次临时放行 {self._format_pairs(plan.collision_pairs)}"
+            self._motion_status.update(
+                state="executing",
+                trajectory_points=plan.points,
+                planned_duration_s=plan.duration_s,
+                result_message=message,
+            )
+            self._enqueue("motion_status", self._motion_status)
+            if self._motion_actuator_target is not None:
+                self._publish_actuator(request_id, self._motion_actuator_target)
+            self._controller_output_armed = True
+
         try:
-            result = future.result().result
+            result = self._moveit.execute(plan)
         except Exception as error:
-            self._set_motion_failed(request_id, f"规划结果读取失败：{error}", "apply")
+            self._fail_active_motion(request_id, f"普通运动执行失败：{error}")
             return
-        if result.error_code.val != MoveItErrorCodes.SUCCESS:
-            if pairs:
+
+        with self._lock:
+            if not self._motion_is(request_id, "executing"):
+                return
+            if not result.success:
                 self._set_motion_failed(
                     request_id,
-                    f"MoveIt 规划失败，错误码 {result.error_code.val}；本次已临时放行 {self._format_pairs(pairs)}",
+                    f"普通运动执行失败，MoveIt 错误码 {result.code}",
                     "apply",
                 )
-            else:
-                self._begin_collision_retry(request_id, options, result.error_code.val)
-            return
-        points = result.planned_trajectory.joint_trajectory.points
-        if not points:
-            self._set_motion_failed(request_id, "MoveIt 返回空轨迹", "apply")
-            return
-        end = points[-1].time_from_start
-        self._planned_trajectory = result.planned_trajectory
-        self._motion_status.update(
-            trajectory_points=len(points),
-            planned_duration_s=end.sec + end.nanosec * 1e-9,
-            result_message="普通运动规划通过"
-            if not pairs
-            else f"规划通过；本次临时放行 {self._format_pairs(pairs)}",
-        )
-        self._begin_motion_execute(request_id)
+                return
+            if complete_in_relative_mode:
+                error = self._apply_control_mode("relative")
+                if error is not None:
+                    self._set_motion_failed(request_id, error, "apply")
+                    return
+            self._resume_servo()
+            self._reset_relative_baseline()
+            self._motion_actuator_target = None
+            self._motion_status.update(
+                state="succeeded",
+                result_code=str(result.code),
+                result_message="普通运动执行完成",
+            )
+            self._enqueue("motion_status", self._motion_status)
+            self._enqueue("motion_request_result", self._status_result())
 
-    def _begin_collision_retry(
-        self, request_id: str, options: dict[str, Any], error_code: int
-    ) -> None:
-        current = (
-            None
-            if self._latest_arm_state is None
-            else self._latest_arm_state["joints_rad"]
-        )
-        if current is None or not self._state_validity_client.service_is_ready():
-            self._set_motion_failed(
-                request_id,
-                f"MoveIt 规划失败，错误码 {error_code}；状态有效性服务尚未就绪",
-                "apply",
-            )
-            return
-        request = GetStateValidity.Request()
-        request.robot_state.joint_state.name = list(JOINTS)
-        request.robot_state.joint_state.position = list(current)
-        request.robot_state.is_diff = False
-        request.group_name = "arm"
-        self._state_validity_client.call_async(request).add_done_callback(
-            lambda done: self._collision_validity_result(
-                request_id, options, error_code, done
-            )
+    def _motion_is(self, request_id: str, state: str) -> bool:
+        return (
+            self._motion_status["request_id"] == request_id
+            and self._motion_status["state"] == state
         )
 
-    def _collision_validity_result(
-        self, request_id: str, options: dict[str, Any], error_code: int, future: Any
-    ) -> None:
-        if self._motion_status["request_id"] != request_id:
-            return
-        try:
-            response = future.result()
-        except Exception as error:
-            self._set_motion_failed(
-                request_id, f"读取 MoveIt 起始碰撞失败：{error}", "apply"
-            )
-            return
-        pairs = tuple(
-            sorted(
-                {
-                    tuple(sorted((c.contact_body_1, c.contact_body_2)))
-                    for c in response.contacts
-                    if c.body_type_1 == c.ROBOT_LINK
-                    and c.body_type_2 == c.ROBOT_LINK
-                    and c.contact_body_1 != c.contact_body_2
-                }
-            )
-        )
-        if response.valid or not pairs:
-            self._set_motion_failed(
-                request_id,
-                f"MoveIt 规划失败，错误码 {error_code}；未检测到起始自碰撞",
-                "apply",
-            )
-            return
-        if not self._planning_scene_client.service_is_ready():
-            self._set_motion_failed(request_id, "MoveIt 规划场景服务尚未就绪", "apply")
-            return
-        request = GetPlanningScene.Request()
-        request.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
-        self._planning_scene_client.call_async(request).add_done_callback(
-            lambda done: self._collision_scene_result(request_id, options, pairs, done)
-        )
-
-    def _collision_scene_result(
-        self,
-        request_id: str,
-        options: dict[str, Any],
-        pairs: tuple[tuple[str, str], ...],
-        future: Any,
-    ) -> None:
-        if self._motion_status["request_id"] != request_id:
-            return
-        try:
-            matrix = future.result().scene.allowed_collision_matrix
-            self._allow_collision_pairs(matrix, pairs)
-        except Exception as error:
-            self._set_motion_failed(
-                request_id, f"构造 MoveIt 临时碰撞矩阵失败：{error}", "apply"
-            )
-            return
-        if self._latest_arm_state is None or self._motion_target is None:
-            self._set_motion_failed(request_id, "重试规划时缺少关节状态", "apply")
-            return
-        self._send_motion_plan(
-            request_id,
-            list(self._latest_arm_state["joints_rad"]),
-            list(self._motion_target),
-            options,
-            matrix,
-            pairs,
-        )
-
-    @staticmethod
-    def _allow_collision_pairs(matrix: Any, pairs: tuple[tuple[str, str], ...]) -> None:
-        if len(matrix.entry_values) != len(matrix.entry_names) or any(
-            len(row.enabled) != len(matrix.entry_names) for row in matrix.entry_values
-        ):
-            raise ValueError("MoveIt AllowedCollisionMatrix 不是方阵")
-        for name in sorted({name for pair in pairs for name in pair}):
-            if name not in matrix.entry_names:
-                matrix.entry_names.append(name)
-                for row in matrix.entry_values:
-                    row.enabled.append(False)
-                entry = AllowedCollisionEntry()
-                entry.enabled = [False] * len(matrix.entry_names)
-                matrix.entry_values.append(entry)
-        indices = {name: index for index, name in enumerate(matrix.entry_names)}
-        for first, second in pairs:
-            matrix.entry_values[indices[first]].enabled[indices[second]] = True
-            matrix.entry_values[indices[second]].enabled[indices[first]] = True
+    def _fail_active_motion(self, request_id: str, message: str) -> None:
+        with self._lock:
+            if self._motion_status["request_id"] == request_id:
+                self._set_motion_failed(request_id, message, "apply")
 
     @staticmethod
     def _format_pairs(pairs: tuple[tuple[str, str], ...]) -> str:
         return "、".join(f"{first}↔{second}" for first, second in pairs)
 
-    def _begin_motion_execute(self, request_id: str) -> None:
-        if (
-            self._planned_trajectory is None
-            or not self._execute_client.server_is_ready()
-            or not self._servo_paused
-        ):
-            self._set_motion_failed(request_id, "轨迹或执行服务尚未就绪", "apply")
-            return
-        self._motion_status.update(
-            state="executing", result_message="正在执行普通关节轨迹"
-        )
-        self._enqueue("motion_status", self._motion_status)
-        if self._motion_actuator_target is not None:
-            self._publish_actuator(request_id, self._motion_actuator_target)
-        goal = ExecuteTrajectory.Goal()
-        goal.trajectory = self._planned_trajectory
-        goal.controller_names = ["arm_controller"]
-        self._execute_client.send_goal_async(goal).add_done_callback(
-            lambda done: self._execute_goal_response(request_id, done)
-        )
-
-    def _execute_goal_response(self, request_id: str, future: Any) -> None:
-        try:
-            handle = future.result()
-        except Exception as error:
-            self._set_motion_failed(request_id, f"提交执行失败：{error}", "apply")
-            return
-        if self._motion_status["request_id"] != request_id:
-            if handle.accepted:
-                handle.cancel_goal_async()
-            return
-        if not handle.accepted:
-            self._set_motion_failed(request_id, "MoveIt 拒绝执行普通轨迹", "apply")
-            return
-        self._controller_output_armed = True
-        self._execute_goal_handle = handle
-        handle.get_result_async().add_done_callback(
-            lambda done: self._execute_result(request_id, done)
-        )
-
-    def _execute_result(self, request_id: str, future: Any) -> None:
-        if self._motion_status["request_id"] != request_id:
-            return
-        self._execute_goal_handle = None
-        try:
-            result = future.result().result
-        except Exception as error:
-            self._set_motion_failed(request_id, f"执行结果读取失败：{error}", "apply")
-            return
-        if result.error_code.val != MoveItErrorCodes.SUCCESS:
-            self._set_motion_failed(
-                request_id,
-                f"普通运动执行失败，MoveIt 错误码 {result.error_code.val}",
-                "apply",
-            )
-            return
-        complete_in_relative_mode = self._complete_in_relative_mode
-        self._complete_in_relative_mode = False
-        if complete_in_relative_mode:
-            error = self._apply_control_mode("relative")
-            if error is not None:
-                self._set_motion_failed(request_id, error, "apply")
-                return
-        self._resume_servo()
-        self._reset_relative_baseline()
-        self._planned_trajectory = None
-        self._motion_target = None
-        self._motion_actuator_target = None
-        self._motion_status.update(
-            state="succeeded",
-            result_code=str(result.error_code.val),
-            result_message="普通运动执行完成",
-        )
-        self._enqueue("motion_status", self._motion_status)
-        self._enqueue("motion_request_result", self._status_result())
-
     def _cancel_motion(self, request_id: str) -> None:
-        self._complete_in_relative_mode = False
         cancelled_request_id = self._motion_status["request_id"]
         cancelled_action = self._motion_status["acknowledged_action"]
-        cancelled_was_active = self._motion_status["state"] in {"planning", "executing"}
-        if self._plan_goal_handle is not None:
-            self._plan_goal_handle.cancel_goal_async()
-            self._plan_goal_handle = None
-        if self._execute_goal_handle is not None:
-            self._execute_goal_handle.cancel_goal_async()
-            self._execute_goal_handle = None
+        cancelled_was_active = self._motion_status["state"] in {
+            "planning",
+            "executing",
+        }
+        self._moveit.cancel()
         self._resume_servo()
         self._reset_relative_baseline()
-        self._planned_trajectory = None
-        self._motion_target = None
         self._motion_actuator_target = None
         if cancelled_was_active and cancelled_request_id != request_id:
             cancelled = {
@@ -1116,11 +900,8 @@ class MotionNode(Node):
         self._enqueue("motion_request_result", self._status_result())
 
     def _set_motion_failed(self, request_id: str, message: str, action: str) -> None:
-        self._complete_in_relative_mode = False
         self._resume_servo()
         self._reset_relative_baseline()
-        self._planned_trajectory = None
-        self._motion_target = None
         self._motion_actuator_target = None
         self._motion_status = {
             **self._idle_motion_status(),
@@ -1193,7 +974,7 @@ class MotionNode(Node):
             }
 
         controllers_ready = (
-            self._move_group_client.server_is_ready()
+            self._moveit.ready()
             and self._arm_trajectory_client.server_is_ready()
             and self._hand_trajectory_client.server_is_ready()
             and self._servo_pause_client.service_is_ready()
@@ -1224,193 +1005,22 @@ class MotionNode(Node):
             },
         }
 
-    def _enqueue_motion_state(self) -> None:
+    def _enqueue_motion_state(self, *, force_service: bool = False) -> None:
         state = self._motion_state()
-        self._enqueue("service_state", state["service"])
+        service = state["service"]
+        identity = {
+            key: value for key, value in service.items() if key != "updated_at_ns"
+        }
+        if force_service or identity != self._last_service_state:
+            self._last_service_state = identity
+            self._enqueue("service_state", service)
         self._enqueue("motion_state", state)
 
-    def _build_model_info(self) -> dict[str, Any]:
-        asset_root = Path(
-            os.environ.get("STARARM_MODEL_ASSETS", "/opt/robot-arm/model")
-        )
-        description_path = (
-            next(iter(sorted(asset_root.glob("*.urdf"))), None)
-            if asset_root.exists()
-            else None
-        )
-        if description_path is None:
-            raise RuntimeError(f"模型目录中没有 URDF：{asset_root}")
-        import xml.etree.ElementTree as ET
-
-        root = ET.fromstring(description_path.read_text())
-        limits = {}
-        for joint in root.findall("joint"):
-            if (
-                joint.get("name") in JOINTS
-                and (limit := joint.find("limit")) is not None
-            ):
-                limits[joint.get("name")] = (
-                    float(limit.get("lower")),
-                    float(limit.get("upper")),
-                )
-        missing = [name for name in JOINTS if name not in limits]
-        if missing:
-            raise RuntimeError(f"URDF 缺少主动关节范围：{missing}")
-        files = (
-            sorted(
-                str(path.relative_to(asset_root))
-                for path in asset_root.rglob("*")
-                if path.is_file()
-            )
-            if asset_root.exists()
-            else []
-        )
-        digest = hashlib.sha256()
-        for relative in files:
-            digest.update(relative.encode())
-            digest.update((asset_root / relative).read_bytes())
-        manifest_hash = digest.hexdigest()
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "model_id": MODEL_ID,
-            "model_revision": MODEL_REVISION,
-            "display_name": "StarArm-102",
-            "base_frame": "base_link",
-            "tcp_frame": "link6",
-            "joints": [
-                {
-                    "key": name,
-                    "label": f"J{index + 1}",
-                    "unit": "rad",
-                    "minimum": limits[name][0],
-                    "maximum": limits[name][1],
-                }
-                for index, name in enumerate(JOINTS)
-            ],
-            "tool_actuators": [
-                {
-                    "key": GRIPPER_KEY,
-                    "label": "夹爪",
-                    "unit": "rad",
-                    "minimum": 0.0,
-                    "maximum": math.radians(90),
-                    "visualization_joint_key": GRIPPER_JOINT,
-                }
-            ],
-            "named_targets": [
-                {
-                    "key": "start",
-                    "label": "默认位",
-                    "joint_positions_rad": dict(zip(JOINTS, START_RAD, strict=True)),
-                    "actuator_positions_rad": {GRIPPER_KEY: CLOSED_GRIPPER_RAD},
-                },
-                {
-                    "key": "test",
-                    "label": "测试位",
-                    "joint_positions_rad": dict(zip(JOINTS, TEST_RAD, strict=True)),
-                    "actuator_positions_rad": {GRIPPER_KEY: CLOSED_GRIPPER_RAD},
-                },
-            ],
-            "motion_options": [
-                {
-                    "key": "velocity_scaling",
-                    "label": "速度倍率",
-                    "unit": "ratio",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "required": False,
-                },
-                {
-                    "key": "acceleration_scaling",
-                    "label": "加速度倍率",
-                    "unit": "ratio",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "required": False,
-                },
-            ],
-            "diagnostics": [],
-            "visualization": {
-                "manifest_hash": manifest_hash,
-                "root_path": next(
-                    (name for name in files if name.endswith((".urdf", ".xacro"))), ""
-                ),
-                "files": files,
-                "link_materials": {
-                    "base_link": {
-                        "color_rgb": [0.196, 0.298, 0.365],
-                        "metalness": 0.16,
-                        "roughness": 0.56,
-                    },
-                    **{
-                        name: {
-                            "color_rgb": [0.863, 0.906, 0.929],
-                            "metalness": 0.16,
-                            "roughness": 0.56,
-                        }
-                        for name in (
-                            "link1",
-                            "link2",
-                            "link3",
-                            "link4",
-                            "link5",
-                            "link6",
-                        )
-                    },
-                    **{
-                        name: {
-                            "color_rgb": [0.145, 0.216, 0.275],
-                            "metalness": 0.42,
-                            "roughness": 0.48,
-                        }
-                        for name in ("link7_left", "link7_right")
-                    },
-                },
-            },
-        }
-
     def _handle_asset_request(self, request: dict[str, Any]) -> None:
-        response = {
-            "schema_version": SCHEMA_VERSION,
-            "request_id": str(request.get("request_id", "")),
-            "model_revision": MODEL_REVISION,
-            "manifest_hash": self._model_info["visualization"]["manifest_hash"],
-            "relative_path": str(request.get("relative_path", "")),
-            "mime_type": None,
-            "content_hash": None,
-            "content": None,
-            "original_error": None,
-        }
-        relative = Path(response["relative_path"])
-        root = Path(os.environ.get("STARARM_MODEL_ASSETS", "/opt/robot-arm/model"))
-        if (
-            request.get("model_revision") != MODEL_REVISION
-            or request.get("manifest_hash") != response["manifest_hash"]
-            or relative.is_absolute()
-            or ".." in relative.parts
-        ):
-            response["original_error"] = (
-                "asset request does not match the current manifest"
-            )
-        else:
-            try:
-                content = (root / relative).read_bytes()
-                response["content"] = list(content)
-                response["content_hash"] = hashlib.sha256(content).hexdigest()
-                response["mime_type"] = (
-                    "model/stl"
-                    if relative.suffix.lower() == ".stl"
-                    else "application/xml"
-                )
-            except OSError as error:
-                response["original_error"] = str(error)
-        self._enqueue("model_asset_response", response)
+        self._enqueue("model_asset_response", self._catalog.asset_response(request))
 
 
 def main(args: list[str] | None = None) -> None:
-    stack = subprocess.Popen(
-        ["ros2", "launch", "stararm_102_motion_node", "motion_stack.launch.py"]
-    )
     node = None
     try:
         rclpy.init(args=args)
@@ -1421,8 +1031,6 @@ def main(args: list[str] | None = None) -> None:
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-        stack.terminate()
-        stack.wait()
 
 
 if __name__ == "__main__":

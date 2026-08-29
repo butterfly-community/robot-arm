@@ -102,6 +102,8 @@ services:
     depends_on:
       dora-coordinator: { condition: service_started }
     networks: [robot-services]
+    ulimits:
+      memlock: -1
     volumes: ["./backend/config/runtime:/config"]
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]

@@ -112,7 +112,7 @@ if (selectedInput) {
   });
   await waitFor(
     () => snapshot("spatial"),
-    (state) => state.values.relative_motion?.active === false,
+    (state) => state.values.transformed_control?.active === false,
   );
   await request("/api/tracking/pose-source", {
     schema_version: 2,
@@ -164,8 +164,6 @@ await request("/api/arm-execution/disconnect", {
 const initialSpatial = await snapshot("spatial");
 const originalScale =
   initialSpatial.values.spatial_config_state.translation_scale;
-const originalOrigin =
-  initialSpatial.values.spatial_config_state.origin_position_m;
 const changed = await request(
   "/api/spatial/config",
   {
@@ -229,14 +227,14 @@ const applyBindings = (
     bindings,
     feedback_bindings: feedbackBindings,
   });
-if (selectedRuntimeSource?.source_id && booleanComponents.length > 0) {
+if (selectedRuntimeSource?.source_id && booleanComponents.length > 1) {
   try {
     const booleanResult = await applyBindings("integration-binding-boolean", [
       {
-        action: "control_active",
+        action: "start_stop",
         action_type: "boolean",
         source_id: selectedRuntimeSource.source_id,
-        component_paths: [booleanComponents[0].path],
+        component_paths: [booleanComponents[0].path, booleanComponents[1].path],
         invert: false,
       },
     ]);
@@ -245,11 +243,12 @@ if (selectedRuntimeSource?.source_id && booleanComponents.length > 0) {
       () => snapshot("tracking"),
       (state) => {
         const binding = state.values.discovery_state?.bindings?.find(
-          (value) => value.action === "control_active",
+          (value) => value.action === "start_stop",
         );
         return (
           binding?.active === true &&
-          binding.configured_components.includes(booleanComponents[0].path)
+          binding.configured_components.includes(booleanComponents[0].path) &&
+          binding.configured_components.includes(booleanComponents[1].path)
         );
       },
     );
@@ -522,14 +521,8 @@ try {
         "simulation:generic-6dof-cycle" &&
       state.values.absolute_pose?.orientation_source_id ===
         "simulation:generic-6dof-cycle" &&
-      state.values.control_input?.primary_tool?.value === 1,
+      state.values.control_input?.actuator_actions?.primary_tool?.value === 1,
   );
-  const origin = await request("/api/spatial/origin", {
-    schema_version: 2,
-    request_id: "integration-origin",
-  });
-  assert.equal(origin.original_error, null);
-  assert.equal(origin.value.origin_position_m.length, 3);
   await waitFor(
     () => snapshot("spatial"),
     (state) =>
@@ -537,8 +530,8 @@ try {
         "simulation:generic-6dof-cycle" &&
       state.values.spatial_config_state?.orientation_source_id ===
         "simulation:generic-6dof-cycle" &&
-      state.values.relative_motion?.active === true &&
-      state.values.relative_motion.translation_m.some(
+      state.values.transformed_control?.active === true &&
+      state.values.transformed_control.translation_m.some(
         (component) => Math.abs(component) > 0,
       ),
   );
@@ -568,16 +561,7 @@ try {
   assert.equal(stopped.value.active, false);
   await waitFor(
     () => snapshot("spatial"),
-    (state) => state.values.relative_motion?.active === false,
-  );
-  await request(
-    "/api/spatial/config",
-    {
-      schema_version: 2,
-      request_id: "integration-origin-restore",
-      patch: { origin_position_m: originalOrigin },
-    },
-    "PATCH",
+    (state) => state.values.transformed_control?.active === false,
   );
 }
 

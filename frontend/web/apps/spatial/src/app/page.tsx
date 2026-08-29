@@ -3,11 +3,10 @@
 import type {
   AbsolutePoseFrame,
   Json,
-  RelativeToolMotion,
+  TransformedControlFrame,
 } from "@robot/contracts";
-import { patch, post, requestId, useGateway } from "@robot/gateway-client";
+import { patch, requestId, useGateway } from "@robot/gateway-client";
 import {
-  Button,
   Card,
   Field,
   Input,
@@ -16,7 +15,7 @@ import {
   Shell,
   StatusBadge,
 } from "@robot/ui";
-import { PoseViewer } from "@robot/visualization";
+import { PoseViewer, relativeMotionPose } from "@robot/visualization";
 import { useState } from "react";
 
 function centimeters(value: number | undefined) {
@@ -36,24 +35,12 @@ export default function Page() {
     values.config_state ??
     {}) as Record<string, unknown>;
   const switches = (config.switches ?? {}) as Record<string, unknown>;
-  const pose = values.absolute_pose as unknown as AbsolutePoseFrame | undefined;
-  const motion = values.relative_motion as unknown as
-    RelativeToolMotion | undefined;
+  const pose = values.spatial_pose as unknown as AbsolutePoseFrame | undefined;
+  const motion = values.transformed_control as unknown as
+    TransformedControlFrame | undefined;
   const effectiveAxes = (config.base_from_tracking_axes ?? []) as number[][];
   const [axesDraft, setAxesDraft] = useState<number[][]>();
   const axes = axesDraft ?? effectiveAxes;
-
-  async function origin() {
-    setError(undefined);
-    try {
-      await post("/api/spatial/origin", {
-        schema_version: 2,
-        request_id: requestId(),
-      });
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
 
   async function update(patchValue: Record<string, Json>) {
     setError(undefined);
@@ -70,15 +57,13 @@ export default function Page() {
 
   const translation = motion?.translation_m;
   const active = Boolean(motion?.active);
-  const originM = Array.isArray(config.origin_position_m)
-    ? (config.origin_position_m as [number, number, number])
-    : ([0, 0, 0] as [number, number, number]);
+  const displayPose = active && motion ? relativeMotionPose(motion) : pose;
 
   return (
     <Shell
       section="02 / SPATIAL TRANSFORM"
       title="空间转换"
-      description="图形展示坐标映射后的空间位置与设备姿态；原点、倍率和分量配置紧邻结果，原始消息统一收进排障区。"
+      description="空间节点统一完成原点、坐标换基和比例转换；页面只显示转换结果与相对运动。"
     >
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
@@ -113,9 +98,9 @@ export default function Page() {
             tone="cyan"
           />
           <Metric
-            label="接管会话"
+            label="控制过程"
             value={
-              active ? String(motion?.control_session_id ?? "ACTIVE") : "IDLE"
+              active ? String(motion?.control_session_id ?? "运行中") : "未启动"
             }
             tone={active ? "green" : undefined}
           />
@@ -127,19 +112,15 @@ export default function Page() {
           title="人体空间 / 自身姿态"
           action={
             <StatusBadge tone={active ? "good" : "neutral"}>
-              {active ? "相对运动输出中" : "等待接管"}
+              {active ? "相对运动输出中" : "等待启动"}
             </StatusBadge>
           }
         >
           <PoseViewer
-            pose={pose}
-            motion={motion}
+            pose={displayPose}
             poseCoordinates="robot"
-            originM={originM}
-            axes={effectiveAxes}
-            translationScale={Number(config.translation_scale ?? 1)}
             active={active}
-            ariaLabel="映射后空间位置和设备自身姿态"
+            ariaLabel="空间节点转换后的空间位置和设备自身姿态"
           />
         </Card>
 
@@ -147,7 +128,6 @@ export default function Page() {
           className="span-4 aligned-row-card"
           eyebrow="Transform configuration"
           title="空间配置"
-          action={<Button onClick={origin}>确认当前位置为原点</Button>}
         >
           <Field label="平移倍率">
             <Input
@@ -261,7 +241,7 @@ export default function Page() {
           defaultOpen={false}
         >
           <div className="diagnostic-grid">
-            <JsonView title="原始绝对位姿" value={pose} />
+            <JsonView title="空间节点转换位姿" value={pose} />
             <JsonView title="相对运动消息" value={motion} />
             <JsonView
               title="空间配置 / 请求结果"

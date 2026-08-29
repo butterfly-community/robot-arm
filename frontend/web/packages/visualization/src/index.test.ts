@@ -2,16 +2,10 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 
 import {
-  mappedOrientation,
-  mappedPosition,
+  relativeMotionPose,
+  robotToSceneOrientation,
   robotToScenePosition,
 } from "./index";
-
-const axes = [
-  [0, 0, -1],
-  [-1, 0, 0],
-  [0, 1, 0],
-];
 
 function expectSameRotation(
   actual: THREE.Quaternion,
@@ -20,73 +14,62 @@ function expectSameRotation(
   expect(Math.abs(actual.dot(expected))).toBeCloseTo(1, 10);
 }
 
-describe("mappedPosition", () => {
-  it("maps tracking movement into forward, left and up exactly once", () => {
-    expect(mappedPosition([0, 0, -0.04], [0, 0, 0], axes, 0.5)).toEqual([
-      0.02, 0, 0,
-    ]);
-    expect(mappedPosition([-0.04, 0, 0], [0, 0, 0], axes, 0.5)).toEqual([
-      0, 0.02, 0,
-    ]);
-    expect(mappedPosition([0, 0.04, 0], [0, 0, 0], axes, 0.5)).toEqual([
-      0, 0, 0.02,
-    ]);
-  });
-});
-
 describe("robotToScenePosition", () => {
   it("renders forward, left and up on the visible front, left and vertical axes", () => {
     expect(robotToScenePosition([0.1, 0.2, 0.3])).toEqual([-0.2, 0.3, 0.1]);
   });
 });
 
-describe("mappedOrientation", () => {
-  it("keeps an identity device orientation upright after changing basis", () => {
+describe("robotToSceneOrientation", () => {
+  it("keeps identity upright", () => {
     expectSameRotation(
-      mappedOrientation([0, 0, 0, 1], axes),
+      robotToSceneOrientation([0, 0, 0, 1]),
       new THREE.Quaternion(),
     );
   });
 
-  it("maps a device Y rotation onto the configured up axis", () => {
+  it("converts robot up rotation into the scene up axis", () => {
     const source = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(0, 1, 0),
-      Math.PI / 2,
-    );
-    const expected = new THREE.Quaternion().setFromAxisAngle(
       new THREE.Vector3(0, 0, 1),
       Math.PI / 2,
     );
-
-    expectSameRotation(mappedOrientation(source.toArray(), axes), expected);
+    const expected = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, -1, 0),
+      Math.PI / 2,
+    );
+    expectSameRotation(robotToSceneOrientation(source.toArray()), expected);
   });
+});
 
-  it.each([
-    [
-      [1, 0, 0],
-      [0, -1, 0],
-    ],
-    [
-      [0, 1, 0],
-      [0, 0, 1],
-    ],
-    [
-      [0, 0, 1],
-      [-1, 0, 0],
-    ],
-  ])(
-    "maps source axis %j onto configured axis %j",
-    (sourceAxis, targetAxis) => {
-      const source = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(...(sourceAxis as [number, number, number])),
-        Math.PI / 3,
-      );
-      const expected = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(...(targetAxis as [number, number, number])),
-        Math.PI / 3,
-      );
-
-      expectSameRotation(mappedOrientation(source.toArray(), axes), expected);
-    },
-  );
+describe("relativeMotionPose", () => {
+  it("adapts an already transformed motion message without changing translation", () => {
+    const pose = relativeMotionPose({
+      schema_version: 2,
+      sequence: 1,
+      source_time_ns: 2,
+      transformed_time_ns: 3,
+      control_session_id: 4,
+      active: true,
+      translation_m: [0.1, 0.2, 0.3],
+      front_pitch_rad: 0.4,
+      horizontal_arc_rad: 0.5,
+      actuator_actions: {
+        primary_tool_open: {
+          is_active: false,
+          changed_since_last_sync: false,
+          value: false,
+        },
+        primary_tool: {
+          is_active: false,
+          changed_since_last_sync: false,
+          value: 0,
+        },
+      },
+    });
+    expect(pose.position_m).toEqual([0.1, 0.2, 0.3]);
+    expectSameRotation(
+      new THREE.Quaternion().fromArray(pose.orientation_xyzw),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, 0.5, 0, "XYZ")),
+    );
+  });
 });

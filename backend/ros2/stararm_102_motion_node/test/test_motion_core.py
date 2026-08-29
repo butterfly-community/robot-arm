@@ -3,8 +3,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from transforms3d.quaternions import axangle2quat, quat2mat
-
 from stararm_102_motion_node.motion_core import (
     PIVOT_TO_TCP_M,
     MotionConfig,
@@ -19,6 +17,7 @@ from stararm_102_motion_node.motion_core import (
     tool_action_transition,
     tool_position_rad,
 )
+from transforms3d.quaternions import axangle2quat, quat2mat
 
 
 def axis_angle(

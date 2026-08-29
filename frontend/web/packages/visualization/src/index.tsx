@@ -1,6 +1,9 @@
 "use client";
 
-import type { AbsolutePoseFrame, RelativeToolMotion } from "@robot/contracts";
+import type {
+  AbsolutePoseFrame,
+  TransformedControlFrame,
+} from "@robot/contracts";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -16,10 +19,6 @@ export type PoseVisualization = {
 
 type Props = {
   pose?: AbsolutePoseFrame | PoseVisualization;
-  motion?: RelativeToolMotion;
-  originM?: Vector3Tuple;
-  axes?: number[][];
-  translationScale?: number;
   poseCoordinates?: "scene" | "robot";
   active?: boolean;
   className?: string;
@@ -118,22 +117,6 @@ const cameraViews: Array<{ id: CameraView; label: string }> = [
   { id: "right", label: "右视" },
 ];
 
-export function mappedPosition(
-  position: Vector3Tuple,
-  origin: Vector3Tuple,
-  axes: number[][],
-  scale: number,
-): Vector3Tuple {
-  const delta = position.map((value, index) => value - origin[index]);
-  if (axes.length !== 3 || axes.some((row) => row.length !== 3)) {
-    return delta as Vector3Tuple;
-  }
-  return axes.map(
-    (row) =>
-      row.reduce((sum, value, index) => sum + value * delta[index], 0) * scale,
-  ) as Vector3Tuple;
-}
-
 export function robotToScenePosition([
   forward,
   left,
@@ -142,35 +125,52 @@ export function robotToScenePosition([
   return [-left, up, forward];
 }
 
-export function mappedOrientation(
+export function robotToSceneOrientation(
   orientation: QuaternionTuple,
-  axes: number[][],
-) {
+): THREE.Quaternion {
   const source = new THREE.Quaternion().fromArray(orientation).normalize();
-  if (axes.length !== 3 || axes.some((row) => row.length !== 3)) {
-    return source;
-  }
   const basis = new THREE.Matrix4().set(
-    axes[0][0],
-    axes[0][1],
-    axes[0][2],
     0,
-    axes[1][0],
-    axes[1][1],
-    axes[1][2],
+    -1,
     0,
-    axes[2][0],
-    axes[2][1],
-    axes[2][2],
+    0,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
     0,
     0,
     0,
     0,
     1,
   );
-  const basisRotation = new THREE.Quaternion().setFromRotationMatrix(basis);
-  const inverseBasis = basisRotation.clone().invert();
-  return basisRotation.multiply(source).multiply(inverseBasis).normalize();
+  const sourceRotation = new THREE.Matrix4().makeRotationFromQuaternion(source);
+  const mapped = basis
+    .clone()
+    .multiply(sourceRotation)
+    .multiply(basis.clone().invert());
+  return new THREE.Quaternion().setFromRotationMatrix(mapped).normalize();
+}
+
+export function relativeMotionPose(
+  motion: TransformedControlFrame,
+): PoseVisualization {
+  return {
+    position_m: motion.translation_m,
+    orientation_xyzw: new THREE.Quaternion()
+      .setFromEuler(
+        new THREE.Euler(
+          motion.front_pitch_rad,
+          motion.horizontal_arc_rad,
+          0,
+          "XYZ",
+        ),
+      )
+      .toArray(),
+  };
 }
 
 function lineGeometry(points: THREE.Vector3[]) {
@@ -179,14 +179,6 @@ function lineGeometry(points: THREE.Vector3[]) {
 
 export function PoseViewer({
   pose,
-  motion,
-  originM = [0, 0, 0],
-  axes = [
-    [1, 0, 0],
-    [0, 1, 0],
-    [0, 0, 1],
-  ],
-  translationScale = 1,
   poseCoordinates = "scene",
   active = false,
   className,
@@ -390,12 +382,7 @@ export function PoseViewer({
       pose != null &&
       pose.orientation_xyzw.every(Number.isFinite) &&
       (!("flags" in pose) || pose.flags.orientation_valid);
-    const motionValid =
-      motion?.active === true &&
-      motion.translation_m.every(Number.isFinite) &&
-      Number.isFinite(motion.front_pitch_rad) &&
-      Number.isFinite(motion.horizontal_arc_rad);
-    const valid = positionValid || orientationValid || motionValid;
+    const valid = positionValid || orientationValid;
     current.device.visible = valid;
     current.orientationDevice.visible = valid;
     current.vector.visible = valid;
@@ -404,33 +391,23 @@ export function PoseViewer({
     element.dataset.poseReady = String(valid);
     element.dataset.controlActive = String(active);
     if (!valid) {
-      current.displacementLabel.textContent = "等待有效位姿或相对运动";
+      current.displacementLabel.textContent = "等待有效空间数据";
       return;
     }
-    const mapped =
+    const position =
       positionValid && pose
-        ? mappedPosition(pose.position_m, originM, axes, translationScale)
-        : undefined;
-    const position = mapped
-      ? poseCoordinates === "robot"
-        ? robotToScenePosition(mapped)
-        : mapped
-      : motion
-        ? robotToScenePosition(motion.translation_m)
+        ? poseCoordinates === "robot"
+          ? robotToScenePosition(pose.position_m)
+          : pose.position_m
         : [0, 0, 0];
     const point = new THREE.Vector3(...position);
     current.device.position.copy(point);
     const orientation =
       orientationValid && pose
-        ? mappedOrientation(pose.orientation_xyzw, axes)
-        : new THREE.Quaternion().setFromEuler(
-            new THREE.Euler(
-              motion?.front_pitch_rad ?? 0,
-              motion?.horizontal_arc_rad ?? 0,
-              0,
-              "XYZ",
-            ),
-          );
+        ? poseCoordinates === "robot"
+          ? robotToSceneOrientation(pose.orientation_xyzw)
+          : new THREE.Quaternion().fromArray(pose.orientation_xyzw).normalize()
+        : new THREE.Quaternion();
     current.device.quaternion.copy(orientation);
     current.orientationDevice.quaternion.copy(orientation);
     current.vector.geometry.dispose();
@@ -442,7 +419,7 @@ export function PoseViewer({
     current.floorMarker.position.set(floor.x, 0.004, floor.z);
     current.displacementLabel.textContent = `${active ? "控制中 · " : ""}X ${position[0].toFixed(3)} · Y ${position[1].toFixed(3)} · Z ${position[2].toFixed(3)} m`;
     element.dataset.position = position.join(",");
-  }, [active, axes, motion, originM, pose, poseCoordinates, translationScale]);
+  }, [active, pose, poseCoordinates]);
 
   return (
     <div

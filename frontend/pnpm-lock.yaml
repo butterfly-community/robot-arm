@@ -164,9 +164,6 @@ importers:
       '@robot/ui':
         specifier: workspace:*
         version: link:../../packages/ui
-      '@robot/visualization':
-        specifier: workspace:*
-        version: link:../../packages/visualization
       next:
         specifier: 16.3.3
         version: 16.3.3(@babel/core@7.29.7(supports-color@7.2.0))(@playwright/test@1.62.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

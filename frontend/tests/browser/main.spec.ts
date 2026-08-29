@@ -119,9 +119,6 @@ test("simulation control uses the normal input and spatial path", async ({
   page,
   request,
 }) => {
-  const initialSpatial = await (await request.get("/api/spatial/state")).json();
-  const originalOrigin =
-    initialSpatial.values.spatial_config_state.origin_position_m;
   const initialTracking = await (
     await request.get("/api/tracking/state")
   ).json();
@@ -137,39 +134,33 @@ test("simulation control uses the normal input and spatial path", async ({
   });
   await page.goto("/tracking/");
   try {
+    const simulationStarted = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/tracking/simulation") &&
+        response.request().method() === "POST",
+    );
     await page.getByRole("button", { name: "启动模拟数据" }).click();
+    await simulationStarted;
     await expect(
       page.getByRole("button", { name: "停止模拟数据" }),
     ).toBeVisible();
     const renderCadence = await page.evaluate(async () => {
       const metrics = [...document.querySelectorAll(".metric")];
-      const position = metrics
-        .find((metric) => metric.textContent?.includes("位置 Y"))
-        ?.querySelector("strong");
       const rate = metrics
         .find((metric) => metric.textContent?.includes("采集频率"))
         ?.querySelector("strong");
-      if (!position || !rate) throw new Error("缺少位置或采集频率指标");
-      let positionRenders = 0;
+      if (!rate) throw new Error("缺少采集频率指标");
       let rateRenders = 0;
-      const positionObserver = new MutationObserver(() => positionRenders++);
       const rateObserver = new MutationObserver(() => rateRenders++);
-      positionObserver.observe(position, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
       rateObserver.observe(rate, {
         childList: true,
         subtree: true,
         characterData: true,
       });
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
-      positionObserver.disconnect();
       rateObserver.disconnect();
-      return { positionRenders, rateRenders };
+      return { rateRenders };
     });
-    expect(renderCadence.positionRenders).toBeGreaterThan(10);
     expect(renderCadence.rateRenders).toBeLessThanOrEqual(2);
     const inputTest = page.locator("section.card").filter({
       has: page.getByText("输入测试", { exact: true }),
@@ -177,7 +168,7 @@ test("simulation control uses the normal input and spatial path", async ({
     await inputTest
       .getByLabel("选择测试设备")
       .selectOption("simulation:generic-6dof-cycle");
-    await expect(inputTest.getByText(/button\/control_active/)).toBeVisible();
+    await expect(inputTest.getByText(/button\/start_stop_a/)).toBeVisible();
     await expect
       .poll(async () => {
         const response = await request.get("/api/spatial/state");
@@ -186,7 +177,7 @@ test("simulation control uses the normal input and spatial path", async ({
           positionSource: state.values.spatial_config_state?.position_source_id,
           orientationSource:
             state.values.spatial_config_state?.orientation_source_id,
-          active: state.values.relative_motion?.active,
+          active: state.values.transformed_control?.active,
         };
       })
       .toEqual({
@@ -210,8 +201,7 @@ test("simulation control uses the normal input and spatial path", async ({
             (component: { path: string }) => component.path,
           ),
           controlBinding: discovery.bindings.find(
-            (binding: { action: string }) =>
-              binding.action === "control_active",
+            (binding: { action: string }) => binding.action === "start_stop",
           )?.configured_components,
           primaryToolBinding: discovery.bindings.find(
             (binding: { action: string }) => binding.action === "primary_tool",
@@ -224,8 +214,12 @@ test("simulation control uses the normal input and spatial path", async ({
       .toMatchObject({
         positionCapable: true,
         orientationCapable: true,
-        components: ["button/control_active", "axis/primary_tool"],
-        controlBinding: ["button/control_active"],
+        components: [
+          "button/start_stop_a",
+          "button/start_stop_b",
+          "axis/primary_tool",
+        ],
+        controlBinding: ["button/start_stop_a", "button/start_stop_b"],
         primaryToolBinding: ["axis/primary_tool"],
         feedbackBinding: {
           source_id: "virtual-feedback",
@@ -236,46 +230,21 @@ test("simulation control uses the normal input and spatial path", async ({
     await expect(
       page.getByRole("meter", { name: "网页虚拟力度反馈" }),
     ).toBeVisible();
-    const trackingViewer = page.getByLabel("三维空间位置和设备自身姿态");
-    await expect(trackingViewer).toHaveAttribute("data-pose-ready", "true");
-    await expect(trackingViewer.locator("canvas")).toBeVisible();
-    const cameraViews = trackingViewer.getByLabel("三维视角");
-    await expect(cameraViews.getByRole("button")).toHaveCount(4);
-    for (const view of ["俯视", "正视", "右视", "透视"]) {
-      const button = cameraViews.getByRole("button", { name: view });
-      await button.click();
-      await expect(button).toHaveAttribute("aria-pressed", "true");
-    }
+    await expect(page.getByLabel("三维空间位置和设备自身姿态")).toHaveCount(0);
     await page.goto("/spatial/");
-    const spatialViewer = page.getByLabel("映射后空间位置和设备自身姿态");
+    const spatialViewer = page.getByLabel(
+      "空间节点转换后的空间位置和设备自身姿态",
+    );
     await expect(spatialViewer).toHaveAttribute("data-pose-ready", "true");
     for (const label of ["前后", "左右", "上下"]) {
       await expect(page.getByText(label, { exact: true })).toBeVisible();
     }
-    await page.getByRole("button", { name: "确认当前位置为原点" }).click();
-    await expect
-      .poll(async () => {
-        const response = await request.get("/api/spatial/state");
-        const state = await response.json();
-        return {
-          origin: state.values.spatial_config_state?.origin_position_m,
-          error: state.values.spatial_request_result?.original_error,
-        };
-      })
-      .toMatchObject({ origin: expect.any(Array), error: null });
   } finally {
     await request.post("/api/tracking/simulation", {
       data: {
         schema_version: 2,
         request_id: "browser-simulation-stop",
         enabled: false,
-      },
-    });
-    await request.patch("/api/spatial/config", {
-      data: {
-        schema_version: 2,
-        request_id: "browser-origin-restore",
-        patch: { origin_position_m: originalOrigin },
       },
     });
   }
@@ -358,8 +327,10 @@ test("tracking page applies and displays a controller binding", async ({
   ).toBeGreaterThanOrEqual(10);
 
   const selectedRuntimeSource = before.values.discovery_state?.sources?.find(
-    (source: { available_components?: unknown[] }) =>
-      (source.available_components?.length ?? 0) > 0,
+    (source: { available_components?: Array<{ action_type?: string }> }) =>
+      (source.available_components ?? []).filter(
+        (component) => component.action_type === "boolean",
+      ).length >= 2,
   );
   test.skip(
     !selectedRuntimeSource,
@@ -387,11 +358,12 @@ test("tracking page applies and displays a controller binding", async ({
     );
   try {
     const field = page.locator("fieldset.field").filter({
-      has: page.getByText("接管控制", { exact: true }),
+      has: page.getByText("启动和停止控制", { exact: true }),
     });
     const sourceSelect = field.locator("select").nth(0);
     await sourceSelect.selectOption(selectedRuntimeSource.source_id);
     const componentSelect = field.locator("select").nth(2);
+    const secondComponentSelect = field.locator("select").nth(3);
     await expect
       .poll(() => componentSelect.locator("option").count())
       .toBeGreaterThan(1);
@@ -401,6 +373,15 @@ test("tracking page applies and displays a controller binding", async ({
       .getAttribute("value");
     expect(componentPath).toBeTruthy();
     await componentSelect.selectOption(componentPath!);
+    await expect
+      .poll(() => secondComponentSelect.locator("option").count())
+      .toBeGreaterThan(2);
+    const secondComponentPath = await secondComponentSelect
+      .locator("option")
+      .nth(2)
+      .getAttribute("value");
+    expect(secondComponentPath).toBeTruthy();
+    await secondComponentSelect.selectOption(secondComponentPath!);
     await page.getByRole("button", { name: "应用绑定" }).click();
     await expect(
       page.getByRole("button", { name: "正在检测零位（3 秒）" }),
@@ -412,7 +393,7 @@ test("tracking page applies and displays a controller binding", async ({
       .poll(async () => {
         const current = await (await request.get("/api/tracking/state")).json();
         const binding = current.values.discovery_state.bindings.find(
-          (item: { action: string }) => item.action === "control_active",
+          (item: { action: string }) => item.action === "start_stop",
         );
         return {
           configured: binding.configured_components,
@@ -420,7 +401,7 @@ test("tracking page applies and displays a controller binding", async ({
         };
       })
       .toEqual({
-        configured: [componentPath],
+        configured: [componentPath, secondComponentPath],
         active: true,
       });
   } finally {
@@ -493,7 +474,13 @@ test("virtual feedback is selectable, draggable, and visible across pages", asyn
       has: page.getByText("夹爪力度回馈", { exact: true }),
     });
     await field.locator("select").first().selectOption("virtual-feedback");
+    const applied = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/tracking/bindings") &&
+        response.request().method() === "POST",
+    );
     await page.getByRole("button", { name: "应用绑定" }).click();
+    await applied;
 
     const meter = page.getByRole("meter", { name: "网页虚拟力度反馈" });
     await expect(meter).toBeVisible();

@@ -2,22 +2,13 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch_ros.actions import Node
 from launch_param_builder import ParameterBuilder
-from moveit_configs_utils import MoveItConfigsBuilder
+from launch_ros.actions import Node
+from stararm_102_motion_node.moveit_config import build_moveit_configs
 
 
 def generate_launch_description() -> LaunchDescription:
-    moveit = (
-        MoveItConfigsBuilder(
-            "stararm102_description", package_name="stararm102_moveit_config"
-        )
-        .robot_description(file_path="config/stararm102_description.urdf.xacro")
-        .robot_description_semantic(file_path="config/stararm102_description.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .to_moveit_configs()
-    )
+    moveit = build_moveit_configs()
     servo = (
         ParameterBuilder("stararm_102_motion_node").yaml("config/servo.yaml").to_dict()
     )
@@ -67,6 +58,11 @@ def generate_launch_description() -> LaunchDescription:
                     "moveit_manage_controllers": False,
                 },
             ],
+            output="screen",
+        ),
+        Node(
+            package="stararm_102_motion_node",
+            executable="dora_motion_node",
             output="screen",
         ),
     ]

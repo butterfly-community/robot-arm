@@ -185,9 +185,10 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "pose_source_request_result"
         | "bindings_request_result"
         | "simulation_request_result" => Some("tracking"),
-        "spatial_config_state"
+        "spatial_pose"
+        | "spatial_config_state"
         | "spatial_service_state"
-        | "relative_motion"
+        | "transformed_control"
         | "spatial_request_result" => Some("spatial"),
         "robot_model_info"
         | "motion_state"
@@ -207,7 +208,6 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
 fn mirrored_namespaces(input: &str) -> &'static [&'static str] {
     match input {
         "arm_state" => &["motion"],
-        "absolute_pose" => &["spatial"],
         "robot_model_info" | "motion_state" => &["arm-execution"],
         _ => &[],
     }
@@ -223,7 +223,6 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/tracking/snapshot", post(request_tracking_snapshot))
         .route("/api/spatial/state", get(snapshot_spatial))
         .route("/api/spatial/config", patch(request_spatial_config))
-        .route("/api/spatial/origin", post(request_origin))
         .route("/api/spatial/snapshot", post(request_spatial_snapshot))
         .route("/api/motion/state", get(snapshot_motion))
         .route("/api/motion/mode", post(request_mode))
@@ -323,7 +322,6 @@ request_handler!(request_pose_source, "select_pose_source_request");
 request_handler!(request_bindings, "apply_bindings_request");
 request_handler!(request_simulation, "set_simulation_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");
-request_handler!(request_origin, "confirm_origin_request");
 request_handler!(request_mode, "set_control_mode_request");
 request_handler!(request_prepare_relative, "prepare_relative_request");
 request_handler!(request_motion, "motion_request");
@@ -465,8 +463,9 @@ mod tests {
             "discovery_state",
             "absolute_pose",
             "control_input",
+            "spatial_pose",
             "spatial_config_state",
-            "relative_motion",
+            "transformed_control",
             "robot_model_info",
             "motion_state",
             "arm_state",
@@ -498,6 +497,6 @@ mod tests {
         assert_eq!(mirrored_namespaces("arm_state"), ["motion"]);
         assert_eq!(mirrored_namespaces("robot_model_info"), ["arm-execution"]);
         assert_eq!(mirrored_namespaces("motion_state"), ["arm-execution"]);
-        assert_eq!(mirrored_namespaces("absolute_pose"), ["spatial"]);
+        assert!(mirrored_namespaces("absolute_pose").is_empty());
     }
 }

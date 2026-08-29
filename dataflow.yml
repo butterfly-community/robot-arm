@@ -44,21 +44,22 @@ nodes:
         queue_size: 1
         queue_policy: drop_oldest
       update_config: web-gateway-node/update_spatial_config_request
-      confirm_origin: web-gateway-node/confirm_origin_request
       snapshot: web-gateway-node/spatial_snapshot
     outputs:
-      - relative_motion
+      - spatial_pose
+      - transformed_control
       - config_state
       - service_state
       - request_result
 
   - id: stararm-102-motion-node
-    path: /opt/ros_ws/install/stararm_102_motion_node/lib/stararm_102_motion_node/dora_motion_node
+    path: ros2
+    args: "launch stararm_102_motion_node motion_stack.launch.py"
     deploy:
       machine: stararm-102-motion
     inputs:
-      relative_motion:
-        source: spatial-transform-node/relative_motion
+      transformed_control:
+        source: spatial-transform-node/transformed_control
         queue_size: 1
         queue_policy: drop_oldest
       arm_state:
@@ -134,10 +135,14 @@ nodes:
       pose_source_request_result: controller-input-node/pose_source_request_result
       bindings_request_result: controller-input-node/bindings_request_result
       simulation_request_result: controller-input-node/simulation_request_result
+      spatial_pose:
+        source: spatial-transform-node/spatial_pose
+        queue_size: 1
+        queue_policy: drop_oldest
       spatial_config_state: spatial-transform-node/config_state
       spatial_service_state: spatial-transform-node/service_state
-      relative_motion:
-        source: spatial-transform-node/relative_motion
+      transformed_control:
+        source: spatial-transform-node/transformed_control
         queue_size: 1
         queue_policy: drop_oldest
       spatial_request_result: spatial-transform-node/request_result
@@ -167,7 +172,6 @@ nodes:
       - set_simulation_request
       - spatial_snapshot
       - update_spatial_config_request
-      - confirm_origin_request
       - motion_snapshot
       - set_control_mode_request
       - prepare_relative_request

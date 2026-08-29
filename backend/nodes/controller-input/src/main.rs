@@ -17,12 +17,12 @@ use nalgebra::Vector3;
 use nolo_cv1::protocol::{REPORT_SIZE, SUPPORTED_DEVICES, decode_report};
 use robot_arm_messages::{
     AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
-    ActionFeedbackBindingState, ActionType, ApplyInputBindingsRequest, BooleanActionSample,
-    ControlInputFrame, FloatActionSample, InputBindingState, InputComponentInfo,
-    InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo, InputSimulationRequest,
-    InputSimulationState, InputSourceInfo, InputStreamDiagnostics, PoseComponent, PoseFlags,
-    RequestAction, RequestResult, SCHEMA_VERSION, SelectPoseSourceRequest,
-    SelectedInputSourceState, ServiceState, from_arrow, to_arrow,
+    ActionFeedbackBindingState, ActionType, ActuatorActions, ApplyInputBindingsRequest,
+    BooleanActionSample, ControlInputFrame, FloatActionSample, InputBindingState,
+    InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo,
+    InputSimulationRequest, InputSimulationState, InputSourceInfo, InputStreamDiagnostics,
+    PoseComponent, PoseFlags, RequestAction, RequestResult, SCHEMA_VERSION,
+    SelectPoseSourceRequest, SelectedInputSourceState, ServiceState, from_arrow, to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -31,9 +31,9 @@ use sdl3::{
 };
 use serde::{Deserialize, Serialize};
 use simulation::{
-    CONTROL_ACTIVE_COMPONENT as SIMULATION_CONTROL_ACTIVE_COMPONENT,
     DRIVER_ID as SIMULATION_DRIVER_ID, PRIMARY_TOOL_COMPONENT as SIMULATION_PRIMARY_TOOL_COMPONENT,
-    SOURCE_ID as SIMULATION_SOURCE_ID, SimulationPlayback,
+    SOURCE_ID as SIMULATION_SOURCE_ID, START_STOP_COMPONENT_A as SIMULATION_START_STOP_COMPONENT_A,
+    START_STOP_COMPONENT_B as SIMULATION_START_STOP_COMPONENT_B, SimulationPlayback,
 };
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
@@ -45,8 +45,8 @@ const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
 const BINDING_CALIBRATION_DURATION: Duration = Duration::from_secs(3);
 
 const ACTIONS: [(&str, ActionType); 9] = [
-    ("control_active", ActionType::Boolean),
-    ("confirm_origin", ActionType::Boolean),
+    ("start_stop", ActionType::Boolean),
+    ("emergency_stop", ActionType::Boolean),
     ("primary_tool_open", ActionType::Boolean),
     ("primary_tool", ActionType::Float),
     ("move_forward_back", ActionType::Float),
@@ -497,10 +497,15 @@ impl ControllerInput {
             .err()
             .map(|error| error.to_string());
         if error.is_none() {
+            let component_offsets = if self.config.bindings == request.bindings {
+                self.config.component_offsets.clone()
+            } else {
+                self.detect_component_offsets(&request.bindings)
+            };
             let mut config = self.config.clone();
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
-            config.component_offsets = self.detect_component_offsets(&request.bindings);
+            config.component_offsets = component_offsets;
             config.config_version += 1;
             if let Err(save_error) = self.commit_config(config) {
                 return RequestResult {
@@ -788,10 +793,13 @@ fn simulation_config(config: &InputConfig) -> InputConfig {
     config.orientation_source = Some(selection);
     config.bindings = vec![
         ActionBinding {
-            action: "control_active".into(),
+            action: "start_stop".into(),
             action_type: ActionType::Boolean,
             source_id: SIMULATION_SOURCE_ID.into(),
-            component_paths: vec![SIMULATION_CONTROL_ACTIVE_COMPONENT.into()],
+            component_paths: vec![
+                SIMULATION_START_STOP_COMPONENT_A.into(),
+                SIMULATION_START_STOP_COMPONENT_B.into(),
+            ],
             invert: false,
         },
         ActionBinding {
@@ -845,6 +853,9 @@ fn validate_bindings(bindings: &[ActionBinding]) -> Result<()> {
             .1;
         if binding.action_type != expected {
             return Err(eyre!("Action {} 类型不匹配", binding.action));
+        }
+        if binding.action == "start_stop" && binding.component_paths.len() != 2 {
+            return Err(eyre!("启动和停止控制必须绑定两个按钮"));
         }
     }
     Ok(())
@@ -950,24 +961,26 @@ fn evaluate_actions(
         sequence,
         source_time_ns: now,
         received_time_ns: now,
-        control_active: boolean(
-            "control_active",
-            previous.is_some_and(|frame| frame.control_active.value),
+        start_stop: boolean(
+            "start_stop",
+            previous.is_some_and(|frame| frame.start_stop.value),
         ),
-        confirm_origin: boolean(
-            "confirm_origin",
-            previous.is_some_and(|frame| frame.confirm_origin.value),
+        emergency_stop: boolean(
+            "emergency_stop",
+            previous.is_some_and(|frame| frame.emergency_stop.value),
         ),
-        primary_tool_open: boolean(
-            "primary_tool_open",
-            previous.is_some_and(|frame| frame.primary_tool_open.value),
-        ),
-        primary_tool: float(
-            "primary_tool",
-            previous
-                .map(|frame| frame.primary_tool.value)
-                .unwrap_or(0.0),
-        ),
+        actuator_actions: ActuatorActions {
+            primary_tool_open: boolean(
+                "primary_tool_open",
+                previous.is_some_and(|frame| frame.actuator_actions.primary_tool_open.value),
+            ),
+            primary_tool: float(
+                "primary_tool",
+                previous
+                    .map(|frame| frame.actuator_actions.primary_tool.value)
+                    .unwrap_or(0.0),
+            ),
+        },
         move_forward_back: float(
             "move_forward_back",
             previous
@@ -1011,16 +1024,26 @@ fn binding_value(
             .copied()
             .unwrap_or(0.0)
     };
-    let mut value = match binding.component_paths.as_slice() {
-        [component] => sample.components.get(component).copied().unwrap_or(0.0) - offset(component),
-        [negative, positive] => {
-            sample.components.get(positive).copied().unwrap_or(0.0)
-                - offset(positive)
-                - sample.components.get(negative).copied().unwrap_or(0.0)
-                + offset(negative)
-        }
-        _ => 0.0,
-    };
+    let mut value =
+        if binding.action_type == ActionType::Boolean {
+            (!binding.component_paths.is_empty()
+                && binding.component_paths.iter().all(|component| {
+                    sample.components.get(component).copied().unwrap_or(0.0) != 0.0
+                })) as u8 as f64
+        } else {
+            match binding.component_paths.as_slice() {
+                [component] => {
+                    sample.components.get(component).copied().unwrap_or(0.0) - offset(component)
+                }
+                [negative, positive] => {
+                    sample.components.get(positive).copied().unwrap_or(0.0)
+                        - offset(positive)
+                        - sample.components.get(negative).copied().unwrap_or(0.0)
+                        + offset(negative)
+                }
+                _ => 0.0,
+            }
+        };
     if binding.invert {
         value = -value;
     }
@@ -1640,10 +1663,13 @@ mod tests {
             Some(SIMULATION_SOURCE_ID)
         );
         assert_eq!(config.bindings.len(), 2);
-        assert_eq!(config.bindings[0].action, "control_active");
+        assert_eq!(config.bindings[0].action, "start_stop");
         assert_eq!(
             config.bindings[0].component_paths,
-            [SIMULATION_CONTROL_ACTIVE_COMPONENT]
+            [
+                SIMULATION_START_STOP_COMPONENT_A,
+                SIMULATION_START_STOP_COMPONENT_B
+            ]
         );
         assert_eq!(config.bindings[1].action, "primary_tool");
         assert_eq!(
@@ -1685,10 +1711,10 @@ mod tests {
             pose.orientation_source_id.as_deref(),
             Some(SIMULATION_SOURCE_ID)
         );
-        assert!(control.control_active.is_active);
-        assert!(control.control_active.value);
-        assert!(control.primary_tool.is_active);
-        assert_eq!(control.primary_tool.value, 1.0);
+        assert!(control.start_stop.is_active);
+        assert!(control.start_stop.value);
+        assert!(control.actuator_actions.primary_tool.is_active);
+        assert_eq!(control.actuator_actions.primary_tool.value, 1.0);
     }
 
     #[test]
@@ -1734,8 +1760,13 @@ mod tests {
             1,
             1,
         );
-        assert!(pressed.primary_tool_open.value);
-        assert!(pressed.primary_tool_open.changed_since_last_sync);
+        assert!(pressed.actuator_actions.primary_tool_open.value);
+        assert!(
+            pressed
+                .actuator_actions
+                .primary_tool_open
+                .changed_since_last_sync
+        );
         let held = evaluate_actions(
             &sample(&[("button/south", 1.0)]),
             &bindings,
@@ -1744,8 +1775,13 @@ mod tests {
             2,
             2,
         );
-        assert!(held.primary_tool_open.value);
-        assert!(!held.primary_tool_open.changed_since_last_sync);
+        assert!(held.actuator_actions.primary_tool_open.value);
+        assert!(
+            !held
+                .actuator_actions
+                .primary_tool_open
+                .changed_since_last_sync
+        );
     }
 
     #[test]
@@ -1799,7 +1835,37 @@ mod tests {
             1,
             1,
         );
-        assert_eq!(frame.primary_tool.value, 0.375);
+        assert_eq!(frame.actuator_actions.primary_tool.value, 0.375);
+    }
+
+    #[test]
+    fn boolean_chord_requires_every_bound_button() {
+        let binding = ActionBinding {
+            action: "start_stop".into(),
+            action_type: ActionType::Boolean,
+            source_id: "fixture".into(),
+            component_paths: vec!["button/a".into(), "button/b".into()],
+            invert: false,
+        };
+        let one = evaluate_actions(
+            &sample(&[("button/a", 1.0), ("button/b", 0.0)]),
+            std::slice::from_ref(&binding),
+            &BTreeMap::new(),
+            None,
+            1,
+            1,
+        );
+        assert!(!one.start_stop.value);
+        let both = evaluate_actions(
+            &sample(&[("button/a", 1.0), ("button/b", 1.0)]),
+            &[binding],
+            &BTreeMap::new(),
+            Some(&one),
+            2,
+            2,
+        );
+        assert!(both.start_stop.value);
+        assert!(both.start_stop.changed_since_last_sync);
     }
 
     #[test]
@@ -1876,7 +1942,7 @@ mod tests {
             &samples,
             &[
                 ActionBinding {
-                    action: "control_active".into(),
+                    action: "start_stop".into(),
                     action_type: ActionType::Boolean,
                     source_id: "position-device".into(),
                     component_paths: vec!["button/one".into()],
@@ -1895,7 +1961,7 @@ mod tests {
             1,
             1,
         );
-        assert!(control.control_active.value);
+        assert!(control.start_stop.value);
         assert_eq!(control.front_pitch.value, 0.75);
     }
 

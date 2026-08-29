@@ -22,14 +22,13 @@ import {
   Shell,
   StatusBadge,
 } from "@robot/ui";
-import { PoseViewer } from "@robot/visualization";
 import { useEffect, useRef, useState } from "react";
 
 const feedbackActions = [["primary_tool", "夹爪力度回馈"]] as const;
 
 const actions = [
-  ["control_active", "接管控制", "boolean"],
-  ["confirm_origin", "确认原点", "boolean"],
+  ["start_stop", "启动和停止控制", "boolean"],
+  ["emergency_stop", "急停", "boolean"],
   ["primary_tool_open", "打开夹爪", "boolean"],
   ["primary_tool", "夹爪连续控制", "float"],
   ["move_forward_back", "前后移动", "float"],
@@ -39,7 +38,7 @@ const actions = [
   ["horizontal_arc", "左旋 / 右旋", "float"],
 ] as const;
 
-type InputMode = "button" | "buttons" | "axis";
+type InputMode = "button" | "chord" | "buttons" | "axis";
 
 function componentLabel(component: Record<string, unknown>) {
   const path = String(component.path ?? "");
@@ -48,7 +47,11 @@ function componentLabel(component: Record<string, unknown>) {
 }
 
 function sampleValue(input: ControlInputFrame | undefined, key: string) {
-  const sample = input?.[key as keyof ControlInputFrame] as
+  const samples =
+    key === "primary_tool" || key === "primary_tool_open"
+      ? input?.actuator_actions
+      : input;
+  const sample = samples?.[key as keyof typeof samples] as
     { value?: number | boolean; is_active?: boolean } | undefined;
   return {
     value:
@@ -59,11 +62,6 @@ function sampleValue(input: ControlInputFrame | undefined, key: string) {
         : Number(sample?.value ?? 0),
     active: Boolean(sample?.is_active),
   };
-}
-
-function positionValue(pose: AbsolutePoseFrame | undefined, index: number) {
-  const value = pose?.position_m[index];
-  return Number.isFinite(value) ? Number(value).toFixed(3) : "—";
 }
 
 function ObservedRate({ value }: { value: string }) {
@@ -84,15 +82,13 @@ function ObservedRate({ value }: { value: string }) {
 
 export default function Page() {
   const { snapshot, error, setError } = useGateway("tracking");
-  const { snapshot: spatialSnapshot } = useGateway("spatial");
   const values = snapshot?.values ?? {};
   const discovery = (values.discovery_state ?? {}) as Record<string, unknown>;
   const pose = values.absolute_pose as unknown as AbsolutePoseFrame | undefined;
   const input = values.control_input as unknown as
     ControlInputFrame | undefined;
-  const relativeMotion = spatialSnapshot?.values.relative_motion as unknown as
-    import("@robot/contracts").RelativeToolMotion | undefined;
   const sources = (discovery.sources ?? []) as Array<Record<string, unknown>>;
+  const drivers = (discovery.drivers ?? []) as Array<Record<string, unknown>>;
   const bindingStates = (discovery.bindings ?? []) as Array<
     Record<string, unknown>
   >;
@@ -127,7 +123,6 @@ export default function Page() {
   const diagnostics = (
     (discovery.diagnostics ?? []) as Array<Record<string, unknown>>
   )[0];
-  const controlActive = Boolean(input?.control_active?.value);
 
   if (previousConfigKey !== configKey) {
     setPreviousConfigKey(configKey);
@@ -161,11 +156,14 @@ export default function Page() {
       Object.fromEntries(
         bindingStates.map((binding) => [
           String(binding.action),
-          binding.action_type === "boolean"
-            ? "button"
-            : ((binding.configured_components ?? []) as unknown[]).length === 2
-              ? "buttons"
-              : "axis",
+          binding.action === "start_stop"
+            ? "chord"
+            : binding.action_type === "boolean"
+              ? "button"
+              : ((binding.configured_components ?? []) as unknown[]).length ===
+                  2
+                ? "buttons"
+                : "axis",
         ]),
       ),
     );
@@ -315,37 +313,21 @@ export default function Page() {
     <Shell
       section="01 / INPUT ACQUISITION"
       title="输入采集"
-      description="空间位置和设备自身姿态是主视图；驱动、设备和原始消息只作为连接配置与排障依据。"
+      description="连接输入设备，选择位置与姿态来源，并把实际按钮和轴绑定为设备无关的功能动作。"
     >
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
+          <Metric label="输入驱动" value={String(drivers.length)} tone="cyan" />
+          <Metric label="输入设备" value={String(sources.length)} tone="cyan" />
           <Metric
-            label="Position X"
-            value={positionValue(pose, 0)}
-            unit="m"
-            tone="red"
+            label="位置来源"
+            value={positionSource ? "已选择" : "未选择"}
+            tone={positionSource ? "green" : undefined}
           />
           <Metric
-            label="Position Y"
-            value={positionValue(pose, 1)}
-            unit="m"
-            tone="green"
-          />
-          <Metric
-            label="Position Z"
-            value={positionValue(pose, 2)}
-            unit="m"
-            tone="blue"
-          />
-          <Metric
-            label="Pose tracking"
-            value={pose?.flags?.position_tracked ? "TRACKED" : "WAIT"}
-            tone={pose?.flags?.position_tracked ? "cyan" : "amber"}
-          />
-          <Metric
-            label="Control"
-            value={controlActive ? "ACTIVE" : "IDLE"}
-            tone={controlActive ? "green" : undefined}
+            label="姿态来源"
+            value={orientationSource ? "已选择" : "未选择"}
+            tone={orientationSource ? "green" : undefined}
           />
           <ObservedRate
             value={
@@ -357,35 +339,10 @@ export default function Page() {
         </div>
 
         <Card
-          className="span-8 aligned-row-card viewer-fill-card"
-          eyebrow="Three.js realtime view"
-          title="空间位置 / 自身姿态"
-          action={
-            <StatusBadge tone={pose ? "good" : "warning"}>
-              {pose
-                ? [pose.position_source_id, pose.orientation_source_id]
-                    .filter(Boolean)
-                    .join(" + ") || "位姿分量未绑定"
-                : "等待位姿"}
-            </StatusBadge>
-          }
-        >
-          <PoseViewer
-            pose={pose}
-            motion={relativeMotion}
-            active={controlActive}
-          />
-        </Card>
-
-        <Card
-          className="span-4 aligned-row-card"
+          className="span-12"
           eyebrow="Semantic actions"
           title="控制分量"
-          action={
-            <StatusBadge tone={controlActive ? "good" : "neutral"}>
-              {controlActive ? "接管中" : "未接管"}
-            </StatusBadge>
-          }
+          action={<StatusBadge tone="neutral">业务动作</StatusBadge>}
         >
           <div className="action-list">
             {actions.map(([key, label]) => {
@@ -555,7 +512,11 @@ export default function Page() {
           <div className="binding-guide">
             <div>
               <strong>单个按钮</strong>
-              <span>按下为开，松开为关，用于接管或确认等开关功能。</span>
+              <span>按下为开，松开为关，用于独立业务动作。</span>
+            </div>
+            <div>
+              <strong>双按键组合</strong>
+              <span>两个按钮同时按下时触发启动或停止。</span>
             </div>
             <div>
               <strong>正负按钮对</strong>
@@ -573,9 +534,11 @@ export default function Page() {
                 (candidate) => candidate.source_id === sourceIds[action],
               );
               const mode =
-                actionType === "boolean"
-                  ? "button"
-                  : (inputModes[action] ?? "axis");
+                action === "start_stop"
+                  ? "chord"
+                  : actionType === "boolean"
+                    ? "button"
+                    : (inputModes[action] ?? "axis");
               const components = (
                 (source?.available_components ?? []) as Array<
                   Record<string, unknown>
@@ -622,9 +585,11 @@ export default function Page() {
                         setPaths({ ...paths, [action]: "" });
                       }}
                     >
-                      {actionType === "boolean" && (
+                      {action === "start_stop" ? (
+                        <option value="chord">双按键组合</option>
+                      ) : actionType === "boolean" ? (
                         <option value="button">单个按钮</option>
-                      )}
+                      ) : null}
                       {actionType === "float" && (
                         <>
                           <option value="axis">连续轴</option>
@@ -633,43 +598,47 @@ export default function Page() {
                       )}
                     </select>
                     <div className="binding-components">
-                      {Array.from({ length: mode === "buttons" ? 2 : 1 }).map(
-                        (_, index) => (
-                          <select
-                            key={index}
-                            aria-label={`${label}${
-                              mode === "buttons"
+                      {Array.from({
+                        length: mode === "buttons" || mode === "chord" ? 2 : 1,
+                      }).map((_, index) => (
+                        <select
+                          key={index}
+                          aria-label={`${label}${
+                            mode === "chord"
+                              ? "组合按键 " + (index + 1)
+                              : mode === "buttons"
                                 ? index === 0
                                   ? "负方向按钮"
                                   : "正方向按钮"
                                 : "设备输入"
-                            }`}
-                            value={
-                              (paths[action] ?? "").split(",")[index]?.trim() ??
-                              ""
-                            }
-                            onChange={(event) =>
-                              setPath(action, index, event.currentTarget.value)
-                            }
-                          >
-                            <option value="">
-                              {mode === "buttons"
+                          }`}
+                          value={
+                            (paths[action] ?? "").split(",")[index]?.trim() ??
+                            ""
+                          }
+                          onChange={(event) =>
+                            setPath(action, index, event.currentTarget.value)
+                          }
+                        >
+                          <option value="">
+                            {mode === "chord"
+                              ? "选择组合按键 " + (index + 1)
+                              : mode === "buttons"
                                 ? index === 0
                                   ? "负方向按钮"
                                   : "正方向按钮"
                                 : "选择设备输入"}
+                          </option>
+                          {components.map((component) => (
+                            <option
+                              key={String(component.path)}
+                              value={String(component.path)}
+                            >
+                              {componentLabel(component)}
                             </option>
-                            {components.map((component) => (
-                              <option
-                                key={String(component.path)}
-                                value={String(component.path)}
-                              >
-                                {componentLabel(component)}
-                              </option>
-                            ))}
-                          </select>
-                        ),
-                      )}
+                          ))}
+                        </select>
+                      ))}
                     </div>
                     {actionType === "float" && (
                       <label className="compact-check">

@@ -441,7 +441,6 @@ const interfaceTerms: Record<string, readonly [string, string]> = {
   前后: ["前后", "Forward / backward"],
   "前部抬起 / 往下": ["前部抬起 / 往下", "Front pitch"],
   "左旋 / 右旋": ["左旋 / 右旋", "Horizontal arc"],
-  接管会话: ["接管会话", "Control session"],
   驱动: ["驱动", "Driver"],
   设备: ["设备", "Device"],
   当前: ["当前", "Current"],

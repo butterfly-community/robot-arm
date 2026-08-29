@@ -159,15 +159,19 @@ export interface FloatActionSample {
   value: number;
 }
 
+export interface ActuatorActions {
+  primary_tool_open: BooleanActionSample;
+  primary_tool: FloatActionSample;
+}
+
 export interface ControlInputFrame {
   schema_version: number;
   sequence: number;
   source_time_ns: number;
   received_time_ns: number;
-  control_active: BooleanActionSample;
-  confirm_origin: BooleanActionSample;
-  primary_tool_open: BooleanActionSample;
-  primary_tool: FloatActionSample;
+  start_stop: BooleanActionSample;
+  emergency_stop: BooleanActionSample;
+  actuator_actions: ActuatorActions;
   move_forward_back: FloatActionSample;
   move_left_right: FloatActionSample;
   move_up_down: FloatActionSample;
@@ -183,7 +187,7 @@ export interface ActionFeedback {
   strength_percent: number;
 }
 
-export interface RelativeToolMotion {
+export interface TransformedControlFrame {
   schema_version: number;
   sequence: number;
   source_time_ns: number;
@@ -193,6 +197,5 @@ export interface RelativeToolMotion {
   translation_m: [number, number, number];
   front_pitch_rad: number;
   horizontal_arc_rad: number;
-  primary_tool_open: boolean;
-  primary_tool_value: number;
+  actuator_actions: ActuatorActions;
 }

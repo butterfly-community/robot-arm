@@ -322,15 +322,20 @@ pub struct FloatActionSample {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActuatorActions {
+    pub primary_tool_open: BooleanActionSample,
+    pub primary_tool: FloatActionSample,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ControlInputFrame {
     pub schema_version: u32,
     pub sequence: u64,
     pub source_time_ns: i64,
     pub received_time_ns: i64,
-    pub control_active: BooleanActionSample,
-    pub confirm_origin: BooleanActionSample,
-    pub primary_tool_open: BooleanActionSample,
-    pub primary_tool: FloatActionSample,
+    pub start_stop: BooleanActionSample,
+    pub emergency_stop: BooleanActionSample,
+    pub actuator_actions: ActuatorActions,
     pub move_forward_back: FloatActionSample,
     pub move_left_right: FloatActionSample,
     pub move_up_down: FloatActionSample,
@@ -365,7 +370,6 @@ pub struct SpatialConfigState {
     pub translation_scale: f64,
     pub action_translation_m_per_s: Option<f64>,
     pub action_arc_rad_per_s: Option<f64>,
-    pub origin_position_m: Option<[f64; 3]>,
     pub switches: SpatialComponentSwitches,
     pub control_session_id: Option<u64>,
 }
@@ -381,7 +385,6 @@ impl Default for SpatialConfigState {
             translation_scale: 0.5,
             action_translation_m_per_s: Some(DEFAULT_ACTION_TRANSLATION_M_PER_S),
             action_arc_rad_per_s: Some(DEFAULT_ACTION_ARC_RAD_PER_S),
-            origin_position_m: None,
             switches: SpatialComponentSwitches::default(),
             control_session_id: None,
         }
@@ -389,7 +392,7 @@ impl Default for SpatialConfigState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RelativeToolMotion {
+pub struct TransformedControlFrame {
     pub schema_version: u32,
     pub sequence: u64,
     pub source_time_ns: i64,
@@ -399,24 +402,11 @@ pub struct RelativeToolMotion {
     pub translation_m: [f64; 3],
     pub front_pitch_rad: f64,
     pub horizontal_arc_rad: f64,
-    pub primary_tool_open: bool,
-    pub primary_tool_value: f64,
+    pub actuator_actions: ActuatorActions,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpatialConfigPatch {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
-    )]
-    pub position_source_id: Option<Option<String>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
-    )]
-    pub orientation_source_id: Option<Option<String>>,
     pub base_from_tracking_axes: Option<[[f64; 3]; 3]>,
     pub translation_scale: Option<f64>,
     #[serde(
@@ -431,12 +421,6 @@ pub struct SpatialConfigPatch {
         with = "serde_with::rust::double_option"
     )]
     pub action_arc_rad_per_s: Option<Option<f64>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
-    )]
-    pub origin_position_m: Option<Option<[f64; 3]>>,
     pub switches: Option<SpatialComponentSwitches>,
 }
 
@@ -445,12 +429,6 @@ pub struct UpdateSpatialConfigRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub patch: SpatialConfigPatch,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ConfirmOriginRequest {
-    pub schema_version: u32,
-    pub request_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -838,7 +816,7 @@ mod tests {
             flags: PoseFlags::default(),
         };
         let json = serde_json::to_value(pose).unwrap();
-        assert!(json.get("control_active").is_none());
+        assert!(json.get("start_stop").is_none());
         assert!(json.get("joints_rad").is_none());
         assert!(json.get("translation_scale").is_none());
     }
@@ -862,37 +840,18 @@ mod tests {
     #[test]
     fn spatial_patch_distinguishes_missing_fields_from_explicit_null() {
         let missing: SpatialConfigPatch = serde_json::from_str("{}").unwrap();
-        assert_eq!(missing.position_source_id, None);
         assert_eq!(missing.action_translation_m_per_s, None);
         assert_eq!(missing.action_arc_rad_per_s, None);
-        assert_eq!(missing.origin_position_m, None);
-        let missing_json = serde_json::to_value(&missing).unwrap();
-        assert!(missing_json.get("origin_position_m").is_none());
 
         let cleared: SpatialConfigPatch = serde_json::from_str(
             r#"{
-                "position_source_id": null,
                 "action_translation_m_per_s": null,
-                "action_arc_rad_per_s": null,
-                "origin_position_m": null
+                "action_arc_rad_per_s": null
             }"#,
         )
         .unwrap();
-        assert_eq!(cleared.position_source_id, Some(None));
         assert_eq!(cleared.action_translation_m_per_s, Some(None));
         assert_eq!(cleared.action_arc_rad_per_s, Some(None));
-        assert_eq!(cleared.origin_position_m, Some(None));
-        assert!(serde_json::to_value(&cleared).unwrap()["origin_position_m"].is_null());
-
-        let request = UpdateSpatialConfigRequest {
-            schema_version: SCHEMA_VERSION,
-            request_id: "clear-origin".into(),
-            patch: cleared,
-        };
-        let round_trip: UpdateSpatialConfigRequest =
-            from_arrow(to_arrow(&request).unwrap().as_ref()).unwrap();
-        assert_eq!(round_trip.patch.origin_position_m, Some(None));
-        assert_eq!(round_trip.patch.action_translation_m_per_s, Some(None));
     }
 
     #[test]
