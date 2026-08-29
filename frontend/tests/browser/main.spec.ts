@@ -336,6 +336,38 @@ test("tracking page applies and displays a controller binding", async ({
   const bindingCard = page.locator("section.card").filter({
     has: page.getByText("功能与反馈绑定", { exact: true }),
   });
+  const semantics = bindingCard.locator(".motion-semantics-table");
+  await expect(
+    bindingCard.getByText(
+      "方向以机器人底座为准：前后、左右位于水平面，上下是竖直方向；不是屏幕或手柄自身方向。",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const verticalSemantics = semantics
+    .locator("tbody tr")
+    .filter({ hasText: "上下移动" });
+  await expect(verticalSemantics.locator("td").nth(2)).toHaveText(
+    "夹爪末端沿竖直方向直线平移",
+  );
+  await expect(verticalSemantics.locator("td").nth(3)).toHaveText(
+    "水平面内的前后、左右位置和夹爪朝向不变",
+  );
+  await expect(
+    semantics.locator("tbody tr").filter({ hasText: "左旋 / 右旋" }),
+  ).toContainText("绕工具后部枢轴在水平面走圆弧");
+  await expect(
+    semantics.locator("tbody tr").filter({ hasText: "夹爪连续控制" }),
+  ).toContainText("输入从 0 到 1，对应夹爪从 90° 到 0° 线性运动");
+  const verticalBinding = bindingCard.locator("fieldset.field").filter({
+    has: page.getByText("上下移动", { exact: true }),
+  });
+  await verticalBinding.locator("select").nth(1).selectOption("buttons");
+  await expect(verticalBinding.locator("select").nth(2)).toHaveAccessibleName(
+    "上下移动下移按钮",
+  );
+  await expect(verticalBinding.locator("select").nth(3)).toHaveAccessibleName(
+    "上下移动上移按钮",
+  );
   const firstBinding = bindingCard.locator(".binding-grid .field").first();
   const firstBindingControls = firstBinding.locator(".binding-row");
   await expect(firstBinding).toHaveCSS("border-top-width", "0px");

@@ -1015,6 +1015,27 @@ input[type="range"] {
 .binding-section-heading {
   margin: 24px 0 12px;
 }
+.binding-section-description {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+.motion-semantics-table {
+  min-width: 980px;
+  margin-bottom: 22px;
+}
+.motion-semantics-table th,
+.motion-semantics-table td {
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.5;
+}
+.motion-semantics-table th:first-child,
+.motion-semantics-table td:first-child {
+  min-width: 150px;
+  font-weight: 650;
+}
 .binding-guide + .binding-section-heading {
   margin-top: 0;
 }

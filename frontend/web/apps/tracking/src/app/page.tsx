@@ -38,6 +38,74 @@ const actions = [
   ["horizontal_arc", "左旋 / 右旋", "float"],
 ] as const;
 
+const actionDirections: Partial<
+  Record<(typeof actions)[number][0], readonly [string, string]>
+> = {
+  move_forward_back: ["后退", "前进"],
+  move_left_right: ["右移", "左移"],
+  move_up_down: ["下移", "上移"],
+  front_pitch: ["前部往下", "前部抬起"],
+  horizontal_arc: ["右旋", "左旋"],
+};
+
+const armMotionSemantics = [
+  [
+    "启动和停止控制",
+    "每按下一次切换开始或停止",
+    "开始时以当前夹爪末端位置和姿态建立本轮相对原点",
+    "按钮本身不产生位移；停止后不再发送新的相对目标",
+  ],
+  [
+    "急停",
+    "按下时结束当前控制过程",
+    "停止发送本轮相对运动目标",
+    "下一次启动会重新建立相对原点",
+  ],
+  ["打开夹爪", "按下时触发一次", "夹爪张开到机械角 90°", "J1–J6 的目标不变"],
+  [
+    "夹爪连续控制",
+    "0 为张开，1 为闭合",
+    "输入从 0 到 1，对应夹爪从 90° 到 0° 线性运动",
+    "J1–J6 的目标不变",
+  ],
+  [
+    "前后移动",
+    "正向前进，负向后退",
+    "夹爪末端沿机器人前后方向直线平移",
+    "左右位置、高度和夹爪朝向不变",
+  ],
+  [
+    "左右移动",
+    "正向左移，负向右移",
+    "夹爪末端沿机器人左右方向直线平移",
+    "前后位置、高度和夹爪朝向不变",
+  ],
+  [
+    "上下移动",
+    "正向上移，负向下移",
+    "夹爪末端沿竖直方向直线平移",
+    "水平面内的前后、左右位置和夹爪朝向不变",
+  ],
+  [
+    "前部抬起 / 往下",
+    "正向抬起，负向往下",
+    "夹爪尖端绕工具后部枢轴在竖直平面走圆弧",
+    "后部枢轴不动；不是夹爪整体上下平移",
+  ],
+  [
+    "左旋 / 右旋",
+    "正向左旋，负向右旋",
+    "夹爪尖端绕工具后部枢轴在水平面走圆弧",
+    "后部枢轴和尖端高度不变；不是夹爪自身旋转",
+  ],
+  [
+    "夹爪力度反馈",
+    "输出 0–100 的力度值",
+    "不驱动机械臂，只把当前夹爪力度发送到所选反馈目标",
+    "可以绑定扳机反馈、手柄振动或网页浮动圆环",
+  ],
+] as const;
+
 type InputMode = "button" | "buttons" | "axis";
 
 function componentLabel(component: Record<string, unknown>) {
@@ -533,9 +601,36 @@ export default function Page() {
               <span>摇杆或扳机的连续数值；反转方向会把输出乘以 -1。</span>
             </div>
           </div>
+          <h3 className="binding-section-heading">机械臂动作语义</h3>
+          <p className="binding-section-description">
+            方向以机器人底座为准：前后、左右位于水平面，上下是竖直方向；不是屏幕或手柄自身方向。
+          </p>
+          <div className="table-scroll">
+            <table className="telemetry-table motion-semantics-table">
+              <thead>
+                <tr>
+                  <th>功能</th>
+                  <th>输入 / 输出含义</th>
+                  <th>机械臂实际动作</th>
+                  <th>保持不变 / 补充</th>
+                </tr>
+              </thead>
+              <tbody>
+                {armMotionSemantics.map(([name, direction, motion, fixed]) => (
+                  <tr key={name}>
+                    <td>{name}</td>
+                    <td>{direction}</td>
+                    <td>{motion}</td>
+                    <td>{fixed}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <h3 className="binding-section-heading">功能输入</h3>
           <div className="binding-grid">
             {actions.map(([action, label, actionType]) => {
+              const directions = actionDirections[action];
               const source = sources.find(
                 (candidate) => candidate.source_id === sourceIds[action],
               );
@@ -608,8 +703,8 @@ export default function Page() {
                           aria-label={`${label}${
                             mode === "buttons"
                               ? index === 0
-                                ? "负方向按钮"
-                                : "正方向按钮"
+                                ? `${directions?.[0] ?? "负方向"}按钮`
+                                : `${directions?.[1] ?? "正方向"}按钮`
                               : "设备输入"
                           }`}
                           value={
@@ -623,8 +718,8 @@ export default function Page() {
                           <option value="">
                             {mode === "buttons"
                               ? index === 0
-                                ? "负方向按钮"
-                                : "正方向按钮"
+                                ? `${directions?.[0] ?? "负方向"}按钮`
+                                : `${directions?.[1] ?? "正方向"}按钮`
                               : "选择设备输入"}
                           </option>
                           {components.map((component) => (
