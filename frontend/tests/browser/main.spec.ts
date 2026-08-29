@@ -602,6 +602,33 @@ test("motion mode keyboard action round-trips through the service", async ({
   expect(state.values.motion_state.control_mode).toBe("relative");
 });
 
+test("motion collision unlock toggles the Servo collision monitor", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/motion/");
+  await page.getByRole("button", { name: "解除碰撞" }).click();
+  await expect
+    .poll(async () => {
+      const state = await (await request.get("/api/motion/state")).json();
+      return state.values.motion_state.collision_checking;
+    })
+    .toBe(false);
+  await expect(
+    page.getByRole("button", { name: "恢复碰撞检测" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "恢复碰撞检测" }).click();
+  await expect
+    .poll(async () => {
+      const state = await (await request.get("/api/motion/state")).json();
+      return state.values.motion_state.collision_checking;
+    })
+    .toBe(true);
+  await expect(
+    page.getByText("启用 · 容差 2 mm", { exact: true }),
+  ).toBeVisible();
+});
+
 test("motion named target is submitted by the metadata-driven page", async ({
   page,
   request,

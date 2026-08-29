@@ -415,10 +415,8 @@ const atStart = await waitFor(
           state.values.arm_state.joints_rad[index] -
             start.joint_positions_rad[joint.key],
         ) < 1e-9,
-    ),
-);
-assert.ok(
-  Math.abs(atStart.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
+    ) &&
+    Math.abs(state.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
 );
 
 const cancellable = [...atStart.values.arm_state.joints_rad];

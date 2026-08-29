@@ -32,7 +32,7 @@ update_pose() 接收已经分别标明空间来源和姿态来源的组合位姿
 `save_motion_config()` 使用 Python 标准库 JSON 保存控制模式，写盘成功后才替换内存状态。
 MoveIt/Servo 负责规划、逆运动学、控制器同步
 和碰撞模型。`motion_core.target_pose()` 仅构造绕机械臂工具后部枢轴的目标；四元数运算使用
-`transforms3d`。`tool_position_rad()` 把连续夹爪值线性映射到厂家定义的 90°→0° 行程。
+`transforms3d`。运动镜像固定 MoveIt Servo 2.12.4，并应用项目补丁把 `self_collision_proximity_threshold=0.002` 同时作为自碰撞网格穿透容差：2 mm 以内不急停，超过才停止；环境碰撞判断保持原样。运动页的“解除碰撞”通过同一个 `MotionRequest` 调用 Servo 官方动态参数服务关闭碰撞检查，按钮随后变为“恢复碰撞检测”，不创建另一条运动链。`MotionState` 明确报告碰撞检查状态和容差。`tool_position_rad()` 把连续夹爪值线性映射到厂家定义的 90°→0° 行程。
 `_model_info()` 通过通用 `named_targets` 契约发布默认位和测试位，前端只消费契约，不包含
 StarArm-102 关节常量。命名目标同时携带关节和工具执行器位置；默认位、测试位都把夹爪设为闭合 0°，前端用一个 `MotionRequest` 提交全部目标，motion 节点在同一轮执行中驱动手臂轨迹与夹爪。
 这里的 0° 是工具执行器的物理角度，不是 `primary_tool` 的归一化值。
