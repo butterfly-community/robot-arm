@@ -47,23 +47,11 @@ class Pose:
     orientation_xyzw: tuple[float, float, float, float]
 
 
-def session_is_frozen(frozen_session: int | None, current_session: int | None) -> bool:
-    return frozen_session is not None and frozen_session == current_session
-
-
 def controller_sync_required(previous_source: str | None, source: str) -> bool:
     """Synchronize the first state and newly acquired hardware feedback."""
     return previous_source is None or (
         previous_source != source and source == "hardware"
     )
-
-
-def frozen_session_after_servo_status(
-    code: int, current_session: int | None, frozen_session: int | None
-) -> int | None:
-    if code == 6 and current_session is not None:
-        return current_session
-    return frozen_session
 
 
 def tool_action_transition(previous: float | None, current: float) -> float | None:

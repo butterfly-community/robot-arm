@@ -40,11 +40,9 @@ from .motion_core import (
     MotionConfig,
     Pose,
     controller_sync_required,
-    frozen_session_after_servo_status,
     load_motion_config,
     merge_controller_command,
     save_motion_config,
-    session_is_frozen,
     target_pose,
     tool_action_transition,
     tool_position_rad,
@@ -118,8 +116,6 @@ class MotionNode(Node):
         self._control_session_id: int | None = None
         self._control_mode = self._config.control_mode
         self._primary_tool_value: float | None = None
-        self._frozen_session: int | None = None
-        self._hold_sent = False
         self._sequence = 0
         self._last_controller_command: tuple[tuple[float, ...], float] | None = None
         self._servo_code: int | None = None
@@ -319,8 +315,6 @@ class MotionNode(Node):
             if merged is None:
                 return
             joints, actuator = merged
-            if session_is_frozen(self._frozen_session, self._control_session_id):
-                return
             identity = (tuple(joints), actuator)
             if identity == self._last_controller_command:
                 return
@@ -391,30 +385,7 @@ class MotionNode(Node):
         with self._lock:
             self._servo_code = int(message.code)
             self._servo_message = message.message
-            frozen = frozen_session_after_servo_status(
-                self._servo_code, self._control_session_id, self._frozen_session
-            )
-            if frozen != self._frozen_session:
-                self._frozen_session = frozen
-                self._publish_feedback_hold_once()
             self._enqueue_motion_state()
-
-    def _publish_feedback_hold_once(self) -> None:
-        if self._hold_sent or self._latest_arm_state is None:
-            return
-        self._hold_sent = True
-        self._sequence += 1
-        self._enqueue(
-            "arm_command",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "sequence": self._sequence,
-                "controller_time_ns": time.time_ns(),
-                "model_revision": MODEL_REVISION,
-                "joints_rad": list(self._latest_arm_state["joints_rad"]),
-                "actuators_rad": list(self._latest_arm_state["actuators_rad"]),
-            },
-        )
 
     def _apply_transformed_control(self, value: dict[str, Any]) -> None:
         session_id = value.get("control_session_id")
@@ -422,8 +393,6 @@ class MotionNode(Node):
             self._control_session_id = None
             self._anchor_tcp = None
             self._target_tcp = None
-            self._frozen_session = None
-            self._hold_sent = False
             self._enqueue_motion_state()
             return
         actuator_actions = value.get("actuator_actions", {})
@@ -450,9 +419,7 @@ class MotionNode(Node):
         if session_id != self._control_session_id:
             self._control_session_id = session_id
             self._anchor_tcp = self._current_tcp
-            self._frozen_session = None
-            self._hold_sent = False
-        if self._frozen_session == session_id or self._anchor_tcp is None:
+        if self._anchor_tcp is None:
             return
         translation = value.get("translation_m")
         if not finite(translation, 3):

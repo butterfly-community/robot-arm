@@ -8,11 +8,9 @@ from stararm_102_motion_node.motion_core import (
     MotionConfig,
     Pose,
     controller_sync_required,
-    frozen_session_after_servo_status,
     load_motion_config,
     merge_controller_command,
     save_motion_config,
-    session_is_frozen,
     target_pose,
     tool_action_transition,
     tool_position_rad,
@@ -123,19 +121,6 @@ class MotionCoreTests(unittest.TestCase):
             actuator[1],
         )
         self.assertEqual(late_arm, ([0.25, -0.5], 0.6))
-
-    def test_no_active_session_is_not_frozen(self):
-        self.assertFalse(session_is_frozen(None, None))
-        self.assertFalse(session_is_frozen(None, 4))
-        self.assertTrue(session_is_frozen(4, 4))
-        self.assertFalse(session_is_frozen(4, 5))
-
-    def test_only_servo_code_six_freezes_the_active_control_session(self):
-        for code in (-1, 0, 1, 2, 3, 4, 5):
-            self.assertIsNone(frozen_session_after_servo_status(code, 4, None))
-        self.assertEqual(frozen_session_after_servo_status(6, 4, None), 4)
-        self.assertEqual(frozen_session_after_servo_status(6, None, None), None)
-        self.assertEqual(frozen_session_after_servo_status(1, 5, 4), 4)
 
     def test_tool_action_ignores_the_initial_sample_and_emits_changes(self):
         self.assertIsNone(tool_action_transition(None, 1.0))
