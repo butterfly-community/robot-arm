@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 const config: NextConfig = {
+  experimental: { useTypeScriptCli: false },
   basePath: "/arm-execution",
   trailingSlash: true,
   output: "standalone",

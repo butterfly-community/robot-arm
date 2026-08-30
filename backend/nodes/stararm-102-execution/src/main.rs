@@ -13,17 +13,16 @@ use json_config_store::{load_or_default, save};
 use robot_arm_messages::{
     ActionFeedback, ActuatorTelemetry, ArmCommand, ArmState, ArmTelemetry, ConnectionFieldSchema,
     ExecutionEndpoint, ExecutionInfo, ExecutionRequest, ExecutionTransportState, FeedbackSource,
-    NumericFieldSchema, ParameterValue, RequestAction, RequestResult, SCHEMA_VERSION, ServiceState,
-    from_arrow, to_arrow,
+    ModelAssetRequest, NumericFieldSchema, ParameterValue, RequestAction, RequestResult,
+    SCHEMA_VERSION, ServiceState, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
+use stararm_102_model::{
+    CLOSED_GRIPPER_RAD, JOINTS, MODEL_REVISION, ModelCatalog, START_JOINTS_RAD,
+};
 
-const MODEL_REVISION: &str = "stararm-102-fl-v1";
 const ADAPTER_REVISION: &str = "stararm-102-fashionstar-v1";
 const SERVO_IDS: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
-const JOINT_KEYS: [&str; 6] = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"];
-const INITIAL_JOINTS_RAD: [f64; 6] = [0.0, 0.0, -5.0_f64.to_radians(), 0.0, 0.0, 0.0];
-const INITIAL_GRIPPER_RAD: f64 = 0.0;
 const MOTION_TIME_MS: u32 = 100;
 const ACCELERATION_TIME_MS: u16 = 50;
 const DECELERATION_TIME_MS: u16 = 50;
@@ -39,7 +38,11 @@ fn default_feedback_interval_ms() -> u64 {
 fn main() -> Result<()> {
     let (mut node, mut events) = DoraNode::init_from_env()?;
     let mut execution = StarArmExecution::load()?;
-    publish_snapshot(&mut node, &mut execution)?;
+    let model_root = std::env::var_os("STARARM_MODEL_ASSETS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/robot-arm/model"));
+    let model = ModelCatalog::load(model_root).map_err(eyre::Report::msg)?;
+    publish_snapshot(&mut node, &execution, &model)?;
 
     while let Some(event) = events.recv() {
         match event {
@@ -48,21 +51,32 @@ fn main() -> Result<()> {
                     let command: ArmCommand =
                         from_arrow(data.as_array()).context("decode arm_command")?;
                     execution.apply_command(command);
-                    publish_snapshot(&mut node, &mut execution)?;
+                    publish_transport(&mut node, &execution)?;
+                    publish_state(&mut node, &execution)?;
                 }
                 "execution_request" => {
                     let request: ExecutionRequest =
                         from_arrow(data.as_array()).context("decode execution_request")?;
                     let result = execution.handle_request(request);
                     send(&mut node, "request_result", &result)?;
-                    publish_snapshot(&mut node, &mut execution)?;
+                    publish_transport(&mut node, &execution)?;
+                    publish_state(&mut node, &execution)?;
+                }
+                "model_asset_request" => {
+                    let request: ModelAssetRequest =
+                        from_arrow(data.as_array()).context("decode model_asset_request")?;
+                    send(
+                        &mut node,
+                        "model_asset_response",
+                        &model.asset_response(request),
+                    )?;
                 }
                 "tick" => {
                     if execution.poll_hardware() {
                         publish_state(&mut node, &execution)?;
                     }
                 }
-                "snapshot" => publish_snapshot(&mut node, &mut execution)?,
+                "snapshot" => publish_snapshot(&mut node, &execution, &model)?,
                 _ => {}
             },
             Event::Stop(_) => break,
@@ -220,8 +234,8 @@ impl StarArmExecution {
                 sequence: 0,
                 sample_time_ns: now_ns(),
                 model_revision: MODEL_REVISION.into(),
-                joints_rad: INITIAL_JOINTS_RAD.to_vec(),
-                actuators_rad: vec![INITIAL_GRIPPER_RAD],
+                joints_rad: START_JOINTS_RAD.to_vec(),
+                actuators_rad: vec![CLOSED_GRIPPER_RAD],
                 feedback_source: FeedbackSource::Software,
             },
             telemetry: ArmTelemetry {
@@ -332,7 +346,7 @@ impl StarArmExecution {
         let actuator = fields
             .get("actuator_key")
             .ok_or_else(|| "参数写入请求缺少 actuator_key".to_owned())?;
-        let id = JOINT_KEYS
+        let id = JOINTS
             .iter()
             .position(|key| key == actuator)
             .map(|index| index as u8)
@@ -564,7 +578,7 @@ fn execution_info() -> ExecutionInfo {
 
 fn actuator_key(id: u8) -> String {
     if id < 6 {
-        JOINT_KEYS[usize::from(id)].into()
+        JOINTS[usize::from(id)].into()
     } else {
         "gripper".into()
     }
@@ -723,7 +737,12 @@ fn encode_command(command: &ArmCommand) -> Result<[PositionCommand; 7], String> 
         .map_err(|_| "StarArm-102 命令必须包含六个关节和一个夹爪".into())
 }
 
-fn publish_snapshot(node: &mut DoraNode, execution: &mut StarArmExecution) -> Result<()> {
+fn publish_snapshot(
+    node: &mut DoraNode,
+    execution: &StarArmExecution,
+    model: &ModelCatalog,
+) -> Result<()> {
+    send(node, "robot_model_info", &model.model_info())?;
     send(node, "execution_info", &execution.info)?;
     publish_transport(node, execution)?;
     publish_state(node, execution)
@@ -826,7 +845,7 @@ mod tests {
         assert_eq!(state.actuators_rad, [7.0_f64.to_radians()]);
     }
     #[test]
-    fn primary_tool_feedback_ignores_idle_power_with_margin() {
+    fn primary_tool_feedback_keeps_zero_as_a_valid_sample() {
         let telemetry = |power_mw| ArmTelemetry {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
@@ -842,7 +861,10 @@ mod tests {
                 status: 0,
             }],
         };
-        assert_eq!(primary_tool_feedback(&telemetry(364)).strength_percent, 0.0);
+        let stable = primary_tool_feedback(&telemetry(364));
+        assert_eq!(stable.sequence, 1);
+        assert_eq!(stable.sample_time_ns, 2);
+        assert_eq!(stable.strength_percent, 0.0);
         assert_eq!(primary_tool_feedback(&telemetry(400)).strength_percent, 0.0);
         assert_eq!(
             primary_tool_feedback(&telemetry(1_200)).strength_percent,
@@ -880,8 +902,8 @@ mod tests {
     #[test]
     fn initial_state_matches_the_model_start_only_before_any_input() {
         let execution = StarArmExecution::new();
-        assert_eq!(execution.state.joints_rad, INITIAL_JOINTS_RAD);
-        assert_eq!(execution.state.actuators_rad, [INITIAL_GRIPPER_RAD]);
+        assert_eq!(execution.state.joints_rad, START_JOINTS_RAD);
+        assert_eq!(execution.state.actuators_rad, [CLOSED_GRIPPER_RAD]);
     }
 
     #[test]

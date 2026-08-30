@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const config: NextConfig = {
+  experimental: { useTypeScriptCli: false },
   basePath: "/tracking",
   trailingSlash: true,
   output: "standalone",

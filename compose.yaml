@@ -22,6 +22,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.rust
+      additional_contexts:
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
     depends_on: {}
     command: ["dora", "coordinator", "--interface", "0.0.0.0"]
     healthcheck:

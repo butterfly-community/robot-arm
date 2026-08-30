@@ -26,29 +26,39 @@ API，并通过 `has_axis()`、`has_button()` 只发布设备实际声明的标�
 ## spatial-transform-node
 
 节点外壳负责持久化配置和 Dora I/O；磁盘 `SpatialConfig` 只含轴映射、比例、Action 速率和分量
-开关，更新时复制、写盘成功后再替换运行配置。全部转换状态机在
+开关，更新时复制、写盘成功后再替换运行配置。全部转换状态在
 `crates/spatial-core::SpatialTransform`。
 update_pose() 接收已经分别标明空间来源和姿态来源的组合位姿，handle_control() 接收与设备无关的聚合 Action；两者不要求同源。采集节点每个周期先发布位姿、再发布控制帧，空间节点只在控制帧到达时输出一次运动消息，避免同一采样重复进入运动节点。current_output() 以每次接管开始时的位置和姿态为本轮原点；未选择绝对位置时积分底座三轴平移和工具轴向平移，未选择绝对姿态时积分两种圆弧与三个定点旋转。工具轴向螺旋只在位置和姿态都没有绝对来源时原子地积分距离和轴向角度，不能只输出半个动作。绝对姿态的垂直、水平分量分别按配置映射到圆弧或定点旋转，轴向分量映射到工具轴旋转。平移默认满输入 1 cm/s，所有角向动作共用 0.10 rad/s。空间节点不解释执行器动作，只把夹爪连续值和打开按下沿作为统一控制帧的透明载荷传给 motion 节点。矩阵与四元数运算使用 `nalgebra`。可清除的 Action 速率配置由 `serde_with::rust::double_option` 表达，没有自写 JSON 解析分支。
 
 ## stararm-102-motion-node
 
-这是设备专属运动学节点。Dora 外壳处理请求和状态；`load_motion_config()`、
-`save_motion_config()` 使用 Python 标准库 JSON 保存控制模式，写盘成功后才替换内存状态。
-MoveIt/Servo 负责规划、逆运动学、控制器同步
-和碰撞模型。`motion_core.target_pose()` 先构造两种绕工具后部枢轴的圆弧，再以得到的 TCP 为
-中心组合定点俯仰、偏航和轴向旋转，最后沿最终工具轴组合轴向平移与螺旋；定点旋转不改变
-TCP，工具轴动作不退化成底座固定轴。旋转和四元数组合使用 `transforms3d`。
+这是 Rust 实现的设备专属运动节点。`main.rs` 的 Dora 事件循环接收空间增量、模型信息、
+`ArmState` 和网页请求；`MotionConfig` 通过公共 `json-config-store` 保存控制模式。普通运动进入
+同一个 FIFO，前一个 MoveIt action 完成后才取出下一个，不存在并行规划器、固定队列上限或
+“已有运动”拒绝路径。活动请求只保存请求 ID、准备相对控制标记和业务取消标记，没有引入
+状态机框架或永久故障状态。
+
+`core::target_pose()` 直接消费 `TransformedControlFrame`：先构造两种绕工具后部枢轴的圆弧，
+再以得到的 TCP 为中心组合定点俯仰、偏航和轴向旋转，最后沿最终工具轴组合轴向平移与螺旋；
+定点旋转不改变 TCP，工具轴动作不退化成底座固定轴。旋转和四元数组合只使用 `nalgebra`。
 `tool_position_rad()` 把连续夹爪值线性映射到厂家定义的 90°→0° 行程。
-`_apply_transformed_control()` 只在这个设备专属节点解释透明传入的夹爪 Action，并且只在控制过程处于启动状态时执行。
-`ModelCatalog` 从镜像中实际运行的最终 URDF 读取关节范围并生成资源清单；命名目标和显示信息
-只是本型号 motion 节点发布通用契约所需的行为元数据，不另建一份模型定义。前端不包含
-StarArm-102 关节常量。默认位为
+`apply_transformed_control()` 只在这个设备专属节点解释透明传入的夹爪 Action，并且只在控制过程处于启动状态时执行。
+
+`ros.rs` 是唯一 ROS 适配层，使用 `r2r` 的标准 topic、service 和 action 客户端连接 Servo、
+MoveGroup、ExecuteTrajectory 与 ros2_control。普通运动只有一个 action worker；它按顺序执行
+“同步控制器 → 暂停 Servo → 规划 → 执行 → 恢复 Servo”。业务取消不创建第二个 ROS 路径：
+已经提交的 action 自然结束后才开始队列下一项。物理急停是机械臂断电，不由该节点模拟。
+ROS Python 包只剩 MoveIt、Servo、ros2_control、robot_state_publisher 的 launch/config，不再
+包含 Dora 分发、目标数学、模型服务或运动生命周期代码。
+
+`ModelCatalog` 位于共享 `stararm-102-model` crate，由 execution 从镜像中实际运行的最终 URDF
+读取关节范围并生成模型信息与资源清单；motion 只消费这份模型信息。前端不包含 StarArm-102
+关节常量。默认位为
 J3=-5°，测试位为 J3=-20°，其余 J1–J6 均为 0°。命名目标同时携带关节和工具执行器位置；
 默认位、测试位都把夹爪设为闭合 0°，前端用一个 `MotionRequest` 提交全部目标，motion 节点在
 同一轮执行中驱动手臂轨迹与夹爪。
 这里的 0° 是工具执行器的物理角度，不是 `primary_tool` 的归一化值。
-`MoveItBackend` 把 MoveGroup、ExecuteTrajectory、状态有效性和规划场景的官方 ROS 接口封装成
-运动工作线程中的一条顺序流程，Dora 节点不再维护规划/执行回调状态机。Servo 保持官方碰撞检查，并在自碰撞距离 1 cm 时开始减速。
+Servo 保持官方碰撞检查，并在自碰撞距离 1 cm 时开始减速。
 普通规划第一次失败时，适配层查询当前状态；仅当起点存在自碰撞时，才在同一个规划请求的
 重试中临时允许已检测到的 link 对，从碰撞位置规划退出。该允许矩阵不写入全局规划场景，
 执行后不保留状态，也没有碰撞解锁接口或 MoveIt 源码补丁。
@@ -63,11 +73,16 @@ J3=-5°，测试位为 J3=-20°，其余 J1–J6 均为 0°。命名目标同时
 `state_from_monitors()` 生成位置反馈，`telemetry_from_monitors()` 生成电压、电流、功率、温度和状态。
 `primary_tool_feedback()` 在此设备专属边界把夹爪 400～2000 mW 映射为通用 `primary_tool` 0～100 力度百分比
 Action 回馈；400 mW 来自实测空载 364 mW 后保留的余量。
+该字段由每次真机 Monitor 样本生成，稳定的 0 仍是有效反馈，表示扣除空载功率后当前没有
+检测到负载，而不是“没有反馈”。夹爪运动中可以产生非零反馈；软件模式只能反馈夹爪位置，
+不能伪装成真机力度测量。
 串口帧和厂家协议由 `crates/fashionstar-uart` 实现；Monitor 失败先在原串口完整重试一次，仍
 失败才执行重开串口和完整初始化。真机反馈周期默认 100 ms，可在执行页修改并持久化；10 ms
 的 Dora tick 只负责检查配置周期，不等于每次访问串口。串口枚举使用 `serialport`，只在网页
 发送 `discover` 请求时执行，不随定时器或状态快照运行。读取舵机参数继续使用独立的
-`refresh` 请求，不会顺带枚举串口。
+`refresh` 请求，不会顺带枚举串口。execution 同时持有共享 `ModelCatalog`，发布模型信息并按
+manifest 返回资源；motion 与 Web Gateway 均不再维护第二份模型目录。每次接受 `ArmCommand`
+后同时发布 transport 和 `ArmState`，因此网页的“最后命令”与软件/真机反馈使用同一事件。
 
 ## service-status-node 与 web-gateway-node
 
@@ -82,6 +97,6 @@ namespace 聚合快照；不解释机械臂轴数、设备类型或运动语义�
 - 模拟与真机共享消息、空间转换、运动和执行状态模型；模拟只是输入测试功能。
 - 四个可修改服务共享一个宿主 bind mount，但各自拥有独立 JSON；不引入数据库、文件监听器、
   备份层或双写路径。
-- 需要持久化的 Rust 节点共用 `json-config-store`；Python motion 节点直接使用标准库 JSON。
+- 需要持久化的 Rust 节点共用 `json-config-store`；ROS Python 包不保存业务状态。
 - 业务层不实现死区、姿态门限、关节范围、起始位检查或设备保护流程。
-- 使用 SDL3、hidapi、Fusion、nalgebra、transforms3d、serialport、Axum、Dora 和 MoveIt；手写部分都是协议或业务边界，不重复实现这些库已经提供的通用能力。
+- 使用 SDL3、hidapi、Fusion、nalgebra、r2r、urdf-rs、serialport、Axum、Dora 和 MoveIt；手写部分都是协议或业务边界，不重复实现这些库已经提供的通用能力。

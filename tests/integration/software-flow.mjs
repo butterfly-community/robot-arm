@@ -72,6 +72,11 @@ for (const page of ["tracking", "spatial", "motion", "arm-execution"]) {
   assert.match(response.headers.get("content-type") ?? "", /text\/html/);
 }
 
+await waitFor(
+  () => json("/api/system/readiness"),
+  (state) => state.values.system_readiness?.ready === true,
+);
+
 const malformedExecution = await fetch(`${base}/api/arm-execution/connect`, {
   method: "POST",
   headers: { "content-type": "application/json" },
@@ -85,11 +90,6 @@ assert.equal(malformedExecution.status, 400);
 assert.match(
   (await malformedExecution.json()).original_error,
   /missing field `action`/,
-);
-
-await waitFor(
-  () => json("/api/system/readiness"),
-  (state) => state.values.system_readiness?.ready === true,
 );
 
 const tracking = await waitFor(
@@ -372,6 +372,56 @@ const motionResult = await observeMotionRequest(
     }),
 );
 assert.equal(motionResult.value.state, "succeeded");
+await waitFor(
+  () => snapshot("arm-execution"),
+  (state) => Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) < 1e-9,
+);
+
+const queuedAway = request("/api/motion/request", {
+  schema_version: 3,
+  request_id: "integration-fifo-away",
+  model_revision: model.model_revision,
+  joints: model.joints.map((joint, index) => ({
+    joint_key: joint.key,
+    position_rad: before.joints_rad[index],
+  })),
+  actuators: model.tool_actuators.map((item, index) => ({
+    actuator_key: item.key,
+    position_rad: before.actuators_rad[index],
+  })),
+  options: {},
+  action: "apply",
+});
+await waitFor(
+  () => snapshot("motion"),
+  (state) =>
+    state.values.motion_state.latest_motion.request_id ===
+      "integration-fifo-away" &&
+    ["planning", "executing"].includes(
+      state.values.motion_state.latest_motion.state,
+    ),
+);
+const queuedReturn = request("/api/motion/request", {
+  schema_version: 3,
+  request_id: "integration-fifo-return",
+  model_revision: model.model_revision,
+  joints: model.joints.map((joint, index) => ({
+    joint_key: joint.key,
+    position_rad: moved[index],
+  })),
+  actuators: model.tool_actuators.map((item, index) => ({
+    actuator_key: item.key,
+    position_rad: before.actuators_rad[index],
+  })),
+  options: {},
+  action: "apply",
+});
+const [queuedAwayResult, queuedReturnResult] = await Promise.all([
+  queuedAway,
+  queuedReturn,
+]);
+assert.equal(queuedAwayResult.value.state, "succeeded");
+assert.equal(queuedReturnResult.value.state, "succeeded");
 await waitFor(
   () => snapshot("arm-execution"),
   (state) => Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) < 1e-9,

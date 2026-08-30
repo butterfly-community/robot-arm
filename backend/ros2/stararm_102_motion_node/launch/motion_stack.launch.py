@@ -60,11 +60,6 @@ def generate_launch_description() -> LaunchDescription:
             ],
             output="screen",
         ),
-        Node(
-            package="stararm_102_motion_node",
-            executable="dora_motion_node",
-            output="screen",
-        ),
     ]
     nodes.extend(
         Node(

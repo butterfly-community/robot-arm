@@ -4,11 +4,13 @@ members = [
   "crates/json-config-store",
   "crates/robot-arm-messages",
   "crates/spatial-core",
+  "crates/stararm-102-model",
   "crates/fashionstar-uart",
   "crates/nolo-cv1",
   "nodes/controller-input",
   "nodes/service-status",
   "nodes/spatial-transform",
+  "nodes/stararm-102-motion",
   "nodes/stararm-102-execution",
   "nodes/web-gateway",
 ]
@@ -20,10 +22,13 @@ rust-version = "1.95"
 license = "MIT"
 
 [workspace.dependencies]
+approx = "0.5.1"
 arrow = { version = "59.2.0", default-features = false }
 axum = { version = "0.8.7", features = ["ws"] }
 dora-node-api = { version = "1.0.0-rc.5", default-features = false, features = ["arrow-v59"] }
 eyre = "0.6.12"
+futures = "0.3.32"
+mime_guess = "2.0.5"
 nalgebra = { version = "0.35.0", features = ["serde-serialize"] }
 robot-arm-messages = { path = "crates/robot-arm-messages" }
 fashionstar-uart = { path = "crates/fashionstar-uart" }
@@ -32,6 +37,10 @@ serialport = { version = "4.8.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_with = "3.22.0"
+sha2 = "0.10.9"
 spatial-core = { path = "crates/spatial-core" }
+stararm-102-model = { path = "crates/stararm-102-model" }
 thiserror = "2.0.20"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "sync", "net", "signal"] }
+urdf-rs = "0.9.0"
+walkdir = "2.5.0"

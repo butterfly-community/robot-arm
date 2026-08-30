@@ -58,9 +58,8 @@ pnpm build
 pnpm test:e2e
 
 cd ..
-docker compose exec -T stararm-102-motion bash -lc \
-  'source /opt/ros/jazzy/setup.bash && source /opt/ros_ws/install/setup.bash && \
-   python3 -m unittest discover -s /opt/ros_ws/src/stararm_102_motion_node/test -v'
+docker compose config --quiet
+docker compose build
 docker compose --profile test run --rm integration-test
 ```
 

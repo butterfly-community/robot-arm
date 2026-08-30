@@ -4,12 +4,11 @@ RUN git clone --filter=blob:none https://github.com/dora-rs/dora.git /dora-src \
     && git -C /dora-src checkout 06254f3d3353132f1184020d693680be4733bc2c \
     && cargo build --manifest-path /dora-src/Cargo.toml --release -p dora-cli
 
-FROM moveit/moveit2:jazzy-release
+FROM moveit/moveit2:jazzy-release AS ros-base
 SHELL ["/bin/bash", "-c"]
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-       git python3-pip ros-jazzy-joint-state-topic-hardware-interface ros-jazzy-trac-ik-kinematics-plugin \
-    && python3 -m pip install --break-system-packages dora-rs==1.0.0rc5 pyarrow transforms3d==0.4.2 \
+       git ros-jazzy-joint-state-topic-hardware-interface ros-jazzy-trac-ik-kinematics-plugin \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dora-build /dora-src/target/release/dora /usr/local/bin/dora
 
@@ -35,5 +34,28 @@ RUN source /opt/ros/jazzy/setup.bash \
        --cmake-args -DBUILD_TESTING=OFF \
        --event-handlers console_direct+ \
     && rm -rf /tmp/vendor /tmp/patches log
+
+FROM rust:1.97-trixie AS motion-build
+SHELL ["/bin/bash", "-c"]
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ros-base /opt/ros /opt/ros
+COPY --from=ros-base /opt/ros_ws/install /opt/ros_ws/install
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY nodes nodes
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    source /opt/ros/jazzy/setup.bash \
+    && source /opt/ros_ws/install/setup.bash \
+    && cargo build --release --locked -p stararm-102-motion-node \
+       --no-default-features --features ros-runtime \
+    && cp /src/target/release/stararm-102-motion-node /stararm-102-motion-node
+
+FROM ros-base
+COPY --from=motion-build /stararm-102-motion-node /opt/robot-arm/bin/stararm-102-motion-node
 COPY --chmod=755 docker/motion-entrypoint.sh /usr/local/bin/motion-entrypoint
 ENTRYPOINT ["/usr/local/bin/motion-entrypoint"]

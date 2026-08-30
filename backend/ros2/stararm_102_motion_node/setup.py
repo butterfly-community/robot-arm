@@ -15,11 +15,6 @@ setup(
             ["config/controllers.yaml", "config/servo.yaml"],
         ),
     ],
-    install_requires=["setuptools", "transforms3d==0.4.2"],
+    install_requires=["setuptools"],
     zip_safe=True,
-    entry_points={
-        "console_scripts": [
-            "dora_motion_node = stararm_102_motion_node.dora_motion_node:main"
-        ]
-    },
 )
