@@ -364,7 +364,7 @@ export const inputActionCatalog = [
     motion: "开始时建立本轮相对原点，结束后停止相对控制",
     invariant: "按键本身不产生位移",
     reference: "控制过程",
-    prepare: false,
+    prepare: true,
   },
   {
     key: "emergency_stop",
@@ -376,7 +376,7 @@ export const inputActionCatalog = [
     motion: "结束当前控制过程",
     invariant: "不产生新的相对目标；重新接管后可继续",
     reference: "控制过程",
-    prepare: false,
+    prepare: true,
   },
   {
     key: "tool_axis_translation",

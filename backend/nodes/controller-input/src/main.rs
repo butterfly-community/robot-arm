@@ -897,14 +897,23 @@ fn simulation_config(config: &InputConfig, item: InputSimulationItem) -> InputCo
         let action_type = input_action_spec(action)
             .map(|spec| spec.action_type)
             .expect("simulation item is declared in the action catalog");
-        let mut bindings = vec![ActionBinding {
-            action: "start_stop".into(),
-            action_type: ActionType::Boolean,
-            source_id: SIMULATION_SOURCE_ID.into(),
-            component_paths: vec![SIMULATION_START_STOP_COMPONENT.into()],
-            invert: false,
-        }];
-        if action != "start_stop" {
+        let mut bindings = vec![
+            ActionBinding {
+                action: "start_stop".into(),
+                action_type: ActionType::Boolean,
+                source_id: SIMULATION_SOURCE_ID.into(),
+                component_paths: vec![SIMULATION_START_STOP_COMPONENT.into()],
+                invert: false,
+            },
+            ActionBinding {
+                action: "move_up_down".into(),
+                action_type: ActionType::Float,
+                source_id: SIMULATION_SOURCE_ID.into(),
+                component_paths: vec!["action/move_up_down".into()],
+                invert: false,
+            },
+        ];
+        if action != "start_stop" && action != "move_up_down" {
             bindings.push(ActionBinding {
                 action: action.into(),
                 action_type,
@@ -1884,14 +1893,16 @@ mod tests {
         let config = simulation_config(&original, InputSimulationItem::PrimaryTool);
         assert!(config.position_source.is_none());
         assert!(config.orientation_source.is_none());
-        assert_eq!(config.bindings.len(), 2);
+        assert_eq!(config.bindings.len(), 3);
         assert_eq!(config.bindings[0].action, "start_stop");
         assert_eq!(
             config.bindings[0].component_paths,
             [SIMULATION_START_STOP_COMPONENT]
         );
-        assert_eq!(config.bindings[1].action, "primary_tool");
-        assert_eq!(config.bindings[1].component_paths, ["action/primary_tool"]);
+        assert_eq!(config.bindings[1].action, "move_up_down");
+        assert_eq!(config.bindings[1].component_paths, ["action/move_up_down"]);
+        assert_eq!(config.bindings[2].action, "primary_tool");
+        assert_eq!(config.bindings[2].component_paths, ["action/primary_tool"]);
         assert_eq!(config.feedback_bindings.len(), 1);
         assert!(is_virtual_feedback(&config.feedback_bindings[0]));
         assert_eq!(

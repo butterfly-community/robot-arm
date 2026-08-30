@@ -65,4 +65,9 @@ describe("action catalog", () => {
       tool_helical_motion: ["position", "orientation"],
     });
   });
+
+  it("prepares every arm input demo but not the feedback-only test", () => {
+    expect(inputActionCatalog.every((action) => action.prepare)).toBe(true);
+    expect(feedbackActionCatalog[0].prepare).toBe(false);
+  });
 });

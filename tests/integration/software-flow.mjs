@@ -506,8 +506,8 @@ const simulationItems = [
   ["horizontal_arc", true],
   ["primary_tool_open", true],
   ["primary_tool", true],
-  ["start_stop", false],
-  ["emergency_stop", false],
+  ["start_stop", true],
+  ["emergency_stop", true],
   ["primary_tool_feedback", false],
   ["tool_axis_translation", true],
   ["tool_helical_motion", true],
@@ -538,6 +538,15 @@ for (const [item, prepare] of simulationItems) {
         (source) => source.source_id === "simulation:generic-action-source",
       ),
   );
+  if (item !== "primary_tool_feedback") {
+    await waitFor(
+      () => snapshot("tracking"),
+      (state) =>
+        state.values.discovery_state?.simulation?.active === true &&
+        state.values.discovery_state.simulation.item === item &&
+        state.values.discovery_state.simulation.phase === "lifting",
+    );
+  }
   await waitFor(
     () => snapshot("tracking"),
     (state) => state.values.discovery_state?.simulation?.active === false,

@@ -15,6 +15,7 @@ pub(super) const START_STOP_COMPONENT: &str = "action/start_stop";
 const SAMPLE_RATE_HZ: u64 = 100;
 const PHASE_SAMPLES: u64 = SAMPLE_RATE_HZ * 3;
 const ORIENTATION_RAD: f64 = 8.0_f64.to_radians();
+const LIFT_M: f64 = 0.05;
 
 pub(super) struct SimulationPlayback {
     item: InputSimulationItem,
@@ -113,13 +114,65 @@ struct GeneratedSample {
 }
 
 fn generate(item: InputSimulationItem, sample_index: u64) -> GeneratedSample {
+    if item == InputSimulationItem::PrimaryToolFeedback {
+        return feedback_sample(sample_index);
+    }
+    if sample_index <= PHASE_SAMPLES {
+        return lift_sample(item, sample_index);
+    }
+    if item == InputSimulationItem::MoveUpDown {
+        return GeneratedSample {
+            components: BTreeMap::from([
+                (START_STOP_COMPONENT.into(), 1.0),
+                ("action/move_up_down".into(), 0.0),
+            ]),
+            feedback: None,
+            phase: "complete",
+            complete: true,
+        };
+    }
+    let selected_index = sample_index - PHASE_SAMPLES - 1;
+    let mut selected = selected_sample(item, selected_index);
+    if selected_index == 0 {
+        selected.components.insert(START_STOP_COMPONENT.into(), 0.0);
+    }
+    selected
+}
+
+fn selected_sample(item: InputSimulationItem, sample_index: u64) -> GeneratedSample {
     match item {
-        InputSimulationItem::PrimaryToolFeedback => feedback_sample(sample_index),
+        InputSimulationItem::PrimaryToolFeedback => unreachable!("feedback has no arm prelude"),
         InputSimulationItem::StartStop => control_sample(sample_index, false),
         InputSimulationItem::EmergencyStop => control_sample(sample_index, true),
         InputSimulationItem::PrimaryToolOpen => open_tool_sample(sample_index),
         InputSimulationItem::PrimaryTool => continuous_tool_sample(sample_index),
         _ => continuous_motion_sample(item, sample_index),
+    }
+}
+
+fn lift_sample(item: InputSimulationItem, sample_index: u64) -> GeneratedSample {
+    let phase_seconds = PHASE_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
+    let lift_amplitude = LIFT_M / (DEFAULT_ACTION_TRANSLATION_M_PER_S * phase_seconds);
+    let lift = if sample_index == 0 {
+        0.0
+    } else {
+        lift_amplitude * motion_profile(sample_index - 1)
+    };
+    let mut components = BTreeMap::from([
+        (
+            START_STOP_COMPONENT.into(),
+            if sample_index == 0 { 1.0 } else { 0.0 },
+        ),
+        ("action/move_up_down".into(), lift),
+    ]);
+    if item == InputSimulationItem::PrimaryTool {
+        components.insert("action/primary_tool".into(), 1.0);
+    }
+    GeneratedSample {
+        components,
+        feedback: None,
+        phase: "lifting",
+        complete: false,
     }
 }
 
@@ -362,8 +415,8 @@ mod tests {
     fn continuous_motion_has_a_smooth_opposite_return() {
         let item = InputSimulationItem::MoveLeftRight;
         for sample in [0, 30, 75, 150, 225, 300] {
-            let outbound = generate(item, sample + 1);
-            let returned = generate(item, PHASE_SAMPLES + sample + 1);
+            let outbound = selected_sample(item, sample + 1);
+            let returned = selected_sample(item, PHASE_SAMPLES + sample + 1);
             let path = component_path(item).unwrap();
             assert!((outbound.components[path] + returned.components[path]).abs() < 1e-12);
         }
@@ -371,13 +424,48 @@ mod tests {
 
     #[test]
     fn continuous_items_finish_with_a_stop_toggle() {
-        let sample = generate(
+        let sample = selected_sample(
             InputSimulationItem::ToolHelicalMotion,
             PHASE_SAMPLES * 2 + 1,
         );
         assert!(sample.complete);
         assert_eq!(sample.components[START_STOP_COMPONENT], 1.0);
         assert_eq!(sample.components["action/tool_helical_motion"], 0.0);
+    }
+
+    #[test]
+    fn every_input_demo_begins_with_a_five_centimeter_lift() {
+        for item in ITEMS {
+            if item == InputSimulationItem::PrimaryToolFeedback {
+                continue;
+            }
+            let first = generate(item, 0);
+            assert_eq!(first.phase, "lifting");
+            assert_eq!(first.components[START_STOP_COMPONENT], 1.0);
+
+            let lifted_distance_m = (1..=PHASE_SAMPLES)
+                .map(|sample| generate(item, sample).components["action/move_up_down"])
+                .sum::<f64>()
+                * DEFAULT_ACTION_TRANSLATION_M_PER_S
+                / SAMPLE_RATE_HZ as f64;
+            assert!((lifted_distance_m - LIFT_M).abs() < 1e-12);
+
+            let selected = generate(item, PHASE_SAMPLES + 1);
+            assert_ne!(selected.phase, "lifting");
+            if item == InputSimulationItem::MoveUpDown {
+                assert!(selected.complete);
+            } else {
+                assert_eq!(selected.components[START_STOP_COMPONENT], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_translation_demo_is_only_the_five_centimeter_lift() {
+        let completed = generate(InputSimulationItem::MoveUpDown, PHASE_SAMPLES + 1);
+        assert!(completed.complete);
+        assert_eq!(completed.phase, "complete");
+        assert_eq!(completed.components["action/move_up_down"], 0.0);
     }
 
     #[test]

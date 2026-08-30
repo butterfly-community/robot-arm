@@ -114,8 +114,8 @@ test("tracking exposes the complete action catalog and sends every demo item", a
     ["水平圆弧", "horizontal_arc", true, "演示动作"],
     ["夹爪张开", "primary_tool_open", true, "测试动作"],
     ["夹爪开合", "primary_tool", true, "演示动作"],
-    ["接管控制", "start_stop", false, "测试动作"],
-    ["急停", "emergency_stop", false, "测试动作"],
+    ["接管控制", "start_stop", true, "测试动作"],
+    ["急停", "emergency_stop", true, "测试动作"],
     ["工具轴向平移", "tool_axis_translation", true, "演示动作"],
     ["工具轴向螺旋", "tool_helical_motion", true, "演示动作"],
   ] as const;
