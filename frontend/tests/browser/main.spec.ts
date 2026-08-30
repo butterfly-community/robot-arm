@@ -154,6 +154,21 @@ test("tracking exposes the complete action catalog and sends every demo item", a
     await expect(details.nth(index)).not.toHaveAttribute("open", "");
   }
 
+  const firstPair = bindingCard.locator(".action-group-items").first();
+  const firstItem = firstPair.locator("details").nth(0);
+  const secondItem = firstPair.locator("details").nth(1);
+  const collapsedSecondHeight = await secondItem.evaluate(
+    (element) => element.getBoundingClientRect().height,
+  );
+  await firstItem.locator("summary").click();
+  await expect(firstItem).toHaveAttribute("open", "");
+  await expect
+    .poll(() =>
+      secondItem.evaluate((element) => element.getBoundingClientRect().height),
+    )
+    .toBe(collapsedSecondHeight);
+  await firstItem.locator("summary").click();
+
   for (const [label, item, , buttonName] of actions) {
     const previousRequestCount = simulationRequests.length;
     const detail = details.filter({
