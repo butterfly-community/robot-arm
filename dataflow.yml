@@ -18,6 +18,7 @@ nodes:
       apply_bindings: web-gateway-node/apply_bindings_request
       rename_source: web-gateway-node/rename_input_source_request
       set_simulation: web-gateway-node/set_simulation_request
+      set_depth_camera: web-gateway-node/set_depth_camera_request
       action_feedback:
         source: stararm-102-execution-node/action_feedback
         queue_size: 1
@@ -31,6 +32,10 @@ nodes:
       - bindings_request_result
       - source_name_request_result
       - simulation_request_result
+      - depth_camera_request_result
+      - depth_camera_state
+      - depth_point_cloud
+      - depth_camera_calibration
 
   - id: spatial-transform-node
     path: /opt/robot-arm/bin/spatial-transform-node
@@ -65,6 +70,18 @@ nodes:
         queue_policy: drop_oldest
       arm_state:
         source: stararm-102-execution-node/arm_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      depth_camera_state:
+        source: controller-input-node/depth_camera_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      depth_point_cloud:
+        source: controller-input-node/depth_point_cloud
+        queue_size: 1
+        queue_policy: drop_oldest
+      depth_camera_calibration:
+        source: controller-input-node/depth_camera_calibration
         queue_size: 1
         queue_policy: drop_oldest
       robot_model_info: stararm-102-execution-node/robot_model_info
@@ -142,6 +159,8 @@ nodes:
       bindings_request_result: controller-input-node/bindings_request_result
       source_name_request_result: controller-input-node/source_name_request_result
       simulation_request_result: controller-input-node/simulation_request_result
+      depth_camera_state: controller-input-node/depth_camera_state
+      depth_camera_request_result: controller-input-node/depth_camera_request_result
       spatial_pose:
         source: spatial-transform-node/spatial_pose
         queue_size: 1
@@ -178,6 +197,7 @@ nodes:
       - apply_bindings_request
       - rename_input_source_request
       - set_simulation_request
+      - set_depth_camera_request
       - spatial_snapshot
       - update_spatial_config_request
       - motion_snapshot

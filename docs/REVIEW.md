@@ -1,4 +1,4 @@
-# Rust 运动链路迁移审查结果
+# 全局链路与实现审查结果
 
 ## 最终结论
 
@@ -67,21 +67,65 @@ controller-input
 | 模型资源 | `walkdir`、`sha2`、`mime_guess` | manifest 契约和路径归属 |
 | 配置 | `json-config-store`、`serde` | 控制模式字段 |
 | 串口 | `serialport`、`fashionstar-uart` | StarArm-102 舵机 ID 与命令映射 |
+| 浏览器 RViz | RViz2、KasmVNC、Openbox | 最短进程生命周期脚本与项目 RViz 配置 |
+| 点云承载 | Arrow 类型化 List、`r2r` 的标准 `sensor_msgs` | 设备无关 XYZ 与 ROS 消息边界转换 |
+| 感知规划 | MoveIt PointCloudOctomapUpdater、PlanningSceneMonitor | 感知启停时调用标准清图服务 |
 
 没有引入状态机 crate、手写线程池、DDS/CDR、IK、碰撞检测、轨迹插值、JSON 配置存储或文件
 遍历/摘要实现。r2r action client 必须由拥有 ROS node 的线程持续 spin，因此保留一个标准线程
 和 `std::sync::mpsc`；改成 Tokio 或状态机库只会增加 runtime、桥接和取消分支。
 
+## 浏览器 RViz 与可选感知审查
+
+- 远程显示只有 KasmVNC 1.5.0 一种实现、motion 容器一个入口和 `6080/tcp` 一个端口；X11、
+  Openbox、WebSocket、输入和动态分辨率均使用现成组件，没有 noVNC/Xpra/Selkies 备用路径。
+- 根入口只做一次静态跳转并传入 KasmVNC 官方 `enable_hidpi=true`，不改写其编码、画布或输入
+  实现；实测 `devicePixelRatio=2` 时 1000×600 视口对应 2000×1200 远端画布。
+- 最终镜像实测为 Ubuntu 24.04、amd64、Python 3.12；KasmVNC 使用官方 Noble 1.5.0 包，
+  amd64/arm64 下载分别由 Dockerfile 中固定的 SHA-256 校验，随包版权文件声明 GPL-2+。
+- 深度配置只新增到采集节点现有 JSON；状态、请求和网页沿现有 tracking 通道，点云使用
+  Dora Arrow 原生类型直达 motion，不经过 Web Gateway。未发现自写字节协议、CDR、OctoMap、点云过滤、
+  TF 缓存或图像同步器。ROS 发布边界只缓存订阅发现前的最新点云，使用官方 SensorDataQoS；
+  10 Hz 只属于确定性测试源，不限制未来真实相机。
+- 点云和标定各自保留原始 source、sequence 与采样时间；CameraInfo、PointCloud2 和标定 TF
+  使用同一个采样时间转换，不使用网页接收时间或规划开始时间替代。
+- ros2_control 的关节状态原本为 100 Hz，而 robot_state_publisher 默认 TF 实测约 18 Hz；MoveIt
+  自过滤因此无法在部分点云采样时间取得 link1 变换。最终让 TF 与既有 100 Hz 关节状态同步，
+  没有改写相机时间、增加等待超时或另写自过滤逻辑。
+- MoveIt 感知只加载项目唯一 `sensors_3d.yaml`，采用标准 PointCloudOctomapUpdater。无相机
+  时没有占位消息和 launch 分支；测试数据也没有绕过采集、Dora、ROS 或 PlanningScene。
+- 停止采集只触发 MoveIt 自带 clear-OctoMap；实测普通 CollisionObject 保留。状态变化没有
+  轮询、收帧超时、重试状态机、帧率门限或 readiness 限制。
+- RViz 配置只引用已有 URDF、SRDF、MoveIt 参数和标准 display，不复制模型或运动学配置；
+  暂无数据的图像、点云和 Marker display 默认关闭。
+
 ## 验收证据
 
-- Rust workspace：格式、Clippy（warnings 视为错误）和 94 项单元测试通过。
+- Rust workspace：格式、Clippy（warnings 视为错误）和 98 项单元测试通过。
 - 前端：格式、Lint、TypeScript、Vitest 及 Next.js 16.3.3 的四个生产构建通过。
-- 浏览器：Playwright 19 项通过，包含命名目标、独立夹爪命令、页面状态和绑定流程。
+- 浏览器：Playwright 20 项通过，包含命名目标、独立夹爪命令、页面状态、绑定流程和深度能力
+  持久化；另以 1200×700 到 1600×900 的真实画布变化验证远端动态分辨率，并实际发送鼠标
+  点击和拖动。
 - 软件全链路：Compose 完整启动后集成测试通过；普通运动、FIFO、准备相对控制、软件反馈、
   模型资源和配置链路均走正式 API。
 - 真机全链路：最终镜像的反馈源为 `hardware`；J1 从 0.3° 命令到 5.3°，反馈 5.0°，实际变化
   4.7°；返回命令成功后反馈 0.5°，相对测试前误差 0.2°。两次 MoveIt 规划/执行均成功，随后保留真机
   连接，没有遗留测试程序或配置。
+- 可选感知链路：测试源的 497 点 PointCloud2、CameraInfo 与静态 TF 均从正式 ROS 接口读
+  取；MoveIt 输出 497 点标准自过滤点云，并在发布和查询到的 PlanningScene 中生成分辨率
+  0.1 m 的非空 OcTree。显式停止后 OctoMap 为空，临时普通 CollisionObject 仍存在，测试对象
+  随后已移除；默认关闭时订阅 3 秒没有收到占位点云。
+- 浏览器 RViz：主机 `6080/tcp` 返回 KasmVNC 页面，包含 Remote Resizing 与 Native
+  Resolution；普通与 HiDPI 浏览器中 RViz、中文字体、MoveIt 插件、RobotModel 和
+  PlanningScene 均在无宿主 DISPLAY 的容器内清晰加载。
+- 性能事实只作记录、不作为门限：最终空闲场景的一次主机采样中，motion 容器为 157% CPU、
+  601 MiB 内存；容器内进程采样分别为 RViz 115% CPU / 323 MiB RSS、KasmVNC 5.3% / 107 MiB、
+  MoveIt `move_group` 2.2% / 136 MiB。当前主要成本来自软件 OpenGL 的 RViz 渲染，不把它误判
+  成点云处理或网页编码问题，也没有据此增加帧率、点数或分辨率限制。
+- 最终日志审查没有新增循环错误。启动阶段的一次性诊断包括：当前没有物体识别节点时
+  RViz MotionPlanning 找不到可选的 `/recognize_objects` action、既有 URDF 根 link 惯量的
+  KDL 提示、容器没有实时调度权限，以及 RViz 插件自身的重复节点名提示；它们均不改变
+  PlanningScene、OctoMap、运动执行或浏览器显示链路。
 
 最终代码没有新增用户未要求的运动门限、确认流程、队列限制、保护分支或超时策略。保留的
 数值均为迁移前已确认的模型、驱动、MoveIt/Servo 配置或既有动作参数。

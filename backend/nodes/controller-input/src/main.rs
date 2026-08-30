@@ -20,12 +20,13 @@ use one_euro_filter::OneEuroFilter;
 use robot_arm_messages::{
     AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
     ActionFeedbackBindingState, ActionType, ActuatorActions, ApplyInputBindingsRequest,
-    BooleanActionSample, ControlInputFrame, FloatActionSample, INPUT_ACTIONS, InputBindingState,
-    InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo,
-    InputSimulationItem, InputSimulationRequest, InputSimulationState, InputSourceInfo,
-    InputStreamDiagnostics, PoseComponent, PoseFlags, RenameInputSourceRequest, RequestAction,
-    RequestResult, SCHEMA_VERSION, SelectPoseSourceRequest, SelectedInputSourceState, ServiceState,
-    from_arrow, input_action_spec, to_arrow,
+    BooleanActionSample, ControlInputFrame, DepthCameraCalibration, DepthCameraState,
+    DepthPointCloudFrame, FloatActionSample, INPUT_ACTIONS, InputBindingState, InputComponentInfo,
+    InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo, InputSimulationItem,
+    InputSimulationRequest, InputSimulationState, InputSourceInfo, InputStreamDiagnostics,
+    PoseComponent, PoseFlags, RenameInputSourceRequest, RequestAction, RequestResult,
+    SCHEMA_VERSION, SelectPoseSourceRequest, SelectedInputSourceState, ServiceState,
+    SetDepthCameraRequest, depth_point_cloud_to_arrow, from_arrow, input_action_spec, to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -40,7 +41,7 @@ use simulation::{
 
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
-const CONFIG_SCHEMA_VERSION: u32 = 2;
+const CONFIG_SCHEMA_VERSION: u32 = 3;
 const HAPTIC_DURATION_MS: u32 = 100;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
@@ -118,6 +119,16 @@ fn main() -> Result<()> {
                         }
                         send(&mut node, "control_input", &control)?;
                     }
+                    if let Some(calibration) = input.take_depth_calibration() {
+                        send(&mut node, "depth_camera_calibration", &calibration)?;
+                    }
+                    if let Some(cloud) = input.take_depth_cloud() {
+                        node.send_output(
+                            DataId::from("depth_point_cloud"),
+                            MetadataParameters::default(),
+                            depth_point_cloud_to_arrow(&cloud)?,
+                        )?;
+                    }
                     publish_discovery(&mut node, &input)?;
                 }
                 "snapshot" => publish_snapshot(&mut node, &mut input)?,
@@ -147,6 +158,13 @@ fn main() -> Result<()> {
                         from_arrow(data.as_array()).context("decode set_simulation")?;
                     let result = input.set_simulation(request);
                     send(&mut node, "simulation_request_result", &result)?;
+                    publish_snapshot(&mut node, &mut input)?;
+                }
+                "set_depth_camera" => {
+                    let request: SetDepthCameraRequest =
+                        from_arrow(data.as_array()).context("decode set_depth_camera")?;
+                    let result = input.set_depth_camera(request);
+                    send(&mut node, "depth_camera_request_result", &result)?;
                     publish_snapshot(&mut node, &mut input)?;
                 }
                 "action_feedback" => {
@@ -237,6 +255,8 @@ struct InputConfig {
     feedback_bindings: Vec<ActionFeedbackBinding>,
     #[serde(default)]
     device_names: BTreeMap<String, String>,
+    #[serde(default)]
+    depth_camera_enabled: bool,
     #[serde(default = "initial_config_version")]
     config_version: u64,
 }
@@ -258,6 +278,7 @@ impl Default for InputConfig {
             bindings: vec![],
             feedback_bindings: vec![],
             device_names: BTreeMap::new(),
+            depth_camera_enabled: false,
             config_version: 1,
         }
     }
@@ -284,6 +305,9 @@ struct ControllerInput {
     offset_candidates: BTreeMap<(String, String), StableAxisSample>,
     component_offsets: BTreeMap<String, BTreeMap<String, f64>>,
     component_filters: BTreeMap<String, BTreeMap<String, FilteredComponent>>,
+    depth_camera: DepthCameraState,
+    pending_depth_cloud: Option<DepthPointCloudFrame>,
+    pending_depth_calibration: Option<DepthCameraCalibration>,
 }
 
 impl ControllerInput {
@@ -306,6 +330,7 @@ impl ControllerInput {
         config_path: Option<PathBuf>,
         config: InputConfig,
     ) -> Self {
+        let depth_camera_enabled = config.depth_camera_enabled;
         Self {
             config_path,
             config,
@@ -330,6 +355,13 @@ impl ControllerInput {
             offset_candidates: BTreeMap::new(),
             component_offsets: BTreeMap::new(),
             component_filters: BTreeMap::new(),
+            depth_camera: DepthCameraState {
+                schema_version: SCHEMA_VERSION,
+                enabled: depth_camera_enabled,
+                ..Default::default()
+            },
+            pending_depth_cloud: None,
+            pending_depth_calibration: None,
         }
     }
 
@@ -524,7 +556,19 @@ impl ControllerInput {
                 self.apply_feedback(feedback);
             }
             finish_simulation = sample.complete;
-            self.accept_sample(sample.raw);
+            if let Some(raw) = sample.raw {
+                self.accept_sample(raw);
+            }
+            if let Some(cloud) = sample.depth_cloud {
+                self.depth_camera.last_frame_time_ns = Some(cloud.source_time_ns);
+                self.depth_camera.width = Some(cloud.width);
+                self.depth_camera.height = Some(cloud.height);
+                self.depth_camera.frame_id = Some(cloud.frame_id.clone());
+                self.pending_depth_cloud = Some(cloud);
+            }
+            if let Some(calibration) = sample.depth_calibration {
+                self.pending_depth_calibration = Some(calibration);
+            }
         }
         self.update_continuous_inputs(Instant::now(), monotonic_ns() as f64 / 1_000_000_000.0);
 
@@ -723,9 +767,30 @@ impl ControllerInput {
             if self.simulation.is_some() {
                 self.stop_simulation();
             }
+            if item == InputSimulationItem::DepthScene && !self.depth_camera.enabled {
+                return RequestResult {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    acknowledged_action: RequestAction::Apply,
+                    value: Some(self.simulation_state.clone()),
+                    original_error: Some("请先启用深度相机能力".into()),
+                };
+            }
             self.config_before_simulation = Some(self.config.clone());
             self.config = simulation_config(&self.config, item);
-            self.replace_driver_sources(simulation::driver_info(), vec![simulation::source_info()]);
+            if item == InputSimulationItem::DepthScene {
+                self.depth_camera.available = true;
+                self.depth_camera.streaming = true;
+                self.depth_camera.source_id = Some(simulation::DEPTH_SOURCE_ID.into());
+                self.depth_camera.display_name = Some("确定性深度测试场景".into());
+                self.depth_camera.driver_id = Some(simulation::DRIVER_ID.into());
+                self.depth_camera.original_error = None;
+            } else {
+                self.replace_driver_sources(
+                    simulation::driver_info(),
+                    vec![simulation::source_info()],
+                );
+            }
             self.simulation = Some(SimulationPlayback::new(item));
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
@@ -752,10 +817,20 @@ impl ControllerInput {
     }
 
     fn stop_simulation(&mut self) {
-        if self.simulation.take().is_none() {
+        let Some(simulation) = self.simulation.take() else {
             return;
+        };
+        if simulation.item() == InputSimulationItem::DepthScene {
+            self.depth_camera.available = false;
+            self.depth_camera.streaming = false;
+            self.depth_camera.source_id = None;
+            self.depth_camera.display_name = None;
+            self.depth_camera.driver_id = None;
+            self.pending_depth_cloud = None;
+            self.pending_depth_calibration = None;
+        } else {
+            self.replace_driver_sources(simulation::driver_info(), vec![]);
         }
-        self.replace_driver_sources(simulation::driver_info(), vec![]);
         if let Some(config) = self.config_before_simulation.take() {
             self.config = config;
         }
@@ -796,6 +871,44 @@ impl ControllerInput {
                 intensity: haptic_intensity(feedback.strength_percent),
             });
         }
+    }
+
+    fn set_depth_camera(
+        &mut self,
+        request: SetDepthCameraRequest,
+    ) -> RequestResult<DepthCameraState> {
+        self.stop_simulation();
+        let mut config = self.config.clone();
+        config.depth_camera_enabled = request.enabled;
+        config.config_version += 1;
+        let error = self
+            .commit_config(config)
+            .err()
+            .map(|error| format!("保存深度相机配置失败：{error}"));
+        if error.is_none() {
+            self.depth_camera.enabled = request.enabled;
+            if !request.enabled {
+                self.depth_camera.available = false;
+                self.depth_camera.streaming = false;
+                self.pending_depth_cloud = None;
+                self.pending_depth_calibration = None;
+            }
+        }
+        RequestResult {
+            schema_version: SCHEMA_VERSION,
+            request_id: request.request_id,
+            acknowledged_action: RequestAction::Apply,
+            value: Some(self.depth_camera.clone()),
+            original_error: error,
+        }
+    }
+
+    fn take_depth_cloud(&mut self) -> Option<DepthPointCloudFrame> {
+        self.pending_depth_cloud.take()
+    }
+
+    fn take_depth_calibration(&mut self) -> Option<DepthCameraCalibration> {
+        self.pending_depth_calibration.take()
     }
 
     fn binding_states(&self) -> Vec<InputBindingState> {
@@ -928,9 +1041,13 @@ impl ControllerInput {
 }
 
 fn load_input_config(path: &Path) -> Result<InputConfig> {
-    let config: InputConfig = load_or_default(path)?;
-    if config.schema_version != CONFIG_SCHEMA_VERSION {
+    let mut config: InputConfig = load_or_default(path)?;
+    if !matches!(config.schema_version, 2 | CONFIG_SCHEMA_VERSION) {
         return Err(eyre!("不支持的输入配置版本 {}", config.schema_version));
+    }
+    if config.schema_version == 2 {
+        config.schema_version = CONFIG_SCHEMA_VERSION;
+        save_input_config(path, &config)?;
     }
     Ok(config)
 }
@@ -941,6 +1058,9 @@ fn save_input_config(path: &Path, config: &InputConfig) -> Result<()> {
 
 fn simulation_config(config: &InputConfig, item: InputSimulationItem) -> InputConfig {
     let mut config = config.clone();
+    if item == InputSimulationItem::DepthScene {
+        return config;
+    }
     config.position_source = None;
     config.orientation_source = None;
     config.bindings = if item == InputSimulationItem::PrimaryToolFeedback {
@@ -1777,6 +1897,7 @@ fn publish_snapshot(node: &mut DoraNode, input: &mut ControllerInput) -> Result<
 
 fn publish_discovery(node: &mut DoraNode, input: &ControllerInput) -> Result<()> {
     send(node, "discovery_state", &input.discovery_state())?;
+    send(node, "depth_camera_state", &input.depth_camera)?;
     send(node, "service_state", &input.service_state())
 }
 
@@ -1894,6 +2015,104 @@ mod tests {
         assert!(loaded.position_source.is_none());
         assert!(loaded.orientation_source.is_none());
         assert_eq!(loaded.config_version, 7);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn depth_capability_persists_without_publishing_placeholder_data() {
+        let path = std::env::temp_dir().join(format!(
+            "controller-input-depth-{}-{}.json",
+            std::process::id(),
+            now_ns()
+        ));
+        let (_driver_tx, driver_rx) = mpsc::channel();
+        let (haptic_tx, _haptic_rx) = mpsc::channel();
+        let mut input = ControllerInput::from_config(
+            driver_rx,
+            haptic_tx,
+            Some(path.clone()),
+            InputConfig::default(),
+        );
+
+        assert!(!input.depth_camera.enabled);
+        assert!(input.take_depth_cloud().is_none());
+        let result = input.set_depth_camera(SetDepthCameraRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "enable-depth".into(),
+            enabled: true,
+        });
+        assert_eq!(result.original_error, None);
+        assert!(load_input_config(&path).unwrap().depth_camera_enabled);
+        assert!(input.take_depth_cloud().is_none());
+
+        input.set_simulation(InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "action-scene".into(),
+            enabled: true,
+            item: Some(InputSimulationItem::MoveUpDown),
+        });
+        input.set_depth_camera(SetDepthCameraRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "keep-depth-enabled".into(),
+            enabled: true,
+        });
+        assert!(input.simulation.is_none());
+        assert!(input.config_before_simulation.is_none());
+
+        let started = input.set_simulation(InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "depth-scene".into(),
+            enabled: true,
+            item: Some(InputSimulationItem::DepthScene),
+        });
+        assert_eq!(started.original_error, None);
+        input.tick();
+        let cloud = input
+            .take_depth_cloud()
+            .expect("depth scene publishes its first frame");
+        assert_eq!(cloud.points_xyz_m.len(), cloud.width as usize);
+        assert_eq!(cloud.frame_id, "depth_sim_frame");
+        let calibration = input
+            .take_depth_calibration()
+            .expect("depth scene publishes calibration with its first frame");
+        assert_eq!(calibration.sequence, cloud.sequence);
+        assert_eq!(calibration.source_time_ns, cloud.source_time_ns);
+        for _ in 0..9 {
+            input.tick();
+            assert!(input.take_depth_cloud().is_none());
+        }
+        input.tick();
+        assert!(input.take_depth_cloud().is_some());
+
+        input.set_simulation(InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "stop-depth".into(),
+            enabled: false,
+            item: None,
+        });
+        assert!(!input.depth_camera.streaming);
+        assert!(input.take_depth_cloud().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn version_two_config_is_normalized_once_with_depth_disabled() {
+        let path = std::env::temp_dir().join(format!(
+            "controller-input-v2-{}-{}.json",
+            std::process::id(),
+            now_ns()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"bindings":[],"config_version":9}"#,
+        )
+        .unwrap();
+        let loaded = load_input_config(&path).unwrap();
+        assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
+        assert!(!loaded.depth_camera_enabled);
+        let persisted = load_or_default::<InputConfig>(&path).unwrap();
+        assert_eq!(persisted.schema_version, CONFIG_SCHEMA_VERSION);
+        assert!(!persisted.depth_camera_enabled);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -2056,7 +2275,8 @@ mod tests {
 
         let sample = SimulationPlayback::new(InputSimulationItem::PrimaryTool)
             .sample(1, 1)
-            .raw;
+            .raw
+            .expect("action simulation produces an input sample");
         let samples = BTreeMap::from([(sample.source_id.clone(), sample)]);
         let control = evaluate_actions(&samples, &config.bindings, &BTreeMap::new(), None, 1, 1);
         assert!(control.start_stop.is_active);

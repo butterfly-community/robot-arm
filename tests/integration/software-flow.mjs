@@ -96,6 +96,52 @@ const tracking = await waitFor(
   () => snapshot("tracking"),
   (state) => state.namespace === "tracking",
 );
+const originalDepthEnabled = Boolean(
+  tracking.values.depth_camera_state?.enabled,
+);
+const depthEnabled = await request("/api/tracking/depth-camera", {
+  schema_version: 3,
+  request_id: "integration-depth-enable",
+  enabled: true,
+});
+assert.equal(depthEnabled.original_error, null);
+await waitFor(
+  () => snapshot("tracking"),
+  (state) =>
+    state.values.depth_camera_state?.enabled === true &&
+    state.values.depth_camera_state?.available === false &&
+    state.values.depth_camera_state?.streaming === false,
+);
+const depthStarted = await request("/api/tracking/simulation", {
+  schema_version: 3,
+  request_id: "integration-depth-scene",
+  enabled: true,
+  item: "depth_scene",
+});
+assert.equal(depthStarted.original_error, null);
+await waitFor(
+  () => snapshot("tracking"),
+  (state) =>
+    state.values.depth_camera_state?.streaming === true &&
+    state.values.depth_camera_state?.frame_id === "depth_sim_frame",
+);
+await request("/api/tracking/simulation", {
+  schema_version: 3,
+  request_id: "integration-depth-stop",
+  enabled: false,
+  item: null,
+});
+await waitFor(
+  () => snapshot("tracking"),
+  (state) => state.values.depth_camera_state?.streaming === false,
+);
+if (!originalDepthEnabled) {
+  await request("/api/tracking/depth-camera", {
+    schema_version: 3,
+    request_id: "integration-depth-restore",
+    enabled: false,
+  });
+}
 const discoveredSources = tracking.values.discovery_state?.sources ?? [];
 for (const [component, capability] of [
   ["position", "position_capable"],

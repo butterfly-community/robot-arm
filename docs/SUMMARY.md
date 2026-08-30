@@ -8,12 +8,25 @@ controller-input-node
   → stararm-102-motion-node
   → stararm-102-execution-node
   → controller-input-node（设备无关 Action 回馈）
+
+controller-input-node（可选深度驱动）
+  → Arrow 类型化点云与标定
+  → stararm-102-motion-node
+  → ROS PointCloud2 / CameraInfo / TF
+  → MoveIt OccupancyMapUpdater
+  → 同一个 PlanningScene
 ```
 
 `controller-input-node` 同时承载两个硬件输入适配层和一个模拟测试源，但不分裂业务流程：NOLO CV1 使用本地 Rust HID
 协议，其他手柄使用 SDL3，并且只根据设备声明的轴、按钮、传感器和振动能力工作；SDL 标准组件的路径、类型和中文名称由同一能力表发布，网页不重复维护名称映射。带 IMU 的手柄（包括 PS4）与 NOLO CV1 都交给同一个
 `fusion-ahrs` 实现。生产代码不维护手柄型号白名单，不按型号选择行为，也不提供型号专属默认绑定；型号和 USB 信息只用于发现页面展示。没有 IMU 能力时仍发布按键和轴。空间位置与姿态来源分别只列出声明对应能力的设备；例如两个仅有按键和轴的设备不会产生姿态候选，此时仍可把任一设备的按键或轴绑定为俯仰和水平圆弧 Action。只要某一分量已经选择绝对来源，空间节点就不再叠加该分量的 Action。每个 Action 和反馈能力仍独立选择设备，不受位姿来源选择影响。采集节点把组合位姿和跨设备聚合 Action 送入同一个空间转换节点。
 同一采集周期的位姿先更新空间快照，随后只有控制帧触发一次运动输出，不会把一份采样重复发送给运动节点。
+
+深度相机也是采集节点的一项可选能力，开关持久化但设备可用性与采集状态只来自驱动事实；
+它不参与 readiness。默认关闭、开启但无设备时都不发布假数据，也不改变现有控制链路。当前
+尚无真实相机驱动，采集页的确定性深度测试源通过正式 Arrow→motion→ROS→MoveIt 链路验证
+平面与障碍点云。相机停止时调用 MoveIt 自带能力清除 OctoMap，普通 PlanningScene 对象保
+留。未来相机型号差异只进入采集节点驱动适配器。
 
 `stararm-102-motion-node` 已完全迁移为 Rust。设备无关空间增量在这里结合 StarArm-102-FL 的
 当前 TCP、工具枢轴和末端几何生成目标；MoveIt、Servo 与 ros2_control 仍负责 IK、碰撞、规划
@@ -60,6 +73,11 @@ Compose 启动 Dora coordinator、五个 Dora daemon、Rust/MoveIt motion 服务
 统一 Web 入口。输入容器挂载主机 `/dev`、只读 udev/sys 信息，因此能够同时枚举 HID 和
 SDL 控制器。SDL3 手柄按运行时声明的轴、按钮、传感器与振动能力接入，NOLO CV1 由同一节点的 HID 适配层接入；
 两者输出统一消息。服务配置使用宿主 bind mount，不依赖 Compose 命名卷。dataflow 容器停止时使用 Dora `start --attach` 原生支持的 `SIGINT` 停止整条 dataflow，避免下次启动重复拉起 MoveIt、Servo 或其他节点。
+
+motion 容器内的 RViz2 通过 KasmVNC 1.5.0 在
+`http://192.168.100.10:6080` 提供单端口浏览器会话；它使用同容器的 ROS 上下文与项目
+`.rviz`，直接显示机器人、TF、PlanningScene、轨迹和可选深度点云。动态远端分辨率与 Native
+Resolution 由 KasmVNC 提供，项目没有自制编码/输入协议、第二个远程桌面服务或 host network。
 
 常用验收：
 

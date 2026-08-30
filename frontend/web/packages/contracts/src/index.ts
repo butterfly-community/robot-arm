@@ -199,7 +199,23 @@ export type InputSimulationItem =
   | "emergency_stop"
   | "primary_tool_feedback"
   | "tool_axis_translation"
-  | "tool_helical_motion";
+  | "tool_helical_motion"
+  | "depth_scene";
+
+export interface DepthCameraState {
+  schema_version: number;
+  enabled: boolean;
+  available: boolean;
+  streaming: boolean;
+  source_id?: string | null;
+  display_name?: string | null;
+  driver_id?: string | null;
+  last_frame_time_ns?: number | null;
+  width?: number | null;
+  height?: number | null;
+  frame_id?: string | null;
+  original_error?: string | null;
+}
 
 export const actionGroupOrder = [
   "tcp",

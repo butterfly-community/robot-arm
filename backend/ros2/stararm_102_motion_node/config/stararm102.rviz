@@ -1,0 +1,109 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 7; 10; 14
+    Fixed Frame: base_link
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Ground
+      Enabled: true
+      Cell Size: 0.05
+      Plane: XY
+      Plane Cell Count: 20
+      Color: 45; 63; 72
+    - Class: rviz_common/Group
+      Name: 机械臂与 TF
+      Enabled: true
+      Displays:
+        - Class: rviz_default_plugins/RobotModel
+          Name: Robot model
+          Enabled: true
+          Description Source: Topic
+          Description Topic:
+            Value: /robot_description
+          Visual Enabled: true
+          Collision Enabled: false
+        - Class: rviz_default_plugins/TF
+          Name: Frames
+          Enabled: true
+          Marker Scale: 0.04
+          Show Axes: true
+          Show Names: false
+          Show Arrows: false
+    - Class: rviz_common/Group
+      Name: MoveIt 规划
+      Enabled: true
+      Displays:
+        - Class: moveit_rviz_plugin/MotionPlanning
+          Name: Planning scene and trajectory
+          Enabled: true
+          Planning Group: arm
+          Planning Scene Topic: /monitored_planning_scene
+          Robot Description: robot_description
+          Planning Request:
+            Query Goal State: false
+            Query Start State: false
+          Scene Geometry:
+            Show Scene Geometry: true
+          Scene Robot:
+            Show Robot Collision: false
+            Show Robot Visual: false
+          Planned Path:
+            Trajectory Topic: /display_planned_path
+    - Class: rviz_common/Group
+      Name: 深度感知
+      Enabled: true
+      Displays:
+        - Class: rviz_default_plugins/Image
+          Name: Color image
+          Enabled: false
+          Topic:
+            Value: /perception/color/image_raw
+        - Class: rviz_default_plugins/Image
+          Name: Depth image
+          Enabled: false
+          Topic:
+            Value: /perception/depth/image_raw
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Raw depth cloud
+          Enabled: false
+          Topic:
+            Value: /perception/depth/points
+          Size (Pixels): 2
+          Style: Points
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Robot-filtered cloud
+          Enabled: false
+          Topic:
+            Value: /perception/depth/points_filtered
+          Size (Pixels): 2
+          Style: Points
+    - Class: rviz_common/Group
+      Name: 目标与放置区
+      Enabled: true
+      Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Name: Perception debug markers
+          Enabled: false
+          Topic:
+            Value: /perception/debug/markers
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 0.62
+      Focal Point:
+        X: 0.0
+        Y: 0.08
+        Z: 0.10
+      Pitch: 0.45
+      Yaw: 0.75
+Window Geometry:
+  Width: 1600
+  Height: 1000

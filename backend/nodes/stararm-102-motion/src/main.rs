@@ -15,10 +15,11 @@ use std::{
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::Result;
 use robot_arm_messages::{
-    ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, MotionRequest, MotionState,
+    ArmCommand, ArmState, ControlMode, DepthCameraCalibration, DepthCameraState,
+    DepthPointCloudFrame, DiagnosticValue, FeedbackSource, MotionRequest, MotionState,
     MotionStatus, RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION,
     ServiceState, SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose,
-    TransformedControlFrame, from_arrow, to_arrow,
+    TransformedControlFrame, depth_point_cloud_from_arrow, from_arrow, to_arrow,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -72,6 +73,9 @@ struct MotionNode {
     motion_status: MotionStatus,
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
+    depth_camera: Option<DepthCameraState>,
+    depth_calibration: Option<DepthCameraCalibration>,
+    pending_depth_cloud: Option<DepthPointCloudFrame>,
 }
 
 fn main() {
@@ -115,6 +119,9 @@ fn run() -> Result<()> {
         motion_status: idle_status(),
         actuator_status: None,
         last_error: None,
+        depth_camera: None,
+        depth_calibration: None,
+        pending_depth_cloud: None,
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
     motion.publish_state(&mut node)?;
@@ -163,8 +170,31 @@ fn run() -> Result<()> {
                     "tool_actuator_request" => {
                         motion.handle_actuator_request(&mut node, from_arrow(data.as_array())?)?
                     }
+                    "depth_point_cloud" => {
+                        let cloud: DepthPointCloudFrame =
+                            depth_point_cloud_from_arrow(data.as_array())?;
+                        motion.pending_depth_cloud = Some(cloud);
+                    }
+                    "depth_camera_calibration" => {
+                        let calibration: DepthCameraCalibration = from_arrow(data.as_array())?;
+                        motion.ros.publish_depth_calibration(calibration.clone())?;
+                        motion.depth_calibration = Some(calibration);
+                    }
+                    "depth_camera_state" => {
+                        let state: DepthCameraState = from_arrow(data.as_array())?;
+                        let clear = motion
+                            .depth_camera
+                            .as_ref()
+                            .is_some_and(|previous| previous.streaming && !state.streaming);
+                        motion.depth_camera = Some(state);
+                        if clear {
+                            motion.depth_calibration = None;
+                            motion.pending_depth_cloud = None;
+                            motion.ros.clear_octomap()?;
+                        }
+                    }
                     "snapshot" => motion.publish_state(&mut node)?,
-                    "tick" => {}
+                    "tick" => motion.flush_depth_cloud()?,
                     _ => {}
                 }
                 motion.drain_ros_events(&mut node)?;
@@ -178,6 +208,22 @@ fn run() -> Result<()> {
 }
 
 impl MotionNode {
+    fn flush_depth_cloud(&mut self) -> Result<()> {
+        let ready = self.pending_depth_cloud.as_ref().is_some_and(|cloud| {
+            self.depth_calibration.as_ref().is_some_and(|calibration| {
+                calibration.source_id == cloud.source_id && calibration.frame_id == cloud.frame_id
+            }) && self.ros.depth_output_ready()
+        });
+        if ready {
+            self.ros.publish_depth_cloud(
+                self.pending_depth_cloud
+                    .take()
+                    .expect("checked pending depth cloud"),
+            )?;
+        }
+        Ok(())
+    }
+
     fn apply_arm_state(&mut self, state: ArmState) -> Result<()> {
         if state.model_revision != MODEL_REVISION
             || state.joints_rad.len() != JOINTS.len()

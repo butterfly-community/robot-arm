@@ -15,6 +15,21 @@
 出口恢复演示前的内存配置；用户主动停止也走同一出口且不归位。
 原始按钮和轴始终保留给输入测试。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，则在内存中用该值作为计算零偏；值变化会重新计时。连续轴按“原始值 → 内存零偏 → One Euro → Action”处理，按钮和方向按钮对不滤波，也不引入死区。功能 Action 绑定、反馈目标和设备自定义名称写入 `/config/controller-input.json`；SDL 持久化来源标识优先使用设备序列号，其次使用 Linux `by-id` / `by-path`，不保存重连时变化的 instance id。空间与姿态来源、动态零偏、滤波状态仍只存在内存，节点重启后重新建立。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
 
+深度相机是同一采集节点的可选能力。`depth_camera_enabled` 与其他输入配置保存在同一个
+`controller-input.json`；旧的 schema 2 文件加载后一次性写成 schema 3，默认关闭。状态分别
+报告用户开关、驱动发现和实际采集，不把它们压成一个连接标志，也不参与系统 readiness。
+未启用或没有驱动事件时不发布空点云、假内参或周期占位消息。采集页通过现有 tracking 请求
+链路修改开关，并只接收小型状态摘要；点云不会经过 Web Gateway。
+
+当前尚未接入真实深度相机驱动。确定性“深度测试场景”复用采集节点的 simulation 驱动边
+界，以 10 Hz 连续生成平面与障碍物，并生成一次相机内参与 `base_link -> depth_sim_frame`
+标定变换；这个频率只描述测试源，不限制真实驱动。它与未来硬
+件适配器输出完全相同的设备无关契约。XYZ 数据以米为单位，使用 Arrow 原生的
+`LargeList<FixedSizeList<Float32, 3>>`，避免把高带宽点云展开为 JSON 或手写字节协议；内参与
+外参是独立的低频消息，并与点云一样携带 source、sequence 和原始采样时间。测试源显式开始和
+停止，不用收帧超时猜测状态。真实相机接入时只需在本节点增加一个驱动适配器，提供真实时
+间戳、frame、CameraInfo、标定 TF 和点云，不修改下游数据流。
+
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在
 `crates/nolo-cv1`；每只 NOLO 手柄分别维护三轴 One Euro 状态，统一绝对位置使用滤波结果。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
 API，并通过 `has_axis()`、`has_button()` 只发布设备实际声明的标准轴和按钮；路径、类型和中文名称来自同一能力表，网页不维护第二份组件名称映射。NOLO 将协议中已确认的触摸板、扳机、菜单、系统、侧握以及触摸板坐标转换为同样的 `button/*`、`axis/*` 组件，不发布未确认的按键位。生产代码没有手柄型号白名单、型号分支或默认按键映射，型号名称与 USB 信息只作为发现元数据展示。`ImuFusion::update()` 是两类 IMU 输入唯一的姿态融合入口，算法来自 `fusion-ahrs`，项目只做
@@ -50,6 +65,16 @@ MoveGroup、ExecuteTrajectory 与 ros2_control。普通运动只有一个 action
 已经提交的 action 自然结束后才开始队列下一项。物理急停是机械臂断电，不由该节点模拟。
 ROS Python 包只剩 MoveIt、Servo、ros2_control、robot_state_publisher 的 launch/config，不再
 包含 Dora 分发、目标数学、模型服务或运动生命周期代码。
+
+同一 `ros.rs` 也是感知进入 ROS 的唯一边界：Arrow XYZ 转成
+`sensor_msgs/msg/PointCloud2` 发布到 `/perception/depth/points`，标定消息转成
+`CameraInfo` 和 `/tf_static`。MoveIt 通过项目唯一的 `sensors_3d.yaml` 和标准
+`occupancy_map_monitor/PointCloudOctomapUpdater` 消费该点云，自过滤结果发布到
+`/perception/depth/points_filtered`，占据数据进入现有 PlanningSceneMonitor。相机明确停止或
+用户关闭能力时只调用一次 MoveIt 自带 `/clear_octomap`；普通 CollisionObject 和附着物不清
+除。无相机时 updater 继续监听同一 topic，没有消息就是完整语义，不切换 launch 或规划器。
+ROS 边界使用 MoveIt 官方 SensorDataQoS；motion 只保留订阅发现前的最新一帧，并在对应标定
+已经发布后从既有 tick 发送，不引入收帧超时、重试次数或第二条感知路径。
 
 `ModelCatalog` 位于共享 `stararm-102-model` crate，由 execution 从镜像中实际运行的最终 URDF
 读取关节范围并生成模型信息与资源清单；motion 只消费这份模型信息。前端不包含 StarArm-102
@@ -89,6 +114,43 @@ manifest 返回资源；motion 与 Web Gateway 均不再维护第二份模型目
 状态节点只读取配置中的服务和依赖关系，聚合各节点主动上报的 `ServiceState`；就绪只表示节点正在运行，`has_input` 和 `has_output` 保留为观测字段，不作为通用门槛。没有硬编码业务节点列表、超时门限或探活分支。网关使用 Axum 暴露 HTTP/WebSocket，把请求原样转成 Dora 消息并按
 namespace 聚合快照；不解释机械臂轴数、设备类型或运动语义。
 共享网页客户端通过浏览器动画帧合并实时快照，避免同一显示帧重复渲染，也不限制位姿、控制、输入测试和关节反馈的更新频率；文本被选中时保留最新待显示快照，避免破坏复制操作。只有采集页的“采集频率”数字在页面本地每秒更新一次，这个显示节拍不会进入后端或其他数据链路。可连接串口列表只在用户点击“刷新串口”后更新。
+
+## 浏览器 RViz 与感知接口
+
+`stararm-102-motion` 容器同时运行 RViz2、Openbox 和 KasmVNC 1.5.0。KasmVNC 使用其现成的
+X11、WebSocket、输入转发、远端动态分辨率和 Native Resolution 能力；项目不维护 VNC/编码
+协议或第二套网页 3D 规划视图。根入口只把浏览器导向 KasmVNC 自带页面并默认启用其
+`enable_hidpi` 参数。唯一入口是 `http://192.168.100.10:6080`，Compose 只映射这
+一个 TCP 端口，没有 host network、宿主 DISPLAY 或 X11 socket。该地址位于项目局域网且当前
+不启用登录或 TLS，不应直接暴露到公网。
+
+项目 `.rviz` 默认加载 RobotModel、TF、MoveIt MotionPlanning 和规划轨迹，并按“机械臂与
+TF / MoveIt 规划 / 深度感知 / 目标与放置区”分组。尚无发布者的彩色图、深度图、原始点
+云、过滤点云和 Marker 默认关闭；需要排障时在同一会话启用。PlanningScene 中的 OctoMap 和
+CollisionObject 才参与碰撞规划，Marker 只用于解释识别结果。RViz 的 Execute 仅供排障，不
+是项目控制入口。
+
+motion 容器内固定的标准接口如下；当前已经发布深度 CameraInfo、TF、原始点云和过滤点
+云，其余接口为真实相机与识别节点接入时沿同一链路补齐：
+
+`robot_state_publisher` 与现有 ros2_control 的 100 Hz 关节状态同步发布机器人 TF。MoveIt
+自过滤由此能在点云原始采样时间取得各 link 变换；项目没有改写时间戳，也没有增加变换等待
+超时或重试分支。
+
+| 用途 | ROS 接口 | 标准消息 |
+| --- | --- | --- |
+| 彩色图 / 内参 | `/perception/color/image_raw`、`/perception/color/camera_info` | `Image`、`CameraInfo` |
+| 深度图 / 内参 | `/perception/depth/image_raw`、`/perception/depth/camera_info` | `Image`、`CameraInfo` |
+| 规划点云 / 自过滤点云 | `/perception/depth/points`、`/perception/depth/points_filtered` | `PointCloud2` |
+| 识别排障标记 | `/perception/debug/markers` | `MarkerArray` |
+| 世界物体 / 附着物 | `/collision_object`、`/attached_collision_object` | `CollisionObject`、`AttachedCollisionObject` |
+| 统一规划场景 | `/monitored_planning_scene` | `PlanningScene` |
+| 坐标关系 | `/tf`、`/tf_static` | `TFMessage` |
+
+真实相机可以固定安装或腕部安装，差异只体现在标定产物的 parent frame 与变换值；下游始终
+消费同一 frame/TF 语义。彩色与深度若使用不同光学坐标系，必须由真实设备标定关系对齐，
+不能只改 topic 或 frame 名称。以后识别物体与放置区时，用 CollisionObject 更新同一个
+PlanningScene，抓取后用 AttachedCollisionObject 附着到现有 TCP，不重新定义夹爪中心。
 
 ## 实现边界
 

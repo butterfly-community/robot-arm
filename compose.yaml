@@ -99,17 +99,17 @@ services:
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
-      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     depends_on:
       dora-coordinator: { condition: service_started }
     networks: [robot-services]
+    ports: ["192.168.100.10:6080:6080"]
     ulimits:
       memlock: -1
     volumes: ["./backend/config/runtime:/config"]
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291 && exec 4<>/dev/tcp/127.0.0.1/6080"]
 
   dataflow:
     <<: *dora-daemon

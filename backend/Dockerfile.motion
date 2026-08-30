@@ -6,10 +6,26 @@ RUN git clone --filter=blob:none https://github.com/dora-rs/dora.git /dora-src \
 
 FROM moveit/moveit2:jazzy-release AS ros-base
 SHELL ["/bin/bash", "-c"]
+ARG TARGETARCH
+ARG KASMVNC_VERSION=1.5.0
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-       git ros-jazzy-joint-state-topic-hardware-interface ros-jazzy-trac-ik-kinematics-plugin \
+       curl fonts-noto-cjk git openbox \
+       ros-jazzy-joint-state-topic-hardware-interface \
+       ros-jazzy-moveit-ros-perception ros-jazzy-moveit-ros-visualization \
+       ros-jazzy-rviz2 ros-jazzy-trac-ik-kinematics-plugin \
+    && case "${TARGETARCH}" in \
+         amd64) kasm_sha=f599fe02e2175b9817b6165f74a5d2bebdc73118dde9181ba3410963bed7ae1e ;; \
+         arm64) kasm_sha=c9199cf4753208bfb69fd016a9780242bebfc43370cc38c97d61e90a3c783e04 ;; \
+         *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/kasmvnc.deb \
+       "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_noble_${KASMVNC_VERSION}_${TARGETARCH}.deb" \
+    && echo "${kasm_sha}  /tmp/kasmvnc.deb" | sha256sum --check --strict \
+    && apt-get install --yes --no-install-recommends /tmp/kasmvnc.deb \
+    && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
+COPY docker/rviz-index.html /usr/share/kasmvnc/www/index.html
 COPY --from=dora-build /dora-src/target/release/dora /usr/local/bin/dora
 
 WORKDIR /tmp/vendor

@@ -9,6 +9,7 @@ import {
   virtualFeedbackTarget,
   type AbsolutePoseFrame,
   type ControlInputFrame,
+  type DepthCameraState,
   type InputSimulationItem,
   type InputSimulationState,
 } from "@robot/contracts";
@@ -189,6 +190,11 @@ export default function Page() {
   >;
   const simulation = (discovery.simulation ??
     {}) as unknown as InputSimulationState;
+  const depthCamera = (values.depth_camera_state ?? {
+    enabled: false,
+    available: false,
+    streaming: false,
+  }) as unknown as DepthCameraState;
   const diagnostics = (
     (discovery.diagnostics ?? []) as Array<Record<string, unknown>>
   )[0];
@@ -233,6 +239,13 @@ export default function Page() {
   const [bindingsResult, setBindingsResult] = useState<
     "idle" | "success" | "error"
   >("idle");
+  const [depthRequestPending, setDepthRequestPending] = useState(false);
+  const [depthEnabledDraft, setDepthEnabledDraft] = useState(
+    Boolean(depthCamera.enabled),
+  );
+  const depthCameraEnabled = depthRequestPending
+    ? depthEnabledDraft
+    : Boolean(depthCamera.enabled);
 
   const positionSource = sources.find(
     (source) => source.source_id === discovery.position_source_id,
@@ -370,6 +383,31 @@ export default function Page() {
       setSimulationRequest(undefined);
     }
   }
+
+  async function setDepthCameraEnabled(enabled: boolean) {
+    setError(undefined);
+    setDepthEnabledDraft(enabled);
+    setDepthRequestPending(true);
+    try {
+      await post("/api/tracking/depth-camera", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        enabled,
+      });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDepthRequestPending(false);
+    }
+  }
+
+  const depthStatus = !depthCameraEnabled
+    ? "未启用"
+    : depthCamera.streaming
+      ? "正在采集"
+      : depthCamera.available
+        ? "已发现，尚未采集"
+        : "已启用，未发现深度相机";
 
   const actionSources = sources.filter((source) => source.action_capable);
   const currentTestSourceId = actionSources.some(
@@ -591,6 +629,45 @@ export default function Page() {
             )}
           />
           <div className="source-list">
+            <div className="source-item depth-camera-capability">
+              <div className="row-spread">
+                <div>
+                  <strong>深度相机能力</strong>
+                  <small>可选感知输入；无相机不会阻塞机械臂功能</small>
+                </div>
+                <StatusBadge tone={depthCamera.streaming ? "good" : "neutral"}>
+                  {depthStatus}
+                </StatusBadge>
+              </div>
+              <label className="compact-check">
+                <input
+                  type="checkbox"
+                  checked={depthCameraEnabled}
+                  disabled={depthRequestPending}
+                  onChange={(event) =>
+                    setDepthCameraEnabled(event.currentTarget.checked)
+                  }
+                />
+                启用深度相机
+              </label>
+              <div className="card-actions">
+                <Button
+                  variant="outline"
+                  disabled={depthRequestPending || !depthCameraEnabled}
+                  onClick={() => runSimulation("depth_scene", false)}
+                >
+                  {simulation.active && simulation.item === "depth_scene"
+                    ? "停止深度测试"
+                    : "测试深度场景"}
+                </Button>
+              </div>
+              <details className="diagnostic-details">
+                <summary>排障信息</summary>
+                <pre className="json" tabIndex={0}>
+                  {JSON.stringify(depthCamera, null, 2)}
+                </pre>
+              </details>
+            </div>
             {sources.map((source) => {
               const positionCurrent =
                 source.source_id === discovery.position_source_id;

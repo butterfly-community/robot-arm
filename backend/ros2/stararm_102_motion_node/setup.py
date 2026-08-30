@@ -12,7 +12,12 @@ setup(
         ("share/" + package_name + "/launch", ["launch/motion_stack.launch.py"]),
         (
             "share/" + package_name + "/config",
-            ["config/controllers.yaml", "config/servo.yaml"],
+            [
+                "config/controllers.yaml",
+                "config/servo.yaml",
+                "config/sensors_3d.yaml",
+                "config/stararm102.rviz",
+            ],
         ),
     ],
     install_requires=["setuptools"],

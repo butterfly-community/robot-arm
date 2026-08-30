@@ -76,13 +76,13 @@ for (const [path] of pages) {
   }) => {
     await page.goto(`/${path}/`);
     const diagnosticsTitle = path === "tracking" ? "实时诊断" : "排障数据";
-    await page
-      .locator(".card-toggle")
-      .filter({ hasText: diagnosticsTitle })
-      .click();
-    const details = page.locator("details.diagnostics").first();
+    const diagnosticsCard = page.locator("section.card").filter({
+      has: page.getByText(diagnosticsTitle, { exact: true }),
+    });
+    await diagnosticsCard.locator(".card-toggle").click();
+    const details = diagnosticsCard.locator("details.diagnostics").first();
     await details.locator("summary").click();
-    const state = page.locator("pre").first();
+    const state = details.locator("pre");
     await expect(state).not.toHaveText("null");
     await state.selectText();
     const selected = await page.evaluate(() =>
@@ -431,6 +431,50 @@ test("tracking page persists a custom input device name", async ({
         request_id: "browser-device-name-restore",
         source_id: source!.source_id,
         custom_name: source!.custom_name,
+      },
+    });
+  }
+});
+
+test("tracking depth capability persists and drives the standard test source", async ({
+  page,
+  request,
+}) => {
+  const before = await (await request.get("/api/tracking/state")).json();
+  const originalEnabled = Boolean(before.values.depth_camera_state?.enabled);
+  try {
+    await page.goto("/tracking/");
+    const enabled = page.getByRole("checkbox", { name: "启用深度相机" });
+    if (!(await enabled.isChecked())) await enabled.check();
+    await expect(enabled).toBeChecked();
+    await expect(page.getByText("已启用，未发现深度相机")).toBeVisible();
+
+    await page.getByRole("button", { name: "测试深度场景" }).click();
+    await expect(
+      page.getByRole("button", { name: "停止深度测试" }),
+    ).toBeVisible();
+    await expect(page.getByText("正在采集", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "停止深度测试" }).click();
+    await expect(
+      page.getByRole("button", { name: "测试深度场景" }),
+    ).toBeVisible();
+
+    await page.reload();
+    await expect(enabled).toBeChecked();
+  } finally {
+    await request.post("/api/tracking/simulation", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-depth-stop",
+        enabled: false,
+        item: null,
+      },
+    });
+    await request.post("/api/tracking/depth-camera", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-depth-restore",
+        enabled: originalEnabled,
       },
     });
   }

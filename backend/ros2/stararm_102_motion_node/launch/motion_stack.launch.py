@@ -13,8 +13,6 @@ def generate_launch_description() -> LaunchDescription:
         ParameterBuilder("stararm_102_motion_node").yaml("config/servo.yaml").to_dict()
     )
     move_group = moveit.to_dict()
-    for key in ("sensors", "kinect_pointcloud", "kinect_depthimage"):
-        move_group.pop(key, None)
     controllers = str(
         Path(get_package_share_directory("stararm_102_motion_node"))
         / "config"
@@ -24,7 +22,28 @@ def generate_launch_description() -> LaunchDescription:
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
-            parameters=[moveit.robot_description],
+            parameters=[moveit.robot_description, {"publish_frequency": 100.0}],
+            output="screen",
+        ),
+        Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2",
+            arguments=[
+                "-d",
+                str(
+                    Path(get_package_share_directory("stararm_102_motion_node"))
+                    / "config"
+                    / "stararm102.rviz"
+                ),
+            ],
+            parameters=[
+                moveit.robot_description,
+                moveit.robot_description_semantic,
+                moveit.robot_description_kinematics,
+                moveit.planning_pipelines,
+                moveit.joint_limits,
+            ],
             output="screen",
         ),
         Node(
@@ -52,6 +71,7 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[
                 move_group,
                 {
+                    "octomap_frame": "base_link",
                     "allow_trajectory_execution": True,
                     "trajectory_execution.allowed_start_tolerance": 0.0,
                     "publish_robot_description_semantic": True,

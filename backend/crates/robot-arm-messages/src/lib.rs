@@ -1,7 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use arrow::{
-    array::{Array, ArrayRef, StringArray, StructArray, UInt32Array},
+    array::{
+        Array, ArrayRef, FixedSizeListArray, Float32Array, LargeListArray, StringArray,
+        StructArray, UInt32Array,
+    },
+    buffer::{OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Fields},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -21,6 +25,8 @@ pub enum ArrowCodecError {
     UnsupportedVersion { actual: u32, expected: u32 },
     #[error("JSON encode failed: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("invalid point cloud: {0}")]
+    InvalidPointCloud(String),
 }
 
 pub fn to_arrow<T: Serialize>(value: &T) -> Result<ArrayRef, ArrowCodecError> {
@@ -66,6 +72,145 @@ pub fn from_arrow<T: DeserializeOwned>(array: &dyn Array) -> Result<T, ArrowCode
         });
     }
     Ok(serde_json::from_str(strings.value(0))?)
+}
+
+#[derive(Serialize, Deserialize)]
+struct DepthPointCloudMetadata {
+    sequence: u64,
+    source_time_ns: i64,
+    source_id: String,
+    frame_id: String,
+    width: u32,
+    height: u32,
+}
+
+/// Encodes XYZ as Arrow-native `LargeList<FixedSizeList<Float32, 3>>`.
+pub fn depth_point_cloud_to_arrow(
+    cloud: &DepthPointCloudFrame,
+) -> Result<ArrayRef, ArrowCodecError> {
+    let expected = usize::try_from(u64::from(cloud.width) * u64::from(cloud.height))
+        .map_err(|_| ArrowCodecError::InvalidPointCloud("dimensions exceed usize".into()))?;
+    if cloud.points_xyz_m.len() != expected {
+        return Err(ArrowCodecError::InvalidPointCloud(format!(
+            "dimensions describe {expected} points, payload contains {}",
+            cloud.points_xyz_m.len()
+        )));
+    }
+    let metadata = serde_json::to_string(&DepthPointCloudMetadata {
+        sequence: cloud.sequence,
+        source_time_ns: cloud.source_time_ns,
+        source_id: cloud.source_id.clone(),
+        frame_id: cloud.frame_id.clone(),
+        width: cloud.width,
+        height: cloud.height,
+    })?;
+    let mut coordinates = Vec::with_capacity(expected * 3);
+    for point in &cloud.points_xyz_m {
+        coordinates.extend_from_slice(point);
+    }
+    let coordinate_field = Arc::new(Field::new("coordinate_m", DataType::Float32, false));
+    let points = Arc::new(FixedSizeListArray::new(
+        coordinate_field,
+        3,
+        Arc::new(Float32Array::from(coordinates)),
+        None,
+    ));
+    let point_field = Arc::new(Field::new("point_xyz_m", points.data_type().clone(), false));
+    let point_count = i64::try_from(expected)
+        .map_err(|_| ArrowCodecError::InvalidPointCloud("point count exceeds i64".into()))?;
+    let point_cloud = LargeListArray::new(
+        point_field,
+        OffsetBuffer::new(ScalarBuffer::from(vec![0, point_count])),
+        points,
+        None,
+    );
+    let fields = Fields::from(vec![
+        Field::new("schema_version", DataType::UInt32, false),
+        Field::new("metadata_json", DataType::Utf8, false),
+        Field::new("points_xyz_m", point_cloud.data_type().clone(), false),
+    ]);
+    Ok(Arc::new(StructArray::new(
+        fields,
+        vec![
+            Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])) as ArrayRef,
+            Arc::new(StringArray::from(vec![metadata])) as ArrayRef,
+            Arc::new(point_cloud) as ArrayRef,
+        ],
+        None,
+    )))
+}
+
+pub fn depth_point_cloud_from_arrow(
+    array: &dyn Array,
+) -> Result<DepthPointCloudFrame, ArrowCodecError> {
+    let structure = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if structure.len() != 1 || structure.is_null(0) {
+        return Err(ArrowCodecError::InvalidShape);
+    }
+    let versions = structure
+        .column_by_name("schema_version")
+        .and_then(|value| value.as_any().downcast_ref::<UInt32Array>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    let metadata = structure
+        .column_by_name("metadata_json")
+        .and_then(|value| value.as_any().downcast_ref::<StringArray>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    let points = structure
+        .column_by_name("points_xyz_m")
+        .and_then(|value| value.as_any().downcast_ref::<LargeListArray>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if versions.is_null(0) || metadata.is_null(0) || points.is_null(0) {
+        return Err(ArrowCodecError::InvalidShape);
+    }
+    let actual = versions.value(0);
+    if actual != SCHEMA_VERSION {
+        return Err(ArrowCodecError::UnsupportedVersion {
+            actual,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    let metadata: DepthPointCloudMetadata = serde_json::from_str(metadata.value(0))?;
+    let expected = usize::try_from(u64::from(metadata.width) * u64::from(metadata.height))
+        .map_err(|_| ArrowCodecError::InvalidPointCloud("dimensions exceed usize".into()))?;
+    let points = points.value(0);
+    let points = points
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if points.value_length() != 3 || points.len() != expected || points.null_count() != 0 {
+        return Err(ArrowCodecError::InvalidPointCloud(format!(
+            "dimensions describe {expected} XYZ points, Arrow payload contains {}",
+            points.len()
+        )));
+    }
+    let coordinates = points
+        .values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if coordinates.null_count() != 0 {
+        return Err(ArrowCodecError::InvalidPointCloud(
+            "XYZ coordinates cannot be null".into(),
+        ));
+    }
+    let points_xyz_m = coordinates
+        .values()
+        .chunks_exact(3)
+        .map(|point| [point[0], point[1], point[2]])
+        .collect();
+    Ok(DepthPointCloudFrame {
+        schema_version: actual,
+        sequence: metadata.sequence,
+        source_time_ns: metadata.source_time_ns,
+        source_id: metadata.source_id,
+        frame_id: metadata.frame_id,
+        width: metadata.width,
+        height: metadata.height,
+        points_xyz_m,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +501,60 @@ pub struct InputDiscoveryState {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DepthCameraState {
+    pub schema_version: u32,
+    pub enabled: bool,
+    pub available: bool,
+    pub streaming: bool,
+    pub source_id: Option<String>,
+    pub display_name: Option<String>,
+    pub driver_id: Option<String>,
+    pub last_frame_time_ns: Option<i64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub frame_id: Option<String>,
+    pub original_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SetDepthCameraRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub enabled: bool,
+}
+
+/// Device-independent XYZ point cloud. Coordinates are metres in `frame_id`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DepthPointCloudFrame {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub source_time_ns: i64,
+    pub source_id: String,
+    pub frame_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub points_xyz_m: Vec<[f32; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DepthCameraCalibration {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub source_time_ns: i64,
+    pub source_id: String,
+    pub parent_frame_id: String,
+    pub frame_id: String,
+    pub translation_m: [f64; 3],
+    pub orientation_xyzw: [f64; 4],
+    pub width: u32,
+    pub height: u32,
+    pub distortion_model: String,
+    pub distortion: Vec<f64>,
+    pub camera_matrix: [f64; 9],
+    pub projection_matrix: [f64; 12],
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InputSimulationState {
     pub schema_version: u32,
     pub active: bool,
@@ -390,6 +589,7 @@ pub enum InputSimulationItem {
     PrimaryToolFeedback,
     ToolAxisTranslation,
     ToolHelicalMotion,
+    DepthScene,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1100,6 +1300,50 @@ mod tests {
         let encoded = to_arrow(&request).unwrap();
         let decoded: InputSimulationRequest = from_arrow(encoded.as_ref()).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn point_cloud_uses_typed_arrow_payload_and_round_trips() {
+        let cloud = DepthPointCloudFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence: 7,
+            source_time_ns: 8,
+            source_id: "depth-fixture".into(),
+            frame_id: "depth_optical_frame".into(),
+            width: 2,
+            height: 1,
+            points_xyz_m: vec![[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]],
+        };
+        let encoded = depth_point_cloud_to_arrow(&cloud).unwrap();
+        let structure = encoded.as_any().downcast_ref::<StructArray>().unwrap();
+        assert!(
+            structure
+                .column_by_name("points_xyz_m")
+                .unwrap()
+                .as_any()
+                .is::<LargeListArray>()
+        );
+        assert!(structure.column_by_name("payload_json").is_none());
+        let decoded = depth_point_cloud_from_arrow(encoded.as_ref()).unwrap();
+        assert_eq!(decoded, cloud);
+    }
+
+    #[test]
+    fn point_cloud_rejects_dimensions_that_do_not_match_payload() {
+        let cloud = DepthPointCloudFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence: 0,
+            source_time_ns: 0,
+            source_id: "depth-fixture".into(),
+            frame_id: "depth_optical_frame".into(),
+            width: 2,
+            height: 1,
+            points_xyz_m: vec![[0.0; 3]],
+        };
+        assert!(matches!(
+            depth_point_cloud_to_arrow(&cloud),
+            Err(ArrowCodecError::InvalidPointCloud(_))
+        ));
     }
 
     #[test]

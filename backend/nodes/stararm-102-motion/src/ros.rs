@@ -12,8 +12,10 @@ use std::{
 use eyre::{Context, Result as EyreResult, bail, eyre};
 use futures::{Future, FutureExt, StreamExt, executor::block_on};
 use r2r::{
-    ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
+    ActionClientUntyped, ClientUntyped, Context as RosContext, Node, Publisher, PublisherUntyped,
+    QosProfile,
 };
+use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame};
 use serde_json::{Value, json};
 use stararm_102_model::{BASE_FRAME, GRIPPER_JOINT, JOINTS, TCP_FRAME};
 
@@ -22,6 +24,7 @@ use crate::core::Pose;
 const MOVEIT_SUCCESS: i64 = 1;
 const ROBOT_LINK: u64 = 0;
 const ALLOWED_COLLISION_MATRIX: u64 = 128;
+const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 #[derive(Debug)]
 pub enum RosEvent {
@@ -62,12 +65,16 @@ pub struct RosInterface {
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
+    depth_publisher: Publisher<r2r::sensor_msgs::msg::PointCloud2>,
+    camera_info_publisher: Publisher<r2r::sensor_msgs::msg::CameraInfo>,
+    static_tf_publisher: Publisher<r2r::tf2_msgs::msg::TFMessage>,
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
+    clear_octomap: Arc<ClientUntyped>,
     motion_sender: Sender<MotionJob>,
     event_sender: Sender<RosEvent>,
 }
@@ -91,6 +98,18 @@ impl RosInterface {
             "/stararm102/joint_states",
             "sensor_msgs/msg/JointState",
             QosProfile::default(),
+        )?;
+        let depth_publisher = node.create_publisher::<r2r::sensor_msgs::msg::PointCloud2>(
+            "/perception/depth/points",
+            QosProfile::sensor_data(),
+        )?;
+        let camera_info_publisher = node.create_publisher::<r2r::sensor_msgs::msg::CameraInfo>(
+            "/perception/depth/camera_info",
+            QosProfile::default(),
+        )?;
+        let static_tf_publisher = node.create_publisher::<r2r::tf2_msgs::msg::TFMessage>(
+            "/tf_static",
+            QosProfile::default().transient_local(),
         )?;
         let controller_commands = node.subscribe_untyped(
             "/stararm102/joint_commands",
@@ -132,6 +151,11 @@ impl RosInterface {
             "moveit_msgs/srv/GetPlanningScene",
             QosProfile::default(),
         )?;
+        let clear_octomap = node.create_client_untyped(
+            "/clear_octomap",
+            "std_srvs/srv/Empty",
+            QosProfile::default(),
+        )?;
         let (motion_sender, motion_receiver) = channel();
         let node = Arc::new(Mutex::new(node));
         let spin_node = Arc::clone(&node);
@@ -155,12 +179,16 @@ impl RosInterface {
             pose_publisher,
             hand_publisher,
             state_publisher,
+            depth_publisher,
+            camera_info_publisher,
+            static_tf_publisher,
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
             forward_kinematics: Arc::new(forward_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
+            clear_octomap: Arc::new(clear_octomap),
             motion_sender,
             event_sender,
         };
@@ -177,6 +205,86 @@ impl RosInterface {
             "name": names,
             "position": positions,
         }))?;
+        Ok(())
+    }
+
+    pub fn publish_depth_cloud(&self, cloud: DepthPointCloudFrame) -> EyreResult<()> {
+        let mut data = Vec::with_capacity(cloud.points_xyz_m.len() * 12);
+        for point in cloud.points_xyz_m {
+            for coordinate in point {
+                data.extend_from_slice(&coordinate.to_le_bytes());
+            }
+        }
+        self.depth_publisher
+            .publish(&r2r::sensor_msgs::msg::PointCloud2 {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: ros_time(cloud.source_time_ns),
+                    frame_id: cloud.frame_id,
+                },
+                height: cloud.height,
+                width: cloud.width,
+                fields: ["x", "y", "z"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| r2r::sensor_msgs::msg::PointField {
+                        name: name.into(),
+                        offset: (index * 4) as u32,
+                        datatype: 7,
+                        count: 1,
+                    })
+                    .collect(),
+                is_bigendian: false,
+                point_step: 12,
+                row_step: cloud.width * 12,
+                data,
+                is_dense: false,
+            })?;
+        Ok(())
+    }
+
+    pub fn publish_depth_calibration(&self, calibration: DepthCameraCalibration) -> EyreResult<()> {
+        let stamp = ros_time(calibration.source_time_ns);
+        self.camera_info_publisher
+            .publish(&r2r::sensor_msgs::msg::CameraInfo {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: stamp.clone(),
+                    frame_id: calibration.frame_id.clone(),
+                },
+                height: calibration.height,
+                width: calibration.width,
+                distortion_model: calibration.distortion_model,
+                d: calibration.distortion,
+                k: calibration.camera_matrix.to_vec(),
+                r: RECTIFICATION_MATRIX.to_vec(),
+                p: calibration.projection_matrix.to_vec(),
+                ..Default::default()
+            })?;
+        let [x, y, z] = calibration.translation_m;
+        let [qx, qy, qz, qw] = calibration.orientation_xyzw;
+        self.static_tf_publisher
+            .publish(&r2r::tf2_msgs::msg::TFMessage {
+                transforms: vec![r2r::geometry_msgs::msg::TransformStamped {
+                    header: r2r::std_msgs::msg::Header {
+                        stamp,
+                        frame_id: calibration.parent_frame_id,
+                    },
+                    child_frame_id: calibration.frame_id,
+                    transform: r2r::geometry_msgs::msg::Transform {
+                        translation: r2r::geometry_msgs::msg::Vector3 { x, y, z },
+                        rotation: r2r::geometry_msgs::msg::Quaternion {
+                            x: qx,
+                            y: qy,
+                            z: qz,
+                            w: qw,
+                        },
+                    },
+                }],
+            })?;
+        Ok(())
+    }
+
+    pub fn clear_octomap(&self) -> EyreResult<()> {
+        block_on(call(&self.clear_octomap, json!({})))?;
         Ok(())
     }
 
@@ -216,6 +324,12 @@ impl RosInterface {
                 .get_inter_process_subscription_count()
                 .is_ok_and(|count| count > 0)
         })
+    }
+
+    pub fn depth_output_ready(&self) -> bool {
+        self.depth_publisher
+            .get_inter_process_subscription_count()
+            .is_ok_and(|count| count > 0)
     }
 
     pub fn request_current_pose(&self, joints: Vec<f64>) {
@@ -574,6 +688,13 @@ fn parse_fk(response: Value) -> EyreResult<Pose> {
 
 fn number(value: &Value) -> f64 {
     value.as_f64().unwrap_or_default()
+}
+
+fn ros_time(time_ns: i64) -> r2r::builtin_interfaces::msg::Time {
+    r2r::builtin_interfaces::msg::Time {
+        sec: time_ns.div_euclid(1_000_000_000) as i32,
+        nanosec: time_ns.rem_euclid(1_000_000_000) as u32,
+    }
 }
 
 fn allow_pairs(matrix: &mut Value, pairs: &[(String, String)]) -> EyreResult<()> {
