@@ -92,6 +92,7 @@ services:
       dockerfile: Dockerfile.motion
       additional_contexts:
         stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+        moveit_vendor: ${MOVEIT_SERVO_SOURCE:-../../../../temp/moveit2-2.12.4/moveit_ros/moveit_servo}
     command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-motion"]
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250

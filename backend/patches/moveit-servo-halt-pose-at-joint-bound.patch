@@ -1,0 +1,14 @@
+diff --git a/moveit_ros/moveit_servo/src/servo.cpp b/moveit_ros/moveit_servo/src/servo.cpp
+index 022176128..8fc4cc3df 100644
+--- a/moveit_ros/moveit_servo/src/servo.cpp
++++ b/moveit_ros/moveit_servo/src/servo.cpp
+@@ -349,7 +349,8 @@ KinematicState Servo::haltJoints(const std::vector<size_t>& joint_variables_to_h
+ 
+   const bool all_joint_halt =
+       (getCommandType() == CommandType::JOINT_JOG && servo_params_.halt_all_joints_in_joint_mode) ||
+-      (getCommandType() == CommandType::TWIST && servo_params_.halt_all_joints_in_cartesian_mode);
++      ((getCommandType() == CommandType::TWIST || getCommandType() == CommandType::POSE) &&
++       servo_params_.halt_all_joints_in_cartesian_mode);
+ 
+   if (all_joint_halt)
+   {
