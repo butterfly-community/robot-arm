@@ -2,6 +2,7 @@ mod simulation;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -22,9 +23,9 @@ use robot_arm_messages::{
     BooleanActionSample, ControlInputFrame, FloatActionSample, INPUT_ACTIONS, InputBindingState,
     InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo,
     InputSimulationItem, InputSimulationRequest, InputSimulationState, InputSourceInfo,
-    InputStreamDiagnostics, PoseComponent, PoseFlags, RequestAction, RequestResult, SCHEMA_VERSION,
-    SelectPoseSourceRequest, SelectedInputSourceState, ServiceState, from_arrow, input_action_spec,
-    to_arrow,
+    InputStreamDiagnostics, PoseComponent, PoseFlags, RenameInputSourceRequest, RequestAction,
+    RequestResult, SCHEMA_VERSION, SelectPoseSourceRequest, SelectedInputSourceState, ServiceState,
+    from_arrow, input_action_spec, to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -134,6 +135,13 @@ fn main() -> Result<()> {
                     send(&mut node, "bindings_request_result", &result)?;
                     publish_snapshot(&mut node, &mut input)?;
                 }
+                "rename_source" => {
+                    let request: RenameInputSourceRequest =
+                        from_arrow(data.as_array()).context("decode rename_source")?;
+                    let result = input.rename_source(request);
+                    send(&mut node, "source_name_request_result", &result)?;
+                    publish_snapshot(&mut node, &mut input)?;
+                }
                 "set_simulation" => {
                     let request: InputSimulationRequest =
                         from_arrow(data.as_array()).context("decode set_simulation")?;
@@ -227,6 +235,8 @@ struct InputConfig {
     bindings: Vec<ActionBinding>,
     #[serde(default)]
     feedback_bindings: Vec<ActionFeedbackBinding>,
+    #[serde(default)]
+    device_names: BTreeMap<String, String>,
     #[serde(default = "initial_config_version")]
     config_version: u64,
 }
@@ -247,6 +257,7 @@ impl Default for InputConfig {
             orientation_source: None,
             bindings: vec![],
             feedback_bindings: vec![],
+            device_names: BTreeMap::new(),
             config_version: 1,
         }
     }
@@ -338,7 +349,7 @@ impl ControllerInput {
         }
     }
 
-    fn commit_bindings(&mut self, config: InputConfig) -> Result<()> {
+    fn commit_config(&mut self, config: InputConfig) -> Result<()> {
         if let Some(path) = &self.config_path {
             save_input_config(path, &config)?;
         }
@@ -644,7 +655,7 @@ impl ControllerInput {
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
             config.config_version += 1;
-            if let Err(save_error) = self.commit_bindings(config) {
+            if let Err(save_error) = self.commit_config(config) {
                 error = Some(format!("保存输入绑定失败：{save_error}"));
             } else {
                 self.offset_candidates.clear();
@@ -657,6 +668,40 @@ impl ControllerInput {
             request_id: request.request_id,
             acknowledged_action: RequestAction::Apply,
             value: Some(self.binding_states()),
+            original_error: error,
+        }
+    }
+
+    fn rename_source(
+        &mut self,
+        request: RenameInputSourceRequest,
+    ) -> RequestResult<InputSourceInfo> {
+        let source = self.sources.get(&request.source_id).cloned();
+        let mut config = self.config.clone();
+        match request.custom_name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                config
+                    .device_names
+                    .insert(request.source_id.clone(), name.to_owned());
+            }
+            _ => {
+                config.device_names.remove(&request.source_id);
+            }
+        }
+        config.config_version += 1;
+        let error = self
+            .commit_config(config)
+            .err()
+            .map(|error| format!("保存设备名称失败：{error}"));
+        let mut value = source;
+        if let Some(source) = &mut value {
+            source.custom_name = self.config.device_names.get(&source.source_id).cloned();
+        }
+        RequestResult {
+            schema_version: SCHEMA_VERSION,
+            request_id: request.request_id,
+            acknowledged_action: RequestAction::Apply,
+            value,
             original_error: error,
         }
     }
@@ -837,7 +882,15 @@ impl ControllerInput {
         InputDiscoveryState {
             schema_version: SCHEMA_VERSION,
             drivers: self.drivers.values().cloned().collect(),
-            sources: self.sources.values().cloned().collect(),
+            sources: self
+                .sources
+                .values()
+                .cloned()
+                .map(|mut source| {
+                    source.custom_name = self.config.device_names.get(&source.source_id).cloned();
+                    source
+                })
+                .collect(),
             position_source_id: self
                 .config
                 .position_source
@@ -1399,6 +1452,7 @@ fn nolo_source(info: &hidapi::DeviceInfo, device_id: &str, controller: u8) -> In
             "{} / Controller {controller}",
             info.product_string().unwrap_or("NOLO CV1")
         ),
+        custom_name: None,
         vendor_id: Some(format!("{:04x}", info.vendor_id())),
         product_id: Some(format!("{:04x}", info.product_id())),
         serial: info.serial_number().map(str::to_owned),
@@ -1546,7 +1600,9 @@ fn open_sdl_gamepad(
             .sensor_set_enabled(SensorType::Accelerometer, true)
             .map_err(|error| eyre!(error.to_string()))?;
     }
-    let source_id = format!("sdl3:{raw_id}");
+    let serial = gamepad.serial_number();
+    let device_id = sdl_device_id(serial.as_deref(), gamepad.path().as_deref(), raw_id);
+    let source_id = format!("sdl3:{device_id}");
     let has_rumble = unsafe { gamepad.has_rumble() };
     let has_trigger_rumble = unsafe { gamepad.has_rumble_triggers() };
     let components = SDL_AXES
@@ -1570,19 +1626,16 @@ fn open_sdl_gamepad(
                 }),
         )
         .collect();
-    let device_id = gamepad
-        .serial_number()
-        .or_else(|| gamepad.path())
-        .unwrap_or_else(|| source_id.clone());
     let feedback_capabilities = sdl_feedback_capabilities(has_trigger_rumble, has_rumble);
     let source = InputSourceInfo {
         source_id,
         driver_id: SDL_DRIVER_ID.into(),
         device_id,
         display_name: gamepad.name().unwrap_or_else(|| "SDL3 gamepad".into()),
+        custom_name: None,
         vendor_id: gamepad.vendor_id().map(|value| format!("{value:04x}")),
         product_id: gamepad.product_id().map(|value| format!("{value:04x}")),
-        serial: gamepad.serial_number(),
+        serial,
         position_capable: false,
         orientation_capable: has_gyro && has_acceleration,
         action_capable: true,
@@ -1605,6 +1658,41 @@ fn open_sdl_gamepad(
         },
     );
     Ok(())
+}
+
+fn sdl_device_id(serial: Option<&str>, path: Option<&str>, raw_id: u32) -> String {
+    if let Some(serial) = serial.filter(|value| !value.is_empty()) {
+        return format!("serial:{serial}");
+    }
+    if let Some(path) = path {
+        return stable_input_alias(path).unwrap_or_else(|| path.to_owned());
+    }
+    format!("instance:{raw_id}")
+}
+
+fn stable_input_alias(path: &str) -> Option<String> {
+    let target = fs::canonicalize(path).ok()?;
+    for directory in ["/dev/input/by-id", "/dev/input/by-path"] {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        let mut aliases = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|alias| {
+                alias
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("event-joystick"))
+                    && fs::canonicalize(alias).ok().as_ref() == Some(&target)
+            })
+            .collect::<Vec<_>>();
+        aliases.sort();
+        if let Some(alias) = aliases.into_iter().next() {
+            return Some(alias.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 fn sdl_feedback_capabilities(
@@ -1728,6 +1816,7 @@ mod tests {
             driver_id: "fixture-driver".into(),
             device_id: source_id.into(),
             display_name: source_id.into(),
+            custom_name: None,
             vendor_id: None,
             product_id: None,
             serial: None,
@@ -1758,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_config_contains_only_function_and_feedback_bindings() {
+    fn persisted_config_contains_bindings_and_device_names() {
         let path = std::env::temp_dir().join(format!(
             "controller-input-{}-{}.json",
             std::process::id(),
@@ -1784,6 +1873,7 @@ mod tests {
             }),
             bindings: vec![function_binding.clone()],
             feedback_bindings: vec![feedback_binding.clone()],
+            device_names: BTreeMap::from([("controller-a".into(), "左手控制器".into())]),
             config_version: 7,
             ..Default::default()
         };
@@ -1792,6 +1882,7 @@ mod tests {
         let stored = std::fs::read_to_string(&path).unwrap();
         assert!(stored.contains("bindings"));
         assert!(stored.contains("feedback_bindings"));
+        assert!(stored.contains("device_names"));
         assert!(!stored.contains("position_source"));
         assert!(!stored.contains("orientation_source"));
         assert!(!stored.contains("component_offsets"));
@@ -1799,9 +1890,50 @@ mod tests {
         let loaded = load_input_config(&path).unwrap();
         assert_eq!(loaded.bindings, [function_binding]);
         assert_eq!(loaded.feedback_bindings, [feedback_binding]);
+        assert_eq!(loaded.device_names["controller-a"], "左手控制器");
         assert!(loaded.position_source.is_none());
         assert!(loaded.orientation_source.is_none());
         assert_eq!(loaded.config_version, 7);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn custom_device_name_is_persisted_and_reported() {
+        let path = std::env::temp_dir().join(format!(
+            "controller-input-name-{}-{}.json",
+            std::process::id(),
+            now_ns()
+        ));
+        let (_driver_tx, driver_rx) = mpsc::channel();
+        let (haptic_tx, _haptic_rx) = mpsc::channel();
+        let mut input = ControllerInput::from_config(
+            driver_rx,
+            haptic_tx,
+            Some(path.clone()),
+            InputConfig::default(),
+        );
+        input
+            .sources
+            .insert("controller-a".into(), source("controller-a", false, false));
+
+        let result = input.rename_source(RenameInputSourceRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "rename".into(),
+            source_id: "controller-a".into(),
+            custom_name: Some("  左手控制器  ".into()),
+        });
+
+        assert_eq!(result.original_error, None);
+        assert_eq!(
+            result.value.and_then(|source| source.custom_name),
+            Some("左手控制器".into())
+        );
+        assert_eq!(
+            input.discovery_state().sources[0].custom_name.as_deref(),
+            Some("左手控制器")
+        );
+        let loaded = load_input_config(&path).unwrap();
+        assert_eq!(loaded.device_names["controller-a"], "左手控制器");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1860,6 +1992,18 @@ mod tests {
                 "button/grip",
                 "button/touchpad_touch",
             ]
+        );
+    }
+
+    #[test]
+    fn sdl_source_identity_does_not_use_the_runtime_instance_when_serial_is_available() {
+        assert_eq!(
+            sdl_device_id(Some("controller-serial"), Some("/dev/input/event8"), 1),
+            sdl_device_id(Some("controller-serial"), Some("/dev/input/event9"), 42)
+        );
+        assert_eq!(
+            sdl_device_id(Some("controller-serial"), None, 1),
+            "serial:controller-serial"
         );
     }
 

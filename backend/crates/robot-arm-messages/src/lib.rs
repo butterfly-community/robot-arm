@@ -133,6 +133,7 @@ pub struct InputSourceInfo {
     pub driver_id: String,
     pub device_id: String,
     pub display_name: String,
+    pub custom_name: Option<String>,
     pub vendor_id: Option<String>,
     pub product_id: Option<String>,
     pub serial: Option<String>,
@@ -439,6 +440,14 @@ pub struct ApplyInputBindingsRequest {
     pub request_id: String,
     pub bindings: Vec<ActionBinding>,
     pub feedback_bindings: Vec<ActionFeedbackBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RenameInputSourceRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub source_id: String,
+    pub custom_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -949,6 +958,7 @@ pub struct ExecutionTransportState {
     pub discovered_endpoints: Vec<ExecutionEndpoint>,
     pub selected_endpoint: Option<String>,
     pub connected: bool,
+    pub feedback_interval_ms: u64,
     pub last_error: Option<String>,
     pub last_command: Option<ArmCommand>,
     pub feedback_summary: Option<String>,

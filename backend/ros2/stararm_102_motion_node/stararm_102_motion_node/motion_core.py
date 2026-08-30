@@ -54,6 +54,10 @@ def controller_sync_required(previous_source: str | None, source: str) -> bool:
     )
 
 
+def motion_in_progress(state: str) -> bool:
+    return state in {"planning", "executing"}
+
+
 def tool_action_transition(previous: float | None, current: float) -> float | None:
     if previous is None or previous == current:
         return None

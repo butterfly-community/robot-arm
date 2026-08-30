@@ -42,6 +42,7 @@ from .motion_core import (
     controller_sync_required,
     load_motion_config,
     merge_controller_command,
+    motion_in_progress,
     save_motion_config,
     target_pose,
     tool_action_transition,
@@ -109,6 +110,9 @@ class MotionNode(Node):
         self._feedback_source: str | None = None
         self._controller_sync_requested = False
         self._controller_sync_phase: str | None = None
+        self._motion_waiting_for_sync: tuple[
+            str, list[float], dict[str, Any], bool
+        ] | None = None
         self._controller_output_armed = False
         self._current_tcp: Pose | None = None
         self._anchor_tcp: Pose | None = None
@@ -337,7 +341,10 @@ class MotionNode(Node):
             if (
                 not self._controller_sync_requested
                 or self._controller_sync_phase is not None
-                or self._motion_status["state"] in {"planning", "executing"}
+                or (
+                    motion_in_progress(self._motion_status["state"])
+                    and self._motion_waiting_for_sync is None
+                )
                 or not self._controller_switch_client.service_is_ready()
                 or not self._arm_trajectory_client.server_is_ready()
                 or not self._hand_trajectory_client.server_is_ready()
@@ -376,6 +383,8 @@ class MotionNode(Node):
                 self._enqueue_motion_state()
         if activate:
             self._switch_controllers(["arm_controller", "hand_controller"], [])
+        else:
+            self._start_motion_after_controller_sync()
 
     def _maintain_ros_interfaces(self) -> None:
         self._synchronize_controllers()
@@ -488,6 +497,9 @@ class MotionNode(Node):
 
     def _prepare_relative_control(self, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id", ""))
+        if motion_in_progress(self._motion_status["state"]):
+            self._reject_concurrent_motion(request_id)
+            return
         error = self._apply_control_mode("manual")
         if error is not None:
             self._set_motion_failed(request_id, error, "apply")
@@ -562,6 +574,9 @@ class MotionNode(Node):
         request_id = str(request.get("request_id", ""))
         if request.get("action") == "cancel":
             self._cancel_motion(request_id)
+            return
+        if motion_in_progress(self._motion_status["state"]):
+            self._reject_concurrent_motion(request_id)
             return
         if request.get("action") != "apply":
             self._set_motion_failed(
@@ -689,6 +704,51 @@ class MotionNode(Node):
         *,
         complete_in_relative_mode: bool = False,
     ) -> None:
+        if self._latest_arm_state is None:
+            self._set_motion_failed(request_id, "缺少当前关节反馈", "apply")
+            return
+        waiting_for_sync = (
+            self._controller_sync_requested or self._controller_sync_phase is not None
+        )
+        self._motion_status = {
+            **self._idle_motion_status(),
+            "request_id": request_id,
+            "state": "planning",
+            "result_message": "等待 ros2_control 同步当前反馈"
+            if waiting_for_sync
+            else "MoveIt 正在规划普通关节目标",
+        }
+        self._enqueue("motion_status", self._motion_status)
+        if waiting_for_sync:
+            self._motion_waiting_for_sync = (
+                request_id,
+                target,
+                options,
+                complete_in_relative_mode,
+            )
+            self._synchronize_controllers()
+            return
+        self._start_motion_plan(
+            request_id, target, options, complete_in_relative_mode
+        )
+
+    def _start_motion_after_controller_sync(self) -> None:
+        with self._lock:
+            waiting = self._motion_waiting_for_sync
+            self._motion_waiting_for_sync = None
+            if waiting is None:
+                return
+            self._start_motion_plan(*waiting)
+
+    def _start_motion_plan(
+        self,
+        request_id: str,
+        target: list[float],
+        options: dict[str, Any],
+        complete_in_relative_mode: bool,
+    ) -> None:
+        if not self._motion_is(request_id, "planning"):
+            return
         if (
             self._latest_arm_state is None
             or not self._moveit.ready()
@@ -696,18 +756,9 @@ class MotionNode(Node):
             or not self._hand_trajectory_client.server_is_ready()
             or not self._servo_pause_client.service_is_ready()
         ):
-            self._set_motion_failed(
-                request_id, "缺少当前关节反馈或轨迹控制器尚未就绪", "apply"
-            )
+            self._set_motion_failed(request_id, "轨迹控制器尚未就绪", "apply")
             return
         current = list(self._latest_arm_state["joints_rad"])
-        self._motion_status = {
-            **self._idle_motion_status(),
-            "request_id": request_id,
-            "state": "planning",
-            "result_message": "MoveIt 正在规划普通关节目标",
-        }
-        self._enqueue("motion_status", self._motion_status)
         request = SetBool.Request()
         request.data = True
         self._servo_pause_client.call_async(request).add_done_callback(
@@ -845,11 +896,9 @@ class MotionNode(Node):
     def _cancel_motion(self, request_id: str) -> None:
         cancelled_request_id = self._motion_status["request_id"]
         cancelled_action = self._motion_status["acknowledged_action"]
-        cancelled_was_active = self._motion_status["state"] in {
-            "planning",
-            "executing",
-        }
+        cancelled_was_active = motion_in_progress(self._motion_status["state"])
         self._moveit.cancel()
+        self._motion_waiting_for_sync = None
         self._resume_servo()
         self._reset_relative_baseline()
         self._motion_actuator_target = None
@@ -873,6 +922,7 @@ class MotionNode(Node):
         self._enqueue("motion_request_result", self._status_result())
 
     def _set_motion_failed(self, request_id: str, message: str, action: str) -> None:
+        self._motion_waiting_for_sync = None
         self._resume_servo()
         self._reset_relative_baseline()
         self._motion_actuator_target = None
@@ -885,6 +935,15 @@ class MotionNode(Node):
         }
         self._enqueue("motion_status", self._motion_status)
         self._enqueue("motion_request_result", self._status_result())
+
+    def _reject_concurrent_motion(self, request_id: str) -> None:
+        status = {
+            **self._idle_motion_status(),
+            "request_id": request_id,
+            "state": "failed",
+            "result_message": "已有普通运动正在执行",
+        }
+        self._enqueue("motion_request_result", self._status_result_for(status))
 
     def _status_result(self) -> dict[str, Any]:
         return self._status_result_for(self._motion_status)

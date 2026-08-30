@@ -149,6 +149,7 @@ export default function Page() {
   const tool = motion?.current_tool_pose;
   const target = motion?.target_tool_pose;
   const state = String(latestMotion.state ?? "idle");
+  const motionBusy = state === "planning" || state === "executing";
 
   return (
     <Shell
@@ -327,10 +328,13 @@ export default function Page() {
             </Field>
           ))}
           <div className="target-list">
-            <Button onClick={prepareRelative}>准备相对控制</Button>
+            <Button disabled={motionBusy} onClick={prepareRelative}>
+              准备相对控制
+            </Button>
             {(model?.named_targets ?? []).map((item) => (
               <Button
                 key={item.key}
+                disabled={motionBusy}
                 onClick={() => {
                   setPositions(item.joint_positions_rad);
                   setActuators(item.actuator_positions_rad);

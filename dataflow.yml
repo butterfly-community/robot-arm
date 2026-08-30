@@ -16,6 +16,7 @@ nodes:
       snapshot: web-gateway-node/tracking_snapshot
       select_pose_source: web-gateway-node/select_pose_source_request
       apply_bindings: web-gateway-node/apply_bindings_request
+      rename_source: web-gateway-node/rename_input_source_request
       set_simulation: web-gateway-node/set_simulation_request
       action_feedback:
         source: stararm-102-execution-node/action_feedback
@@ -28,6 +29,7 @@ nodes:
       - control_input
       - pose_source_request_result
       - bindings_request_result
+      - source_name_request_result
       - simulation_request_result
 
   - id: spatial-transform-node
@@ -95,7 +97,7 @@ nodes:
       execution_request: web-gateway-node/execution_request
       snapshot: web-gateway-node/execution_snapshot
       tick:
-        source: dora/timer/millis/100
+        source: dora/timer/millis/10
         queue_size: 1
         queue_policy: drop_oldest
     outputs:
@@ -134,6 +136,7 @@ nodes:
         queue_policy: drop_oldest
       pose_source_request_result: controller-input-node/pose_source_request_result
       bindings_request_result: controller-input-node/bindings_request_result
+      source_name_request_result: controller-input-node/source_name_request_result
       simulation_request_result: controller-input-node/simulation_request_result
       spatial_pose:
         source: spatial-transform-node/spatial_pose
@@ -169,6 +172,7 @@ nodes:
       - tracking_snapshot
       - select_pose_source_request
       - apply_bindings_request
+      - rename_input_source_request
       - set_simulation_request
       - spatial_snapshot
       - update_spatial_config_request

@@ -150,6 +150,12 @@ def python_protocol_server(port, rounds, Packet):
             assert code == CODE_SYNC_COMMAND
             assert params == bytes([CODE_QUERY_MONITOR, 1, 7, *IDS])
             if round_index == 0:
+                # The Rust transaction retries one lost Monitor request on the same port.
+                code, params = read_request(fd, Packet)
+                assert code == CODE_SYNC_COMMAND
+                assert params == bytes([CODE_QUERY_MONITOR, 1, 7, *IDS])
+                # A legal optional action response may still be pending on the bus.
+                os.write(fd, response_packet(Packet, CODE_SET_MTURN_BY_INTERVAL, b"\x00\x01"))
                 corrupt = bytearray(response_packet(Packet, CODE_QUERY_MONITOR, bytes(16)))
                 corrupt[-1] ^= 1
                 os.write(fd, b"\xaa\x05\xaa" + corrupt)

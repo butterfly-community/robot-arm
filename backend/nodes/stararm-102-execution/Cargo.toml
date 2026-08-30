@@ -13,3 +13,6 @@ json-config-store.workspace = true
 robot-arm-messages.workspace = true
 serde.workspace = true
 serialport.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

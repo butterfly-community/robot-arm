@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
@@ -30,6 +30,11 @@ const DECELERATION_TIME_MS: u16 = 50;
 const GRIPPER_COMMAND_POWER_MW: u16 = 2_000;
 const GRIPPER_IDLE_POWER_MW: u16 = 400;
 const CONFIG_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_FEEDBACK_INTERVAL_MS: u64 = 100;
+
+fn default_feedback_interval_ms() -> u64 {
+    DEFAULT_FEEDBACK_INTERVAL_MS
+}
 
 fn main() -> Result<()> {
     let (mut node, mut events) = DoraNode::init_from_env()?;
@@ -106,6 +111,29 @@ impl StarArmBus {
         read_parameters(&mut self.bus)
     }
 
+    fn write_gains(&mut self, id: u8, kp: u16, hold_kp: u16) -> Result<(), String> {
+        let mut parameters = self
+            .bus
+            .read_internal_parameters(id)
+            .map_err(|error| error.to_string())?;
+        parameters.kp = kp;
+        parameters.hold_kp = hold_kp;
+        self.bus
+            .write_internal_parameters(parameters)
+            .map_err(|error| error.to_string())?;
+        let actual = self
+            .bus
+            .read_internal_parameters(id)
+            .map_err(|error| error.to_string())?;
+        if actual.kp != kp || actual.hold_kp != hold_kp {
+            return Err(format!(
+                "舵机 ID {id} 参数回读不一致：kp={} hold_kp={}",
+                actual.kp, actual.hold_kp
+            ));
+        }
+        Ok(())
+    }
+
     fn write(&mut self, command: &ArmCommand) -> Result<bool, String> {
         let commands = encode_command(command)?;
         if self.last_commands.as_ref() == Some(&commands) {
@@ -124,6 +152,8 @@ struct ExecutionConfig {
     schema_version: u32,
     config_version: u64,
     selected_endpoint: Option<String>,
+    #[serde(default = "default_feedback_interval_ms")]
+    feedback_interval_ms: u64,
 }
 
 impl Default for ExecutionConfig {
@@ -132,6 +162,7 @@ impl Default for ExecutionConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
             config_version: 1,
             selected_endpoint: None,
+            feedback_interval_ms: DEFAULT_FEEDBACK_INTERVAL_MS,
         }
     }
 }
@@ -145,6 +176,7 @@ struct StarArmExecution {
     telemetry: ArmTelemetry,
     bus: Option<StarArmBus>,
     next_sequence: u64,
+    last_feedback_poll: Option<Instant>,
 }
 
 impl StarArmExecution {
@@ -173,12 +205,14 @@ impl StarArmExecution {
     }
 
     fn with_config(config_path: PathBuf, config: ExecutionConfig) -> Self {
+        let feedback_interval_ms = config.feedback_interval_ms;
         Self {
             config_path,
             config,
             info: execution_info(),
             transport: ExecutionTransportState {
                 schema_version: SCHEMA_VERSION,
+                feedback_interval_ms,
                 ..Default::default()
             },
             state: ArmState {
@@ -199,6 +233,7 @@ impl StarArmExecution {
             },
             bus: None,
             next_sequence: 1,
+            last_feedback_poll: None,
         }
     }
 
@@ -275,6 +310,13 @@ impl StarArmExecution {
                 }
                 None
             }
+            RequestAction::Apply => {
+                if request.fields.contains_key("feedback_interval_ms") {
+                    self.apply_execution_config(&request.fields).err()
+                } else {
+                    self.apply_parameters(&request.fields).err()
+                }
+            }
             action => Some(format!("execution 节点不处理 {action:?} 请求")),
         };
         RequestResult {
@@ -284,6 +326,53 @@ impl StarArmExecution {
             value: Some(self.transport.clone()),
             original_error: error,
         }
+    }
+
+    fn apply_parameters(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
+        let actuator = fields
+            .get("actuator_key")
+            .ok_or_else(|| "参数写入请求缺少 actuator_key".to_owned())?;
+        let id = JOINT_KEYS
+            .iter()
+            .position(|key| key == actuator)
+            .map(|index| index as u8)
+            .or_else(|| (actuator == "gripper").then_some(6))
+            .ok_or_else(|| format!("未知执行器 {actuator}"))?;
+        let parse = |key: &str| {
+            fields
+                .get(key)
+                .ok_or_else(|| format!("参数写入请求缺少 {key}"))?
+                .parse::<u16>()
+                .map_err(|error| format!("参数 {key} 无效：{error}"))
+        };
+        let bus = self
+            .bus
+            .as_mut()
+            .ok_or_else(|| "真机串口未连接".to_owned())?;
+        bus.write_gains(id, parse("kp")?, parse("hold_kp")?)?;
+        self.transport.parameter_values = bus.read_parameters();
+        self.transport.parameter_error = self
+            .transport
+            .parameter_values
+            .iter()
+            .find_map(|value| value.original_error.clone());
+        Ok(())
+    }
+
+    fn apply_execution_config(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
+        let feedback_interval_ms = fields
+            .get("feedback_interval_ms")
+            .ok_or_else(|| "执行配置缺少 feedback_interval_ms".to_owned())?
+            .parse::<u64>()
+            .map_err(|error| format!("feedback_interval_ms 无效：{error}"))?;
+        let mut next = self.config.clone();
+        next.feedback_interval_ms = feedback_interval_ms;
+        next.config_version += 1;
+        save(&self.config_path, &next).map_err(|error| error.to_string())?;
+        self.config = next;
+        self.transport.feedback_interval_ms = feedback_interval_ms;
+        self.last_feedback_poll = None;
+        Ok(())
     }
 
     fn configure_endpoint(&mut self, selected_endpoint: Option<String>) -> Result<(), String> {
@@ -304,6 +393,7 @@ impl StarArmExecution {
 
     fn connect(&mut self, path: String) -> Result<(), String> {
         self.bus = None;
+        self.last_feedback_poll = None;
         self.transport.connected = false;
         self.transport.selected_endpoint = Some(path.clone());
         match StarArmBus::open(&path) {
@@ -331,12 +421,12 @@ impl StarArmExecution {
 
     fn disconnect(&mut self) {
         self.bus = None;
+        self.last_feedback_poll = None;
         self.transport.connected = false;
         self.transport.last_error = None;
     }
 
     fn apply_command(&mut self, command: ArmCommand) {
-        self.transport.last_command = Some(command.clone());
         if command.model_revision != MODEL_REVISION
             || command.joints_rad.len() != 6
             || command.actuators_rad.len() != 1
@@ -350,12 +440,14 @@ impl StarArmExecution {
             return;
         }
         if let Some(bus) = self.bus.as_mut() {
+            self.transport.last_command = Some(command.clone());
             if let Err(error) = bus.write(&command) {
                 self.reopen_after_io_error(error);
             } else {
                 self.transport.last_error = None;
             }
-        } else {
+        } else if self.transport.selected_endpoint.is_none() {
+            self.transport.last_command = Some(command.clone());
             self.state = ArmState {
                 schema_version: SCHEMA_VERSION,
                 sequence: self.next_sequence,
@@ -370,6 +462,15 @@ impl StarArmExecution {
     }
 
     fn poll_hardware(&mut self) -> bool {
+        let now = Instant::now();
+        if self.bus.is_none()
+            || self.last_feedback_poll.is_some_and(|last| {
+                now.duration_since(last) < Duration::from_millis(self.config.feedback_interval_ms)
+            })
+        {
+            return false;
+        }
+        self.last_feedback_poll = Some(now);
         let result = self
             .bus
             .as_mut()
@@ -395,6 +496,7 @@ impl StarArmExecution {
     fn reopen_after_io_error(&mut self, error: String) {
         let path = self.transport.selected_endpoint.clone();
         self.bus = None;
+        self.last_feedback_poll = None;
         self.transport.connected = false;
         self.transport.last_error = Some(error);
         if let Some(path) = path {
@@ -448,8 +550,14 @@ fn execution_info() -> ExecutionInfo {
             parameter("hold_kp", "保持 Kp"),
             parameter("hold_kd", "保持 Kd"),
             parameter("hold_bias", "保持偏置"),
+            parameter("full_deg", "满量程"),
+            parameter("reserved", "保留值"),
+            parameter("pwm_limit", "PWM 上限"),
             parameter("direction", "方向"),
+            parameter("pwm_frequency", "PWM 频率"),
             parameter("dead_zone", "死区"),
+            parameter("motor_direction", "电机方向"),
+            parameter("version_info", "内部版本"),
         ],
     }
 }
@@ -471,8 +579,14 @@ fn parameter_values(value: InternalParameters, time: i64) -> Vec<ParameterValue>
         ("hold_kp", value.hold_kp),
         ("hold_kd", value.hold_kd),
         ("hold_bias", value.hold_bias),
+        ("full_deg", value.full_deg),
+        ("reserved", value.reserved),
+        ("pwm_limit", value.pwm_limit),
         ("direction", u16::from(value.direction)),
+        ("pwm_frequency", u16::from(value.pwm_frequency)),
         ("dead_zone", u16::from(value.dead_zone)),
+        ("motor_direction", u16::from(value.motor_direction)),
+        ("version_info", u16::from(value.version_info)),
     ]
     .into_iter()
     .map(|(field, number)| ParameterValue {
@@ -671,6 +785,15 @@ mod tests {
         assert_eq!(execution.state.joints_rad, vec![0.1; 6]);
     }
     #[test]
+    fn selected_but_disconnected_hardware_freezes_the_visible_state() {
+        let mut execution = StarArmExecution::new();
+        execution.transport.selected_endpoint = Some("/dev/disconnected".into());
+        let before = execution.state.clone();
+        execution.apply_command(command(vec![0.2; 6], 0.4));
+        assert_eq!(execution.state, before);
+        assert!(execution.transport.last_command.is_none());
+    }
+    #[test]
     fn all_model_angles_keep_their_sign_at_the_uart_boundary() {
         let encoded = encode_command(&command(vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6], 0.7)).unwrap();
         for (actual, expected) in encoded[..6]
@@ -805,5 +928,28 @@ mod tests {
         assert_eq!(disconnected.config_version, 3);
         assert_eq!(execution.transport.selected_endpoint, None);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn feedback_interval_is_persisted_without_reconnecting() {
+        let path = config_path();
+        let mut execution = StarArmExecution::with_config(path.clone(), ExecutionConfig::default());
+        let fields = BTreeMap::from([("feedback_interval_ms".into(), "250".into())]);
+        execution.apply_execution_config(&fields).unwrap();
+
+        let persisted: ExecutionConfig = load_or_default(&path).unwrap();
+        assert_eq!(persisted.feedback_interval_ms, 250);
+        assert_eq!(execution.transport.feedback_interval_ms, 250);
+        assert!(execution.last_feedback_poll.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn existing_config_without_feedback_interval_keeps_the_previous_period() {
+        let config: ExecutionConfig = serde_json::from_str(
+            r#"{"schema_version":1,"config_version":4,"selected_endpoint":null}"#,
+        )
+        .unwrap();
+        assert_eq!(config.feedback_interval_ms, DEFAULT_FEEDBACK_INTERVAL_MS);
     }
 }

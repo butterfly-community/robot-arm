@@ -12,14 +12,18 @@ pub const CODE_PING: u8 = 1;
 pub const CODE_SET_MTURN_BY_INTERVAL: u8 = 14;
 pub const CODE_QUERY_MONITOR: u8 = 22;
 pub const CODE_SYNC_COMMAND: u8 = 25;
+const CODE_STOP_CONTROL: u8 = 0x18;
 
 const REQUEST_HEADER: [u8; 2] = [0x12, 0x4c];
 const RESPONSE_HEADER: [u8; 2] = [0x05, 0x1c];
 const FRAME_OVERHEAD: usize = 5;
 const INVALID_MONITOR_POSITION: i32 = -235_929_599;
 const INTERNAL_PARAMETERS_REQUEST_HEADER: [u8; 4] = [0x13, 0x4d, 0xc5, 0x01];
+const INTERNAL_PARAMETERS_RESPONSE_HEADER: [u8; 4] = [0x05, 0x1c, 0xc5, 0x1a];
+const INTERNAL_PARAMETERS_WRITE_HEADER: [u8; 4] = [0x13, 0x4d, 0xc4, 0x1a];
 const INTERNAL_PARAMETERS_RESPONSE_SIZE: usize = 31;
 const INTERNAL_PARAMETERS_RESPONSE_DELAY: Duration = Duration::from_millis(200);
+const INTERNAL_PARAMETERS_WRITE_DELAY: Duration = Duration::from_millis(60);
 
 #[derive(Debug)]
 pub enum Error {
@@ -212,8 +216,14 @@ pub struct InternalParameters {
     pub hold_kp: u16,
     pub hold_kd: u16,
     pub hold_bias: u16,
+    pub full_deg: u16,
+    pub reserved: u16,
+    pub pwm_limit: u16,
     pub direction: u8,
+    pub pwm_frequency: u8,
     pub dead_zone: u8,
+    pub motor_direction: u8,
+    pub version_info: u8,
 }
 
 impl InternalParameters {
@@ -227,6 +237,12 @@ impl InternalParameters {
         if checksum(&response[..response.len() - 1]) != response[response.len() - 1] {
             return Err(Error::Protocol(format!(
                 "舵机 {expected_id} 内部参数响应校验失败"
+            )));
+        }
+        if response[..4] != INTERNAL_PARAMETERS_RESPONSE_HEADER {
+            return Err(Error::Protocol(format!(
+                "舵机 {expected_id} 内部参数响应头无效：{:02x?}",
+                &response[..4]
             )));
         }
         if response[4] != expected_id {
@@ -245,9 +261,46 @@ impl InternalParameters {
             hold_kp: value(13),
             hold_kd: value(15),
             hold_bias: value(17),
+            full_deg: value(19),
+            reserved: value(21),
+            pwm_limit: value(23),
             direction: response[25],
+            pwm_frequency: response[26],
             dead_zone: response[27],
+            motor_direction: response[28],
+            version_info: response[29],
         })
+    }
+
+    fn write_request(self) -> [u8; INTERNAL_PARAMETERS_RESPONSE_SIZE] {
+        let mut request = Vec::with_capacity(INTERNAL_PARAMETERS_RESPONSE_SIZE);
+        request.extend_from_slice(&INTERNAL_PARAMETERS_WRITE_HEADER);
+        request.push(self.id);
+        for value in [
+            self.kp,
+            self.kd,
+            self.ki,
+            self.bias,
+            self.hold_kp,
+            self.hold_kd,
+            self.hold_bias,
+            self.full_deg,
+            self.reserved,
+            self.pwm_limit,
+        ] {
+            request.extend_from_slice(&value.to_le_bytes());
+        }
+        request.extend_from_slice(&[
+            self.direction,
+            self.pwm_frequency,
+            self.dead_zone,
+            self.motor_direction,
+            self.version_info,
+        ]);
+        request.push(checksum(&request));
+        request
+            .try_into()
+            .expect("internal parameter request has a fixed size")
     }
 }
 
@@ -289,6 +342,23 @@ impl FashionStarBus {
         Ok(())
     }
     pub fn read_monitors(&mut self, ids: &[u8]) -> Result<Vec<Monitor>, Error> {
+        match self.read_monitors_once(ids) {
+            Ok(monitors) => Ok(monitors),
+            Err(first_error) => {
+                self.clear_input().map_err(|clear_error| {
+                    Error::Protocol(format!(
+                        "Monitor 首次读取失败：{first_error}；清理串口输入失败：{clear_error}"
+                    ))
+                })?;
+                self.read_monitors_once(ids).map_err(|retry_error| {
+                    Error::Protocol(format!(
+                        "Monitor 首次读取失败：{first_error}；重试仍失败：{retry_error}"
+                    ))
+                })
+            }
+        }
+    }
+    fn read_monitors_once(&mut self, ids: &[u8]) -> Result<Vec<Monitor>, Error> {
         let count = u8::try_from(ids.len())
             .map_err(|_| Error::Protocol("Monitor 舵机数量超过一个字节".to_owned()))?;
         let mut params = vec![CODE_QUERY_MONITOR, 1, count];
@@ -296,13 +366,12 @@ impl FashionStarBus {
         self.send(CODE_SYNC_COMMAND, &params)?;
         (0..ids.len())
             .map(|_| {
-                let response = self.receive()?;
-                if response.code != CODE_QUERY_MONITOR {
-                    return Err(Error::Protocol(format!(
-                        "Monitor 返回了功能码 {}",
-                        response.code
-                    )));
-                }
+                let response = loop {
+                    let response = self.receive()?;
+                    if response.code == CODE_QUERY_MONITOR {
+                        break response;
+                    }
+                };
                 Monitor::from_params(&response.params)
             })
             .collect()
@@ -335,16 +404,62 @@ impl FashionStarBus {
         }
         result
     }
+    pub fn write_internal_parameters(
+        &mut self,
+        parameters: InternalParameters,
+    ) -> Result<(), Error> {
+        self.port.clear(ClearBuffer::Input)?;
+        self.decoder = PacketDecoder::responses();
+        let result = (|| {
+            self.send(CODE_STOP_CONTROL, &[parameters.id, 0x10, 0, 0])?;
+            thread::sleep(INTERNAL_PARAMETERS_WRITE_DELAY);
+            self.port.write_all(&parameters.write_request())?;
+            let response = loop {
+                let response = self.receive()?;
+                if response.code == 0xc4 {
+                    break response;
+                }
+            };
+            if response.params.as_slice() != [parameters.id, 1] {
+                return Err(Error::Protocol(format!(
+                    "舵机 {} 内部参数写入响应无效：params={:02x?}",
+                    parameters.id, response.params
+                )));
+            }
+            Ok(())
+        })();
+        self.decoder = PacketDecoder::responses();
+        if result.is_err() {
+            let _ = self.port.clear(ClearBuffer::Input);
+        }
+        result
+    }
     fn send(&mut self, code: u8, params: &[u8]) -> Result<(), Error> {
         self.port.write_all(&request_packet(code, params)?)?;
         Ok(())
     }
+    fn clear_input(&mut self) -> Result<(), Error> {
+        self.port.clear(ClearBuffer::Input)?;
+        self.decoder = PacketDecoder::responses();
+        Ok(())
+    }
     fn receive(&mut self) -> Result<Packet, Error> {
+        let mut last_protocol_error = None;
         loop {
             let mut byte = [0];
-            self.port.read_exact(&mut byte)?;
-            if let Some(Ok(packet)) = self.decoder.push(byte[0]) {
-                return Ok(packet);
+            if let Err(io_error) = self.port.read_exact(&mut byte) {
+                return match last_protocol_error {
+                    Some(protocol_error) => Err(Error::Protocol(format!(
+                        "{protocol_error}；随后读取失败：{io_error}"
+                    ))),
+                    None => Err(Error::Io(io_error)),
+                };
+            }
+            if let Some(result) = self.decoder.push(byte[0]) {
+                match result {
+                    Ok(packet) => return Ok(packet),
+                    Err(error) => last_protocol_error = Some(error),
+                }
             }
         }
     }
@@ -388,5 +503,72 @@ mod tests {
         params.extend_from_slice(&INVALID_MONITOR_POSITION.to_le_bytes());
         params.extend_from_slice(&0_i16.to_le_bytes());
         assert!(Monitor::from_params(&params).is_err());
+    }
+    #[test]
+    fn internal_parameter_write_packet_matches_vendor_layout() {
+        let parameters = InternalParameters {
+            id: 2,
+            kp: 750,
+            kd: 50,
+            ki: 0,
+            bias: 0,
+            hold_kp: 750,
+            hold_kd: 50,
+            hold_bias: 0,
+            full_deg: 3600,
+            reserved: 0,
+            pwm_limit: 2980,
+            direction: 0,
+            pwm_frequency: 5,
+            dead_zone: 3,
+            motor_direction: 0,
+            version_info: 1,
+        };
+        let request = parameters.write_request();
+        assert_eq!(&request[..5], &[0x13, 0x4d, 0xc4, 0x1a, 2]);
+        assert_eq!(&request[5..7], &750_u16.to_le_bytes());
+        assert_eq!(&request[13..15], &750_u16.to_le_bytes());
+        assert_eq!(request[30], checksum(&request[..30]));
+    }
+    #[test]
+    fn internal_parameter_read_rejects_a_different_response_header() {
+        let mut response = [0_u8; INTERNAL_PARAMETERS_RESPONSE_SIZE];
+        response[..5].copy_from_slice(&[0x05, 0x1c, 0xc4, 0x1a, 2]);
+        response[30] = checksum(&response[..30]);
+        assert!(InternalParameters::from_response(2, &response).is_err());
+    }
+    #[test]
+    fn internal_parameter_read_accepts_the_protected_response_layout() {
+        let mut response = [0_u8; INTERNAL_PARAMETERS_RESPONSE_SIZE];
+        response[..5].copy_from_slice(&[0x05, 0x1c, 0xc5, 0x1a, 2]);
+        for (offset, value) in [
+            (5, 800_u16),
+            (7, 50),
+            (9, 0),
+            (11, 1),
+            (13, 800),
+            (15, 50),
+            (17, 2),
+            (19, 3600),
+            (21, 0),
+            (23, 2980),
+        ] {
+            response[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        response[25..30].copy_from_slice(&[0, 5, 3, 0, 1]);
+        response[30] = checksum(&response[..30]);
+        let parameters = InternalParameters::from_response(2, &response).unwrap();
+        assert_eq!(parameters.kp, 800);
+        assert_eq!(parameters.hold_kp, 800);
+        assert_eq!(parameters.full_deg, 3600);
+        assert_eq!(parameters.pwm_limit, 2980);
+        assert_eq!(parameters.dead_zone, 3);
+    }
+    #[test]
+    fn parameter_write_releases_torque_with_vendor_packet() {
+        assert_eq!(
+            request_packet(CODE_STOP_CONTROL, &[2, 0x10, 0, 0]).unwrap(),
+            [0x12, 0x4c, 0x18, 4, 2, 0x10, 0, 0, 0x8c]
+        );
     }
 }

@@ -10,6 +10,7 @@ from stararm_102_motion_node.motion_core import (
     controller_sync_required,
     load_motion_config,
     merge_controller_command,
+    motion_in_progress,
     save_motion_config,
     target_pose,
     tool_action_transition,
@@ -38,6 +39,12 @@ class MotionCoreTests(unittest.TestCase):
         self.assertFalse(controller_sync_required("software", "software"))
         self.assertTrue(controller_sync_required("software", "hardware"))
         self.assertFalse(controller_sync_required("hardware", "software"))
+
+    def test_only_planning_and_execution_are_in_progress(self) -> None:
+        self.assertTrue(motion_in_progress("planning"))
+        self.assertTrue(motion_in_progress("executing"))
+        for state in ("idle", "succeeded", "failed", "cancelled"):
+            self.assertFalse(motion_in_progress(state))
 
     def test_missing_motion_config_uses_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

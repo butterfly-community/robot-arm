@@ -383,6 +383,59 @@ test("tracking page applies and displays a controller binding", async ({
   }
 });
 
+test("tracking page persists a custom input device name", async ({
+  page,
+  request,
+}) => {
+  const before = await (await request.get("/api/tracking/state")).json();
+  const source = before.values.discovery_state?.sources?.find(
+    (candidate: { driver_id?: string }) =>
+      candidate.driver_id === "sdl3-gamepad",
+  ) as
+    | {
+        source_id: string;
+        display_name: string;
+        custom_name: string | null;
+      }
+    | undefined;
+  test.skip(!source, "需要一个在线 SDL3 输入设备");
+
+  try {
+    await page.goto("/tracking/");
+    const editor = page.getByLabel(`${source!.display_name} 自定义名称`);
+    await editor.fill("浏览器名称测试");
+    const saved = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/tracking/source-name") &&
+        response.request().method() === "POST",
+    );
+    await editor
+      .locator("xpath=..")
+      .getByRole("button", { name: "保存名称" })
+      .click();
+    await saved;
+    await expect(
+      editor
+        .locator("xpath=../..")
+        .getByText("浏览器名称测试", { exact: true }),
+    ).toBeVisible();
+
+    await page.reload();
+    await expect(
+      page.getByLabel(`${source!.display_name} 自定义名称`),
+    ).toHaveValue("浏览器名称测试");
+  } finally {
+    await request.post("/api/tracking/source-name", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-device-name-restore",
+        source_id: source!.source_id,
+        custom_name: source!.custom_name,
+      },
+    });
+  }
+});
+
 test("virtual feedback is selectable, draggable, and visible across pages", async ({
   page,
   request,

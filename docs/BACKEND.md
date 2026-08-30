@@ -2,7 +2,7 @@
 
 ## controller-input-node
 
-入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 通过公共 `json-config-store` 读取功能 Action 与反馈绑定；`apply_config()` 只替换运行时状态，`commit_bindings()` 先写盘成功再替换内存配置。`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到新样本时生成统一位姿和 Action；`select_pose_source()` 按运行时能力选择空间位置或姿态来源且不持久化；`apply_bindings()` 校验并持久化每个 Action 的输入和反馈目标。测试播放和硬件驱动共用 `replace_driver_sources()`、`accept_sample()`、`combined_pose_frame()` 与 `evaluate_actions()`；模拟数据仍经过统一的来源选择、Action 绑定和消息生成链路，停止后只恢复启动前的内存配置。`combined_pose_frame()` 从两个来源合成位姿；`evaluate_actions()` 与 `binding_value()` 可同时读取多个设备，把按钮、连续轴或方向按钮对转换成功能 Action。能力筛选只约束绝对空间与姿态来源，没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。
+入口 `main()` 只连接 Dora 输入输出。`ControllerInput::load()` 通过公共 `json-config-store` 读取功能 Action、反馈绑定和设备自定义名称；`apply_config()` 只替换运行时状态，`commit_config()` 先写盘成功再替换内存配置。`ControllerInput::drain()` 合并驱动事件；`tick()` 只在收到新样本时生成统一位姿和 Action；`select_pose_source()` 按运行时能力选择空间位置或姿态来源且不持久化；`apply_bindings()` 校验并持久化每个 Action 的输入和反馈目标。测试播放和硬件驱动共用 `replace_driver_sources()`、`accept_sample()`、`combined_pose_frame()` 与 `evaluate_actions()`；模拟数据仍经过统一的来源选择、Action 绑定和消息生成链路，停止后只恢复启动前的内存配置。`combined_pose_frame()` 从两个来源合成位姿；`evaluate_actions()` 与 `binding_value()` 可同时读取多个设备，把按钮、连续轴或方向按钮对转换成功能 Action。能力筛选只约束绝对空间与姿态来源，没有绝对位姿的分量仍可由按键或轴 Action 驱动空间节点积分。
 
 采集节点的统一目录包含十四个输入 Action：TCP 三轴平移与三轴定点旋转、两种枢轴圆弧、
 两个夹爪动作、接管与急停、工具轴向平移和工具轴向螺旋。采集页按动作选择演示时仍调用
@@ -13,7 +13,7 @@
 移，不再叠加第二段上下运动，接管与急停也使用该前置阶段。力度反馈测试只使用现有 Action
 反馈路由且不移动机械臂。每个连续演示独立完成去程、反向回程和控制结束，随后从同一清理
 出口恢复演示前的内存配置；用户主动停止也走同一出口且不归位。
-原始按钮和轴始终保留给输入测试。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，则在内存中用该值作为计算零偏；值变化会重新计时。连续轴按“原始值 → 内存零偏 → One Euro → Action”处理，按钮和方向按钮对不滤波，也不引入死区。功能 Action 绑定和反馈目标写入 `/config/controller-input.json`；空间与姿态来源、动态零偏、滤波状态仍只存在内存，节点重启后重新建立。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
+原始按钮和轴始终保留给输入测试。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，则在内存中用该值作为计算零偏；值变化会重新计时。连续轴按“原始值 → 内存零偏 → One Euro → Action”处理，按钮和方向按钮对不滤波，也不引入死区。功能 Action 绑定、反馈目标和设备自定义名称写入 `/config/controller-input.json`；SDL 持久化来源标识优先使用设备序列号，其次使用 Linux `by-id` / `by-path`，不保存重连时变化的 instance id。空间与姿态来源、动态零偏、滤波状态仍只存在内存，节点重启后重新建立。`live_component_values` 原样携带每个在线来源最近一帧的组件值，采集页用它显示当前按下的按钮或偏离零位的轴，便于确认物理控件名称；它不参与 Action 求值，也不形成测试旁路。
 
 NOLO 适配层的 `run_nolo_driver()` 使用 `hidapi` 枚举和读报告，协议解密/解析集中在
 `crates/nolo-cv1`；每只 NOLO 手柄分别维护三轴 One Euro 状态，统一绝对位置使用滤波结果。SDL 通用适配层的 `run_sdl_driver()` 使用 SDL3 的标准 gamepad、sensor、rumble
@@ -56,13 +56,18 @@ J3=-5°，测试位为 J3=-20°，其余 J1–J6 均为 0°。命名目标同时
 ## stararm-102-execution-node
 
 `StarArmExecution::load()` 读取串口选择；`configure_endpoint()` 先保存选择，再连接或断开。
-`StarArmExecution` 在未连接串口时接受同一个 `ArmCommand` 并发布软件反馈，连接后把同一命令交给
+未选择真机时，`StarArmExecution` 接受同一个 `ArmCommand` 并发布软件反馈；已经选择真机但
+连接中断时冻结最后状态和最后命令，不会隐式切换到软件反馈。连接后把同一命令交给
 `StarArmBus`。`encode_command()` 把 J1–J6 和夹爪的统一模型绝对角直接编码为厂家命令，不做
 第二次方向换算；只有 ID 6 携带 2000 mW。`read_sorted_monitors()` 一次读取 ID 0–6；
 `state_from_monitors()` 生成位置反馈，`telemetry_from_monitors()` 生成电压、电流、功率、温度和状态。
 `primary_tool_feedback()` 在此设备专属边界把夹爪 400～2000 mW 映射为通用 `primary_tool` 0～100 力度百分比
 Action 回馈；400 mW 来自实测空载 364 mW 后保留的余量。
-串口帧和厂家协议由 `crates/fashionstar-uart` 实现；串口枚举使用 `serialport`，只在网页发送 `discover` 请求时执行，不随定时器或状态快照运行。读取舵机参数继续使用独立的 `refresh` 请求，不会顺带枚举串口。
+串口帧和厂家协议由 `crates/fashionstar-uart` 实现；Monitor 失败先在原串口完整重试一次，仍
+失败才执行重开串口和完整初始化。真机反馈周期默认 100 ms，可在执行页修改并持久化；10 ms
+的 Dora tick 只负责检查配置周期，不等于每次访问串口。串口枚举使用 `serialport`，只在网页
+发送 `discover` 请求时执行，不随定时器或状态快照运行。读取舵机参数继续使用独立的
+`refresh` 请求，不会顺带枚举串口。
 
 ## service-status-node 与 web-gateway-node
 

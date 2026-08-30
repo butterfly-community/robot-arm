@@ -47,6 +47,11 @@ export default function Page() {
     Record<string, string>
   >({});
   const [showLabels, setShowLabels] = useState(false);
+  const [feedbackIntervalOverride, setFeedbackIntervalOverride] = useState<
+    string | undefined
+  >();
+  const feedbackIntervalMs =
+    feedbackIntervalOverride ?? String(transport.feedback_interval_ms ?? "");
 
   async function requestExecution(
     action: "connect" | "disconnect" | "discover" | "refresh",
@@ -70,7 +75,22 @@ export default function Page() {
     }
   }
 
+  async function saveExecutionConfig() {
+    setError(undefined);
+    try {
+      await post("/api/arm-execution/config", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        action: "apply",
+        fields: { feedback_interval_ms: feedbackIntervalMs },
+      });
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   const connected = Boolean(transport.connected);
+  const hardwareSelected = transport.selected_endpoint != null;
   const parameterColumns = Array.from(
     new Map(
       parameters.map((item) => [
@@ -109,7 +129,13 @@ export default function Page() {
         <div className="span-12 metric-grid">
           <Metric
             label="Transport"
-            value={connected ? "CONNECTED" : "SIMULATION"}
+            value={
+              connected
+                ? "CONNECTED"
+                : hardwareSelected
+                  ? "STOPPED"
+                  : "SIMULATION"
+            }
             tone={connected ? "green" : "cyan"}
           />
           <Metric
@@ -188,7 +214,11 @@ export default function Page() {
             title="执行连接"
             action={
               <StatusBadge tone={connected ? "good" : "cyan"}>
-                {connected ? "真机" : "软件反馈"}
+                {connected
+                  ? "真机"
+                  : hardwareSelected
+                    ? "真机已停止"
+                    : "软件反馈"}
               </StatusBadge>
             }
           >
@@ -256,6 +286,15 @@ export default function Page() {
                 ))}
               </>
             )}
+            <Field label="真机反馈周期（ms）">
+              <Input
+                type="number"
+                value={feedbackIntervalMs}
+                onChange={(event) =>
+                  setFeedbackIntervalOverride(event.currentTarget.value)
+                }
+              />
+            </Field>
             <div className="card-actions">
               <Button
                 variant={connected ? "danger" : "default"}
@@ -276,6 +315,9 @@ export default function Page() {
                 onClick={() => requestExecution("refresh")}
               >
                 读取参数
+              </Button>
+              <Button variant="outline" onClick={saveExecutionConfig}>
+                保存反馈周期
               </Button>
             </div>
             {transport.last_error != null && (

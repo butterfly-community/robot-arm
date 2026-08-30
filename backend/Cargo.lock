@@ -3788,6 +3788,7 @@ dependencies = [
  "json-config-store",
  "robot-arm-messages",
  "serde",
+ "serde_json",
  "serialport",
 ]
 

@@ -44,6 +44,7 @@ pub(super) fn source_info() -> InputSourceInfo {
         driver_id: DRIVER_ID.into(),
         device_id: DEVICE_ID.into(),
         display_name: "通用动作测试源".into(),
+        custom_name: None,
         vendor_id: None,
         product_id: None,
         serial: None,

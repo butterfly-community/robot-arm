@@ -21,6 +21,7 @@ import {
 import {
   Button,
   Card,
+  Input,
   JsonView,
   KeyValue,
   LocalizedLabel,
@@ -88,6 +89,18 @@ function componentLabel(component: Record<string, unknown>) {
   return localized && localized !== path ? `${localized} · ${path}` : path;
 }
 
+function sourceLabel(
+  source: Record<string, unknown> | undefined,
+  fallback = "",
+) {
+  return String(
+    source?.custom_name ??
+      source?.display_name ??
+      source?.source_id ??
+      fallback,
+  );
+}
+
 function sampleValue(input: ControlInputFrame | undefined, key: string) {
   const samples =
     key === "primary_tool" || key === "primary_tool_open"
@@ -120,6 +133,43 @@ function ObservedRate({ value }: { value: string }) {
   }, []);
 
   return <Metric label="采集频率" value={displayed} unit="Hz" />;
+}
+
+function DeviceNameEditor({
+  source,
+  onSave,
+}: {
+  source: Record<string, unknown>;
+  onSave: (sourceId: string, customName: string) => Promise<void>;
+}) {
+  const savedName = String(source.custom_name ?? "");
+  const [name, setName] = useState(savedName);
+  const [saving, setSaving] = useState(false);
+
+  return (
+    <div className="device-name-editor">
+      <Input
+        aria-label={`${String(source.display_name ?? source.source_id)} 自定义名称`}
+        placeholder="自定义设备名称"
+        value={name}
+        onChange={(event) => setName(event.currentTarget.value)}
+      />
+      <Button
+        variant="outline"
+        disabled={saving}
+        onClick={async () => {
+          setSaving(true);
+          try {
+            await onSave(String(source.source_id), name);
+          } finally {
+            setSaving(false);
+          }
+        }}
+      >
+        {saving ? "保存中" : "保存名称"}
+      </Button>
+    </div>
+  );
 }
 
 export default function Page() {
@@ -231,6 +281,21 @@ export default function Page() {
     }
   }
 
+  async function renameSource(sourceId: string, customName: string) {
+    setError(undefined);
+    try {
+      await post("/api/tracking/source-name", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        source_id: sourceId,
+        custom_name: customName.trim() || null,
+      });
+    } catch (reason) {
+      setError(String(reason));
+      throw reason;
+    }
+  }
+
   function setPath(action: string, index: number, value: string) {
     const next = (paths[action] ?? "").split(",").map((item) => item.trim());
     next[index] = value;
@@ -330,7 +395,7 @@ export default function Page() {
     const source = sources.find(
       (candidate) => candidate.source_id === state.source_id,
     );
-    return `${String(source?.display_name ?? state.source_id)} · ${(
+    return `${sourceLabel(source, String(state.source_id))} · ${(
       (state.configured_components ?? []) as unknown[]
     )
       .map(String)
@@ -340,14 +405,10 @@ export default function Page() {
   function arbitrationSummary(definition: ActionDefinition) {
     const occupied = definition.domains.flatMap((domain) => {
       if (domain === "position" && positionSource) {
-        return [
-          String(positionSource.display_name ?? positionSource.source_id),
-        ];
+        return [sourceLabel(positionSource)];
       }
       if (domain === "orientation" && orientationSource) {
-        return [
-          String(orientationSource.display_name ?? orientationSource.source_id),
-        ];
+        return [sourceLabel(orientationSource)];
       }
       return [];
     });
@@ -402,7 +463,7 @@ export default function Page() {
                 key={String(candidate.source_id)}
                 value={String(candidate.source_id)}
               >
-                {String(candidate.display_name ?? candidate.source_id)}
+                {sourceLabel(candidate)}
               </option>
             ))}
           </select>
@@ -517,18 +578,16 @@ export default function Page() {
         <Card className="span-4" eyebrow="Controller devices" title="输入源">
           <KeyValue
             label="空间位置来源"
-            value={String(
-              positionSource?.display_name ??
-                discovery.position_source_id ??
-                "未选择",
+            value={sourceLabel(
+              positionSource,
+              String(discovery.position_source_id ?? "未选择"),
             )}
           />
           <KeyValue
             label="设备自身姿态来源"
-            value={String(
-              orientationSource?.display_name ??
-                discovery.orientation_source_id ??
-                "未选择",
+            value={sourceLabel(
+              orientationSource,
+              String(discovery.orientation_source_id ?? "未选择"),
             )}
           />
           <div className="source-list">
@@ -542,15 +601,27 @@ export default function Page() {
                   <div className="row-spread">
                     <div>
                       <strong>
-                        {String(source.display_name ?? source.source_id)}
+                        {String(
+                          source.custom_name ??
+                            source.display_name ??
+                            source.source_id,
+                        )}
                       </strong>
                       <small>
+                        {source.custom_name
+                          ? `${String(source.display_name)} · `
+                          : ""}
                         {String(source.driver_id ?? "未知驱动")} · 空间
                         {source.position_capable ? "有" : "无"} · 姿态
                         {source.orientation_capable ? "有" : "无"}
                       </small>
                     </div>
                   </div>
+                  <DeviceNameEditor
+                    key={`${String(source.source_id)}:${String(source.custom_name ?? "")}`}
+                    source={source}
+                    onSave={renameSource}
+                  />
                   <div className="card-actions">
                     {Boolean(source.position_capable) && (
                       <Button
@@ -607,7 +678,7 @@ export default function Page() {
                   key={String(source.source_id)}
                   value={String(source.source_id)}
                 >
-                  {String(source.display_name ?? source.source_id)}
+                  {sourceLabel(source)}
                 </option>
               ))}
             </select>
@@ -699,10 +770,12 @@ export default function Page() {
                           <small>
                             {feedbackSourceIds[feedback.key]
                               ? String(
-                                  selectedSource?.display_name ??
-                                    (virtualSelected
+                                  sourceLabel(
+                                    selectedSource,
+                                    virtualSelected
                                       ? "网页虚拟反馈"
-                                      : feedbackSourceIds[feedback.key]),
+                                      : feedbackSourceIds[feedback.key],
+                                  ),
                                 )
                               : "未绑定"}
                           </small>
@@ -769,9 +842,7 @@ export default function Page() {
                                     key={String(source.source_id)}
                                     value={String(source.source_id)}
                                   >
-                                    {String(
-                                      source.display_name ?? source.source_id,
-                                    )}
+                                    {sourceLabel(source)}
                                   </option>
                                 ))}
                             </select>

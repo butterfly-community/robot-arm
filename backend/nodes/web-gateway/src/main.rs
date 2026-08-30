@@ -184,6 +184,7 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "control_input"
         | "pose_source_request_result"
         | "bindings_request_result"
+        | "source_name_request_result"
         | "simulation_request_result" => Some("tracking"),
         "spatial_pose"
         | "spatial_config_state"
@@ -219,6 +220,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/tracking/state", get(snapshot_tracking))
         .route("/api/tracking/pose-source", post(request_pose_source))
         .route("/api/tracking/bindings", post(request_bindings))
+        .route("/api/tracking/source-name", post(request_source_name))
         .route("/api/tracking/simulation", post(request_simulation))
         .route("/api/tracking/snapshot", post(request_tracking_snapshot))
         .route("/api/spatial/state", get(snapshot_spatial))
@@ -239,6 +241,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/arm-execution/connect", post(request_execution))
         .route("/api/arm-execution/disconnect", post(request_execution))
         .route("/api/arm-execution/endpoints", post(request_execution))
+        .route("/api/arm-execution/config", post(request_execution))
         .route("/api/arm-execution/parameters", post(request_execution))
         .route(
             "/api/arm-execution/snapshot",
@@ -320,6 +323,7 @@ macro_rules! request_handler {
 }
 request_handler!(request_pose_source, "select_pose_source_request");
 request_handler!(request_bindings, "apply_bindings_request");
+request_handler!(request_source_name, "rename_input_source_request");
 request_handler!(request_simulation, "set_simulation_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");
 request_handler!(request_mode, "set_control_mode_request");

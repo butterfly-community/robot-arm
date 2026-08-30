@@ -902,6 +902,12 @@ input[type="range"] {
   display: grid;
   gap: 3px;
 }
+.device-name-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 12px;
+}
 .telemetry-table {
   width: 100%;
   border-collapse: collapse;
@@ -1414,6 +1420,7 @@ input[type="range"] {
   }
   .binding-row,
   .feedback-binding-row,
+  .device-name-editor,
   .input-test-toolbar,
   .binding-guide,
   .action-binding-editor,
