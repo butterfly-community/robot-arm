@@ -12,19 +12,19 @@ use std::{
 use eyre::{Context, Result as EyreResult, bail, eyre};
 use futures::{Future, FutureExt, StreamExt, executor::block_on};
 use r2r::{
-    ActionClientUntyped, ClientUntyped, Context as RosContext, Node, Publisher, PublisherUntyped,
-    QosProfile,
+    ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
 };
-use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame};
+use robot_arm_messages::{Pose3, WorldScene};
 use serde_json::{Value, json};
 use stararm_102_model::{BASE_FRAME, GRIPPER_JOINT, JOINTS, TCP_FRAME};
 
 use crate::core::Pose;
 
 const MOVEIT_SUCCESS: i64 = 1;
+const MOVE_GROUP_DEFAULT_PLANNING_TIME_S: f64 = 5.0;
+const MOVE_GROUP_DEFAULT_SCALING_FACTOR: f64 = 1.0;
 const ROBOT_LINK: u64 = 0;
 const ALLOWED_COLLISION_MATRIX: u64 = 128;
-const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 #[derive(Debug)]
 pub enum RosEvent {
@@ -65,16 +65,16 @@ pub struct RosInterface {
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
-    depth_publisher: Publisher<r2r::sensor_msgs::msg::PointCloud2>,
-    camera_info_publisher: Publisher<r2r::sensor_msgs::msg::CameraInfo>,
-    static_tf_publisher: Publisher<r2r::tf2_msgs::msg::TFMessage>,
+    collision_publisher: PublisherUntyped,
+    attached_collision_publisher: PublisherUntyped,
+    collision_ids: Arc<Mutex<BTreeSet<String>>>,
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
+    inverse_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
-    clear_octomap: Arc<ClientUntyped>,
     motion_sender: Sender<MotionJob>,
     event_sender: Sender<RosEvent>,
 }
@@ -99,17 +99,15 @@ impl RosInterface {
             "sensor_msgs/msg/JointState",
             QosProfile::default(),
         )?;
-        let depth_publisher = node.create_publisher::<r2r::sensor_msgs::msg::PointCloud2>(
-            "/perception/depth/points",
-            QosProfile::sensor_data(),
-        )?;
-        let camera_info_publisher = node.create_publisher::<r2r::sensor_msgs::msg::CameraInfo>(
-            "/perception/depth/camera_info",
+        let collision_publisher = node.create_publisher_untyped(
+            "/collision_object",
+            "moveit_msgs/msg/CollisionObject",
             QosProfile::default(),
         )?;
-        let static_tf_publisher = node.create_publisher::<r2r::tf2_msgs::msg::TFMessage>(
-            "/tf_static",
-            QosProfile::default().transient_local(),
+        let attached_collision_publisher = node.create_publisher_untyped(
+            "/attached_collision_object",
+            "moveit_msgs/msg/AttachedCollisionObject",
+            QosProfile::default(),
         )?;
         let controller_commands = node.subscribe_untyped(
             "/stararm102/joint_commands",
@@ -141,6 +139,11 @@ impl RosInterface {
             "moveit_msgs/srv/GetPositionFK",
             QosProfile::default(),
         )?;
+        let inverse_kinematics = node.create_client_untyped(
+            "/compute_ik",
+            "moveit_msgs/srv/GetPositionIK",
+            QosProfile::default(),
+        )?;
         let state_validity = node.create_client_untyped(
             "/check_state_validity",
             "moveit_msgs/srv/GetStateValidity",
@@ -149,11 +152,6 @@ impl RosInterface {
         let planning_scene = node.create_client_untyped(
             "/get_planning_scene",
             "moveit_msgs/srv/GetPlanningScene",
-            QosProfile::default(),
-        )?;
-        let clear_octomap = node.create_client_untyped(
-            "/clear_octomap",
-            "std_srvs/srv/Empty",
             QosProfile::default(),
         )?;
         let (motion_sender, motion_receiver) = channel();
@@ -179,16 +177,16 @@ impl RosInterface {
             pose_publisher,
             hand_publisher,
             state_publisher,
-            depth_publisher,
-            camera_info_publisher,
-            static_tf_publisher,
+            collision_publisher,
+            attached_collision_publisher,
+            collision_ids: Arc::new(Mutex::new(BTreeSet::new())),
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
             forward_kinematics: Arc::new(forward_kinematics),
+            inverse_kinematics: Arc::new(inverse_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
-            clear_octomap: Arc::new(clear_octomap),
             motion_sender,
             event_sender,
         };
@@ -208,83 +206,122 @@ impl RosInterface {
         Ok(())
     }
 
-    pub fn publish_depth_cloud(&self, cloud: DepthPointCloudFrame) -> EyreResult<()> {
-        let mut data = Vec::with_capacity(cloud.points_xyz_m.len() * 12);
-        for point in cloud.points_xyz_m {
-            for coordinate in point {
-                data.extend_from_slice(&coordinate.to_le_bytes());
-            }
+    pub fn publish_world_scene(&self, scene: &WorldScene) -> EyreResult<()> {
+        let placement_sources = scene
+            .placement_regions
+            .iter()
+            .filter_map(|region| region.source_object_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let next_ids = collision_object_ids(scene);
+        let mut previous_ids = self
+            .collision_ids
+            .lock()
+            .map_err(|_| eyre!("collision id lock poisoned"))?;
+        for id in previous_ids.difference(&next_ids) {
+            self.collision_publisher.publish(json!({
+                "header": {"frame_id": scene.frame_id},
+                "id": id,
+                "operation": 1,
+            }))?;
         }
-        self.depth_publisher
-            .publish(&r2r::sensor_msgs::msg::PointCloud2 {
-                header: r2r::std_msgs::msg::Header {
-                    stamp: ros_time(cloud.source_time_ns),
-                    frame_id: cloud.frame_id,
-                },
-                height: cloud.height,
-                width: cloud.width,
-                fields: ["x", "y", "z"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, name)| r2r::sensor_msgs::msg::PointField {
-                        name: name.into(),
-                        offset: (index * 4) as u32,
-                        datatype: 7,
-                        count: 1,
-                    })
-                    .collect(),
-                is_bigendian: false,
-                point_step: 12,
-                row_step: cloud.width * 12,
-                data,
-                is_dense: false,
-            })?;
+        for object in scene
+            .objects
+            .iter()
+            .filter(|object| !placement_sources.contains(object.object_id.as_str()))
+        {
+            self.publish_collision_box(
+                &scene.frame_id,
+                &object.object_id,
+                &object.pose,
+                object.size_m,
+            )?;
+        }
+        for obstacle in &scene.obstacles {
+            self.publish_collision_box(
+                &scene.frame_id,
+                &obstacle.obstacle_id,
+                &obstacle.pose,
+                obstacle.size_m,
+            )?;
+        }
+        *previous_ids = next_ids;
         Ok(())
     }
 
-    pub fn publish_depth_calibration(&self, calibration: DepthCameraCalibration) -> EyreResult<()> {
-        let stamp = ros_time(calibration.source_time_ns);
-        self.camera_info_publisher
-            .publish(&r2r::sensor_msgs::msg::CameraInfo {
-                header: r2r::std_msgs::msg::Header {
-                    stamp: stamp.clone(),
-                    frame_id: calibration.frame_id.clone(),
-                },
-                height: calibration.height,
-                width: calibration.width,
-                distortion_model: calibration.distortion_model,
-                d: calibration.distortion,
-                k: calibration.camera_matrix.to_vec(),
-                r: RECTIFICATION_MATRIX.to_vec(),
-                p: calibration.projection_matrix.to_vec(),
-                ..Default::default()
-            })?;
-        let [x, y, z] = calibration.translation_m;
-        let [qx, qy, qz, qw] = calibration.orientation_xyzw;
-        self.static_tf_publisher
-            .publish(&r2r::tf2_msgs::msg::TFMessage {
-                transforms: vec![r2r::geometry_msgs::msg::TransformStamped {
-                    header: r2r::std_msgs::msg::Header {
-                        stamp,
-                        frame_id: calibration.parent_frame_id,
-                    },
-                    child_frame_id: calibration.frame_id,
-                    transform: r2r::geometry_msgs::msg::Transform {
-                        translation: r2r::geometry_msgs::msg::Vector3 { x, y, z },
-                        rotation: r2r::geometry_msgs::msg::Quaternion {
-                            x: qx,
-                            y: qy,
-                            z: qz,
-                            w: qw,
-                        },
-                    },
+    pub fn clear_world_scene(&self) -> EyreResult<()> {
+        let mut ids = self
+            .collision_ids
+            .lock()
+            .map_err(|_| eyre!("collision id lock poisoned"))?;
+        for id in ids.iter() {
+            self.collision_publisher.publish(json!({
+                "header": {"frame_id": BASE_FRAME},
+                "id": id,
+                "operation": 1,
+            }))?;
+        }
+        ids.clear();
+        Ok(())
+    }
+
+    pub fn remove_world_object(&self, object_id: &str) -> EyreResult<()> {
+        self.collision_publisher.publish(json!({
+            "header": {"frame_id": BASE_FRAME},
+            "id": object_id,
+            "operation": 1,
+        }))?;
+        self.collision_ids
+            .lock()
+            .map_err(|_| eyre!("collision id lock poisoned"))?
+            .remove(object_id);
+        Ok(())
+    }
+
+    pub fn attach_object(&self, object_id: &str, size_m: [f64; 3]) -> EyreResult<()> {
+        self.attached_collision_publisher.publish(json!({
+            "link_name": TCP_FRAME,
+            "object": {
+                "header": {"frame_id": TCP_FRAME},
+                "id": object_id,
+                "primitives": [{"type": 1, "dimensions": size_m}],
+                "primitive_poses": [{
+                    "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
                 }],
-            })?;
+                "operation": 0,
+            },
+            "touch_links": [TCP_FRAME, "link6", "link7_left", "link7_right"],
+        }))?;
         Ok(())
     }
 
-    pub fn clear_octomap(&self) -> EyreResult<()> {
-        block_on(call(&self.clear_octomap, json!({})))?;
+    pub fn detach_object(&self, object_id: &str) -> EyreResult<()> {
+        self.attached_collision_publisher.publish(json!({
+            "link_name": TCP_FRAME,
+            "object": {"id": object_id, "operation": 1},
+        }))?;
+        Ok(())
+    }
+
+    fn publish_collision_box(
+        &self,
+        frame_id: &str,
+        id: &str,
+        pose: &Pose3,
+        size_m: [f64; 3],
+    ) -> EyreResult<()> {
+        let [x, y, z] = pose.position_m;
+        let [qx, qy, qz, qw] = pose.orientation_xyzw;
+        self.collision_publisher.publish(json!({
+            "header": {"frame_id": frame_id},
+            "id": id,
+            "primitives": [{"type": 1, "dimensions": size_m}],
+            "primitive_poses": [{
+                "position": {"x": x, "y": y, "z": z},
+                "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+            }],
+            "operation": 0,
+        }))?;
         Ok(())
     }
 
@@ -326,12 +363,6 @@ impl RosInterface {
         })
     }
 
-    pub fn depth_output_ready(&self) -> bool {
-        self.depth_publisher
-            .get_inter_process_subscription_count()
-            .is_ok_and(|count| count > 0)
-    }
-
     pub fn request_current_pose(&self, joints: Vec<f64>) {
         let client = self.forward_kinematics.clone();
         let sender = self.event_sender.clone();
@@ -351,6 +382,53 @@ impl RosInterface {
             .map_err(|error| error.to_string());
             let _ = sender.send(RosEvent::CurrentPose(result));
         });
+    }
+
+    pub fn solve_ik(&self, pose: Pose, current: &[f64]) -> EyreResult<Vec<f64>> {
+        let [x, y, z] = pose.position_m;
+        let [qx, qy, qz, qw] = pose.orientation_xyzw;
+        let response = block_on(call(
+            &self.inverse_kinematics,
+            json!({
+                "ik_request": {
+                    "group_name": "arm",
+                    "robot_state": {
+                        "joint_state": {"name": JOINTS, "position": current},
+                        "is_diff": false,
+                    },
+                    "avoid_collisions": false,
+                    "ik_link_name": TCP_FRAME,
+                    "pose_stamped": {
+                        "header": {"frame_id": BASE_FRAME},
+                        "pose": {
+                            "position": {"x": x, "y": y, "z": z},
+                            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+                        },
+                    },
+                },
+            }),
+        ))?;
+        let code = response["error_code"]["val"].as_i64().unwrap_or_default();
+        if code != MOVEIT_SUCCESS {
+            bail!("MoveIt IK 失败，错误码 {code}");
+        }
+        let names = response["solution"]["joint_state"]["name"]
+            .as_array()
+            .ok_or_else(|| eyre!("MoveIt IK 未返回关节名称"))?;
+        let positions = response["solution"]["joint_state"]["position"]
+            .as_array()
+            .ok_or_else(|| eyre!("MoveIt IK 未返回关节位置"))?;
+        JOINTS
+            .iter()
+            .map(|joint| {
+                names
+                    .iter()
+                    .position(|name| name.as_str() == Some(joint))
+                    .and_then(|index| positions.get(index))
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| eyre!("MoveIt IK 缺少关节 {joint}"))
+            })
+            .collect()
     }
 
     pub fn synchronize_controllers(&self) {
@@ -530,6 +608,9 @@ impl RosInterface {
         let mut request = json!({
             "group_name": "arm",
             "pipeline_id": "ompl",
+            "allowed_planning_time": MOVE_GROUP_DEFAULT_PLANNING_TIME_S,
+            "max_velocity_scaling_factor": MOVE_GROUP_DEFAULT_SCALING_FACTOR,
+            "max_acceleration_scaling_factor": MOVE_GROUP_DEFAULT_SCALING_FACTOR,
             "start_state": {
                 "joint_state": {"name": JOINTS, "position": job.current},
                 "is_diff": false,
@@ -598,6 +679,26 @@ impl RosInterface {
         allow_pairs(matrix, pairs)?;
         Ok(matrix.take())
     }
+}
+
+fn collision_object_ids(scene: &WorldScene) -> BTreeSet<String> {
+    let placement_sources = scene
+        .placement_regions
+        .iter()
+        .filter_map(|region| region.source_object_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    scene
+        .objects
+        .iter()
+        .filter(|object| !placement_sources.contains(object.object_id.as_str()))
+        .map(|object| object.object_id.clone())
+        .chain(
+            scene
+                .obstacles
+                .iter()
+                .map(|obstacle| obstacle.obstacle_id.clone()),
+        )
+        .collect()
 }
 
 struct MotionActions {
@@ -690,13 +791,6 @@ fn number(value: &Value) -> f64 {
     value.as_f64().unwrap_or_default()
 }
 
-fn ros_time(time_ns: i64) -> r2r::builtin_interfaces::msg::Time {
-    r2r::builtin_interfaces::msg::Time {
-        sec: time_ns.div_euclid(1_000_000_000) as i32,
-        nanosec: time_ns.rem_euclid(1_000_000_000) as u32,
-    }
-}
-
 fn allow_pairs(matrix: &mut Value, pairs: &[(String, String)]) -> EyreResult<()> {
     let mut names = matrix["entry_names"]
         .as_array()
@@ -762,7 +856,45 @@ fn forward_stream(
 
 #[cfg(test)]
 mod tests {
+    use robot_arm_messages::{PlacementRegion, Pose3, SceneObject, WorldScene};
+
     use super::*;
+
+    #[test]
+    fn placement_container_bounds_are_not_published_as_solid_obstacles() {
+        let pose = Pose3 {
+            position_m: [0.0; 3],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let scene = WorldScene {
+            schema_version: 3,
+            sequence: 1,
+            sample_time_ns: 2,
+            frame_id: "base_link".into(),
+            objects: ["cube", "bin"]
+                .map(|id| SceneObject {
+                    object_id: id.into(),
+                    label: id.into(),
+                    pose: pose.clone(),
+                    size_m: [0.1; 3],
+                    confidence: 1.0,
+                    graspable: id == "cube",
+                })
+                .to_vec(),
+            placement_regions: vec![PlacementRegion {
+                region_id: "bin-interior".into(),
+                label: "interior".into(),
+                pose,
+                size_m: [0.1; 3],
+                source_object_id: Some("bin".into()),
+            }],
+            obstacles: vec![],
+        };
+        assert_eq!(
+            collision_object_ids(&scene),
+            BTreeSet::from(["cube".into()])
+        );
+    }
 
     #[test]
     fn collision_matrix_expands_symmetrically() {

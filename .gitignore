@@ -8,6 +8,9 @@
 **/__pycache__/
 *.pyc
 **/.ruff_cache/
+**/.pytest_cache/
 **/test-results/
 **/playwright-report/
 **/blob-report/
+/tools/perception/artifacts/
+/backend/services/perception-compute/.venv/

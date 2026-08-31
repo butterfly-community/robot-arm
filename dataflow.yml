@@ -18,7 +18,6 @@ nodes:
       apply_bindings: web-gateway-node/apply_bindings_request
       rename_source: web-gateway-node/rename_input_source_request
       set_simulation: web-gateway-node/set_simulation_request
-      set_depth_camera: web-gateway-node/set_depth_camera_request
       action_feedback:
         source: stararm-102-execution-node/action_feedback
         queue_size: 1
@@ -32,10 +31,35 @@ nodes:
       - bindings_request_result
       - source_name_request_result
       - simulation_request_result
-      - depth_camera_request_result
-      - depth_camera_state
-      - depth_point_cloud
-      - depth_camera_calibration
+
+  - id: perception-node
+    path: /opt/robot-arm/bin/perception-node
+    restart_policy: on-failure
+    deploy:
+      machine: perception
+    inputs:
+      tick:
+        source: dora/timer/hz/10
+        queue_size: 1
+        queue_policy: drop_oldest
+      request: web-gateway-node/perception_request
+      calibration_request: web-gateway-node/calibration_request
+      snapshot: web-gateway-node/perception_snapshot
+      arm_state:
+        source: stararm-102-execution-node/arm_state
+        queue_size: 1
+        queue_policy: drop_oldest
+      motion_state:
+        source: stararm-102-motion-node/motion_state
+        queue_size: 1
+        queue_policy: drop_oldest
+    outputs:
+      - perception_state
+      - world_scene
+      - request_result
+      - calibration_state
+      - calibration_request_result
+      - service_state
 
   - id: spatial-transform-node
     path: /opt/robot-arm/bin/spatial-transform-node
@@ -72,16 +96,12 @@ nodes:
         source: stararm-102-execution-node/arm_state
         queue_size: 1
         queue_policy: drop_oldest
-      depth_camera_state:
-        source: controller-input-node/depth_camera_state
+      world_scene:
+        source: perception-node/world_scene
         queue_size: 1
         queue_policy: drop_oldest
-      depth_point_cloud:
-        source: controller-input-node/depth_point_cloud
-        queue_size: 1
-        queue_policy: drop_oldest
-      depth_camera_calibration:
-        source: controller-input-node/depth_camera_calibration
+      perception_state:
+        source: perception-node/perception_state
         queue_size: 1
         queue_policy: drop_oldest
       robot_model_info: stararm-102-execution-node/robot_model_info
@@ -89,6 +109,7 @@ nodes:
       prepare_relative: web-gateway-node/prepare_relative_request
       motion_request: web-gateway-node/motion_request
       tool_actuator_request: web-gateway-node/tool_actuator_request
+      pick_place_request: web-gateway-node/pick_place_request
       snapshot: web-gateway-node/motion_snapshot
       tick:
         source: dora/timer/millis/10
@@ -102,6 +123,8 @@ nodes:
       - arm_command
       - mode_request_result
       - motion_request_result
+      - manipulation_state
+      - manipulation_request_result
 
   - id: stararm-102-execution-node
     path: /opt/robot-arm/bin/stararm-102-execution-node
@@ -135,6 +158,7 @@ nodes:
       machine: service-status
     inputs:
       controller-input: controller-input-node/service_state
+      perception: perception-node/service_state
       spatial-transform: spatial-transform-node/service_state
       stararm-102-motion: stararm-102-motion-node/service_state
       stararm-102-execution: stararm-102-execution-node/service_state
@@ -159,8 +183,11 @@ nodes:
       bindings_request_result: controller-input-node/bindings_request_result
       source_name_request_result: controller-input-node/source_name_request_result
       simulation_request_result: controller-input-node/simulation_request_result
-      depth_camera_state: controller-input-node/depth_camera_state
-      depth_camera_request_result: controller-input-node/depth_camera_request_result
+      perception_state: perception-node/perception_state
+      world_scene: perception-node/world_scene
+      perception_request_result: perception-node/request_result
+      calibration_state: perception-node/calibration_state
+      calibration_request_result: perception-node/calibration_request_result
       spatial_pose:
         source: spatial-transform-node/spatial_pose
         queue_size: 1
@@ -178,6 +205,8 @@ nodes:
       actuator_status: stararm-102-motion-node/actuator_status
       mode_request_result: stararm-102-motion-node/mode_request_result
       motion_request_result: stararm-102-motion-node/motion_request_result
+      manipulation_state: stararm-102-motion-node/manipulation_state
+      manipulation_request_result: stararm-102-motion-node/manipulation_request_result
       model_asset_response: stararm-102-execution-node/model_asset_response
       execution_info: stararm-102-execution-node/execution_info
       transport_state:
@@ -197,7 +226,9 @@ nodes:
       - apply_bindings_request
       - rename_input_source_request
       - set_simulation_request
-      - set_depth_camera_request
+      - perception_snapshot
+      - perception_request
+      - calibration_request
       - spatial_snapshot
       - update_spatial_config_request
       - motion_snapshot
@@ -205,6 +236,7 @@ nodes:
       - prepare_relative_request
       - motion_request
       - tool_actuator_request
+      - pick_place_request
       - model_asset_request
       - execution_snapshot
       - execution_request

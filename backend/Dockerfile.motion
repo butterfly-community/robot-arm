@@ -62,9 +62,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY nodes nodes
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=robot-arm-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=robot-arm-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=robot-arm-motion-target,target=/src/target,sharing=locked \
     source /opt/ros/jazzy/setup.bash \
     && source /opt/ros_ws/install/setup.bash \
     && cargo build --release --locked -p stararm-102-motion-node \

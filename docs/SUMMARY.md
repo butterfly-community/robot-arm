@@ -1,94 +1,133 @@
-# 系统设计
+# 当前系统设计
 
-项目只有一条运行链路：
+## 唯一运行链路
 
 ```text
-controller-input-node
+输入设备 / 模拟输入
+  → controller-input-node
   → spatial-transform-node
   → stararm-102-motion-node
+  → MoveIt / Servo / ros2_control
+  → ArmCommand
   → stararm-102-execution-node
-  → controller-input-node（设备无关 Action 回馈）
+  → ArmState / ActionFeedback
 
-controller-input-node（可选深度驱动）
-  → Arrow 类型化点云与标定
-  → stararm-102-motion-node
-  → ROS PointCloud2 / CameraInfo / TF
-  → MoveIt OccupancyMapUpdater
-  → 同一个 PlanningScene
+ROS 深度相机 / 确定性 RGB-D 测试源
+  → perception-node
+  → perception-compute-service（仅 RGB 实例分割）
+  → perception-node（深度几何、标定、WorldScene、ROS 感知话题）
+  → stararm-102-motion-node（MoveIt 场景与抓放）
+  → 同一 ArmCommand / execution 链路
 ```
 
-`controller-input-node` 同时承载两个硬件输入适配层和一个模拟测试源，但不分裂业务流程：NOLO CV1 使用本地 Rust HID
-协议，其他手柄使用 SDL3，并且只根据设备声明的轴、按钮、传感器和振动能力工作；SDL 标准组件的路径、类型和中文名称由同一能力表发布，网页不重复维护名称映射。带 IMU 的手柄（包括 PS4）与 NOLO CV1 都交给同一个
-`fusion-ahrs` 实现。生产代码不维护手柄型号白名单，不按型号选择行为，也不提供型号专属默认绑定；型号和 USB 信息只用于发现页面展示。没有 IMU 能力时仍发布按键和轴。空间位置与姿态来源分别只列出声明对应能力的设备；例如两个仅有按键和轴的设备不会产生姿态候选，此时仍可把任一设备的按键或轴绑定为俯仰和水平圆弧 Action。只要某一分量已经选择绝对来源，空间节点就不再叠加该分量的 Action。每个 Action 和反馈能力仍独立选择设备，不受位姿来源选择影响。采集节点把组合位姿和跨设备聚合 Action 送入同一个空间转换节点。
-同一采集周期的位姿先更新空间快照，随后只有控制帧触发一次运动输出，不会把一份采样重复发送给运动节点。
+模拟和真机、测试 RGB-D 和真实相机都只在各自节点的输入或驱动适配层不同。空间转换、感知
+结构化、运动学、规划和执行均没有备用业务路径。
 
-深度相机也是采集节点的一项可选能力，开关持久化但设备可用性与采集状态只来自驱动事实；
-它不参与 readiness。默认关闭、开启但无设备时都不发布假数据，也不改变现有控制链路。当前
-尚无真实相机驱动，采集页的确定性深度测试源通过正式 Arrow→motion→ROS→MoveIt 链路验证
-平面与障碍点云。相机停止时调用 MoveIt 自带能力清除 OctoMap，普通 PlanningScene 对象保
-留。未来相机型号差异只进入采集节点驱动适配器。
+模拟和测试实现也与生产核心物理分开：输入回放在
+`backend/nodes/controller-input/src/simulation.rs`，感知测试源在
+`backend/nodes/perception/src/test_source.rs`，离线生成器与探针在 `tools/perception/`。
+`perception-core`、空间核心、运动学和执行节点不包含测试数据生成逻辑。
 
-`stararm-102-motion-node` 已完全迁移为 Rust。设备无关空间增量在这里结合 StarArm-102-FL 的
-当前 TCP、工具枢轴和末端几何生成目标；MoveIt、Servo 与 ros2_control 仍负责 IK、碰撞、规划
-和控制器执行。普通运动进入一个无固定上限的 FIFO，由唯一 action worker 顺序处理；冲突只
-等待，不存在模拟/真机分支、Python 兼容节点或第二套 ROS action 路径。ROS Python 包只保留
-标准节点的 launch/config。普通运动的业务取消不承担硬件急停：已经提交的 MoveIt action
-结束后再处理下一项，机械臂急停仍是物理断电。
+## 服务边界
 
-功能 Action 绑定、反馈目标和用户设置的设备名称保存在 `/config/controller-input.json`；SDL 绑定使用序列号或 Linux 稳定设备路径，不保存重连时变化的 instance id。空间位置来源、姿态来源、动态零偏和滤波状态只保存在 controller-input 节点内存中。SDL3 已绑定连续轴若原始值绝对值不超过 0.1 且连续 3 秒完全不变，会在内存中把该值作为计算零偏；值变化重新计时。来源声明的连续轴随后统一经过官方 One Euro 实现，按钮和方向按钮对不滤波，也不引入死区。NOLO 每只手柄的三轴绝对位置分别使用同一 One Euro 库恢复迁移前的位置滤波。同一轮控制可以组合 NOLO 和多个 SDL3 手柄。模拟数据也是 `controller-input-node` 的输入驱动：它只声明完整的十四个设备无关业务 Action，不声明虚假的绝对空间或姿态，也不模拟某个具体硬件型号。采集页按六组展示 TCP 六自由度、圆弧复合、夹爪、控制、力度反馈和其他复合；十四个输入 Action 与一个反馈输出各有默认收起的说明、绑定和独立演示 / 测试入口。旧的完整轮播已删除。每次只把所选 Action 和接管动作临时绑定到同一个生成 source，产生的普通控制帧继续通过空间转换、MoveIt 和执行节点；结束或主动停止后恢复原来源、绑定与反馈目标。
+| 服务 | 负责 | 不负责 |
+| --- | --- | --- |
+| `controller-input-node` | NOLO HID、SDL3、模拟输入，能力发现，输入/反馈绑定，IMU 融合 | 空间积分、相机、运动学、机械臂参数 |
+| `spatial-transform-node` | 绝对位姿换基、Action 积分、设备无关 TCP 增量 | 设备驱动、IK、串口 |
+| `perception-node` | ROS 相机接入、RGB-D 对齐消费、深度反投影、标定、场景结构化、ROS 点云/图像/Marker/TF | 模型推理、机械臂轨迹 |
+| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割；CPU/CUDA 使用同一 HTTP 契约 | 深度、标定、MoveIt、Dora |
+| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、碰撞场景、九步抓放编排 | 相机采集、设备输入、串口 |
+| `stararm-102-execution-node` | 软件反馈与 FashionStar UART 的同一执行契约、模型资源、真机遥测 | IK、目标位姿解释 |
+| `service-status-node` | 根据配置聚合节点主动状态与依赖 | 业务探活特例、恢复策略 |
+| `web-gateway-node` | HTTP/WebSocket 与 Dora 消息转发 | 设备或机械臂语义 |
 
-十四个输入动作演示先调用统一“准备相对控制”接口：切到手动模式，通过普通 MoveIt 链路执
-行夹爪闭合的默认位，再切到相对模式。生成源随后以同一 `move_up_down` Action 垂直上移
-5 cm，再开始所选动作；垂直平移演示以这次上移直接完成，不重复上下运动，接管与急停也走
-相同前置阶段。力度反馈按同一 0→100→0 Action 反馈路由发送到当前目标，不移动机械臂。连
-续演示使用已有 100 Hz、每个方向 3 秒的余弦轮廓完成去程和回程，停止只结束输入而不联动归
-位。
-采集页的“输入测试”直接显示所选来源最近一帧中有值的原始按钮和轴；绑定区把单个按钮、负/正按钮对和连续轴分开说明，不再把物理输入方式误当作 Action 类型。空间和姿态视图使用六面直接标有“上、下、左、右、前、后”的不透明长方体作为位姿载体，并显示从模型中心出发、随模型旋转的标准右手坐标轴：红 X 指向右面，绿 Y 指向上面，蓝 Z 指向前面；主视图可在透视、俯视、正视和右视之间切换，仍可用鼠标自由观察。空间页按通用的“输入坐标 → 前/左/上”矩阵对位置和姿态换基，姿态使用完整的基变换，因此设备报告单位姿态时仍保持“上在上”；位移指标依次显示前后、左右、上下。采集页不渲染位姿；空间页只读取空间节点发布的 `spatial_pose` 与 `transformed_control`；没有绝对位姿的手柄用按键或轴控制时也会显示真实累计结果，不在网页重算运动。相机不再跟随模型平移，因此位移可见。模型和坐标轴只负责让朝向易于辨认，不参与设备识别或输入绑定。网页按浏览器动画帧合并实时快照，输入测试、空间、姿态和机械臂反馈均实时显示；只有采集页的“采集频率”数字在页面本地每秒更新一次，不改变任何后端输出或其他页面。
+`manipulation-core`、`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
+远程部署，但外部只和 `perception-node` 交互。
 
-需要持久化的服务由 Compose 把宿主 `backend/config/runtime/` 挂载到容器 `/config`：采集节点保存功能 Action、反馈绑定与设备名称，空间节点保存轴映射、比例、Action 速率与分量开关；无绝对位置来源时，平移 Action 默认满输入 1 cm/s；圆弧 Action 默认角速度为 0.10 rad/s，motion 节点保存
-控制模式，execution 节点保存串口选择和真机反馈周期；反馈周期默认 100 ms，可在执行页直接
-修改。一次 Monitor 事务失败会在原串口重试一次，重试仍失败才执行完整重连；已经选择真机但
-连接中断时，执行状态冻结，不会隐式切换为软件模拟。可连接串口不持久化，也不后台轮询，只在
-执行页点击“刷新串口”时主动枚举。文件缺失时生成默认配置；文件存在但损坏时明确失败。配置
-更新先写盘再替换内存状态。采集节点的空间与姿态来源、动态零偏和滤波状态重启后重新建立。
-实时位姿、控制会话、模拟启停、关节反馈、连接状态和错误不会持久化。
+## 感知与抓放
 
-execution 节点通过共享 `stararm-102-model` crate 和最终 URDF 发布模型资源及
-`RobotModelInfo.named_targets`；motion 与前端消费同一份模型信息。前端遍历元数据生成按钮，
-不写死机械臂型号、关节数量或测试位关节值。命名目标同时包含关节和工具执行器；StarArm-102 的默认位是 J3=-5°，测试位是 J3=-20°，其余 J1–J6 均为 0°；两个位置都要求夹爪闭合到物理角度 0°，并通过一个运动请求执行；这个执行器角度不是 `primary_tool` 的归一化值。
+真实相机使用 ROS 主线已经发布的彩色图、对齐到彩色的深度图和 CameraInfo。当前订阅接口为：
 
-夹爪使用连续 `primary_tool` 值：`0` 表示张开并对应 90°，`1` 表示闭合并对应 0°，中间值
-线性插值。`joint7_left` 是 0°～90° 的主动关节，`joint7_right` 通过齿轮和 URDF `mimic=-1`
-反向联动；两侧各运动 90°，不是单侧 180°。这个动作语义只在型号 motion 节点转换一次；模型、
-MoveIt、网页、`ArmCommand`、UART 命令和 Monitor 反馈随后都使用同一个主动关节正向绝对角，不存在
-第二次符号换算。J1–J6 与夹爪分别放在 `joints` 和 `tool_actuators` 中，只是为了让 IK 关节与工具
-执行器保持清楚的模型语义；两者仍由同一
-`ArmCommand`、同一 execution 节点和同一反馈状态执行。采集页负责把设备输入绑定为
-`primary_tool`，手动夹爪目标与 J1–J6 一起位于运动页，执行页只负责连接、命令/反馈和舵机参数。
-Servo 始终使用官方碰撞检查，并在自碰撞距离 1 cm 时开始减速。普通规划若因当前起点自碰撞失败，只在同一次请求的重试中临时放行 MoveIt 实测到的当前碰撞 link 对，用于规划离开碰撞位置；不存在全局解锁状态、独立恢复路径或 MoveIt 源码补丁。
-StarArm-102 FL 的夹爪舵机是 ID 6、RA8-U35H-M；位置命令为它填写 2000 mW，J1–J6 仍为
-0 mW。这个值来自厂家 UART SDK 的功率限制示例；不是运行门限。execution 节点将 Monitor 的实际功率扣除 400 mW 空载区间后，通过设备无关的 action_feedback 输出 0～100 力度百分比；稳定的 0 是有效真机样本，表示当前没有检测到负载，不表示反馈缺失。夹爪运动中可产生非零反馈；软件模式只提供夹爪位置反馈，不能当作真实力度。输入节点仅按独立反馈绑定路由到用户选择的能力。SDL3 运行时声明左右扳机反馈或整机振动能力，网页虚拟反馈则始终作为一个可选目标；选中后四个页面共享的小型可拖动圆环显示最新的 0～100 值。代码不假定 primary_tool 必须绑定扳机，也不在真实能力之间自动回退；仅生成式反馈测试在没有已选目标时临时使用网页虚拟反馈，结束后恢复原绑定。`primary_tool_open` 是独立的按下沿 Action，可与连续 `primary_tool` 分别绑定。采集节点把它们放入统一控制意图；空间节点不解释，只随 `transformed_control` 原样传递，由型号 motion 节点在控制过程启动时转换夹爪目标。启动/停止绑定一个按钮，该按钮按下的上升沿切换控制过程；每次启动以当时位置和姿态建立一次新原点。软件 `emergency_stop` Action 只结束当前控制过程；物理急停是机械臂断电，不由节点实现。
+| 输入 | ROS topic |
+| --- | --- |
+| 彩色图 / 内参 | `/camera/camera/color/image_raw`、`/camera/camera/color/camera_info` |
+| 对齐深度 / 内参 | `/camera/camera/aligned_depth_to_color/image_raw`、`/camera/camera/aligned_depth_to_color/camera_info` |
 
-Compose 启动 Dora coordinator、五个 Dora daemon、Rust/MoveIt motion 服务、dataflow、四个前端与
-统一 Web 入口。输入容器挂载主机 `/dev`、只读 udev/sys 信息，因此能够同时枚举 HID 和
-SDL 控制器。SDL3 手柄按运行时声明的轴、按钮、传感器与振动能力接入，NOLO CV1 由同一节点的 HID 适配层接入；
-两者输出统一消息。服务配置使用宿主 bind mount，不依赖 Compose 命名卷。dataflow 容器停止时使用 Dora `start --attach` 原生支持的 `SIGINT` 停止整条 dataflow，避免下次启动重复拉起 MoveIt、Servo 或其他节点。
+`perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
+占位场景；计算服务失败时保留原始错误，不切换模型或伪造结果。
 
-motion 容器内的 RViz2 通过 KasmVNC 1.5.0 在
-`http://192.168.100.10:6080` 提供单端口浏览器会话；它使用同容器的 ROS 上下文与项目
-`.rviz`，直接显示机器人、TF、PlanningScene、轨迹和可选深度点云。动态远端分辨率与 Native
-Resolution 由 KasmVNC 提供，项目没有自制编码/输入协议、第二个远程桌面服务或 host network。
+仓库提供两个走正式链路的确定性来源：
 
-常用验收：
+- `generated:pick-place-scene`：固定 RGB 资产经真实 YOLOE 分割，再组合确定性深度，生成
+  红色立方体、灰色置物筐和筐内放置区；用于完整抓放验收。
+- `generated:octomap-grid`：原有 497 点测试云；在 MoveIt 0.1 m OctoMap 中显示为已确认的
+  12 个体素块；用于 RViz/PlanningScene 验收。
+
+抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`。通用库线性生成“接近、到达、闭合、
+附着、接近放置、到达放置、打开、分离、完成”九步；型号 motion 节点求 IK、规划并发出唯一
+`ArmCommand`。作为放置容器来源的物体外包围盒不会作为实心碰撞盒发布，显式障碍物和其他
+场景物体仍进入 MoveIt。
+
+## 标定
+
+标定由 `perception-node` 管理，使用 OpenCV 的 ChArUco 检测、PnP 与
+`calibrateRobotWorldHandEye`，由 Rust `opencv` crate 调用 OpenCV 5，不使用 Python/C++
+标定桥，也不手写标定数学。每个样本保存同期真机关节反馈对应的 TCP 位姿与板在相机中的
+观测。求解结果同时包含：
+
+- 相机到 `base_link` 的外参；
+- 标定板到专用测试爪的固定变换；
+- 每个样本的平移和旋转残差。
+
+应用结果后，真实相机帧、点云、`WorldScene` 与 TF 使用同一份外参。标定板变换只参与标定，
+不得作为正常抓放的 TCP 补偿。
+
+## TCP 与机械臂模型
+
+StarArm-102 的业务末端只有 `tcp_link`。它在 URDF 中通过零变换固定到结构链接 `link6`，
+当前位置是两侧夹爪尖端中心。MoveIt group、FK/IK、抓放目标和附着物全部使用
+`stararm_102_model::TCP_FRAME`。73.13 mm 只用于夹爪转轴圆弧演示，不是工具偏移。完整维护
+规则见 [StarArm-102 末端坐标](TCP.md)。
+
+默认位为 J3=-5°，测试位为 J3=-20°，其余 J1–J6 为 0°；两者都携带夹爪闭合目标。夹爪
+`primary_tool=0` 表示张开 90°，`1` 表示闭合 0°。J1–J6 与工具执行器在模型中分栏，但经
+同一命令、同一执行节点完成。
+
+## 输入与空间语义
+
+输入节点按设备运行时声明的能力发布组件，不按型号猜测。NOLO CV1 和 SDL3 IMU 共用
+`fusion-ahrs`；连续轴使用 `one_euro_filter`。位置来源、姿态来源、每个 Action 输入和每个
+反馈目标都可独立选择设备。模拟输入也先声明同一套 Action，再经过空间、motion 和 execution。
+
+空间节点在每次接管时建立新原点。无绝对位置/姿态来源的分量可由按钮或轴积分；选定绝对来源
+的分量不再叠加对应 Action。满输入平移默认 1 cm/s，角向动作默认 0.10 rad/s；这些是用户已
+指定的动作比例，不是保护门限。
+
+## 启动和入口
+
+```bash
+docker compose up -d
+docker compose down
+```
+
+- Web：`http://192.168.100.10:8765`
+- RViz/KasmVNC：`http://192.168.100.10:6080`
+
+Compose 使用私有 bridge network，只映射这两个入口。配置持久化于
+`backend/config/runtime/*.json`。串口只在执行页点击“刷新串口”时枚举。
+
+## 常用验收
 
 ```bash
 cargo test --manifest-path backend/Cargo.toml --workspace
+pnpm --dir frontend format:check
+pnpm --dir frontend lint
 pnpm --dir frontend typecheck
 pnpm --dir frontend test
-docker compose config
-docker compose build
+pnpm --dir frontend build
+docker compose config --quiet
 docker compose up -d
+node tests/integration/software-flow.mjs
 ```
 
-测试回放工具与产物统一位于 `tools/replay/`；原始排障数据在各网页的折叠排障区，默认视图使用
-Three.js 和高信息密度指标展示位置、姿态与机械臂状态。
+测试工具和生成物位于 `tools/`。过程缓存和生成的 RGB-D artifacts 不提交。

@@ -64,6 +64,33 @@ async function observeMotionRequest(requestId, run) {
   }
 }
 
+async function observeManipulation(requestId, run) {
+  const socket = new WebSocket(`${websocketBase}/ws/motion`);
+  await new Promise((resolve, reject) => {
+    socket.onopen = resolve;
+    socket.onerror = reject;
+  });
+  try {
+    const terminal = new Promise((resolve, reject) => {
+      socket.onmessage = (event) => {
+        const state = JSON.parse(event.data).values?.manipulation_state;
+        if (state?.request_id !== requestId) return;
+        if (state.state === "succeeded") resolve(state);
+        if (state.state === "failed" || state.state === "cancelled") {
+          reject(
+            new Error(state.original_error ?? `manipulation ${state.state}`),
+          );
+        }
+      };
+    });
+    const accepted = await run();
+    assert.equal(accepted.accepted, true);
+    return await terminal;
+  } finally {
+    socket.close();
+  }
+}
+
 for (const page of ["tracking", "spatial", "motion", "arm-execution"]) {
   const response = await waitFor(
     () => fetch(`${base}/${page}/`),
@@ -76,6 +103,13 @@ await waitFor(
   () => json("/api/system/readiness"),
   (state) => state.values.system_readiness?.ready === true,
 );
+
+await request("/api/arm-execution/disconnect", {
+  schema_version: 3,
+  request_id: "integration-disconnect",
+  action: "disconnect",
+  fields: {},
+});
 
 const malformedExecution = await fetch(`${base}/api/arm-execution/connect`, {
   method: "POST",
@@ -96,50 +130,64 @@ const tracking = await waitFor(
   () => snapshot("tracking"),
   (state) => state.namespace === "tracking",
 );
-const originalDepthEnabled = Boolean(
-  tracking.values.depth_camera_state?.enabled,
-);
-const depthEnabled = await request("/api/tracking/depth-camera", {
+const motionBeforePerception = await snapshot("motion");
+const originalPerception = motionBeforePerception.values.perception_state;
+const perceptionEnabled = await request("/api/motion/perception", {
   schema_version: 3,
-  request_id: "integration-depth-enable",
-  enabled: true,
+  request_id: "integration-perception-enable",
+  action: "apply",
+  source_kind: "generated_test_scene",
+  source_id: "generated:pick-place-scene",
+  classes: null,
 });
-assert.equal(depthEnabled.original_error, null);
+assert.equal(perceptionEnabled.original_error, null);
 await waitFor(
-  () => snapshot("tracking"),
+  () => snapshot("motion"),
   (state) =>
-    state.values.depth_camera_state?.enabled === true &&
-    state.values.depth_camera_state?.available === false &&
-    state.values.depth_camera_state?.streaming === false,
+    state.values.perception_state?.enabled === true &&
+    state.values.perception_state?.source_kind === "generated_test_scene" &&
+    state.values.world_scene?.objects?.some(
+      (object) => object.label === "red cube" && object.graspable,
+    ) &&
+    state.values.world_scene?.placement_regions?.length === 1,
 );
-const depthStarted = await request("/api/tracking/simulation", {
+const perceptionScene = (await snapshot("motion")).values.world_scene;
+const graspable = perceptionScene.objects.find((object) => object.graspable);
+const placementRegion = perceptionScene.placement_regions[0];
+assert.ok(graspable, "generated perception scene has a graspable object");
+assert.ok(placementRegion, "generated perception scene has a placement region");
+const pickPlaceResult = await observeManipulation(
+  "integration-pick-place",
+  () =>
+    request("/api/motion/pick-place", {
+      schema_version: 3,
+      request_id: "integration-pick-place",
+      object_id: graspable.object_id,
+      placement_region_id: placementRegion.region_id,
+    }),
+);
+assert.equal(pickPlaceResult.state, "succeeded");
+assert.equal(pickPlaceResult.step, "complete");
+await request("/api/motion/perception", {
   schema_version: 3,
-  request_id: "integration-depth-scene",
-  enabled: true,
-  item: "depth_scene",
-});
-assert.equal(depthStarted.original_error, null);
-await waitFor(
-  () => snapshot("tracking"),
-  (state) =>
-    state.values.depth_camera_state?.streaming === true &&
-    state.values.depth_camera_state?.frame_id === "depth_sim_frame",
-);
-await request("/api/tracking/simulation", {
-  schema_version: 3,
-  request_id: "integration-depth-stop",
-  enabled: false,
-  item: null,
+  request_id: "integration-perception-stop",
+  action: "disconnect",
+  source_kind: null,
+  source_id: null,
+  classes: null,
 });
 await waitFor(
-  () => snapshot("tracking"),
-  (state) => state.values.depth_camera_state?.streaming === false,
+  () => snapshot("motion"),
+  (state) => state.values.perception_state?.enabled === false,
 );
-if (!originalDepthEnabled) {
-  await request("/api/tracking/depth-camera", {
+if (originalPerception?.enabled) {
+  await request("/api/motion/perception", {
     schema_version: 3,
-    request_id: "integration-depth-restore",
-    enabled: false,
+    request_id: "integration-perception-restore",
+    action: "apply",
+    source_kind: originalPerception.source_kind,
+    source_id: originalPerception.source_id,
+    classes: originalPerception.classes,
   });
 }
 const discoveredSources = tracking.values.discovery_state?.sources ?? [];
@@ -213,13 +261,6 @@ await new Promise((resolve, reject) => {
     resolve();
   };
   socket.onerror = reject;
-});
-
-await request("/api/arm-execution/disconnect", {
-  schema_version: 3,
-  request_id: "integration-disconnect",
-  action: "disconnect",
-  fields: {},
 });
 
 const initialSpatial = await snapshot("spatial");
@@ -474,6 +515,7 @@ await waitFor(
 );
 
 const actuator = model.tool_actuators[0];
+assert.equal(model.tcp_frame, "tcp_link");
 assert.ok(actuator, "fixture model publishes an actuator");
 const actuatorTarget = before.actuators_rad[0] + Math.PI / 36;
 const actuatorResult = await request("/api/motion/actuator", {

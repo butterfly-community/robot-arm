@@ -25,7 +25,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY nodes nodes
-RUN cargo build --release --locked --workspace --exclude stararm-102-motion-node
+RUN cargo build --release --locked --workspace \
+    --exclude perception-node \
+    --exclude stararm-102-motion-node
 
 FROM debian:13-slim
 RUN apt-get update \

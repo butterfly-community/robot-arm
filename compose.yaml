@@ -9,6 +9,7 @@ x-dora-daemon: &dora-daemon
   environment:
     DORA_COORDINATOR_ADDR: 172.30.0.250
     DORA_DATAFLOW_NAME: robot-arm-services
+    DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
   healthcheck:
     test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
 
@@ -34,11 +35,12 @@ services:
 
   controller-input:
     <<: *dora-daemon
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "controller-input"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "controller-input", "--zenoh-listen", "172.30.0.251:7447", "--zenoh-connect", "tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
     environment:
       CONTROLLER_INPUT_CONFIG: /config/controller-input.json
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
     volumes:
       - ./backend/config/runtime:/config
       - /dev:/dev
@@ -47,31 +49,84 @@ services:
     device_cgroup_rules:
       - "c 13:* rwm"
       - "c 189:* rwm"
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.251
 
   spatial-transform:
     <<: *dora-daemon
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "spatial-transform"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "spatial-transform", "--zenoh-listen", "172.30.0.252:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
+    depends_on:
+      controller-input: { condition: service_healthy }
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
       SPATIAL_CONFIG: /config/spatial-transform.json
     volumes: ["./backend/config/runtime:/config"]
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.252
+
+  perception-compute:
+    build:
+      context: ./backend/services/perception-compute
+    networks: [robot-services]
+    volumes: ["perception-models:/models"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+
+  perception:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.perception
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "perception", "--zenoh-listen", "172.30.0.253:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
+    environment:
+      DORA_COORDINATOR_ADDR: 172.30.0.250
+      DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
+      PERCEPTION_CONFIG: /config/perception.json
+      ROS_DOMAIN_ID: "42"
+    depends_on:
+      controller-input: { condition: service_healthy }
+      perception-compute: { condition: service_healthy }
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.253
+    volumes:
+      - ./backend/config/runtime:/config
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - /sys:/sys:ro
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
 
   service-status:
     <<: *dora-daemon
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "service-status"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "service-status", "--zenoh-listen", "172.30.0.254:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
+    depends_on:
+      controller-input: { condition: service_healthy }
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
       SERVICE_STATUS_CONFIG: /config/service-status.json
     volumes: ["./backend/config/service-status.json:/config/service-status.json:ro"]
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.254
 
   stararm-102-execution:
     <<: *dora-daemon
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-execution"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-execution", "--zenoh-listen", "172.30.0.245:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.246:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
+    depends_on:
+      controller-input: { condition: service_healthy }
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
       STARARM_EXECUTION_CONFIG: /config/stararm-102-execution.json
     volumes:
       - ./backend/config/runtime:/config
@@ -80,13 +135,22 @@ services:
       - /sys:/sys:ro
     device_cgroup_rules:
       - "c 188:* rwm"
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.245
 
   web-gateway:
     <<: *dora-daemon
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "web-gateway"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "web-gateway", "--zenoh-listen", "172.30.0.246:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.247:7447", "--zenoh-no-multicast"]
+    depends_on:
+      controller-input: { condition: service_healthy }
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.246
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
 
   stararm-102-motion:
     build:
@@ -95,15 +159,18 @@ services:
       additional_contexts:
         stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
         moveit_vendor: ${MOVEIT_SERVO_SOURCE:-../../../../temp/moveit2-2.12.4/moveit_ros/moveit_servo}
-    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-motion"]
+    command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-motion", "--zenoh-listen", "172.30.0.247:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447", "--zenoh-no-multicast"]
     environment:
       DORA_COORDINATOR_ADDR: 172.30.0.250
       DORA_DATAFLOW_NAME: robot-arm-services
+      DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     depends_on:
-      dora-coordinator: { condition: service_started }
-    networks: [robot-services]
+      controller-input: { condition: service_healthy }
+    networks:
+      robot-services:
+        ipv4_address: 172.30.0.247
     ports: ["192.168.100.10:6080:6080"]
     ulimits:
       memlock: -1
@@ -121,6 +188,7 @@ services:
       - ./tools/replay/artifacts:/recordings
     depends_on:
       controller-input: { condition: service_healthy }
+      perception: { condition: service_healthy }
       service-status: { condition: service_healthy }
       spatial-transform: { condition: service_healthy }
       stararm-102-motion: { condition: service_healthy }
@@ -164,3 +232,6 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+
+volumes:
+  perception-models:

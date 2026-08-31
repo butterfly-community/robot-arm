@@ -902,13 +902,6 @@ input[type="range"] {
   display: grid;
   gap: 3px;
 }
-.depth-camera-capability > .compact-check {
-  margin-top: 14px;
-}
-.depth-camera-capability > .card-actions,
-.depth-camera-capability > .diagnostic-details {
-  margin-top: 16px;
-}
 .diagnostic-details summary {
   padding: 2px 0;
   color: var(--muted-strong);

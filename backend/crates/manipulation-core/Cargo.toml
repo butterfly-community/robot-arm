@@ -1,14 +1,10 @@
 [package]
-name = "stararm-102-model"
+name = "manipulation-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-hex.workspace = true
-mime_guess.workspace = true
 robot-arm-messages.workspace = true
-sha2.workspace = true
-urdf-rs.workspace = true
-walkdir.workspace = true
+thiserror.workspace = true

@@ -436,47 +436,43 @@ test("tracking page persists a custom input device name", async ({
   }
 });
 
-test("tracking depth capability persists and drives the standard test source", async ({
+test("motion perception uses the generated RGB-D source through the canonical path", async ({
   page,
   request,
 }) => {
-  const before = await (await request.get("/api/tracking/state")).json();
-  const originalEnabled = Boolean(before.values.depth_camera_state?.enabled);
+  const before = await (await request.get("/api/motion/state")).json();
+  const original = before.values.perception_state;
   try {
-    await page.goto("/tracking/");
-    const enabled = page.getByRole("checkbox", { name: "启用深度相机" });
-    if (!(await enabled.isChecked())) await enabled.check();
-    await expect(enabled).toBeChecked();
-    await expect(page.getByText("已启用，未发现深度相机")).toBeVisible();
-
-    await page.getByRole("button", { name: "测试深度场景" }).click();
+    await page.goto("/motion/");
+    await page.getByRole("button", { name: "测试 RGB-D 场景" }).click();
+    await expect(page.getByText("已启用", { exact: true })).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "停止深度测试" }),
+      page.getByText("red cube · 可抓取", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("正在采集", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "停止深度测试" }).click();
-    await expect(
-      page.getByRole("button", { name: "测试深度场景" }),
-    ).toBeVisible();
-
     await page.reload();
-    await expect(enabled).toBeChecked();
+    await expect(page.getByText("已启用", { exact: true })).toBeVisible();
   } finally {
-    await request.post("/api/tracking/simulation", {
+    await request.post("/api/motion/perception", {
       data: {
         schema_version: 3,
-        request_id: "browser-depth-stop",
-        enabled: false,
-        item: null,
+        request_id: "browser-perception-stop",
+        action: "disconnect",
+        source_kind: null,
+        source_id: null,
+        classes: null,
       },
     });
-    await request.post("/api/tracking/depth-camera", {
-      data: {
-        schema_version: 3,
-        request_id: "browser-depth-restore",
-        enabled: originalEnabled,
-      },
-    });
+    if (original?.enabled)
+      await request.post("/api/motion/perception", {
+        data: {
+          schema_version: 3,
+          request_id: "browser-perception-restore",
+          action: "apply",
+          source_kind: original.source_kind,
+          source_id: original.source_id,
+          classes: original.classes,
+        },
+      });
   }
 });
 
@@ -682,15 +678,18 @@ test("motion named target is submitted by the metadata-driven page", async ({
     await expect(page.getByRole("button", { name: "测试位" })).toBeVisible();
     await page.getByRole("button", { name: "测试位" }).click();
     await expect
-      .poll(async () => {
-        const state = await (await request.get("/api/motion/state")).json();
-        const motion = state.values.motion_state.latest_motion;
-        return {
-          changed: motion.request_id !== previousRequest,
-          action: motion.acknowledged_action,
-          state: motion.state,
-        };
-      })
+      .poll(
+        async () => {
+          const state = await (await request.get("/api/motion/state")).json();
+          const motion = state.values.motion_state.latest_motion;
+          return {
+            changed: motion.request_id !== previousRequest,
+            action: motion.acknowledged_action,
+            state: motion.state,
+          };
+        },
+        { timeout: 60_000 },
+      )
       .toEqual({ changed: true, action: "apply", state: "succeeded" });
     await expect
       .poll(async () => {

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use robot_arm_messages::{
     ActionFeedback, DEFAULT_ACTION_ARC_RAD_PER_S, DEFAULT_ACTION_TRANSLATION_M_PER_S,
-    DepthCameraCalibration, DepthPointCloudFrame, INPUT_ACTIONS, InputComponentInfo,
-    InputDriverInfo, InputSimulationItem, InputSimulationState, InputSourceInfo, SCHEMA_VERSION,
+    INPUT_ACTIONS, InputComponentInfo, InputDriverInfo, InputSimulationItem, InputSimulationState,
+    InputSourceInfo, SCHEMA_VERSION,
 };
 
 use super::RawSample;
@@ -11,10 +11,8 @@ use super::RawSample;
 pub(super) const DRIVER_ID: &str = "generated-test-input";
 pub(super) const DEVICE_ID: &str = "generic-action-source";
 pub(super) const SOURCE_ID: &str = "simulation:generic-action-source";
-pub(super) const DEPTH_SOURCE_ID: &str = "simulation:depth-scene";
 pub(super) const START_STOP_COMPONENT: &str = "action/start_stop";
 const SAMPLE_RATE_HZ: u64 = 100;
-const DEPTH_TEST_SAMPLE_PERIOD: u64 = 10;
 const PHASE_SAMPLES: u64 = SAMPLE_RATE_HZ * 3;
 const ORIENTATION_RAD: f64 = 8.0_f64.to_radians();
 const LIFT_M: f64 = 0.05;
@@ -26,8 +24,6 @@ pub(super) struct SimulationPlayback {
 
 pub(super) struct SimulationSample {
     pub(super) raw: Option<RawSample>,
-    pub(super) depth_cloud: Option<DepthPointCloudFrame>,
-    pub(super) depth_calibration: Option<DepthCameraCalibration>,
     pub(super) state: InputSimulationState,
     pub(super) feedback: Option<ActionFeedback>,
     pub(super) complete: bool,
@@ -79,25 +75,6 @@ impl SimulationPlayback {
     }
 
     pub(super) fn sample(&mut self, sequence: u64, now_ns: i64) -> SimulationSample {
-        if self.item == InputSimulationItem::DepthScene {
-            let first_frame = self.sample_index == 0;
-            let publish_cloud = self.sample_index.is_multiple_of(DEPTH_TEST_SAMPLE_PERIOD);
-            self.sample_index += 1;
-            return SimulationSample {
-                raw: None,
-                depth_cloud: publish_cloud.then(|| depth_scene(sequence, now_ns)),
-                depth_calibration: first_frame.then(|| depth_calibration(sequence, now_ns)),
-                state: InputSimulationState {
-                    schema_version: SCHEMA_VERSION,
-                    active: true,
-                    item: Some(self.item),
-                    phase: Some("streaming".into()),
-                    elapsed_s: Some(self.sample_index as f64 / SAMPLE_RATE_HZ as f64),
-                },
-                feedback: None,
-                complete: false,
-            };
-        }
         let generated = generate(self.item, self.sample_index);
         let elapsed_s = self.sample_index as f64 / SAMPLE_RATE_HZ as f64;
         self.sample_index += 1;
@@ -111,8 +88,6 @@ impl SimulationPlayback {
                 orientation_xyzw: None,
                 components: generated.components,
             }),
-            depth_cloud: None,
-            depth_calibration: None,
             state: InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 active: !generated.complete,
@@ -129,55 +104,6 @@ impl SimulationPlayback {
             }),
             complete: generated.complete,
         }
-    }
-
-    pub(super) fn item(&self) -> InputSimulationItem {
-        self.item
-    }
-}
-
-fn depth_scene(sequence: u64, now_ns: i64) -> DepthPointCloudFrame {
-    let mut points = Vec::new();
-    for x in -10..=10 {
-        for y in 30..=50 {
-            points.push([x as f32 * 0.01, y as f32 * 0.01, 0.0]);
-        }
-    }
-    for x in -3..=3 {
-        for z in 1..=8 {
-            points.push([x as f32 * 0.01, 0.4, z as f32 * 0.01]);
-        }
-    }
-    DepthPointCloudFrame {
-        schema_version: SCHEMA_VERSION,
-        sequence,
-        source_time_ns: now_ns,
-        source_id: DEPTH_SOURCE_ID.into(),
-        frame_id: "depth_sim_frame".into(),
-        width: points.len() as u32,
-        height: 1,
-        points_xyz_m: points,
-    }
-}
-
-fn depth_calibration(sequence: u64, now_ns: i64) -> DepthCameraCalibration {
-    DepthCameraCalibration {
-        schema_version: SCHEMA_VERSION,
-        sequence,
-        source_time_ns: now_ns,
-        source_id: DEPTH_SOURCE_ID.into(),
-        parent_frame_id: "base_link".into(),
-        frame_id: "depth_sim_frame".into(),
-        translation_m: [0.0; 3],
-        orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        width: 640,
-        height: 480,
-        distortion_model: "plumb_bob".into(),
-        distortion: vec![0.0; 5],
-        camera_matrix: [500.0, 0.0, 319.5, 0.0, 500.0, 239.5, 0.0, 0.0, 1.0],
-        projection_matrix: [
-            500.0, 0.0, 319.5, 0.0, 0.0, 500.0, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0,
-        ],
     }
 }
 
@@ -388,7 +314,6 @@ pub(super) fn component_path(item: InputSimulationItem) -> Option<&'static str> 
         InputSimulationItem::ToolAxisTranslation => "action/tool_axis_translation",
         InputSimulationItem::ToolHelicalMotion => "action/tool_helical_motion",
         InputSimulationItem::PrimaryToolFeedback => return None,
-        InputSimulationItem::DepthScene => return None,
     })
 }
 

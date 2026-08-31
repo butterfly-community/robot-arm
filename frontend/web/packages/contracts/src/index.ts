@@ -199,21 +199,115 @@ export type InputSimulationItem =
   | "emergency_stop"
   | "primary_tool_feedback"
   | "tool_axis_translation"
-  | "tool_helical_motion"
-  | "depth_scene";
+  | "tool_helical_motion";
 
-export interface DepthCameraState {
+export type PerceptionSourceKind = "camera" | "generated_test_scene";
+
+export interface PerceptionState {
   schema_version: number;
   enabled: boolean;
-  available: boolean;
-  streaming: boolean;
+  source_kind?: PerceptionSourceKind | null;
   source_id?: string | null;
-  display_name?: string | null;
-  driver_id?: string | null;
+  compute_service_url: string;
+  model: string;
+  classes: string[];
   last_frame_time_ns?: number | null;
-  width?: number | null;
-  height?: number | null;
-  frame_id?: string | null;
+  last_scene_sequence?: number | null;
+  calibrated: boolean;
+  original_error?: string | null;
+}
+
+export interface ScenePose {
+  position_m: [number, number, number];
+  orientation_xyzw: [number, number, number, number];
+}
+
+export interface SceneObject {
+  object_id: string;
+  label: string;
+  pose: ScenePose;
+  size_m: [number, number, number];
+  confidence: number;
+  graspable: boolean;
+}
+
+export interface PlacementRegion {
+  region_id: string;
+  label: string;
+  pose: ScenePose;
+  size_m: [number, number, number];
+  source_object_id?: string | null;
+}
+
+export interface WorldScene {
+  schema_version: number;
+  sequence: number;
+  sample_time_ns: number;
+  frame_id: string;
+  objects: SceneObject[];
+  placement_regions: PlacementRegion[];
+  obstacles: Array<{
+    obstacle_id: string;
+    pose: ScenePose;
+    size_m: [number, number, number];
+  }>;
+}
+
+export type ManipulationStep =
+  | "approach_object"
+  | "reach_object"
+  | "close_tool"
+  | "attach_object"
+  | "approach_placement"
+  | "reach_placement"
+  | "open_tool"
+  | "detach_object"
+  | "complete";
+
+export interface ManipulationTaskState {
+  schema_version: number;
+  request_id: string;
+  state:
+    "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
+  step?: ManipulationStep | null;
+  original_error?: string | null;
+}
+
+export interface CalibrationBoard {
+  pattern: string;
+  dictionary: string;
+  squares_x: number;
+  squares_y: number;
+  square_size_m: number;
+  marker_size_m: number;
+  measured_width_m: number;
+  measured_height_m: number;
+}
+
+export interface CalibrationResult {
+  schema_version: number;
+  camera_source_id: string;
+  robot_model_revision: string;
+  calibration_tool_id: string;
+  board: CalibrationBoard;
+  camera_in_base: ScenePose;
+  board_in_calibration_tool: ScenePose;
+  solver: string;
+  solved_at_ns: number;
+  sample_count: number;
+  translation_residuals_m: number[];
+  rotation_residuals_rad: number[];
+}
+
+export interface CalibrationSessionState {
+  schema_version: number;
+  active: boolean;
+  board?: CalibrationBoard | null;
+  camera_source_id?: string | null;
+  robot_model_revision?: string | null;
+  calibration_tool_id?: string | null;
+  observations: Array<Record<string, unknown>>;
+  solved_result?: CalibrationResult | null;
   original_error?: string | null;
 }
 

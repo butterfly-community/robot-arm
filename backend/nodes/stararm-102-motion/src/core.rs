@@ -4,7 +4,7 @@ use json_config_store::{load_or_default, save};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use robot_arm_messages::{ControlMode, TransformedControlFrame};
 use serde::{Deserialize, Serialize};
-use stararm_102_model::PIVOT_TO_TCP_M;
+use stararm_102_model::ARC_PIVOT_TO_TCP_M;
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -64,7 +64,7 @@ pub fn target_pose(anchor: Pose, frame: &TransformedControlFrame) -> Pose {
         * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), frame.tool_roll_rad);
     let target_rotation = tool_rotation
         * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), frame.tool_helical_roll_rad);
-    let pivot = Vector3::from(PIVOT_TO_TCP_M);
+    let pivot = Vector3::from(ARC_PIVOT_TO_TCP_M);
     let anchor_offset = anchor_rotation * pivot;
     let arc_offset = arc_rotation * pivot;
     let tool_axis = tool_rotation * Vector3::z();
@@ -77,6 +77,15 @@ pub fn target_pose(anchor: Pose, frame: &TransformedControlFrame) -> Pose {
         position_m: position.into(),
         orientation_xyzw: xyzw(target_rotation),
     }
+}
+
+pub fn radial_orientation(anchor: Pose, target_position_m: [f64; 3]) -> [f64; 4] {
+    let anchor_angle = anchor.position_m[1].atan2(anchor.position_m[0]);
+    let target_angle = target_position_m[1].atan2(target_position_m[0]);
+    xyzw(
+        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), target_angle - anchor_angle)
+            * quaternion(anchor.orientation_xyzw),
+    )
 }
 
 pub fn merge_controller_command(
@@ -186,6 +195,19 @@ mod tests {
         assert_abs_diff_eq!(
             &returned.orientation_xyzw[..],
             &anchor().orientation_xyzw[..]
+        );
+    }
+
+    #[test]
+    fn radial_orientation_follows_the_target_around_the_base() {
+        let anchor = anchor();
+        assert_abs_diff_eq!(
+            &radial_orientation(anchor, [0.4, -0.2, 0.1])[..],
+            &anchor.orientation_xyzw[..]
+        );
+        assert_ne!(
+            radial_orientation(anchor, [0.1, 0.2, 0.1]),
+            anchor.orientation_xyzw
         );
     }
 

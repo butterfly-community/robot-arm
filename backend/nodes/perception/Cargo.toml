@@ -1,5 +1,5 @@
 [package]
-name = "stararm-102-motion-node"
+name = "perception-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,19 +9,32 @@ license.workspace = true
 default = ["ros-doc-only"]
 ros-doc-only = ["dep:r2r", "r2r/doc-only"]
 ros-runtime = ["dep:r2r"]
+opencv-runtime = ["dep:opencv"]
+
+[[bin]]
+name = "perception-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "perception-calibration"
+path = "src/bin/perception-calibration.rs"
+required-features = ["opencv-runtime"]
 
 [dependencies]
+base64.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
 futures.workspace = true
+image.workspace = true
 json-config-store.workspace = true
-manipulation-core.workspace = true
 nalgebra.workspace = true
+opencv = { workspace = true, optional = true }
+perception-core.workspace = true
 r2r = { version = "0.9.5", default-features = false, optional = true }
+reqwest.workspace = true
 robot-arm-messages.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-stararm-102-model.workspace = true
 
 [dev-dependencies]
 approx.workspace = true

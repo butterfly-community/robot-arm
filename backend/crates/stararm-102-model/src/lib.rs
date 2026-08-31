@@ -14,14 +14,20 @@ use walkdir::WalkDir;
 pub const MODEL_ID: &str = "stararm-102-fl";
 pub const MODEL_REVISION: &str = "stararm-102-fl-v1";
 pub const BASE_FRAME: &str = "base_link";
-pub const TCP_FRAME: &str = "link6";
+pub const TCP_FRAME: &str = "tcp_link";
 pub const JOINTS: [&str; 6] = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"];
 pub const GRIPPER_KEY: &str = "gripper";
 pub const GRIPPER_JOINT: &str = "joint7_left";
 pub const START_JOINTS_RAD: [f64; 6] = [0.0, 0.0, -5.0_f64.to_radians(), 0.0, 0.0, 0.0];
 pub const TEST_JOINTS_RAD: [f64; 6] = [0.0, 0.0, -20.0_f64.to_radians(), 0.0, 0.0, 0.0];
 pub const CLOSED_GRIPPER_RAD: f64 = 0.0;
-pub const PIVOT_TO_TCP_M: [f64; 3] = [0.0, 0.0, 0.07313];
+pub const OPEN_GRIPPER_RAD: f64 = std::f64::consts::FRAC_PI_2;
+/// Offset from the gripper jaw pivot to `tcp_link` at the `link6` origin.
+///
+/// Both finger meshes extend from their z=-73.13 mm pivots back to z=0, so
+/// `tcp_link` is the explicit gripper-tip center used by MoveIt. This offset is
+/// only used to construct the demonstrated arc motion.
+pub const ARC_PIVOT_TO_TCP_M: [f64; 3] = [0.0, 0.0, 0.07313];
 
 pub struct ModelCatalog {
     root: PathBuf,
@@ -76,7 +82,7 @@ impl ModelCatalog {
             root,
             files,
             root_path,
-            manifest_hash: format!("{:x}", digest.finalize()),
+            manifest_hash: hex::encode(digest.finalize()),
             joint_bounds,
         })
     }
@@ -171,7 +177,7 @@ impl ModelCatalog {
                         .essence_str()
                         .into(),
                 );
-                response.content_hash = Some(format!("{:x}", Sha256::digest(&content)));
+                response.content_hash = Some(hex::encode(Sha256::digest(&content)));
                 response.content = Some(content);
             }
             Err(error) => response.original_error = Some(error.to_string()),

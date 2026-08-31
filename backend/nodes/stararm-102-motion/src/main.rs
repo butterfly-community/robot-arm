@@ -14,23 +14,25 @@ use std::{
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::Result;
+use manipulation_core::{PickPlacePlan, cartesian_target, plan_pick_place};
 use robot_arm_messages::{
-    ArmCommand, ArmState, ControlMode, DepthCameraCalibration, DepthCameraState,
-    DepthPointCloudFrame, DiagnosticValue, FeedbackSource, MotionRequest, MotionState,
-    MotionStatus, RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION,
+    ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationStep,
+    ManipulationTaskState, MotionRequest, MotionState, MotionStatus, PerceptionState,
+    PickPlaceRequest, RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION,
     ServiceState, SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose,
-    TransformedControlFrame, depth_point_cloud_from_arrow, from_arrow, to_arrow,
+    TransformedControlFrame, WorldScene, from_arrow, to_arrow,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use stararm_102_model::{
-    CLOSED_GRIPPER_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION, START_JOINTS_RAD,
+    CLOSED_GRIPPER_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION, OPEN_GRIPPER_RAD,
+    START_JOINTS_RAD,
 };
 
 use crate::{
     core::{
-        MotionConfig, Pose, merge_controller_command, target_pose, tool_action_transition,
-        tool_position_rad,
+        MotionConfig, Pose, merge_controller_command, radial_orientation, target_pose,
+        tool_action_transition, tool_position_rad,
     },
     ros::{MotionJob, RosEvent, RosInterface},
 };
@@ -44,6 +46,12 @@ struct ActiveMotion {
 struct PendingMotion {
     job: MotionJob,
     complete_in_relative_mode: bool,
+}
+
+struct ActiveManipulation {
+    plan: PickPlacePlan,
+    step_index: usize,
+    waiting_motion_id: Option<String>,
 }
 
 struct MotionNode {
@@ -73,9 +81,10 @@ struct MotionNode {
     motion_status: MotionStatus,
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
-    depth_camera: Option<DepthCameraState>,
-    depth_calibration: Option<DepthCameraCalibration>,
-    pending_depth_cloud: Option<DepthPointCloudFrame>,
+    latest_scene: Option<WorldScene>,
+    active_manipulation: Option<ActiveManipulation>,
+    manipulation_queue: VecDeque<PickPlacePlan>,
+    manipulation_state: ManipulationTaskState,
 }
 
 fn main() {
@@ -119,9 +128,10 @@ fn run() -> Result<()> {
         motion_status: idle_status(),
         actuator_status: None,
         last_error: None,
-        depth_camera: None,
-        depth_calibration: None,
-        pending_depth_cloud: None,
+        latest_scene: None,
+        active_manipulation: None,
+        manipulation_queue: VecDeque::new(),
+        manipulation_state: idle_manipulation_state(),
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
     motion.publish_state(&mut node)?;
@@ -170,31 +180,22 @@ fn run() -> Result<()> {
                     "tool_actuator_request" => {
                         motion.handle_actuator_request(&mut node, from_arrow(data.as_array())?)?
                     }
-                    "depth_point_cloud" => {
-                        let cloud: DepthPointCloudFrame =
-                            depth_point_cloud_from_arrow(data.as_array())?;
-                        motion.pending_depth_cloud = Some(cloud);
+                    "world_scene" => {
+                        let scene: WorldScene = from_arrow(data.as_array())?;
+                        motion.ros.publish_world_scene(&scene)?;
+                        motion.latest_scene = Some(scene);
                     }
-                    "depth_camera_calibration" => {
-                        let calibration: DepthCameraCalibration = from_arrow(data.as_array())?;
-                        motion.ros.publish_depth_calibration(calibration.clone())?;
-                        motion.depth_calibration = Some(calibration);
-                    }
-                    "depth_camera_state" => {
-                        let state: DepthCameraState = from_arrow(data.as_array())?;
-                        let clear = motion
-                            .depth_camera
-                            .as_ref()
-                            .is_some_and(|previous| previous.streaming && !state.streaming);
-                        motion.depth_camera = Some(state);
-                        if clear {
-                            motion.depth_calibration = None;
-                            motion.pending_depth_cloud = None;
-                            motion.ros.clear_octomap()?;
+                    "perception_state" => {
+                        let state: PerceptionState = from_arrow(data.as_array())?;
+                        if !state.enabled {
+                            motion.ros.clear_world_scene()?;
+                            motion.latest_scene = None;
                         }
                     }
+                    "pick_place_request" => {
+                        motion.handle_pick_place(&mut node, from_arrow(data.as_array())?)?;
+                    }
                     "snapshot" => motion.publish_state(&mut node)?,
-                    "tick" => motion.flush_depth_cloud()?,
                     _ => {}
                 }
                 motion.drain_ros_events(&mut node)?;
@@ -208,22 +209,6 @@ fn run() -> Result<()> {
 }
 
 impl MotionNode {
-    fn flush_depth_cloud(&mut self) -> Result<()> {
-        let ready = self.pending_depth_cloud.as_ref().is_some_and(|cloud| {
-            self.depth_calibration.as_ref().is_some_and(|calibration| {
-                calibration.source_id == cloud.source_id && calibration.frame_id == cloud.frame_id
-            }) && self.ros.depth_output_ready()
-        });
-        if ready {
-            self.ros.publish_depth_cloud(
-                self.pending_depth_cloud
-                    .take()
-                    .expect("checked pending depth cloud"),
-            )?;
-        }
-        Ok(())
-    }
-
     fn apply_arm_state(&mut self, state: ArmState) -> Result<()> {
         if state.model_revision != MODEL_REVISION
             || state.joints_rad.len() != JOINTS.len()
@@ -534,6 +519,210 @@ impl MotionNode {
         Ok(())
     }
 
+    fn handle_pick_place(&mut self, node: &mut DoraNode, request: PickPlaceRequest) -> Result<()> {
+        let plan = self
+            .latest_scene
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("尚未收到结构化感知场景"))
+            .and_then(|scene| plan_pick_place(scene, &request).map_err(Into::into));
+        match plan {
+            Ok(plan) if self.active_manipulation.is_none() => self.start_manipulation(node, plan),
+            Ok(plan) => {
+                self.manipulation_queue.push_back(plan);
+                Ok(())
+            }
+            Err(error) if self.active_manipulation.is_some() => {
+                self.send_manipulation_failure(node, request.request_id, error.to_string())
+            }
+            Err(error) => self.fail_manipulation(node, request.request_id, error.to_string()),
+        }
+    }
+
+    fn start_manipulation(&mut self, node: &mut DoraNode, plan: PickPlacePlan) -> Result<()> {
+        self.manipulation_state = ManipulationTaskState {
+            schema_version: SCHEMA_VERSION,
+            request_id: plan.request_id.clone(),
+            state: RequestState::Executing,
+            step: Some(ManipulationStep::ApproachObject),
+            original_error: None,
+        };
+        self.active_manipulation = Some(ActiveManipulation {
+            plan,
+            step_index: 0,
+            waiting_motion_id: None,
+        });
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        self.continue_or_fail_manipulation(node)
+    }
+
+    fn continue_or_fail_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
+        let Some(request_id) = self
+            .active_manipulation
+            .as_ref()
+            .map(|active| active.plan.request_id.clone())
+        else {
+            return Ok(());
+        };
+        if let Err(error) = self.continue_manipulation(node) {
+            self.fail_manipulation(node, request_id, error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn continue_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
+        loop {
+            let Some(active) = self.active_manipulation.as_ref() else {
+                return Ok(());
+            };
+            let step = active.plan.steps[active.step_index];
+            let plan = active.plan.clone();
+            self.manipulation_state.step = Some(step);
+            send(node, "manipulation_state", &self.manipulation_state)?;
+            match step {
+                ManipulationStep::ApproachObject
+                | ManipulationStep::ReachObject
+                | ManipulationStep::ApproachPlacement
+                | ManipulationStep::ReachPlacement => {
+                    let state = self
+                        .latest_arm_state
+                        .as_ref()
+                        .ok_or_else(|| eyre::eyre!("缺少当前关节反馈"))?;
+                    let current = self
+                        .current_tcp
+                        .ok_or_else(|| eyre::eyre!("缺少当前 TCP 位姿"))?;
+                    let position = cartesian_target(&plan, step)
+                        .expect("cartesian manipulation step checked above");
+                    match step {
+                        ManipulationStep::ReachPlacement => {
+                            if let Some(id) = &plan.placement_region.source_object_id {
+                                self.ros.remove_world_object(id)?;
+                            }
+                        }
+                        ManipulationStep::ReachObject => {
+                            self.ros.remove_world_object(&plan.object.object_id)?;
+                        }
+                        _ => {}
+                    }
+                    let target = self.ros.solve_ik(
+                        Pose {
+                            position_m: position,
+                            orientation_xyzw: radial_orientation(current, position),
+                        },
+                        &state.joints_rad,
+                    )?;
+                    let request_id = format!("{}:{step:?}", plan.request_id);
+                    self.active_manipulation
+                        .as_mut()
+                        .expect("manipulation remains active")
+                        .waiting_motion_id = Some(request_id.clone());
+                    return self.queue_or_start_motion(
+                        node,
+                        MotionJob {
+                            request_id,
+                            current: state.joints_rad.clone(),
+                            target,
+                            actuator: state.actuators_rad[0],
+                            options: BTreeMap::new(),
+                        },
+                        false,
+                    );
+                }
+                ManipulationStep::CloseTool => {
+                    self.publish_actuator(&plan.request_id, CLOSED_GRIPPER_RAD)?;
+                }
+                ManipulationStep::AttachObject => {
+                    self.ros
+                        .attach_object(&plan.object.object_id, plan.object.size_m)?;
+                }
+                ManipulationStep::OpenTool => {
+                    self.publish_actuator(&plan.request_id, OPEN_GRIPPER_RAD)?;
+                }
+                ManipulationStep::DetachObject => {
+                    self.ros.detach_object(&plan.object.object_id)?;
+                    if let Some(scene) = &mut self.latest_scene
+                        && let Some(object) = scene
+                            .objects
+                            .iter_mut()
+                            .find(|object| object.object_id == plan.object.object_id)
+                    {
+                        object.pose.position_m = plan.placement_region.pose.position_m;
+                        object.pose.position_m[2] += object.size_m[2] / 2.0;
+                        self.ros.publish_world_scene(scene)?;
+                    }
+                }
+                ManipulationStep::Complete => {
+                    self.manipulation_state.state = RequestState::Succeeded;
+                    send(node, "manipulation_state", &self.manipulation_state)?;
+                    self.send_manipulation_result(node)?;
+                    self.active_manipulation = None;
+                    if let Some(next) = self.manipulation_queue.pop_front() {
+                        self.start_manipulation(node, next)?;
+                    }
+                    return Ok(());
+                }
+            }
+            self.active_manipulation
+                .as_mut()
+                .expect("manipulation remains active")
+                .step_index += 1;
+        }
+    }
+
+    fn fail_manipulation(
+        &mut self,
+        node: &mut DoraNode,
+        request_id: String,
+        error: String,
+    ) -> Result<()> {
+        self.active_manipulation = None;
+        self.manipulation_state = ManipulationTaskState {
+            schema_version: SCHEMA_VERSION,
+            request_id,
+            state: RequestState::Failed,
+            step: None,
+            original_error: Some(error),
+        };
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        self.send_manipulation_result(node)?;
+        if let Some(next) = self.manipulation_queue.pop_front() {
+            self.start_manipulation(node, next)?;
+        }
+        Ok(())
+    }
+
+    fn send_manipulation_failure(
+        &self,
+        node: &mut DoraNode,
+        request_id: String,
+        error: String,
+    ) -> Result<()> {
+        send(
+            node,
+            "manipulation_request_result",
+            &RequestResult {
+                schema_version: SCHEMA_VERSION,
+                request_id,
+                acknowledged_action: RequestAction::Apply,
+                value: None::<ManipulationTaskState>,
+                original_error: Some(error),
+            },
+        )
+    }
+
+    fn send_manipulation_result(&self, node: &mut DoraNode) -> Result<()> {
+        send(
+            node,
+            "manipulation_request_result",
+            &RequestResult {
+                schema_version: SCHEMA_VERSION,
+                request_id: self.manipulation_state.request_id.clone(),
+                acknowledged_action: RequestAction::Apply,
+                value: Some(self.manipulation_state.clone()),
+                original_error: self.manipulation_state.original_error.clone(),
+            },
+        )
+    }
+
     fn start_controller_sync(&mut self) {
         if self.controller_sync_required
             && !self.controller_sync_running
@@ -630,6 +819,11 @@ impl MotionNode {
                         self.publish_state(node)?;
                         continue;
                     }
+                    let manipulation_waiting = self
+                        .active_manipulation
+                        .as_ref()
+                        .and_then(|active| active.waiting_motion_id.as_deref())
+                        == Some(request_id.as_str());
                     match result {
                         Ok(result) => {
                             if active.complete_in_relative_mode
@@ -648,9 +842,27 @@ impl MotionNode {
                             self.motion_status.result_message = Some("普通运动执行完成".into());
                             send(node, "motion_status", &self.motion_status)?;
                             self.send_motion_result(node, &self.motion_status)?;
+                            if manipulation_waiting {
+                                let active = self
+                                    .active_manipulation
+                                    .as_mut()
+                                    .expect("waiting manipulation remains active");
+                                active.waiting_motion_id = None;
+                                active.step_index += 1;
+                                self.continue_or_fail_manipulation(node)?;
+                            }
                         }
                         Err(error) => {
-                            self.fail_motion(node, request_id, error, RequestAction::Apply)?;
+                            self.fail_motion(
+                                node,
+                                request_id,
+                                error.clone(),
+                                RequestAction::Apply,
+                            )?;
+                            if manipulation_waiting {
+                                let manipulation_id = self.manipulation_state.request_id.clone();
+                                self.fail_manipulation(node, manipulation_id, error)?;
+                            }
                         }
                     }
                     self.start_next_motion(node)?;
@@ -853,6 +1065,7 @@ impl MotionNode {
     fn publish_state(&self, node: &mut DoraNode) -> Result<()> {
         let state = self.motion_state();
         send(node, "motion_state", &state)?;
+        send(node, "manipulation_state", &self.manipulation_state)?;
         send(node, "service_state", &state.service)
     }
 }
@@ -868,6 +1081,16 @@ fn idle_status() -> MotionStatus {
         result_message: Some("尚未请求普通运动".into()),
         trajectory_points: None,
         planned_duration_s: None,
+    }
+}
+
+fn idle_manipulation_state() -> ManipulationTaskState {
+    ManipulationTaskState {
+        schema_version: SCHEMA_VERSION,
+        request_id: String::new(),
+        state: RequestState::Idle,
+        step: None,
+        original_error: None,
     }
 }
 

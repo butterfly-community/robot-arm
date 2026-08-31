@@ -185,9 +185,7 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "pose_source_request_result"
         | "bindings_request_result"
         | "source_name_request_result"
-        | "simulation_request_result"
-        | "depth_camera_state"
-        | "depth_camera_request_result" => Some("tracking"),
+        | "simulation_request_result" => Some("tracking"),
         "spatial_pose"
         | "spatial_config_state"
         | "spatial_service_state"
@@ -197,8 +195,15 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "motion_state"
         | "motion_status"
         | "motion_request_result"
+        | "manipulation_state"
+        | "manipulation_request_result"
         | "actuator_status"
-        | "mode_request_result" => Some("motion"),
+        | "mode_request_result"
+        | "perception_state"
+        | "world_scene"
+        | "perception_request_result"
+        | "calibration_state"
+        | "calibration_request_result" => Some("motion"),
         "execution_info"
         | "transport_state"
         | "execution_service_state"
@@ -224,7 +229,6 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/tracking/bindings", post(request_bindings))
         .route("/api/tracking/source-name", post(request_source_name))
         .route("/api/tracking/simulation", post(request_simulation))
-        .route("/api/tracking/depth-camera", post(request_depth_camera))
         .route("/api/tracking/snapshot", post(request_tracking_snapshot))
         .route("/api/spatial/state", get(snapshot_spatial))
         .route("/api/spatial/config", patch(request_spatial_config))
@@ -238,6 +242,12 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/motion/request", post(request_motion))
         .route("/api/motion/cancel", post(request_motion))
         .route("/api/motion/actuator", post(request_actuator))
+        .route("/api/motion/pick-place", post(request_pick_place))
+        .route("/api/motion/perception", post(request_perception))
+        .route(
+            "/api/motion/perception/calibration",
+            post(request_calibration),
+        )
         .route("/api/motion/snapshot", post(request_motion_snapshot))
         .route("/api/motion/assets/{*path}", get(model_asset))
         .route("/api/arm-execution/state", get(snapshot_execution))
@@ -328,12 +338,52 @@ request_handler!(request_pose_source, "select_pose_source_request");
 request_handler!(request_bindings, "apply_bindings_request");
 request_handler!(request_source_name, "rename_input_source_request");
 request_handler!(request_simulation, "set_simulation_request");
-request_handler!(request_depth_camera, "set_depth_camera_request");
+request_handler!(request_perception, "perception_request");
+request_handler!(request_calibration, "calibration_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");
 request_handler!(request_mode, "set_control_mode_request");
 request_handler!(request_prepare_relative, "prepare_relative_request");
 request_handler!(request_motion, "motion_request");
 request_handler!(request_actuator, "tool_actuator_request");
+
+async fn request_pick_place(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let Some(request_id) = body
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"original_error":"request_id is required"})),
+        )
+            .into_response();
+    };
+    if state
+        .requests
+        .send(OutgoingRequest {
+            output: "pick_place_request".into(),
+            request_id: request_id.clone(),
+            body,
+            response: None,
+        })
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"original_error":"Dora gateway is stopping"})),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "schema_version": SCHEMA_VERSION,
+            "request_id": request_id,
+            "accepted": true
+        })),
+    )
+        .into_response()
+}
 
 async fn request_execution(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     if let Err(error) = serde_json::from_value::<ExecutionRequest>(body.clone()) {
@@ -365,7 +415,13 @@ async fn request_spatial_snapshot(State(s): State<AppState>) -> Response {
     fire(s, "spatial_snapshot").await
 }
 async fn request_motion_snapshot(State(s): State<AppState>) -> Response {
-    fire(s, "motion_snapshot").await
+    let motion = fire(s.clone(), "motion_snapshot").await;
+    let perception = fire(s, "perception_snapshot").await;
+    if motion.status().is_success() && perception.status().is_success() {
+        StatusCode::ACCEPTED.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
 }
 async fn request_execution_snapshot(State(s): State<AppState>) -> Response {
     fire(s, "execution_snapshot").await

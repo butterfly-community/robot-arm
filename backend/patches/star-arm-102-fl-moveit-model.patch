@@ -80,7 +80,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.
        effort="100"
        velocity="1" />
    </joint>
-@@ -503,9 +503,9 @@
+@@ -503,10 +503,16 @@
      <axis
 -      xyz="0 0 1" />
 +      xyz="0 0 -1" />
@@ -93,6 +93,13 @@ diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.
        velocity="1" />
        <mimic joint="joint7_left" multiplier="-1" />
    </joint>
++  <link name="tcp_link" />
++  <joint name="tcp_joint" type="fixed">
++    <origin xyz="0 0 0" rpy="0 0 0" />
++    <parent link="link6" />
++    <child link="tcp_link" />
++  </joint>
+ </robot>
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
 +++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
@@ -107,7 +114,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
 -        <joint name="joint4"/>
 -        <joint name="joint5"/>
 -        <joint name="joint6"/>
-+        <chain base_link="base_link" tip_link="link6"/>
++        <chain base_link="base_link" tip_link="tcp_link"/>
      </group>
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml b/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml

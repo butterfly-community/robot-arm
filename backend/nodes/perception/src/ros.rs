@@ -1,0 +1,370 @@
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
+    thread,
+    time::Duration,
+};
+
+use eyre::{Context, Result, eyre};
+use futures::{StreamExt, executor::block_on};
+use r2r::{ClientUntyped, Context as RosContext, Node, Publisher, QosProfile};
+use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame, WorldScene};
+use serde_json::json;
+
+const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+#[derive(Debug)]
+pub enum RosEvent {
+    Color(r2r::sensor_msgs::msg::Image),
+    ColorInfo(r2r::sensor_msgs::msg::CameraInfo),
+    Depth(r2r::sensor_msgs::msg::Image),
+    DepthInfo(r2r::sensor_msgs::msg::CameraInfo),
+}
+
+pub struct RosInterface {
+    color_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
+    color_info_publisher: Publisher<r2r::sensor_msgs::msg::CameraInfo>,
+    depth_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
+    depth_info_publisher: Publisher<r2r::sensor_msgs::msg::CameraInfo>,
+    cloud_publisher: Publisher<r2r::sensor_msgs::msg::PointCloud2>,
+    marker_publisher: Publisher<r2r::visualization_msgs::msg::MarkerArray>,
+    segmentation_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
+    calibration_debug_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
+    static_tf_publisher: Publisher<r2r::tf2_msgs::msg::TFMessage>,
+    clear_octomap: ClientUntyped,
+}
+
+impl RosInterface {
+    pub fn start(event_sender: Sender<RosEvent>, stop: Arc<AtomicBool>) -> Result<Self> {
+        let context = RosContext::create().context("初始化 ROS 2 perception context")?;
+        let mut node =
+            Node::create(context, "perception_node", "").context("创建 ROS 2 perception 节点")?;
+        let color_publisher =
+            node.create_publisher("/perception/color/image_raw", QosProfile::sensor_data())?;
+        let color_info_publisher =
+            node.create_publisher("/perception/color/camera_info", QosProfile::sensor_data())?;
+        let depth_publisher =
+            node.create_publisher("/perception/depth/image_raw", QosProfile::sensor_data())?;
+        let depth_info_publisher =
+            node.create_publisher("/perception/depth/camera_info", QosProfile::sensor_data())?;
+        let cloud_publisher =
+            node.create_publisher("/perception/depth/points", QosProfile::sensor_data())?;
+        let marker_publisher =
+            node.create_publisher("/perception/debug/markers", QosProfile::default())?;
+        let segmentation_publisher =
+            node.create_publisher("/perception/debug/segmentation", QosProfile::sensor_data())?;
+        let calibration_debug_publisher =
+            node.create_publisher("/perception/debug/calibration", QosProfile::sensor_data())?;
+        let static_tf_publisher =
+            node.create_publisher("/tf_static", QosProfile::default().transient_local())?;
+        let clear_octomap = node.create_client_untyped(
+            "/clear_octomap",
+            "std_srvs/srv/Empty",
+            QosProfile::default(),
+        )?;
+        let color = node.subscribe("/camera/camera/color/image_raw", QosProfile::sensor_data())?;
+        let color_info = node.subscribe(
+            "/camera/camera/color/camera_info",
+            QosProfile::sensor_data(),
+        )?;
+        let depth = node.subscribe(
+            "/camera/camera/aligned_depth_to_color/image_raw",
+            QosProfile::sensor_data(),
+        )?;
+        let depth_info = node.subscribe(
+            "/camera/camera/aligned_depth_to_color/camera_info",
+            QosProfile::sensor_data(),
+        )?;
+        forward_stream(color, event_sender.clone(), RosEvent::Color);
+        forward_stream(color_info, event_sender.clone(), RosEvent::ColorInfo);
+        forward_stream(depth, event_sender.clone(), RosEvent::Depth);
+        forward_stream(depth_info, event_sender.clone(), RosEvent::DepthInfo);
+        drop(event_sender);
+
+        let node = Arc::new(Mutex::new(node));
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                node.lock()
+                    .expect("ROS perception node mutex poisoned")
+                    .spin_once(Duration::from_millis(10));
+            }
+        });
+        Ok(Self {
+            color_publisher,
+            color_info_publisher,
+            depth_publisher,
+            depth_info_publisher,
+            cloud_publisher,
+            marker_publisher,
+            segmentation_publisher,
+            calibration_debug_publisher,
+            static_tf_publisher,
+            clear_octomap,
+        })
+    }
+
+    pub fn publish_color(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
+        self.color_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_color_info(&self, message: r2r::sensor_msgs::msg::CameraInfo) -> Result<()> {
+        self.color_info_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_depth(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
+        self.depth_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_depth_info(&self, message: r2r::sensor_msgs::msg::CameraInfo) -> Result<()> {
+        self.depth_info_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_segmentation(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
+        self.segmentation_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_calibration_debug(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
+        self.calibration_debug_publisher.publish(&message)?;
+        Ok(())
+    }
+
+    pub fn publish_cloud(&self, cloud: DepthPointCloudFrame) -> Result<()> {
+        let mut data = Vec::with_capacity(cloud.points_xyz_m.len() * 12);
+        for point in cloud.points_xyz_m {
+            for coordinate in point {
+                data.extend_from_slice(&coordinate.to_le_bytes());
+            }
+        }
+        self.cloud_publisher
+            .publish(&r2r::sensor_msgs::msg::PointCloud2 {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: ros_time(cloud.source_time_ns),
+                    frame_id: cloud.frame_id,
+                },
+                height: cloud.height,
+                width: cloud.width,
+                fields: ["x", "y", "z"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| r2r::sensor_msgs::msg::PointField {
+                        name: name.into(),
+                        offset: (index * 4) as u32,
+                        datatype: 7,
+                        count: 1,
+                    })
+                    .collect(),
+                is_bigendian: false,
+                point_step: 12,
+                row_step: cloud.width * 12,
+                data,
+                is_dense: false,
+            })?;
+        Ok(())
+    }
+
+    pub fn publish_calibration(&self, calibration: &DepthCameraCalibration) -> Result<()> {
+        let stamp = ros_time(calibration.source_time_ns);
+        let info = r2r::sensor_msgs::msg::CameraInfo {
+            header: r2r::std_msgs::msg::Header {
+                stamp: stamp.clone(),
+                frame_id: calibration.frame_id.clone(),
+            },
+            height: calibration.height,
+            width: calibration.width,
+            distortion_model: calibration.distortion_model.clone(),
+            d: calibration.distortion.clone(),
+            k: calibration.camera_matrix.to_vec(),
+            r: RECTIFICATION_MATRIX.to_vec(),
+            p: calibration.projection_matrix.to_vec(),
+            ..Default::default()
+        };
+        self.depth_info_publisher.publish(&info)?;
+        self.color_info_publisher.publish(&info)?;
+        let [x, y, z] = calibration.translation_m;
+        let [qx, qy, qz, qw] = calibration.orientation_xyzw;
+        self.static_tf_publisher
+            .publish(&r2r::tf2_msgs::msg::TFMessage {
+                transforms: vec![r2r::geometry_msgs::msg::TransformStamped {
+                    header: r2r::std_msgs::msg::Header {
+                        stamp,
+                        frame_id: calibration.parent_frame_id.clone(),
+                    },
+                    child_frame_id: calibration.frame_id.clone(),
+                    transform: r2r::geometry_msgs::msg::Transform {
+                        translation: r2r::geometry_msgs::msg::Vector3 { x, y, z },
+                        rotation: r2r::geometry_msgs::msg::Quaternion {
+                            x: qx,
+                            y: qy,
+                            z: qz,
+                            w: qw,
+                        },
+                    },
+                }],
+            })?;
+        Ok(())
+    }
+
+    pub fn publish_markers(&self, scene: &WorldScene) -> Result<()> {
+        let mut markers = Vec::new();
+        for (index, object) in scene.objects.iter().enumerate() {
+            let [x, y, z] = object.pose.position_m;
+            let [qx, qy, qz, qw] = object.pose.orientation_xyzw;
+            let [sx, sy, sz] = object.size_m;
+            markers.push(r2r::visualization_msgs::msg::Marker {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: ros_time(scene.sample_time_ns),
+                    frame_id: scene.frame_id.clone(),
+                },
+                ns: "perception_objects".into(),
+                id: index as i32,
+                type_: 1,
+                action: 0,
+                pose: r2r::geometry_msgs::msg::Pose {
+                    position: r2r::geometry_msgs::msg::Point { x, y, z },
+                    orientation: r2r::geometry_msgs::msg::Quaternion {
+                        x: qx,
+                        y: qy,
+                        z: qz,
+                        w: qw,
+                    },
+                },
+                scale: r2r::geometry_msgs::msg::Vector3 {
+                    x: sx,
+                    y: sy,
+                    z: sz,
+                },
+                color: r2r::std_msgs::msg::ColorRGBA {
+                    r: 0.2,
+                    g: 0.7,
+                    b: 1.0,
+                    a: 0.65,
+                },
+                ..Default::default()
+            });
+            markers.push(r2r::visualization_msgs::msg::Marker {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: ros_time(scene.sample_time_ns),
+                    frame_id: scene.frame_id.clone(),
+                },
+                ns: "perception_labels".into(),
+                id: index as i32,
+                type_: 9,
+                action: 0,
+                pose: r2r::geometry_msgs::msg::Pose {
+                    position: r2r::geometry_msgs::msg::Point {
+                        x,
+                        y,
+                        z: z + sz / 2.0,
+                    },
+                    orientation: r2r::geometry_msgs::msg::Quaternion {
+                        w: 1.0,
+                        ..Default::default()
+                    },
+                },
+                scale: r2r::geometry_msgs::msg::Vector3 {
+                    z: 0.02,
+                    ..Default::default()
+                },
+                color: r2r::std_msgs::msg::ColorRGBA {
+                    r: 0.9,
+                    g: 0.95,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                text: object.label.clone(),
+                ..Default::default()
+            });
+        }
+        for (index, region) in scene.placement_regions.iter().enumerate() {
+            let [x, y, z] = region.pose.position_m;
+            let [sx, sy, _] = region.size_m;
+            markers.push(r2r::visualization_msgs::msg::Marker {
+                header: r2r::std_msgs::msg::Header {
+                    stamp: ros_time(scene.sample_time_ns),
+                    frame_id: scene.frame_id.clone(),
+                },
+                ns: "perception_placement_regions".into(),
+                id: index as i32,
+                type_: 1,
+                action: 0,
+                pose: r2r::geometry_msgs::msg::Pose {
+                    position: r2r::geometry_msgs::msg::Point { x, y, z },
+                    orientation: r2r::geometry_msgs::msg::Quaternion {
+                        w: 1.0,
+                        ..Default::default()
+                    },
+                },
+                scale: r2r::geometry_msgs::msg::Vector3 {
+                    x: sx,
+                    y: sy,
+                    z: 0.002,
+                },
+                color: r2r::std_msgs::msg::ColorRGBA {
+                    r: 0.2,
+                    g: 1.0,
+                    b: 0.45,
+                    a: 0.55,
+                },
+                ..Default::default()
+            });
+        }
+        self.marker_publisher
+            .publish(&r2r::visualization_msgs::msg::MarkerArray { markers })?;
+        Ok(())
+    }
+
+    pub fn clear_markers(&self) -> Result<()> {
+        self.marker_publisher
+            .publish(&r2r::visualization_msgs::msg::MarkerArray {
+                markers: vec![r2r::visualization_msgs::msg::Marker {
+                    action: 3,
+                    ..Default::default()
+                }],
+            })?;
+        Ok(())
+    }
+
+    pub fn clear_octomap(&self) -> Result<()> {
+        block_on(async {
+            Node::is_available(&self.clear_octomap)?.await?;
+            self.clear_octomap
+                .request(json!({}))?
+                .await?
+                .map_err(|error| eyre!(error))?;
+            Result::<()>::Ok(())
+        })
+    }
+}
+
+fn forward_stream<T: Send + 'static>(
+    mut stream: impl futures::Stream<Item = T> + Unpin + Send + 'static,
+    sender: Sender<RosEvent>,
+    wrap: fn(T) -> RosEvent,
+) {
+    thread::spawn(move || {
+        block_on(async move {
+            while let Some(message) = stream.next().await {
+                let _ = sender.send(wrap(message));
+            }
+        });
+    });
+}
+
+pub fn ros_time(time_ns: i64) -> r2r::builtin_interfaces::msg::Time {
+    r2r::builtin_interfaces::msg::Time {
+        sec: time_ns.div_euclid(1_000_000_000) as i32,
+        nanosec: time_ns.rem_euclid(1_000_000_000) as u32,
+    }
+}
+
+pub fn time_ns(time: &r2r::builtin_interfaces::msg::Time) -> i64 {
+    i64::from(time.sec) * 1_000_000_000 + i64::from(time.nanosec)
+}
