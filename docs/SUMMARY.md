@@ -44,6 +44,10 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 `manipulation-core`、`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
 远程部署，但外部只和 `perception-node` 交互。
 
+StarArm 的 visual 和凹形夹指 collision 保留厂家高质量 STL；其余 collision 在镜像构建时由
+OpenSCAD 从同一 STL 生成凸包。MoveIt 仍检查完整 PlanningScene，但不再用约十万个视觉
+三角面做在线碰撞查询；场景变更统一经同步 `ApplyPlanningScene` 服务提交。
+
 ## 感知与抓放
 
 真实相机使用 ROS 主线已经发布的彩色图、对齐到彩色的深度图和 CameraInfo。当前订阅接口为：
@@ -54,7 +58,8 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 | 对齐深度 / 内参 | `/camera/camera/aligned_depth_to_color/image_raw`、`/camera/camera/aligned_depth_to_color/camera_info` |
 
 `perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
-占位场景；计算服务失败时保留原始错误，不切换模型或伪造结果。
+占位场景；每次应用感知配置时会清除上一来源的 Marker 和 OctoMap，再发布当前来源；计算
+服务失败时保留原始错误，不切换模型或伪造结果。
 
 仓库提供两个走正式链路的确定性来源：
 

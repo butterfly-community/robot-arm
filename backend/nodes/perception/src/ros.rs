@@ -334,7 +334,6 @@ impl RosInterface {
 
     pub fn clear_octomap(&self) -> Result<()> {
         block_on(async {
-            Node::is_available(&self.clear_octomap)?.await?;
             self.clear_octomap
                 .request(json!({}))?
                 .await?

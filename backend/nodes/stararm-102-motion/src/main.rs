@@ -592,16 +592,8 @@ impl MotionNode {
                         .ok_or_else(|| eyre::eyre!("缺少当前 TCP 位姿"))?;
                     let position = cartesian_target(&plan, step)
                         .expect("cartesian manipulation step checked above");
-                    match step {
-                        ManipulationStep::ReachPlacement => {
-                            if let Some(id) = &plan.placement_region.source_object_id {
-                                self.ros.remove_world_object(id)?;
-                            }
-                        }
-                        ManipulationStep::ReachObject => {
-                            self.ros.remove_world_object(&plan.object.object_id)?;
-                        }
-                        _ => {}
+                    if step == ManipulationStep::ReachObject {
+                        self.ros.remove_world_object(&plan.object.object_id)?;
                     }
                     let target = self.ros.solve_ik(
                         Pose {

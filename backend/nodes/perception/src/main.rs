@@ -393,15 +393,12 @@ impl PerceptionNode {
             .err()
             .map(|error: eyre::Report| error.to_string());
         if error.is_none() {
-            let was_enabled = self.config.enabled;
             self.config = next;
             self.generated_published = false;
             self.frames = CameraFrames::default();
             self.last_scene = None;
             self.ros.clear_markers()?;
-            if was_enabled && !self.config.enabled {
-                self.ros.clear_octomap()?;
-            }
+            self.ros.clear_octomap()?;
         }
         self.last_error = error.clone();
         send(

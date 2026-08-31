@@ -65,8 +65,6 @@ pub struct RosInterface {
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
-    collision_publisher: PublisherUntyped,
-    attached_collision_publisher: PublisherUntyped,
     collision_ids: Arc<Mutex<BTreeSet<String>>>,
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
@@ -75,6 +73,7 @@ pub struct RosInterface {
     inverse_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
+    apply_planning_scene: Arc<ClientUntyped>,
     motion_sender: Sender<MotionJob>,
     event_sender: Sender<RosEvent>,
 }
@@ -97,16 +96,6 @@ impl RosInterface {
         let state_publisher = node.create_publisher_untyped(
             "/stararm102/joint_states",
             "sensor_msgs/msg/JointState",
-            QosProfile::default(),
-        )?;
-        let collision_publisher = node.create_publisher_untyped(
-            "/collision_object",
-            "moveit_msgs/msg/CollisionObject",
-            QosProfile::default(),
-        )?;
-        let attached_collision_publisher = node.create_publisher_untyped(
-            "/attached_collision_object",
-            "moveit_msgs/msg/AttachedCollisionObject",
             QosProfile::default(),
         )?;
         let controller_commands = node.subscribe_untyped(
@@ -154,6 +143,11 @@ impl RosInterface {
             "moveit_msgs/srv/GetPlanningScene",
             QosProfile::default(),
         )?;
+        let apply_planning_scene = node.create_client_untyped(
+            "/apply_planning_scene",
+            "moveit_msgs/srv/ApplyPlanningScene",
+            QosProfile::default(),
+        )?;
         let (motion_sender, motion_receiver) = channel();
         let node = Arc::new(Mutex::new(node));
         let spin_node = Arc::clone(&node);
@@ -177,8 +171,6 @@ impl RosInterface {
             pose_publisher,
             hand_publisher,
             state_publisher,
-            collision_publisher,
-            attached_collision_publisher,
             collision_ids: Arc::new(Mutex::new(BTreeSet::new())),
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
@@ -187,6 +179,7 @@ impl RosInterface {
             inverse_kinematics: Arc::new(inverse_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
+            apply_planning_scene: Arc::new(apply_planning_scene),
             motion_sender,
             event_sender,
         };
@@ -217,32 +210,40 @@ impl RosInterface {
             .collision_ids
             .lock()
             .map_err(|_| eyre!("collision id lock poisoned"))?;
-        for id in previous_ids.difference(&next_ids) {
-            self.collision_publisher.publish(json!({
+        let mut collision_objects = previous_ids
+            .difference(&next_ids)
+            .map(|id| {
+                json!({
                 "header": {"frame_id": scene.frame_id},
                 "id": id,
                 "operation": 1,
-            }))?;
-        }
-        for object in scene
-            .objects
-            .iter()
-            .filter(|object| !placement_sources.contains(object.object_id.as_str()))
-        {
-            self.publish_collision_box(
-                &scene.frame_id,
-                &object.object_id,
-                &object.pose,
-                object.size_m,
-            )?;
-        }
-        for obstacle in &scene.obstacles {
-            self.publish_collision_box(
+                })
+            })
+            .collect::<Vec<_>>();
+        collision_objects.extend(
+            scene
+                .objects
+                .iter()
+                .filter(|object| !placement_sources.contains(object.object_id.as_str()))
+                .map(|object| {
+                    collision_box(
+                        &scene.frame_id,
+                        &object.object_id,
+                        &object.pose,
+                        object.size_m,
+                    )
+                }),
+        );
+        collision_objects.extend(scene.obstacles.iter().map(|obstacle| {
+            collision_box(
                 &scene.frame_id,
                 &obstacle.obstacle_id,
                 &obstacle.pose,
                 obstacle.size_m,
-            )?;
+            )
+        }));
+        if !collision_objects.is_empty() {
+            self.apply_scene(json!({"world": {"collision_objects": collision_objects}}))?;
         }
         *previous_ids = next_ids;
         Ok(())
@@ -253,22 +254,30 @@ impl RosInterface {
             .collision_ids
             .lock()
             .map_err(|_| eyre!("collision id lock poisoned"))?;
-        for id in ids.iter() {
-            self.collision_publisher.publish(json!({
-                "header": {"frame_id": BASE_FRAME},
-                "id": id,
-                "operation": 1,
-            }))?;
+        if !ids.is_empty() {
+            let collision_objects = ids
+                .iter()
+                .map(|id| {
+                    json!({
+                        "header": {"frame_id": BASE_FRAME},
+                        "id": id,
+                        "operation": 1,
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.apply_scene(json!({"world": {"collision_objects": collision_objects}}))?;
         }
         ids.clear();
         Ok(())
     }
 
     pub fn remove_world_object(&self, object_id: &str) -> EyreResult<()> {
-        self.collision_publisher.publish(json!({
-            "header": {"frame_id": BASE_FRAME},
-            "id": object_id,
-            "operation": 1,
+        self.apply_scene(json!({
+            "world": {"collision_objects": [{
+                "header": {"frame_id": BASE_FRAME},
+                "id": object_id,
+                "operation": 1,
+            }]},
         }))?;
         self.collision_ids
             .lock()
@@ -278,51 +287,48 @@ impl RosInterface {
     }
 
     pub fn attach_object(&self, object_id: &str, size_m: [f64; 3]) -> EyreResult<()> {
-        self.attached_collision_publisher.publish(json!({
-            "link_name": TCP_FRAME,
-            "object": {
-                "header": {"frame_id": TCP_FRAME},
-                "id": object_id,
-                "primitives": [{"type": 1, "dimensions": size_m}],
-                "primitive_poses": [{
-                    "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                    "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        self.apply_scene(json!({
+            "robot_state": {
+                "is_diff": true,
+                "attached_collision_objects": [{
+                    "link_name": TCP_FRAME,
+                    "object": {
+                        "header": {"frame_id": TCP_FRAME},
+                        "id": object_id,
+                        "primitives": [{"type": 1, "dimensions": size_m}],
+                        "primitive_poses": [{
+                            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                        }],
+                        "operation": 0,
+                    },
+                    "touch_links": [TCP_FRAME, "link6", "link7_left", "link7_right"],
                 }],
-                "operation": 0,
             },
-            "touch_links": [TCP_FRAME, "link6", "link7_left", "link7_right"],
-        }))?;
-        Ok(())
+        }))
     }
 
     pub fn detach_object(&self, object_id: &str) -> EyreResult<()> {
-        self.attached_collision_publisher.publish(json!({
-            "link_name": TCP_FRAME,
-            "object": {"id": object_id, "operation": 1},
-        }))?;
-        Ok(())
+        self.apply_scene(json!({
+            "robot_state": {
+                "is_diff": true,
+                "attached_collision_objects": [{
+                    "link_name": TCP_FRAME,
+                    "object": {"id": object_id, "operation": 1},
+                }],
+            },
+        }))
     }
 
-    fn publish_collision_box(
-        &self,
-        frame_id: &str,
-        id: &str,
-        pose: &Pose3,
-        size_m: [f64; 3],
-    ) -> EyreResult<()> {
-        let [x, y, z] = pose.position_m;
-        let [qx, qy, qz, qw] = pose.orientation_xyzw;
-        self.collision_publisher.publish(json!({
-            "header": {"frame_id": frame_id},
-            "id": id,
-            "primitives": [{"type": 1, "dimensions": size_m}],
-            "primitive_poses": [{
-                "position": {"x": x, "y": y, "z": z},
-                "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-            }],
-            "operation": 0,
-        }))?;
-        Ok(())
+    fn apply_scene(&self, scene: Value) -> EyreResult<()> {
+        let mut scene = scene;
+        scene["is_diff"] = json!(true);
+        let response = block_on(call(&self.apply_planning_scene, json!({"scene": scene})))?;
+        if response["success"].as_bool() == Some(true) {
+            Ok(())
+        } else {
+            bail!("MoveIt 拒绝更新规划场景")
+        }
     }
 
     pub fn publish_pose(&self, pose: Pose) -> EyreResult<()> {
@@ -679,6 +685,21 @@ impl RosInterface {
         allow_pairs(matrix, pairs)?;
         Ok(matrix.take())
     }
+}
+
+fn collision_box(frame_id: &str, id: &str, pose: &Pose3, size_m: [f64; 3]) -> Value {
+    let [x, y, z] = pose.position_m;
+    let [qx, qy, qz, qw] = pose.orientation_xyzw;
+    json!({
+        "header": {"frame_id": frame_id},
+        "id": id,
+        "primitives": [{"type": 1, "dimensions": size_m}],
+        "primitive_poses": [{
+            "position": {"x": x, "y": y, "z": z},
+            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+        }],
+        "operation": 0,
+    })
 }
 
 fn collision_object_ids(scene: &WorldScene) -> BTreeSet<String> {

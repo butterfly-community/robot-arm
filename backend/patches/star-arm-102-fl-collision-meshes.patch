@@ -1,0 +1,66 @@
+diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+--- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
++++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+@@ -39,7 +39,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/base_link.STL" />
++          filename="package://stararm102_description/meshes/collision/base_link.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -79,7 +79,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link1.STL" />
++          filename="package://stararm102_description/meshes/collision/link1.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -137,7 +137,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link2.STL" />
++          filename="package://stararm102_description/meshes/collision/link2.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -195,7 +195,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link3.STL" />
++          filename="package://stararm102_description/meshes/collision/link3.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -253,7 +253,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link4.STL" />
++          filename="package://stararm102_description/meshes/collision/link4.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -311,7 +311,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link5.STL" />
++          filename="package://stararm102_description/meshes/collision/link5.STL" />
+       </geometry>
+     </collision>
+   </link>
+@@ -369,7 +369,7 @@
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+-          filename="package://stararm102_description/meshes/link6.STL" />
++          filename="package://stararm102_description/meshes/collision/link6.STL" />
+       </geometry>
+     </collision>
+   </link>
