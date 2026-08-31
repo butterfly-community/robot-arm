@@ -582,6 +582,10 @@ pub enum ManipulationStep {
 pub struct ManipulationTaskState {
     pub schema_version: u32,
     pub request_id: String,
+    pub object_id: Option<String>,
+    pub placement_region_id: Option<String>,
+    pub pick_position_m: Option<[f64; 3]>,
+    pub place_position_m: Option<[f64; 3]>,
     pub state: RequestState,
     pub step: Option<ManipulationStep>,
     pub original_error: Option<String>,

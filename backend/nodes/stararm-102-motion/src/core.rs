@@ -79,15 +79,6 @@ pub fn target_pose(anchor: Pose, frame: &TransformedControlFrame) -> Pose {
     }
 }
 
-pub fn radial_orientation(anchor: Pose, target_position_m: [f64; 3]) -> [f64; 4] {
-    let anchor_angle = anchor.position_m[1].atan2(anchor.position_m[0]);
-    let target_angle = target_position_m[1].atan2(target_position_m[0]);
-    xyzw(
-        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), target_angle - anchor_angle)
-            * quaternion(anchor.orientation_xyzw),
-    )
-}
-
 pub fn merge_controller_command(
     names: &[String],
     positions: &[f64],
@@ -195,19 +186,6 @@ mod tests {
         assert_abs_diff_eq!(
             &returned.orientation_xyzw[..],
             &anchor().orientation_xyzw[..]
-        );
-    }
-
-    #[test]
-    fn radial_orientation_follows_the_target_around_the_base() {
-        let anchor = anchor();
-        assert_abs_diff_eq!(
-            &radial_orientation(anchor, [0.4, -0.2, 0.1])[..],
-            &anchor.orientation_xyzw[..]
-        );
-        assert_ne!(
-            radial_orientation(anchor, [0.1, 0.2, 0.1]),
-            anchor.orientation_xyzw
         );
     }
 

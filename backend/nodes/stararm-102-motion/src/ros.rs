@@ -22,6 +22,13 @@ use crate::core::Pose;
 const MOVEIT_SUCCESS: i64 = 1;
 const MOVE_GROUP_DEFAULT_PLANNING_TIME_S: f64 = 5.0;
 const MOVE_GROUP_DEFAULT_SCALING_FACTOR: f64 = 1.0;
+// MoveGroupInterface::setPositionTarget() uses this MoveIt default.
+const MOVE_GROUP_DEFAULT_POSITION_TOLERANCE_M: f64 = 1e-4;
+// FCL's distance query used by MoveIt Servo does not support an infinite plane
+// reliably. This solid covers the complete StarArm-102-FL workspace and keeps
+// the same ground surface at Z=0.
+const GROUND_SIZE_M: f64 = 2.0;
+const GROUND_DEPTH_M: f64 = 1.0;
 const ROBOT_LINK: u64 = 0;
 const ALLOWED_COLLISION_MATRIX: u64 = 128;
 
@@ -50,10 +57,16 @@ pub struct MotionResult {
 }
 
 #[derive(Clone)]
+pub enum MotionTarget {
+    Joints(Vec<f64>),
+    Position([f64; 3]),
+}
+
+#[derive(Clone)]
 pub struct MotionJob {
     pub request_id: String,
     pub current: Vec<f64>,
-    pub target: Vec<f64>,
+    pub target: MotionTarget,
     pub actuator: f64,
     pub options: BTreeMap<String, f64>,
 }
@@ -68,9 +81,9 @@ pub struct RosInterface {
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
-    inverse_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
+    apply_planning_scene: Arc<ClientUntyped>,
     motion_sender: Sender<MotionJob>,
     event_sender: Sender<RosEvent>,
 }
@@ -125,11 +138,6 @@ impl RosInterface {
             "moveit_msgs/srv/GetPositionFK",
             QosProfile::default(),
         )?;
-        let inverse_kinematics = node.create_client_untyped(
-            "/compute_ik",
-            "moveit_msgs/srv/GetPositionIK",
-            QosProfile::default(),
-        )?;
         let state_validity = node.create_client_untyped(
             "/check_state_validity",
             "moveit_msgs/srv/GetStateValidity",
@@ -138,6 +146,11 @@ impl RosInterface {
         let planning_scene = node.create_client_untyped(
             "/get_planning_scene",
             "moveit_msgs/srv/GetPlanningScene",
+            QosProfile::default(),
+        )?;
+        let apply_planning_scene = node.create_client_untyped(
+            "/apply_planning_scene",
+            "moveit_msgs/srv/ApplyPlanningScene",
             QosProfile::default(),
         )?;
         let (motion_sender, motion_receiver) = channel();
@@ -167,9 +180,9 @@ impl RosInterface {
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
             forward_kinematics: Arc::new(forward_kinematics),
-            inverse_kinematics: Arc::new(inverse_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
+            apply_planning_scene: Arc::new(apply_planning_scene),
             motion_sender,
             event_sender,
         };
@@ -248,53 +261,6 @@ impl RosInterface {
         });
     }
 
-    pub fn solve_ik(&self, pose: Pose, current: &[f64]) -> EyreResult<Vec<f64>> {
-        let [x, y, z] = pose.position_m;
-        let [qx, qy, qz, qw] = pose.orientation_xyzw;
-        let response = block_on(call(
-            &self.inverse_kinematics,
-            json!({
-                "ik_request": {
-                    "group_name": "arm",
-                    "robot_state": {
-                        "joint_state": {"name": JOINTS, "position": current},
-                        "is_diff": false,
-                    },
-                    "avoid_collisions": false,
-                    "ik_link_name": TCP_FRAME,
-                    "pose_stamped": {
-                        "header": {"frame_id": BASE_FRAME},
-                        "pose": {
-                            "position": {"x": x, "y": y, "z": z},
-                            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-                        },
-                    },
-                },
-            }),
-        ))?;
-        let code = response["error_code"]["val"].as_i64().unwrap_or_default();
-        if code != MOVEIT_SUCCESS {
-            bail!("MoveIt IK 失败，错误码 {code}");
-        }
-        let names = response["solution"]["joint_state"]["name"]
-            .as_array()
-            .ok_or_else(|| eyre!("MoveIt IK 未返回关节名称"))?;
-        let positions = response["solution"]["joint_state"]["position"]
-            .as_array()
-            .ok_or_else(|| eyre!("MoveIt IK 未返回关节位置"))?;
-        JOINTS
-            .iter()
-            .map(|joint| {
-                names
-                    .iter()
-                    .position(|name| name.as_str() == Some(joint))
-                    .and_then(|index| positions.get(index))
-                    .and_then(Value::as_f64)
-                    .ok_or_else(|| eyre!("MoveIt IK 缺少关节 {joint}"))
-            })
-            .collect()
-    }
-
     pub fn synchronize_controllers(&self) {
         let interface = self.clone();
         thread::spawn(move || {
@@ -322,10 +288,11 @@ impl RosInterface {
                 return;
             }
         };
+        let mut ground_applied = false;
         for job in receiver {
             let request_id = job.request_id.clone();
-            let result =
-                block_on(self.motion(job, &mut actions)).map_err(|error| error.to_string());
+            let result = block_on(self.motion(job, &mut actions, &mut ground_applied))
+                .map_err(|error| error.to_string());
             let _ = self
                 .event_sender
                 .send(RosEvent::MotionFinished { request_id, result });
@@ -384,9 +351,10 @@ impl RosInterface {
         &self,
         job: MotionJob,
         actions: &mut MotionActions,
+        ground_applied: &mut bool,
     ) -> EyreResult<MotionResult> {
         self.pause(true).await?;
-        let result = self.plan_and_execute(&job, actions).await;
+        let result = self.plan_and_execute(&job, actions, ground_applied).await;
         let resume = self.pause(false).await;
         match (result, resume) {
             (Ok(result), Ok(())) => Ok(result),
@@ -412,7 +380,12 @@ impl RosInterface {
         &self,
         job: &MotionJob,
         actions: &mut MotionActions,
+        ground_applied: &mut bool,
     ) -> EyreResult<MotionResult> {
+        if !*ground_applied {
+            self.apply_ground().await?;
+            *ground_applied = true;
+        }
         let mut collision_pairs = vec![];
         let mut result = self.request_plan(job, None, actions)?;
         let mut code = result["error_code"]["val"].as_i64().unwrap_or_default();
@@ -462,13 +435,39 @@ impl RosInterface {
         matrix: Option<Value>,
         actions: &mut MotionActions,
     ) -> EyreResult<Value> {
-        let constraints = JOINTS
-            .iter()
-            .zip(&job.target)
-            .map(
-                |(name, position)| json!({"joint_name": name, "position": position, "weight": 1.0}),
-            )
-            .collect::<Vec<_>>();
+        let goal_constraints = match &job.target {
+            MotionTarget::Joints(target) => json!([{
+                "name": "joint_target",
+                "joint_constraints": JOINTS
+                    .iter()
+                    .zip(target)
+                    .map(|(name, position)| json!({
+                        "joint_name": name,
+                        "position": position,
+                        "weight": 1.0,
+                    }))
+                    .collect::<Vec<_>>(),
+            }]),
+            MotionTarget::Position([x, y, z]) => json!([{
+                "name": "position_target",
+                "position_constraints": [{
+                    "header": {"frame_id": BASE_FRAME},
+                    "link_name": TCP_FRAME,
+                    "target_point_offset": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "constraint_region": {
+                        "primitives": [{
+                            "type": 2,
+                            "dimensions": [MOVE_GROUP_DEFAULT_POSITION_TOLERANCE_M],
+                        }],
+                        "primitive_poses": [{
+                            "position": {"x": x, "y": y, "z": z},
+                            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                        }],
+                    },
+                    "weight": 1.0,
+                }],
+            }]),
+        };
         let mut request = json!({
             "group_name": "arm",
             "pipeline_id": "ompl",
@@ -479,10 +478,7 @@ impl RosInterface {
                 "joint_state": {"name": JOINTS, "position": job.current},
                 "is_diff": false,
             },
-            "goal_constraints": [{
-                "name": "joint_target",
-                "joint_constraints": constraints,
-            }],
+            "goal_constraints": goal_constraints,
         });
         if let Some(value) = job.options.get("velocity_scaling") {
             request["max_velocity_scaling_factor"] = json!(value);
@@ -498,6 +494,42 @@ impl RosInterface {
             });
         }
         actions.plan(json!({"request": request, "planning_options": planning_options}))
+    }
+
+    async fn apply_ground(&self) -> EyreResult<()> {
+        let response = call(
+            &self.apply_planning_scene,
+            json!({
+                "scene": {
+                    "is_diff": true,
+                    "world": {
+                        "collision_objects": [{
+                            "header": {"frame_id": BASE_FRAME},
+                            "id": "ground",
+                            "primitives": [{
+                                "type": 1,
+                                "dimensions": [GROUND_SIZE_M, GROUND_SIZE_M, GROUND_DEPTH_M],
+                            }],
+                            "primitive_poses": [{
+                                "position": {
+                                    "x": 0.0,
+                                    "y": 0.0,
+                                    "z": -GROUND_DEPTH_M / 2.0,
+                                },
+                                "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                            }],
+                            "operation": 0,
+                        }],
+                    },
+                },
+            }),
+        )
+        .await?;
+        if response["success"].as_bool() == Some(true) {
+            Ok(())
+        } else {
+            bail!("MoveIt 拒绝刚性地面")
+        }
     }
 
     async fn collision_pairs(&self, current: &[f64]) -> EyreResult<Vec<(String, String)>> {

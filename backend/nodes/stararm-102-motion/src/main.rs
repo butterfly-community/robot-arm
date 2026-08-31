@@ -31,10 +31,10 @@ use stararm_102_model::{
 
 use crate::{
     core::{
-        MotionConfig, Pose, merge_controller_command, radial_orientation, target_pose,
-        tool_action_transition, tool_position_rad,
+        MotionConfig, Pose, merge_controller_command, target_pose, tool_action_transition,
+        tool_position_rad,
     },
-    ros::{MotionJob, RosEvent, RosInterface},
+    ros::{MotionJob, MotionTarget, RosEvent, RosInterface},
 };
 
 struct ActiveMotion {
@@ -52,6 +52,7 @@ struct ActiveManipulation {
     plan: PickPlacePlan,
     step_index: usize,
     waiting_motion_id: Option<String>,
+    actuator_rad: f64,
 }
 
 struct MotionNode {
@@ -319,7 +320,7 @@ impl MotionNode {
         let job = MotionJob {
             request_id,
             current: state.joints_rad.clone(),
-            target: START_JOINTS_RAD.to_vec(),
+            target: MotionTarget::Joints(START_JOINTS_RAD.to_vec()),
             actuator: CLOSED_GRIPPER_RAD,
             options: BTreeMap::new(),
         };
@@ -411,7 +412,7 @@ impl MotionNode {
         let job = MotionJob {
             request_id: request.request_id,
             current: state.joints_rad.clone(),
-            target: JOINTS.map(|name| target[name]).to_vec(),
+            target: MotionTarget::Joints(JOINTS.map(|name| target[name]).to_vec()),
             actuator,
             options: request.options,
         };
@@ -537,17 +538,26 @@ impl MotionNode {
     }
 
     fn start_manipulation(&mut self, node: &mut DoraNode, plan: PickPlacePlan) -> Result<()> {
+        let pick_position_m = cartesian_target(&plan, ManipulationStep::ReachObject)
+            .expect("reach object has a Cartesian target");
+        let place_position_m = cartesian_target(&plan, ManipulationStep::ReachPlacement)
+            .expect("reach placement has a Cartesian target");
         self.manipulation_state = ManipulationTaskState {
             schema_version: SCHEMA_VERSION,
             request_id: plan.request_id.clone(),
+            object_id: Some(plan.object.object_id.clone()),
+            placement_region_id: Some(plan.placement_region.region_id.clone()),
+            pick_position_m: Some(pick_position_m),
+            place_position_m: Some(place_position_m),
             state: RequestState::Executing,
-            step: Some(ManipulationStep::ApproachObject),
+            step: plan.steps.first().copied(),
             original_error: None,
         };
         self.active_manipulation = Some(ActiveManipulation {
             plan,
             step_index: 0,
             waiting_motion_id: None,
+            actuator_rad: OPEN_GRIPPER_RAD,
         });
         send(node, "manipulation_state", &self.manipulation_state)?;
         self.continue_or_fail_manipulation(node)
@@ -574,6 +584,7 @@ impl MotionNode {
             };
             let step = active.plan.steps[active.step_index];
             let plan = active.plan.clone();
+            let actuator_rad = active.actuator_rad;
             self.manipulation_state.step = Some(step);
             send(node, "manipulation_state", &self.manipulation_state)?;
             match step {
@@ -585,18 +596,8 @@ impl MotionNode {
                         .latest_arm_state
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("缺少当前关节反馈"))?;
-                    let current = self
-                        .current_tcp
-                        .ok_or_else(|| eyre::eyre!("缺少当前 TCP 位姿"))?;
                     let position = cartesian_target(&plan, step)
                         .expect("cartesian manipulation step checked above");
-                    let target = self.ros.solve_ik(
-                        Pose {
-                            position_m: position,
-                            orientation_xyzw: radial_orientation(current, position),
-                        },
-                        &state.joints_rad,
-                    )?;
                     let request_id = format!("{}:{step:?}", plan.request_id);
                     self.active_manipulation
                         .as_mut()
@@ -607,27 +608,26 @@ impl MotionNode {
                         MotionJob {
                             request_id,
                             current: state.joints_rad.clone(),
-                            target,
-                            actuator: state.actuators_rad[0],
+                            target: MotionTarget::Position(position),
+                            actuator: actuator_rad,
                             options: BTreeMap::new(),
                         },
                         false,
                     );
                 }
                 ManipulationStep::CloseTool => {
+                    self.active_manipulation
+                        .as_mut()
+                        .expect("manipulation remains active")
+                        .actuator_rad = CLOSED_GRIPPER_RAD;
                     self.publish_actuator(&plan.request_id, CLOSED_GRIPPER_RAD)?;
                 }
                 ManipulationStep::OpenTool => {
+                    self.active_manipulation
+                        .as_mut()
+                        .expect("manipulation remains active")
+                        .actuator_rad = OPEN_GRIPPER_RAD;
                     self.publish_actuator(&plan.request_id, OPEN_GRIPPER_RAD)?;
-                    if let Some(scene) = &mut self.latest_scene
-                        && let Some(object) = scene
-                            .objects
-                            .iter_mut()
-                            .find(|object| object.object_id == plan.object.object_id)
-                    {
-                        object.pose.position_m = plan.placement_region.pose.position_m;
-                        object.pose.position_m[2] += object.size_m[2] / 2.0;
-                    }
                 }
                 ManipulationStep::Complete => {
                     self.manipulation_state.state = RequestState::Succeeded;
@@ -657,8 +657,12 @@ impl MotionNode {
         self.manipulation_state = ManipulationTaskState {
             schema_version: SCHEMA_VERSION,
             request_id,
+            object_id: self.manipulation_state.object_id.clone(),
+            placement_region_id: self.manipulation_state.placement_region_id.clone(),
+            pick_position_m: self.manipulation_state.pick_position_m,
+            place_position_m: self.manipulation_state.place_position_m,
             state: RequestState::Failed,
-            step: None,
+            step: self.manipulation_state.step,
             original_error: Some(error),
         };
         send(node, "manipulation_state", &self.manipulation_state)?;
@@ -1067,6 +1071,10 @@ fn idle_manipulation_state() -> ManipulationTaskState {
     ManipulationTaskState {
         schema_version: SCHEMA_VERSION,
         request_id: String::new(),
+        object_id: None,
+        placement_region_id: None,
+        pick_position_m: None,
+        place_position_m: None,
         state: RequestState::Idle,
         step: None,
         original_error: None,

@@ -216,7 +216,7 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
 fn mirrored_namespaces(input: &str) -> &'static [&'static str] {
     match input {
         "arm_state" => &["motion"],
-        "robot_model_info" | "motion_state" => &["arm-execution"],
+        "robot_model_info" | "motion_state" | "manipulation_state" => &["arm-execution"],
         _ => &[],
     }
 }
@@ -571,6 +571,8 @@ mod tests {
         assert_eq!(mirrored_namespaces("arm_state"), ["motion"]);
         assert_eq!(mirrored_namespaces("robot_model_info"), ["arm-execution"]);
         assert_eq!(mirrored_namespaces("motion_state"), ["arm-execution"]);
+        assert_eq!(mirrored_namespaces("manipulation_state"), ["arm-execution"]);
+        assert!(mirrored_namespaces("world_scene").is_empty());
         assert!(mirrored_namespaces("absolute_pose").is_empty());
     }
 }

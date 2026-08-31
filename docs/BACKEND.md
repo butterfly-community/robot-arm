@@ -98,8 +98,9 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 
 ## `manipulation-core`
 
-`plan_pick_place()` 只按 ID 从 `WorldScene` 取可抓物和放置区，生成七步线性计划；
-`cartesian_target()` 只根据物体与放置区几何计算接近/到达位置。库不含 StarArm 轴数、
+`plan_pick_place()` 只按 ID 从 `WorldScene` 取可抓物和放置区，生成以打开夹爪开始的八步线性计划；
+`cartesian_target()` 只根据物体与放置区几何计算接近/到达位置：抓取点在物体顶面，放置点在
+放置区顶面上方半个物体高度。库不含 StarArm 轴数、
 关节角、串口或 MoveIt 类型，也没有状态机框架。
 
 ## `stararm-102-motion-node`
@@ -112,11 +113,13 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 恢复 Servo”。前一个动作未结束时后一个只等待；没有状态机框架、并行规划器、固定队列上限
 或模拟/真机分支。
 
-`ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、IK、状态有效性和
-PlanningScene 接口。`WorldScene` 只用于选择抓取目标、放置区和计算 TCP 目标，不发布成
-MoveIt CollisionObject、AttachedCollisionObject 或 OctoMap，因此普通规划和 Servo 只保留
-机械臂自身碰撞检查。抓放仍由同一规划和命令链路移动。厂家 URDF 的 visual 与 collision
-网格保持原样，不在镜像构建时生成或替换碰撞几何。Servo 作为从属 PlanningSceneMonitor 订阅同一个
+`ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性和
+PlanningScene 接口。型号节点向 MoveIt 提交 TCP 位置目标，不预先求 IK，也不附加末端姿态；
+MoveIt 在同一次规划中选择 IK 解与轨迹。`WorldScene` 只用于选择抓取目标、放置区和计算 TCP
+目标，不发布成 MoveIt CollisionObject、AttachedCollisionObject 或 OctoMap。规划场景中唯一
+的世界碰撞体是上表面位于 `base_link` Z=0 的刚性地面，普通规划与 Servo 均检查机械臂自身
+碰撞和地面碰撞。厂家网格未替换；只把底座 visual/collision 的模型原点上移 3.5 mm，使网格
+最低点与 Z=0 重合。Servo 作为从属 PlanningSceneMonitor 订阅同一个
 `/monitored_planning_scene`，不维护独立场景来源。
 
 ### 已弃用：构建期单凸包碰撞网格

@@ -1351,6 +1351,12 @@ input[type="range"] {
 .target-dot {
   background: var(--amber);
 }
+.pick-dot {
+  background: #f05a67;
+}
+.place-dot {
+  background: #53d18b;
+}
 
 @media (max-width: 1100px) {
   .span-3,

@@ -3,7 +3,8 @@ use robot_arm_messages::{
 };
 use thiserror::Error;
 
-const PICK_PLACE_STEPS: [ManipulationStep; 7] = [
+const PICK_PLACE_STEPS: [ManipulationStep; 8] = [
+    ManipulationStep::OpenTool,
     ManipulationStep::ApproachObject,
     ManipulationStep::ReachObject,
     ManipulationStep::CloseTool,
@@ -68,11 +69,13 @@ pub fn cartesian_target(plan: &PickPlacePlan, step: ManipulationStep) -> Option<
     };
     position[2] += match step {
         ManipulationStep::ApproachObject => plan.object.size_m[2],
-        ManipulationStep::ReachObject => 0.0,
+        ManipulationStep::ReachObject => plan.object.size_m[2] / 2.0,
         ManipulationStep::ApproachPlacement => {
             plan.placement_region.size_m[2] + plan.object.size_m[2]
         }
-        ManipulationStep::ReachPlacement => plan.object.size_m[2] / 2.0,
+        ManipulationStep::ReachPlacement => {
+            plan.placement_region.size_m[2] + plan.object.size_m[2] / 2.0
+        }
         _ => unreachable!(),
     };
     Some(position)
@@ -125,6 +128,14 @@ mod tests {
         assert_eq!(plan.object.object_id, "red-cube-0");
         assert_eq!(plan.placement_region.region_id, "basket");
         assert_eq!(plan.steps, PICK_PLACE_STEPS);
+        assert_eq!(plan.steps.first(), Some(&ManipulationStep::OpenTool));
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|step| **step == ManipulationStep::OpenTool)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -160,7 +171,7 @@ mod tests {
         );
         assert_eq!(
             cartesian_target(&plan, ManipulationStep::ReachObject),
-            Some([0.2, -0.1, 0.08])
+            Some([0.2, -0.1, 0.1])
         );
         assert_eq!(
             cartesian_target(&plan, ManipulationStep::ApproachPlacement),
@@ -168,7 +179,7 @@ mod tests {
         );
         assert_eq!(
             cartesian_target(&plan, ManipulationStep::ReachPlacement),
-            Some([0.25, 0.1, 0.05])
+            Some([0.25, 0.1, 0.11])
         );
     }
 }

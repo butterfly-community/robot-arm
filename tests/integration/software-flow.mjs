@@ -168,6 +168,37 @@ const pickPlaceResult = await observeManipulation(
 );
 assert.equal(pickPlaceResult.state, "succeeded");
 assert.equal(pickPlaceResult.step, "complete");
+assert.equal(pickPlaceResult.object_id, graspable.object_id);
+assert.equal(pickPlaceResult.placement_region_id, placementRegion.region_id);
+assert.deepEqual(pickPlaceResult.pick_position_m, [
+  graspable.pose.position_m[0],
+  graspable.pose.position_m[1],
+  graspable.pose.position_m[2] + graspable.size_m[2] / 2,
+]);
+assert.deepEqual(pickPlaceResult.place_position_m, [
+  placementRegion.pose.position_m[0],
+  placementRegion.pose.position_m[1],
+  placementRegion.pose.position_m[2] +
+    placementRegion.size_m[2] +
+    graspable.size_m[2] / 2,
+]);
+const executionPickPlace = await snapshot("arm-execution");
+assert.equal(
+  executionPickPlace.values.manipulation_state.object_id,
+  graspable.object_id,
+);
+assert.equal(
+  executionPickPlace.values.manipulation_state.placement_region_id,
+  placementRegion.region_id,
+);
+assert.deepEqual(
+  executionPickPlace.values.manipulation_state.pick_position_m,
+  pickPlaceResult.pick_position_m,
+);
+assert.deepEqual(
+  executionPickPlace.values.manipulation_state.place_position_m,
+  pickPlaceResult.place_position_m,
+);
 await request("/api/motion/perception", {
   schema_version: 3,
   request_id: "integration-perception-stop",

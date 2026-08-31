@@ -4,6 +4,7 @@ import type {
   ArmCommand,
   ArmState,
   ExecutionInfo,
+  ManipulationTaskState,
   MotionState,
   ParameterValue,
   RobotModelInfo,
@@ -20,6 +21,7 @@ type Props = {
   arm?: ArmState;
   command?: ArmCommand;
   motion?: MotionState;
+  manipulation?: ManipulationTaskState;
   execution?: ExecutionInfo;
   parameters: ParameterValue[];
   showLabels: boolean;
@@ -36,6 +38,8 @@ type Viewer = {
   robot?: URDFRobot;
   commandRobot?: URDFRobot;
   target: THREE.Group;
+  pickPoint: THREE.Mesh;
+  placePoint: THREE.Mesh;
   labels: THREE.Sprite[];
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
@@ -142,11 +146,21 @@ function parameterText(key: string, values: ParameterValue[]) {
     .join("  ");
 }
 
+function scenePoint(color: number) {
+  const point = new THREE.Mesh(
+    new THREE.SphereGeometry(0.009, 20, 12),
+    new THREE.MeshBasicMaterial({ color }),
+  );
+  point.visible = false;
+  return point;
+}
+
 export function RobotViewer({
   model,
   arm,
   command,
   motion,
+  manipulation,
   execution,
   parameters,
   showLabels,
@@ -220,7 +234,18 @@ export function RobotViewer({
     );
     target.visible = false;
     scene.add(target);
-    viewer.current = { target, labels: [], camera, controls, grid };
+    const pickPoint = scenePoint(0xf05a67);
+    const placePoint = scenePoint(0x53d18b);
+    scene.add(pickPoint, placePoint);
+    viewer.current = {
+      target,
+      pickPoint,
+      placePoint,
+      labels: [],
+      camera,
+      controls,
+      grid,
+    };
 
     const resize = () => {
       const width = element.clientWidth;
@@ -331,6 +356,35 @@ export function RobotViewer({
       target.quaternion.fromArray(pose.orientation_xyzw);
     }
   }, [motion]);
+
+  useEffect(() => {
+    const current = viewer.current;
+    if (!current) return;
+    const active =
+      manipulation?.state === "planning" || manipulation?.state === "executing";
+    const pickTarget = manipulation?.pick_position_m;
+    const placeTarget = manipulation?.place_position_m;
+    current.pickPoint.visible = Boolean(active && pickTarget);
+    current.placePoint.visible = Boolean(active && placeTarget);
+    if (pickTarget) {
+      current.pickPoint.position.fromArray(pickTarget);
+      if (mount.current)
+        mount.current.dataset.pickPointZ = pickTarget[2].toFixed(3);
+    }
+    if (placeTarget) {
+      current.placePoint.position.fromArray(placeTarget);
+      if (mount.current)
+        mount.current.dataset.placePointZ = placeTarget[2].toFixed(3);
+    }
+    if (mount.current) {
+      mount.current.dataset.pickPointVisible = String(
+        current.pickPoint.visible,
+      );
+      mount.current.dataset.placePointVisible = String(
+        current.placePoint.visible,
+      );
+    }
+  }, [manipulation, model.model_revision, modelsReady]);
 
   useEffect(() => {
     const current = viewer.current;

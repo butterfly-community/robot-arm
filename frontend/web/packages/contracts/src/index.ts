@@ -265,6 +265,10 @@ export type ManipulationStep =
 export interface ManipulationTaskState {
   schema_version: number;
   request_id: string;
+  object_id?: string | null;
+  placement_region_id?: string | null;
+  pick_position_m?: [number, number, number] | null;
+  place_position_m?: [number, number, number] | null;
   state:
     "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
   step?: ManipulationStep | null;

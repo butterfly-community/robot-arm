@@ -4,6 +4,7 @@ import type {
   ArmCommand,
   ArmState,
   ExecutionInfo,
+  ManipulationTaskState,
   MotionState,
   ParameterValue,
   RobotModelInfo,
@@ -38,6 +39,8 @@ export default function Page() {
     RobotModelInfo | undefined;
   const arm = values.arm_state as unknown as ArmState | undefined;
   const motion = values.motion_state as unknown as MotionState | undefined;
+  const manipulation = values.manipulation_state as unknown as
+    ManipulationTaskState | undefined;
   const execution = values.execution_info as unknown as
     ExecutionInfo | undefined;
   const transport = (values.transport_state ?? {}) as Record<string, unknown>;
@@ -185,6 +188,7 @@ export default function Page() {
               arm={arm}
               command={command}
               motion={motion}
+              manipulation={manipulation}
               execution={execution}
               parameters={parameters}
               showLabels={showLabels}
@@ -204,6 +208,14 @@ export default function Page() {
             <span>
               <i className="target-dot" />
               橙色坐标：工具目标
+            </span>
+            <span>
+              <i className="pick-dot" />
+              红点：抓取目标
+            </span>
+            <span>
+              <i className="place-dot" />
+              绿点：放置目标
             </span>
           </div>
         </Card>

@@ -59,6 +59,24 @@ diff --git a/ROS2_HUMBLE/src/stararm102_description/package.xml b/ROS2_HUMBLE/sr
 diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
 --- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
 +++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+@@ -22,7 +22,7 @@
+     </inertial>
+     <visual>
+       <origin
+-        xyz="0 0 0"
++        xyz="0 0 0.0035"
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
+@@ -36,7 +36,7 @@
+     </visual>
+     <collision>
+       <origin
+-        xyz="0 0 0"
++        xyz="0 0 0.0035"
+         rpy="0 0 0" />
+       <geometry>
+         <mesh
 @@ -268,7 +268,7 @@
      <child
        link="link4" />

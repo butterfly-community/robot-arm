@@ -574,6 +574,10 @@ test("execution page renders colored feedback and command models", async ({
   const viewer = page.getByLabel("机械臂三维反馈与目标预览");
   await expect(viewer).toHaveAttribute("data-models-loaded", "2");
   await expect(viewer).toHaveAttribute("data-feedback-ready", "true");
+  await expect(viewer).toHaveAttribute("data-pick-point-visible", "false");
+  await expect(viewer).toHaveAttribute("data-place-point-visible", "false");
+  await expect(page.getByText("红点：抓取目标", { exact: true })).toBeVisible();
+  await expect(page.getByText("绿点：放置目标", { exact: true })).toBeVisible();
   await expect
     .poll(async () =>
       Number((await viewer.getAttribute("data-styled-meshes")) ?? 0),
@@ -586,6 +590,107 @@ test("execution page renders colored feedback and command models", async ({
   await labels.focus();
   await page.keyboard.press("Space");
   await expect(labels).toBeChecked();
+});
+
+test("execution viewer shows the selected pick and placement points only during manipulation", async ({
+  page,
+  request,
+}) => {
+  const before = await (await request.get("/api/motion/state")).json();
+  const original = before.values.perception_state;
+  try {
+    await request.post("/api/arm-execution/disconnect", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-disconnect",
+        action: "disconnect",
+        fields: {},
+      },
+    });
+    await request.post("/api/motion/perception", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-scene",
+        action: "apply",
+        source_kind: "generated_test_scene",
+        source_id: "generated:pick-place-scene",
+        classes: null,
+      },
+    });
+    await expect
+      .poll(
+        async () => {
+          const state = await (await request.get("/api/motion/state")).json();
+          return state.values.world_scene;
+        },
+        { timeout: 30_000 },
+      )
+      .toMatchObject({
+        objects: expect.arrayContaining([
+          expect.objectContaining({ graspable: true }),
+        ]),
+        placement_regions: expect.arrayContaining([expect.any(Object)]),
+      });
+    const state = await (await request.get("/api/motion/state")).json();
+    const currentScene = state.values.world_scene;
+    const object = currentScene.objects.find(
+      (candidate: { graspable: boolean }) => candidate.graspable,
+    );
+    const placement = currentScene.placement_regions[0];
+    await page.goto("/arm-execution/");
+    const viewer = page.getByLabel("机械臂三维反馈与目标预览");
+    const response = await request.post("/api/motion/pick-place", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points",
+        object_id: object.object_id,
+        placement_region_id: placement.region_id,
+      },
+    });
+    expect(response.ok()).toBe(true);
+    await expect(viewer).toHaveAttribute("data-pick-point-visible", "true", {
+      timeout: 15_000,
+    });
+    await expect(viewer).toHaveAttribute("data-place-point-visible", "true");
+    await expect(viewer).toHaveAttribute("data-pick-point-z", "0.040");
+    await expect(viewer).toHaveAttribute("data-place-point-z", "0.060");
+    await expect
+      .poll(
+        async () => {
+          const result = await (await request.get("/api/motion/state")).json();
+          const manipulation = result.values.manipulation_state;
+          return manipulation?.request_id === "browser-pick-points"
+            ? manipulation.state
+            : undefined;
+        },
+        { timeout: 180_000 },
+      )
+      .toBe("succeeded");
+    await expect(viewer).toHaveAttribute("data-pick-point-visible", "false", {
+      timeout: 15_000,
+    });
+    await expect(viewer).toHaveAttribute("data-place-point-visible", "false");
+  } finally {
+    await request.post("/api/motion/perception", {
+      data: original?.enabled
+        ? {
+            schema_version: 3,
+            request_id: "browser-pick-points-restore",
+            action: "apply",
+            source_kind: original.source_kind,
+            source_id: original.source_id,
+            classes: original.classes,
+          }
+        : {
+            schema_version: 3,
+            request_id: "browser-pick-points-restore",
+            action: "disconnect",
+            source_kind: null,
+            source_id: null,
+            classes: null,
+          },
+    });
+  }
 });
 
 test("spatial component switches use the server state and keyboard", async ({
