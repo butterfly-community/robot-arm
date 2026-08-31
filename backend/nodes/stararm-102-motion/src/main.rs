@@ -26,7 +26,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use stararm_102_model::{
     CLOSED_GRIPPER_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION, OPEN_GRIPPER_RAD,
-    START_JOINTS_RAD,
+    START_JOINTS_RAD, TEST_JOINTS_RAD,
 };
 
 use crate::{
@@ -630,14 +630,26 @@ impl MotionNode {
                     self.publish_actuator(&plan.request_id, OPEN_GRIPPER_RAD)?;
                 }
                 ManipulationStep::Complete => {
-                    self.manipulation_state.state = RequestState::Succeeded;
-                    send(node, "manipulation_state", &self.manipulation_state)?;
-                    self.send_manipulation_result(node)?;
-                    self.active_manipulation = None;
-                    if let Some(next) = self.manipulation_queue.pop_front() {
-                        self.start_manipulation(node, next)?;
-                    }
-                    return Ok(());
+                    let state = self
+                        .latest_arm_state
+                        .as_ref()
+                        .ok_or_else(|| eyre::eyre!("缺少当前关节反馈"))?;
+                    let request_id = format!("{}:ReturnToTest", plan.request_id);
+                    self.active_manipulation
+                        .as_mut()
+                        .expect("manipulation remains active")
+                        .waiting_motion_id = Some(request_id.clone());
+                    return self.queue_or_start_motion(
+                        node,
+                        MotionJob {
+                            request_id,
+                            current: state.joints_rad.clone(),
+                            target: MotionTarget::Joints(TEST_JOINTS_RAD.to_vec()),
+                            actuator: CLOSED_GRIPPER_RAD,
+                            options: BTreeMap::new(),
+                        },
+                        false,
+                    );
                 }
             }
             self.active_manipulation
@@ -645,6 +657,17 @@ impl MotionNode {
                 .expect("manipulation remains active")
                 .step_index += 1;
         }
+    }
+
+    fn complete_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
+        self.manipulation_state.state = RequestState::Succeeded;
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        self.send_manipulation_result(node)?;
+        self.active_manipulation = None;
+        if let Some(next) = self.manipulation_queue.pop_front() {
+            self.start_manipulation(node, next)?;
+        }
+        Ok(())
     }
 
     fn fail_manipulation(
@@ -826,13 +849,20 @@ impl MotionNode {
                             send(node, "motion_status", &self.motion_status)?;
                             self.send_motion_result(node, &self.motion_status)?;
                             if manipulation_waiting {
-                                let active = self
-                                    .active_manipulation
-                                    .as_mut()
-                                    .expect("waiting manipulation remains active");
-                                active.waiting_motion_id = None;
-                                active.step_index += 1;
-                                self.continue_or_fail_manipulation(node)?;
+                                let completed = {
+                                    let active = self
+                                        .active_manipulation
+                                        .as_mut()
+                                        .expect("waiting manipulation remains active");
+                                    active.waiting_motion_id = None;
+                                    active.step_index += 1;
+                                    active.step_index == active.plan.steps.len()
+                                };
+                                if completed {
+                                    self.complete_manipulation(node)?;
+                                } else {
+                                    self.continue_or_fail_manipulation(node)?;
+                                }
                             }
                         }
                         Err(error) => {

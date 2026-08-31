@@ -186,7 +186,7 @@ pub(super) fn fill_generated_depth_from_instances(
             image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?.into_luma8();
         match instance.label.as_str() {
             "red cube" => fill_masked_depth(&mut depth.depth, &mask, 630, 670),
-            "gray storage bin" => fill_masked_depth(&mut depth.depth, &mask, 630, 670),
+            "gray storage bin" => fill_masked_depth(&mut depth.depth, &mask, 590, 670),
             _ => {}
         }
     }
@@ -337,7 +337,7 @@ mod tests {
             placement.pose.position_m[2] + cube.size_m[2] / 2.0
         );
         assert_abs_diff_eq!(cube.pose.position_m[2], 0.02);
-        assert_abs_diff_eq!(bin.pose.position_m[2], 0.02);
-        assert_abs_diff_eq!(bin.size_m[2], 0.04);
+        assert_abs_diff_eq!(bin.pose.position_m[2], 0.04);
+        assert_abs_diff_eq!(bin.size_m[2], 0.08);
     }
 }

@@ -175,14 +175,38 @@ assert.deepEqual(pickPlaceResult.pick_position_m, [
   graspable.pose.position_m[1],
   graspable.pose.position_m[2] + graspable.size_m[2] / 2,
 ]);
-assert.deepEqual(pickPlaceResult.place_position_m, [
+const expectedPlacePosition = [
   placementRegion.pose.position_m[0],
   placementRegion.pose.position_m[1],
   placementRegion.pose.position_m[2] +
-    placementRegion.size_m[2] +
-    graspable.size_m[2] / 2,
-]);
+    (placementRegion.size_m[2] + graspable.size_m[2] / 2),
+];
+assert.deepEqual(
+  pickPlaceResult.place_position_m.slice(0, 2),
+  expectedPlacePosition.slice(0, 2),
+);
+assert.ok(
+  Math.abs(pickPlaceResult.place_position_m[2] - expectedPlacePosition[2]) <=
+    Number.EPSILON,
+);
 const executionPickPlace = await snapshot("arm-execution");
+const executionModel = executionPickPlace.values.robot_model_info;
+const pickPlaceTestTarget = executionModel.named_targets.find(
+  (target) => target.key === "test",
+);
+assert.ok(pickPlaceTestTarget, "robot model declares the test target");
+assert.deepEqual(
+  executionPickPlace.values.arm_state.joints_rad,
+  executionModel.joints.map(
+    (joint) => pickPlaceTestTarget.joint_positions_rad[joint.key],
+  ),
+);
+assert.deepEqual(
+  executionPickPlace.values.arm_state.actuators_rad,
+  executionModel.tool_actuators.map(
+    (actuator) => pickPlaceTestTarget.actuator_positions_rad[actuator.key],
+  ),
+);
 assert.equal(
   executionPickPlace.values.manipulation_state.object_id,
   graspable.object_id,

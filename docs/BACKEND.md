@@ -113,6 +113,9 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 恢复 Servo”。前一个动作未结束时后一个只等待；没有状态机框架、并行规划器、固定队列上限
 或模拟/真机分支。
 
+抓放的最后一步由型号节点通过同一普通运动队列回到模型声明的测试位，并恢复该目标声明的
+闭合夹爪状态；返回成功后才发布抓放完成。
+
 `ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性和
 PlanningScene 接口。型号节点向 MoveIt 提交 TCP 位置目标，不预先求 IK，也不附加末端姿态；
 MoveIt 在同一次规划中选择 IK 解与轨迹。`WorldScene` 只用于选择抓取目标、放置区和计算 TCP

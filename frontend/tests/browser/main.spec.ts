@@ -653,7 +653,7 @@ test("execution viewer shows the selected pick and placement points only during 
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "true");
     await expect(viewer).toHaveAttribute("data-pick-point-z", "0.040");
-    await expect(viewer).toHaveAttribute("data-place-point-z", "0.060");
+    await expect(viewer).toHaveAttribute("data-place-point-z", "0.100");
     await expect
       .poll(
         async () => {
