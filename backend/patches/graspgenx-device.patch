@@ -1,0 +1,176 @@
+diff --git a/graspgenx/grasp_server.py b/graspgenx/grasp_server.py
+index b86237f..3713b7c 100644
+--- a/graspgenx/grasp_server.py
++++ b/graspgenx/grasp_server.py
+@@ -32,7 +32,10 @@ SWEEP_VOLUME_ONLY_BACKBONES = {
+ }
+ 
+ 
+-def load_grasp_gen_model(cfg: omegaconf.DictConfig):
++def load_grasp_gen_model(
++    cfg: omegaconf.DictConfig,
++    device: str | torch.device | None = None,
++):
+     """Load the (gripper-independent) GraspGen model from cfg checkpoints.
+ 
+     The returned model can back any number of samplers — the gripper
+@@ -45,7 +48,8 @@ def load_grasp_gen_model(cfg: omegaconf.DictConfig):
+         raise FileNotFoundError(f"Checkpoint {cfg.eval.dis_checkpoint} does not exist")
+     model.load_state_dict(cfg.eval.gen_checkpoint, cfg.eval.dis_checkpoint)
+     model.eval()
+-    return model.cuda().eval()
++    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
++    return model.to(device).eval()
+ 
+ 
+ class GraspGenXSampler:
+@@ -58,6 +62,7 @@ class GraspGenXSampler:
+         tensorrt_precision: str = "fp32",
+         gripper_info: XGripperInfo = None,
+         model=None,
++        device: str | torch.device | None = None,
+     ):
+         """
+         Args:
+@@ -93,9 +98,12 @@ class GraspGenXSampler:
+             self.gripper_name = gripper_name
+ 
+         if model is None:
+-            model = load_grasp_gen_model(cfg)
++            model = load_grasp_gen_model(cfg, device=device)
++        elif device is not None:
++            model = model.to(device)
+ 
+         self.model = model
++        self.device = next(model.parameters()).device
+ 
+         if use_tensorrt:
+             from graspgenx.models.tensorrt_utils import accelerate_sampler
+@@ -120,6 +128,7 @@ class GraspGenXSampler:
+         model=None,
+         use_tensorrt: bool = False,
+         tensorrt_precision: str = "fp32",
++        device: str | torch.device | None = None,
+     ) -> "GraspGenXSampler":
+         """Build a sampler from raw sweep-volume parameters — no gripper assets.
+ 
+@@ -165,6 +174,7 @@ class GraspGenXSampler:
+             model=model,
+             use_tensorrt=use_tensorrt,
+             tensorrt_precision=tensorrt_precision,
++            device=device,
+         )
+ 
+     @staticmethod
+@@ -194,7 +204,7 @@ class GraspGenXSampler:
+             grasp_conf: Confidence scores for the grasps
+         """
+         if type(object_pc) == np.ndarray:
+-            object_pc = torch.from_numpy(object_pc).cuda().float()
++            object_pc = torch.from_numpy(object_pc).to(grasp_sampler.device).float()
+ 
+         if grasp_threshold == -1.0 and topk_num_grasps == -1:
+             topk_num_grasps = 100
+@@ -451,17 +461,17 @@ class GraspGenXSampler:
+ 
+         outputs["z_offset"] = torch.tensor(
+             (self.gripper.depth,), dtype=torch.float32
+-        ).cuda()
++        ).to(self.device)
+         outputs["sweep_volume"] = torch.from_numpy(
+             self.gripper.sweep_volume.astype(np.float32)
+-        ).cuda()
++        ).to(self.device)
+         outputs["gripper_type"] = self.gripper.gripper_type
+ 
+         sweep_volume_open = self.gripper.sweep_volume.astype(np.float32)
+         sweep_volume_mid = self.gripper.sweep_volume_mid.astype(np.float32)
+         outputs["sweep_volume_open_and_mid"] = torch.from_numpy(
+             np.concatenate([sweep_volume_open, sweep_volume_mid], axis=0)
+-        ).cuda()
++        ).to(self.device)
+ 
+         gripper_open_ptc = self.gripper.open_pointcloud.copy()
+         gripper_close_ptc = self.gripper.close_pointcloud.copy()
+@@ -471,14 +481,14 @@ class GraspGenXSampler:
+         )
+         gripper_open_ptc = torch.from_numpy(
+             gripper_close_ptc[mask].astype(np.float32)
+-        ).cuda()
++        ).to(self.device)
+ 
+         mask = np.random.randint(
+             0, gripper_close_ptc.shape[0], (self.cfg.data.num_points,)
+         )
+         gripper_close_ptc = torch.from_numpy(
+             gripper_close_ptc[mask].astype(np.float32)
+-        ).cuda()
++        ).to(self.device)
+ 
+         outputs["gripper_open_ptc"] = gripper_open_ptc
+         outputs["gripper_close_ptc"] = gripper_close_ptc
+@@ -489,7 +499,7 @@ class GraspGenXSampler:
+         )
+         outputs["gripper_vol_tsdf"] = torch.from_numpy(
+             vol_tsdf.astype(np.float32)
+-        ).cuda()
++        ).to(self.device)
+ 
+         outputs["gripper_pointnet_repr"] = torch.from_numpy(
+             np.concatenate(
+@@ -500,7 +510,7 @@ class GraspGenXSampler:
+                 ],
+                 axis=0,
+             ).astype(np.float32)
+-        ).cuda()
++        ).to(self.device)
+ 
+         return outputs
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 5399cac..a37a6c5 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -45,6 +45,6 @@ dependencies = [
+     "hydra-core",
+     "matplotlib",
+-    "numpy==1.26.4",
++    "numpy==2.4.6",
+     "webdataset",
+     "scikit-learn",
+     "scipy",
+@@ -55,7 +55,7 @@ dependencies = [
+     "diffusers==0.11.1",
+     "timm==1.0.15",
+     "huggingface-hub==0.25.2",
+-    "PyOpenGL==3.1.5",
++    "PyOpenGL==3.1.0",
+     "addict",
+     # spconv-cu120 has no cp312 wheel and the ptv3vanilla backbone is a
+     # pure-PyTorch implementation that doesn't need it. Re-add for the
+@@ -63,11 +63,11 @@ dependencies = [
+     "tensorboardx",
+     "sharedarray",
+-    "yourdfpy==0.0.56",
++    "yourdfpy==0.0.60",
+     "urdfpy",
+ 
+     # Additional dependencies
+     "pyrender",
+-    "scene-synthesizer[recommend]",
++    "scene-synthesizer",
+     "imageio",
+     "viser",
+     "tqdm",
+@@ -155,11 +155,6 @@ line_length = 88
+ # Allow pre-release packages (needed for pyrender -> pyglet dependencies)
+ prerelease = "allow"
+ 
+-# Auto-detect the local NVIDIA driver and pick a matching torch wheel
+-# (e.g. cu126 for driver 560.x, cu130 for driver 580.x+). Avoids hardcoding
+-# a CUDA build that would break for users on different driver versions.
+-torch-backend = "auto"
+-
+ # Build dependencies for packages that need special build requirements
+ [tool.uv.extra-build-dependencies]
+ sharedarray = ["setuptools>=45,<78"]

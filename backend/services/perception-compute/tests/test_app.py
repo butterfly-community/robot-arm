@@ -1,10 +1,17 @@
+import asyncio
 import base64
 import io
 
-from fastapi.testclient import TestClient
 from PIL import Image
 
-from perception_compute.app import Instance, create_app
+from perception_compute.app import (
+    GraspCandidate,
+    GraspRequest,
+    GraspResponse,
+    Instance,
+    SegmentRequest,
+    create_app,
+)
 
 
 class FakeBackend:
@@ -28,6 +35,30 @@ class FakeBackend:
         ]
 
 
+class FakeGraspBackend:
+    model_name = "GraspGenX-fixture"
+    device = "cpu"
+
+    def infer(self, request: GraspRequest) -> GraspResponse:
+        assert request.points_xyz_m == [(0.1, 0.2, 0.3)]
+        assert request.gripper_name == "stararm-102-fl"
+        return GraspResponse(
+            candidates=[
+                GraspCandidate(
+                    transform=(
+                        (1.0, 0.0, 0.0, 0.1),
+                        (0.0, 1.0, 0.0, 0.2),
+                        (0.0, 0.0, 1.0, 0.3),
+                        (0.0, 0.0, 0.0, 1.0),
+                    ),
+                    confidence=0.9,
+                    branch="diff",
+                )
+            ],
+            inference_ms=12.0,
+        )
+
+
 def encoded_image() -> str:
     image = Image.new("RGB", (8, 6), "red")
     output = io.BytesIO()
@@ -36,24 +67,38 @@ def encoded_image() -> str:
 
 
 def test_health_and_segmentation_contract() -> None:
-    with TestClient(create_app(FakeBackend)) as client:
-        assert client.get("/health").json() == {
+    asyncio.run(exercise_contract())
+
+
+async def exercise_contract() -> None:
+    app = create_app(FakeBackend, FakeGraspBackend)
+    async with app.router.lifespan_context(app):
+        endpoints = {
+            route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")
+        }
+        assert endpoints["/health"]() == {
             "status": "ready",
             "model": "fixture-seg",
             "device": "cpu",
+            "grasp_model": "GraspGenX-fixture",
+            "grasp_device": "cpu",
         }
-        response = client.post(
-            "/v1/segment",
-            json={
-                "image_base64": encoded_image(),
-                "classes": ["red cube", "gray storage bin"],
-            },
+        response = endpoints["/v1/segment"](
+            SegmentRequest(
+                image_base64=encoded_image(),
+                classes=["red cube", "gray storage bin"],
+            )
         )
-        response.raise_for_status()
-        payload = response.json()
-        assert payload["image_width"] == 8
-        assert payload["image_height"] == 6
-        assert payload["instances"][0]["label"] == "red cube"
+        assert response.image_width == 8
+        assert response.image_height == 6
+        assert response.instances[0].label == "red cube"
         assert Image.open(
-            io.BytesIO(base64.b64decode(payload["instances"][0]["mask_png_base64"]))
+            io.BytesIO(base64.b64decode(response.instances[0].mask_png_base64))
         ).size == (8, 6)
+        grasp = endpoints["/v1/grasps"](
+            GraspRequest(
+                points_xyz_m=[(0.1, 0.2, 0.3)],
+                gripper_name="stararm-102-fl",
+            )
+        )
+        assert grasp.candidates[0].branch == "diff"

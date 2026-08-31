@@ -14,19 +14,17 @@ use std::{
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::Result;
-use manipulation_core::{PickPlacePlan, cartesian_target, plan_pick_place};
 use robot_arm_messages::{
-    ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationStep,
-    ManipulationTaskState, MotionRequest, MotionState, MotionStatus, PerceptionState,
-    PickPlaceRequest, RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION,
-    ServiceState, SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose,
+    ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationTaskState,
+    MotionRequest, MotionState, MotionStatus, PerceptionState, PickPlaceRequest, RequestAction,
+    RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
+    SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose,
     TransformedControlFrame, WorldScene, from_arrow, to_arrow,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use stararm_102_model::{
-    CLOSED_GRIPPER_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION, OPEN_GRIPPER_RAD,
-    START_JOINTS_RAD, TEST_JOINTS_RAD,
+    CLOSED_GRIPPER_RAD, DEFAULT_JOINTS_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION,
 };
 
 use crate::{
@@ -34,7 +32,7 @@ use crate::{
         MotionConfig, Pose, merge_controller_command, target_pose, tool_action_transition,
         tool_position_rad,
     },
-    ros::{MotionJob, MotionTarget, RosEvent, RosInterface},
+    ros::{ManipulationJob, MotionJob, RosEvent, RosInterface},
 };
 
 struct ActiveMotion {
@@ -48,11 +46,14 @@ struct PendingMotion {
     complete_in_relative_mode: bool,
 }
 
-struct ActiveManipulation {
-    plan: PickPlacePlan,
-    step_index: usize,
-    waiting_motion_id: Option<String>,
-    actuator_rad: f64,
+struct PendingManipulation {
+    job: ManipulationJob,
+    state: ManipulationTaskState,
+}
+
+enum WorkItem {
+    Motion(PendingMotion),
+    Manipulation(PendingManipulation),
 }
 
 struct MotionNode {
@@ -78,13 +79,12 @@ struct MotionNode {
     pose_mode_ready: bool,
     fk_pending: bool,
     active_motion: Option<ActiveMotion>,
-    motion_queue: VecDeque<PendingMotion>,
+    work_queue: VecDeque<WorkItem>,
     motion_status: MotionStatus,
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
     latest_scene: Option<WorldScene>,
-    active_manipulation: Option<ActiveManipulation>,
-    manipulation_queue: VecDeque<PickPlacePlan>,
+    active_manipulation: Option<String>,
     manipulation_state: ManipulationTaskState,
 }
 
@@ -125,13 +125,12 @@ fn run() -> Result<()> {
         pose_mode_ready: false,
         fk_pending: false,
         active_motion: None,
-        motion_queue: VecDeque::new(),
+        work_queue: VecDeque::new(),
         motion_status: idle_status(),
         actuator_status: None,
         last_error: None,
         latest_scene: None,
         active_manipulation: None,
-        manipulation_queue: VecDeque::new(),
         manipulation_state: idle_manipulation_state(),
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
@@ -261,7 +260,8 @@ impl MotionNode {
         }
         if self.config.control_mode != ControlMode::Relative
             || self.active_motion.is_some()
-            || !self.motion_queue.is_empty()
+            || self.active_manipulation.is_some()
+            || !self.work_queue.is_empty()
         {
             return Ok(());
         }
@@ -320,7 +320,7 @@ impl MotionNode {
         let job = MotionJob {
             request_id,
             current: state.joints_rad.clone(),
-            target: MotionTarget::Joints(START_JOINTS_RAD.to_vec()),
+            target: DEFAULT_JOINTS_RAD.to_vec(),
             actuator: CLOSED_GRIPPER_RAD,
             options: BTreeMap::new(),
         };
@@ -412,7 +412,7 @@ impl MotionNode {
         let job = MotionJob {
             request_id: request.request_id,
             current: state.joints_rad.clone(),
-            target: MotionTarget::Joints(JOINTS.map(|name| target[name]).to_vec()),
+            target: JOINTS.map(|name| target[name]).to_vec(),
             actuator,
             options: request.options,
         };
@@ -425,42 +425,46 @@ impl MotionNode {
         job: MotionJob,
         complete_in_relative_mode: bool,
     ) -> Result<()> {
-        self.motion_queue.push_back(PendingMotion {
+        self.work_queue.push_back(WorkItem::Motion(PendingMotion {
             job,
             complete_in_relative_mode,
-        });
-        self.start_next_motion(node)
+        }));
+        self.start_next_work(node)
     }
 
-    fn start_next_motion(&mut self, node: &mut DoraNode) -> Result<()> {
-        if self.active_motion.is_some() {
+    fn start_next_work(&mut self, node: &mut DoraNode) -> Result<()> {
+        if self.active_motion.is_some() || self.active_manipulation.is_some() {
             return Ok(());
         }
-        let Some(pending) = self.motion_queue.front_mut() else {
+        let Some(next) = self.work_queue.front_mut() else {
             self.start_controller_sync();
             return Ok(());
         };
-        if let Some(state) = &self.latest_arm_state {
+        if let (WorkItem::Motion(pending), Some(state)) = (next, &self.latest_arm_state) {
             pending.job.current.clone_from(&state.joints_rad);
         }
-        self.motion_status = MotionStatus {
-            request_id: pending.job.request_id.clone(),
-            state: RequestState::Planning,
-            result_message: Some(
-                if self.controller_sync_required || self.controller_sync_running {
-                    "等待 ros2_control 同步当前反馈".into()
-                } else {
-                    "MoveIt 正在规划普通关节目标".into()
-                },
-            ),
-            ..idle_status()
-        };
-        send(node, "motion_status", &self.motion_status)?;
         if self.controller_sync_required || self.controller_sync_running {
             self.start_controller_sync();
-        } else {
-            let pending = self.motion_queue.pop_front().expect("queue checked above");
-            self.start_motion(pending.job, pending.complete_in_relative_mode);
+            return Ok(());
+        }
+        match self.work_queue.pop_front().expect("queue checked above") {
+            WorkItem::Motion(pending) => {
+                self.motion_status = MotionStatus {
+                    request_id: pending.job.request_id.clone(),
+                    state: RequestState::Planning,
+                    result_message: Some("MoveIt 正在规划普通关节目标".into()),
+                    ..idle_status()
+                };
+                send(node, "motion_status", &self.motion_status)?;
+                self.start_motion(pending.job, pending.complete_in_relative_mode);
+            }
+            WorkItem::Manipulation(pending) => {
+                self.manipulation_state = pending.state;
+                self.active_manipulation = Some(pending.job.request_id.clone());
+                send(node, "manipulation_state", &self.manipulation_state)?;
+                self.controller_output_armed = true;
+                self.ros.run_manipulation(pending.job);
+            }
         }
         Ok(())
     }
@@ -519,200 +523,28 @@ impl MotionNode {
     }
 
     fn handle_pick_place(&mut self, node: &mut DoraNode, request: PickPlaceRequest) -> Result<()> {
-        let plan = self
+        let request_id = request.request_id.clone();
+        let result = self
             .latest_scene
             .as_ref()
             .ok_or_else(|| eyre::eyre!("尚未收到结构化感知场景"))
-            .and_then(|scene| plan_pick_place(scene, &request).map_err(Into::into));
-        match plan {
-            Ok(plan) if self.active_manipulation.is_none() => self.start_manipulation(node, plan),
-            Ok(plan) => {
-                self.manipulation_queue.push_back(plan);
-                Ok(())
+            .and_then(|scene| manipulation_job(scene, request));
+        match result {
+            Ok(pending) => {
+                self.work_queue.push_back(WorkItem::Manipulation(pending));
+                self.start_next_work(node)
             }
-            Err(error) if self.active_manipulation.is_some() => {
-                self.send_manipulation_failure(node, request.request_id, error.to_string())
+            Err(error) => {
+                self.manipulation_state = ManipulationTaskState {
+                    request_id,
+                    state: RequestState::Failed,
+                    original_error: Some(error.to_string()),
+                    ..idle_manipulation_state()
+                };
+                send(node, "manipulation_state", &self.manipulation_state)?;
+                self.send_manipulation_result(node)
             }
-            Err(error) => self.fail_manipulation(node, request.request_id, error.to_string()),
         }
-    }
-
-    fn start_manipulation(&mut self, node: &mut DoraNode, plan: PickPlacePlan) -> Result<()> {
-        let pick_position_m = cartesian_target(&plan, ManipulationStep::ReachObject)
-            .expect("reach object has a Cartesian target");
-        let place_position_m = cartesian_target(&plan, ManipulationStep::ReachPlacement)
-            .expect("reach placement has a Cartesian target");
-        self.manipulation_state = ManipulationTaskState {
-            schema_version: SCHEMA_VERSION,
-            request_id: plan.request_id.clone(),
-            object_id: Some(plan.object.object_id.clone()),
-            placement_region_id: Some(plan.placement_region.region_id.clone()),
-            pick_position_m: Some(pick_position_m),
-            place_position_m: Some(place_position_m),
-            state: RequestState::Executing,
-            step: plan.steps.first().copied(),
-            original_error: None,
-        };
-        self.active_manipulation = Some(ActiveManipulation {
-            plan,
-            step_index: 0,
-            waiting_motion_id: None,
-            actuator_rad: OPEN_GRIPPER_RAD,
-        });
-        send(node, "manipulation_state", &self.manipulation_state)?;
-        self.continue_or_fail_manipulation(node)
-    }
-
-    fn continue_or_fail_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
-        let Some(request_id) = self
-            .active_manipulation
-            .as_ref()
-            .map(|active| active.plan.request_id.clone())
-        else {
-            return Ok(());
-        };
-        if let Err(error) = self.continue_manipulation(node) {
-            self.fail_manipulation(node, request_id, error.to_string())?;
-        }
-        Ok(())
-    }
-
-    fn continue_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
-        loop {
-            let Some(active) = self.active_manipulation.as_ref() else {
-                return Ok(());
-            };
-            let step = active.plan.steps[active.step_index];
-            let plan = active.plan.clone();
-            let actuator_rad = active.actuator_rad;
-            self.manipulation_state.step = Some(step);
-            send(node, "manipulation_state", &self.manipulation_state)?;
-            match step {
-                ManipulationStep::ApproachObject
-                | ManipulationStep::ReachObject
-                | ManipulationStep::ApproachPlacement
-                | ManipulationStep::ReachPlacement => {
-                    let state = self
-                        .latest_arm_state
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("缺少当前关节反馈"))?;
-                    let position = cartesian_target(&plan, step)
-                        .expect("cartesian manipulation step checked above");
-                    let request_id = format!("{}:{step:?}", plan.request_id);
-                    self.active_manipulation
-                        .as_mut()
-                        .expect("manipulation remains active")
-                        .waiting_motion_id = Some(request_id.clone());
-                    return self.queue_or_start_motion(
-                        node,
-                        MotionJob {
-                            request_id,
-                            current: state.joints_rad.clone(),
-                            target: MotionTarget::Position(position),
-                            actuator: actuator_rad,
-                            options: BTreeMap::new(),
-                        },
-                        false,
-                    );
-                }
-                ManipulationStep::CloseTool => {
-                    self.active_manipulation
-                        .as_mut()
-                        .expect("manipulation remains active")
-                        .actuator_rad = CLOSED_GRIPPER_RAD;
-                    self.publish_actuator(&plan.request_id, CLOSED_GRIPPER_RAD)?;
-                }
-                ManipulationStep::OpenTool => {
-                    self.active_manipulation
-                        .as_mut()
-                        .expect("manipulation remains active")
-                        .actuator_rad = OPEN_GRIPPER_RAD;
-                    self.publish_actuator(&plan.request_id, OPEN_GRIPPER_RAD)?;
-                }
-                ManipulationStep::Complete => {
-                    let state = self
-                        .latest_arm_state
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("缺少当前关节反馈"))?;
-                    let request_id = format!("{}:ReturnToTest", plan.request_id);
-                    self.active_manipulation
-                        .as_mut()
-                        .expect("manipulation remains active")
-                        .waiting_motion_id = Some(request_id.clone());
-                    return self.queue_or_start_motion(
-                        node,
-                        MotionJob {
-                            request_id,
-                            current: state.joints_rad.clone(),
-                            target: MotionTarget::Joints(TEST_JOINTS_RAD.to_vec()),
-                            actuator: CLOSED_GRIPPER_RAD,
-                            options: BTreeMap::new(),
-                        },
-                        false,
-                    );
-                }
-            }
-            self.active_manipulation
-                .as_mut()
-                .expect("manipulation remains active")
-                .step_index += 1;
-        }
-    }
-
-    fn complete_manipulation(&mut self, node: &mut DoraNode) -> Result<()> {
-        self.manipulation_state.state = RequestState::Succeeded;
-        send(node, "manipulation_state", &self.manipulation_state)?;
-        self.send_manipulation_result(node)?;
-        self.active_manipulation = None;
-        if let Some(next) = self.manipulation_queue.pop_front() {
-            self.start_manipulation(node, next)?;
-        }
-        Ok(())
-    }
-
-    fn fail_manipulation(
-        &mut self,
-        node: &mut DoraNode,
-        request_id: String,
-        error: String,
-    ) -> Result<()> {
-        self.active_manipulation = None;
-        self.manipulation_state = ManipulationTaskState {
-            schema_version: SCHEMA_VERSION,
-            request_id,
-            object_id: self.manipulation_state.object_id.clone(),
-            placement_region_id: self.manipulation_state.placement_region_id.clone(),
-            pick_position_m: self.manipulation_state.pick_position_m,
-            place_position_m: self.manipulation_state.place_position_m,
-            state: RequestState::Failed,
-            step: self.manipulation_state.step,
-            original_error: Some(error),
-        };
-        send(node, "manipulation_state", &self.manipulation_state)?;
-        self.send_manipulation_result(node)?;
-        if let Some(next) = self.manipulation_queue.pop_front() {
-            self.start_manipulation(node, next)?;
-        }
-        Ok(())
-    }
-
-    fn send_manipulation_failure(
-        &self,
-        node: &mut DoraNode,
-        request_id: String,
-        error: String,
-    ) -> Result<()> {
-        send(
-            node,
-            "manipulation_request_result",
-            &RequestResult {
-                schema_version: SCHEMA_VERSION,
-                request_id,
-                acknowledged_action: RequestAction::Apply,
-                value: None::<ManipulationTaskState>,
-                original_error: Some(error),
-            },
-        )
     }
 
     fn send_manipulation_result(&self, node: &mut DoraNode) -> Result<()> {
@@ -733,6 +565,7 @@ impl MotionNode {
         if self.controller_sync_required
             && !self.controller_sync_running
             && self.active_motion.is_none()
+            && self.active_manipulation.is_none()
         {
             self.controller_sync_running = true;
             self.controller_sync_required = false;
@@ -771,20 +604,30 @@ impl MotionNode {
                     match result {
                         Ok(()) => {
                             self.last_error = None;
-                            self.start_next_motion(node)?;
+                            self.start_next_work(node)?;
                         }
                         Err(error) => {
                             self.controller_sync_required = true;
                             self.last_error = Some(error.clone());
-                            if let Some(pending) = self.motion_queue.pop_front() {
-                                self.fail_motion(
-                                    node,
-                                    pending.job.request_id,
-                                    format!("同步 ros2_control 控制器失败：{error}"),
-                                    RequestAction::Apply,
-                                )?;
+                            if let Some(pending) = self.work_queue.pop_front() {
+                                match pending {
+                                    WorkItem::Motion(pending) => self.fail_motion(
+                                        node,
+                                        pending.job.request_id,
+                                        format!("同步 ros2_control 控制器失败：{error}"),
+                                        RequestAction::Apply,
+                                    )?,
+                                    WorkItem::Manipulation(pending) => {
+                                        self.manipulation_state = pending.state;
+                                        self.manipulation_state.state = RequestState::Failed;
+                                        self.manipulation_state.original_error =
+                                            Some(format!("同步 ros2_control 控制器失败：{error}"));
+                                        send(node, "manipulation_state", &self.manipulation_state)?;
+                                        self.send_manipulation_result(node)?;
+                                    }
+                                }
                             }
-                            self.start_next_motion(node)?;
+                            self.start_next_work(node)?;
                         }
                     }
                     self.publish_state(node)?;
@@ -821,15 +664,10 @@ impl MotionNode {
                     };
                     self.reset_relative_baseline();
                     if active.cancelled {
-                        self.start_next_motion(node)?;
+                        self.start_next_work(node)?;
                         self.publish_state(node)?;
                         continue;
                     }
-                    let manipulation_waiting = self
-                        .active_manipulation
-                        .as_ref()
-                        .and_then(|active| active.waiting_motion_id.as_deref())
-                        == Some(request_id.as_str());
                     match result {
                         Ok(result) => {
                             if active.complete_in_relative_mode
@@ -848,37 +686,56 @@ impl MotionNode {
                             self.motion_status.result_message = Some("普通运动执行完成".into());
                             send(node, "motion_status", &self.motion_status)?;
                             self.send_motion_result(node, &self.motion_status)?;
-                            if manipulation_waiting {
-                                let completed = {
-                                    let active = self
-                                        .active_manipulation
-                                        .as_mut()
-                                        .expect("waiting manipulation remains active");
-                                    active.waiting_motion_id = None;
-                                    active.step_index += 1;
-                                    active.step_index == active.plan.steps.len()
-                                };
-                                if completed {
-                                    self.complete_manipulation(node)?;
-                                } else {
-                                    self.continue_or_fail_manipulation(node)?;
-                                }
-                            }
                         }
                         Err(error) => {
-                            self.fail_motion(
-                                node,
-                                request_id,
-                                error.clone(),
-                                RequestAction::Apply,
-                            )?;
-                            if manipulation_waiting {
-                                let manipulation_id = self.manipulation_state.request_id.clone();
-                                self.fail_manipulation(node, manipulation_id, error)?;
-                            }
+                            self.fail_motion(node, request_id, error, RequestAction::Apply)?;
                         }
                     }
-                    self.start_next_motion(node)?;
+                    self.start_next_work(node)?;
+                    self.publish_state(node)?;
+                }
+                RosEvent::ManipulationFeedback {
+                    request_id,
+                    state,
+                    stage,
+                    solution_count,
+                    selected_cost,
+                } => {
+                    if self.active_manipulation.as_deref() == Some(request_id.as_str()) {
+                        self.manipulation_state.state = if state == "executing" {
+                            RequestState::Executing
+                        } else {
+                            RequestState::Planning
+                        };
+                        self.manipulation_state.stage = Some(stage);
+                        self.manipulation_state.solution_count =
+                            (solution_count > 0).then_some(solution_count);
+                        self.manipulation_state.selected_cost =
+                            (solution_count > 0).then_some(selected_cost);
+                        send(node, "manipulation_state", &self.manipulation_state)?;
+                    }
+                }
+                RosEvent::ManipulationFinished { request_id, result } => {
+                    if self.active_manipulation.as_deref() != Some(request_id.as_str()) {
+                        continue;
+                    }
+                    self.active_manipulation = None;
+                    match result {
+                        Ok(result) => {
+                            self.manipulation_state.state = RequestState::Succeeded;
+                            self.manipulation_state.stage = Some(result.message);
+                            self.manipulation_state.solution_count = Some(result.solution_count);
+                            self.manipulation_state.selected_cost = Some(result.selected_cost);
+                            self.manipulation_state.original_error = None;
+                        }
+                        Err(error) => {
+                            self.manipulation_state.state = RequestState::Failed;
+                            self.manipulation_state.original_error = Some(error);
+                        }
+                    }
+                    send(node, "manipulation_state", &self.manipulation_state)?;
+                    self.send_manipulation_result(node)?;
+                    self.start_next_work(node)?;
                     self.publish_state(node)?;
                 }
             }
@@ -950,8 +807,12 @@ impl MotionNode {
     fn cancel_motion(&mut self, node: &mut DoraNode, request_id: String) -> Result<()> {
         self.reset_relative_baseline();
         if self.active_motion.is_none()
-            && let Some(pending) = self.motion_queue.pop_front()
+            && let Some(WorkItem::Motion(_)) = self.work_queue.front()
         {
+            let WorkItem::Motion(pending) = self.work_queue.pop_front().expect("front checked")
+            else {
+                unreachable!()
+            };
             let cancelled = MotionStatus {
                 request_id: pending.job.request_id,
                 state: RequestState::Cancelled,
@@ -959,7 +820,7 @@ impl MotionNode {
                 ..idle_status()
             };
             self.send_motion_result(node, &cancelled)?;
-            self.start_next_motion(node)?;
+            self.start_next_work(node)?;
         }
         if let Some(active) = self.active_motion.as_mut() {
             active.cancelled = true;
@@ -1106,9 +967,69 @@ fn idle_manipulation_state() -> ManipulationTaskState {
         pick_position_m: None,
         place_position_m: None,
         state: RequestState::Idle,
-        step: None,
+        stage: None,
+        solution_count: None,
+        selected_cost: None,
         original_error: None,
     }
+}
+
+fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<PendingManipulation> {
+    let object = scene
+        .objects
+        .iter()
+        .find(|object| object.object_id == request.object_id)
+        .ok_or_else(|| eyre::eyre!("场景中没有抓取对象 {}", request.object_id))?;
+    let placement = scene
+        .placement_regions
+        .iter()
+        .find(|region| region.region_id == request.placement_region_id)
+        .ok_or_else(|| eyre::eyre!("场景中没有放置区 {}", request.placement_region_id))?;
+    if object.grasp_candidates.is_empty() {
+        return Err(eyre::eyre!("抓取对象 {} 没有抓取候选", object.object_id));
+    }
+    let pose = |pose: &robot_arm_messages::Pose3| {
+        let [x, y, z] = pose.position_m;
+        let [qx, qy, qz, qw] = pose.orientation_xyzw;
+        json!({
+            "position": {"x": x, "y": y, "z": z},
+            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+        })
+    };
+    let size = |[x, y, z]: [f64; 3]| json!({"x": x, "y": y, "z": z});
+    let goal = json!({
+        "request_id": request.request_id,
+        "frame_id": scene.frame_id,
+        "object_id": object.object_id,
+        "object_pose": pose(&object.pose),
+        "object_size": size(object.size_m),
+        "grasp_poses": object.grasp_candidates.iter().map(pose).collect::<Vec<_>>(),
+        "placement_region_id": placement.region_id,
+        "placement_pose": pose(&placement.pose),
+        "placement_size": size(placement.size_m),
+        "obstacle_ids": scene.obstacles.iter().map(|item| item.obstacle_id.clone()).collect::<Vec<_>>(),
+        "obstacle_poses": scene.obstacles.iter().map(|item| pose(&item.pose)).collect::<Vec<_>>(),
+        "obstacle_sizes": scene.obstacles.iter().map(|item| size(item.size_m)).collect::<Vec<_>>(),
+    });
+    Ok(PendingManipulation {
+        job: ManipulationJob {
+            request_id: request.request_id.clone(),
+            goal,
+        },
+        state: ManipulationTaskState {
+            schema_version: SCHEMA_VERSION,
+            request_id: request.request_id,
+            object_id: Some(object.object_id.clone()),
+            placement_region_id: Some(placement.region_id.clone()),
+            pick_position_m: Some(object.pose.position_m),
+            place_position_m: Some(placement.pose.position_m),
+            state: RequestState::Planning,
+            stage: Some("等待 MTC 规划".into()),
+            solution_count: None,
+            selected_cost: None,
+            original_error: None,
+        },
+    })
 }
 
 fn tool_pose(pose: Pose) -> ToolPose {
@@ -1153,6 +1074,7 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use robot_arm_messages::{PlacementRegion, Pose3, SceneObject};
 
     #[test]
     fn collision_pairs_have_a_stable_human_readable_form() {
@@ -1160,5 +1082,52 @@ mod tests {
             format_pairs(&[("link1".into(), "link4".into())]),
             "link1↔link4"
         );
+    }
+
+    #[test]
+    fn mtc_goal_maps_the_selected_scene_geometry_without_cartesian_offsets() {
+        let pose = Pose3 {
+            position_m: [0.1, 0.2, 0.02],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let scene = WorldScene {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            sample_time_ns: 2,
+            frame_id: "base_link".into(),
+            objects: vec![SceneObject {
+                object_id: "cube".into(),
+                label: "cube".into(),
+                pose: pose.clone(),
+                size_m: [0.04; 3],
+                confidence: 1.0,
+                grasp_candidates: vec![pose.clone()],
+            }],
+            placement_regions: vec![PlacementRegion {
+                region_id: "bin".into(),
+                label: "bin".into(),
+                pose: Pose3 {
+                    position_m: [-0.1, 0.2, 0.04],
+                    orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                },
+                size_m: [0.08, 0.08, 0.08],
+                source_object_id: None,
+            }],
+            obstacles: vec![],
+        };
+        let pending = manipulation_job(
+            &scene,
+            PickPlaceRequest {
+                schema_version: SCHEMA_VERSION,
+                request_id: "request".into(),
+                object_id: "cube".into(),
+                placement_region_id: "bin".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
+        assert_eq!(pending.job.goal["object_size"]["z"], 0.04);
+        assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));
+        assert_eq!(pending.state.place_position_m, Some([-0.1, 0.2, 0.04]));
     }
 }

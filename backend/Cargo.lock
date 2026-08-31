@@ -2478,14 +2478,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "manipulation-core"
-version = "0.1.0"
-dependencies = [
- "robot-arm-messages",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4552,7 +4544,6 @@ dependencies = [
  "eyre",
  "futures",
  "json-config-store",
- "manipulation-core",
  "nalgebra",
  "r2r",
  "robot-arm-messages",

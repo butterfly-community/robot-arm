@@ -15,6 +15,7 @@ setup(
             [
                 "config/controllers.yaml",
                 "config/servo.yaml",
+                "config/stararm102_description.srdf",
                 "config/stararm102.rviz",
             ],
         ),

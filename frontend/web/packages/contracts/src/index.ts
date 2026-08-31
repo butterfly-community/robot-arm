@@ -211,6 +211,7 @@ export interface PerceptionState {
   compute_service_url: string;
   model: string;
   classes: string[];
+  placement_labels: string[];
   last_frame_time_ns?: number | null;
   last_scene_sequence?: number | null;
   calibrated: boolean;
@@ -228,7 +229,7 @@ export interface SceneObject {
   pose: ScenePose;
   size_m: [number, number, number];
   confidence: number;
-  graspable: boolean;
+  grasp_candidates: ScenePose[];
 }
 
 export interface PlacementRegion {
@@ -253,15 +254,6 @@ export interface WorldScene {
   }>;
 }
 
-export type ManipulationStep =
-  | "approach_object"
-  | "reach_object"
-  | "close_tool"
-  | "approach_placement"
-  | "reach_placement"
-  | "open_tool"
-  | "complete";
-
 export interface ManipulationTaskState {
   schema_version: number;
   request_id: string;
@@ -271,7 +263,9 @@ export interface ManipulationTaskState {
   place_position_m?: [number, number, number] | null;
   state:
     "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
-  step?: ManipulationStep | null;
+  stage?: string | null;
+  solution_count?: number | null;
+  selected_cost?: number | null;
   original_error?: string | null;
 }
 

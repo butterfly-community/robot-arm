@@ -1,140 +1,154 @@
 diff --git a/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt b/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
+index bcdffec..f5411d4 100644
 --- a/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
 +++ b/ROS2_HUMBLE/src/stararm102_description/CMakeLists.txt
-@@ -1,14 +1,8 @@
--cmake_minimum_required(VERSION 2.8.3)
+@@ -3,8 +3,6 @@ project(stararm102_description)
+ 
+ find_package(ament_cmake REQUIRED)
+ 
+-ament_package()
 -
--project(stararm102_description)
--
--find_package(catkin REQUIRED)
--
--catkin_package()
--
--find_package(roslaunch)
--
--foreach(dir config launch meshes urdf)
--	install(DIRECTORY ${dir}/
--		DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/${dir})
--endforeach(dir)
-+cmake_minimum_required(VERSION 3.22)
-+
-+project(stararm102_description)
-+
-+find_package(ament_cmake REQUIRED)
-+
+ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
+   install(
+     DIRECTORY launch
+@@ -12,5 +10,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
+     PATTERN "setup_assistant.launch" EXCLUDE)
+ endif()
+ 
+-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 +install(DIRECTORY meshes urdf DESTINATION share/${PROJECT_NAME})
+-install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
++
 +ament_package()
 diff --git a/ROS2_HUMBLE/src/stararm102_description/package.xml b/ROS2_HUMBLE/src/stararm102_description/package.xml
+index 8a3fcfc..2648b66 100644
 --- a/ROS2_HUMBLE/src/stararm102_description/package.xml
 +++ b/ROS2_HUMBLE/src/stararm102_description/package.xml
-@@ -1,21 +1,14 @@
--<package format="2">
-+<?xml version="1.0"?>
-+<package format="3">
-   <name>stararm102_description</name>
-   <version>1.0.0</version>
--  <description>
--    <p>URDF Description package for stararm102_description</p>
--    <p>This package contains configuration data, 3D models and launch files
--for stararm102_description robot</p>
--  </description>
-+  <description>URDF description and meshes for Star Arm 102</description>
-   <author>TODO</author>
--  <maintainer email="TODO@email.com" />
-+  <maintainer email="TODO@email.com">TODO</maintainer>
-   <license>BSD</license>
--  <buildtool_depend>catkin</buildtool_depend>
--  <depend>roslaunch</depend>
--  <depend>robot_state_publisher</depend>
--  <depend>rviz</depend>
--  <depend>joint_state_publisher_gui</depend>
--  <depend>gazebo</depend>
+@@ -7,18 +7,20 @@
+   <maintainer email="12461360+nyancos@user.noreply.gitee.com">nyancos</maintainer>
+   <license>MIT</license>
+ 
 +  <buildtool_depend>ament_cmake</buildtool_depend>
-+  <exec_depend>urdf</exec_depend>
++
+   <test_depend>ament_copyright</test_depend>
+   <test_depend>ament_flake8</test_depend>
+   <test_depend>ament_pep257</test_depend>
+   <test_depend>python3-pytest</test_depend>
+ 
+-    <depend>urdf</depend>
+-    <build_depend>launch_ros</build_depend>
+-    <exec_depend>launch_ros</exec_depend>
+-    <exec_depend>robot_state_publisher</exec_depend>
+-    <exec_depend>joint_state_publisher_gui</exec_depend>
++  <depend>urdf</depend>
++  <build_depend>launch_ros</build_depend>
++  <exec_depend>launch_ros</exec_depend>
++  <exec_depend>robot_state_publisher</exec_depend>
++  <exec_depend>joint_state_publisher_gui</exec_depend>
+ 
    <export>
--    <architecture_independent />
+-    <build_type>ament_python</build_type>
 +    <build_type>ament_cmake</build_type>
    </export>
  </package>
 diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+index 7af5b15..23ff77f 100644
 --- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
 +++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
-@@ -22,7 +22,7 @@
-     </inertial>
-     <visual>
-       <origin
--        xyz="0 0 0"
-+        xyz="0 0 0.0035"
-         rpy="0 0 0" />
-       <geometry>
-         <mesh
-@@ -36,7 +36,7 @@
-     </visual>
-     <collision>
-       <origin
--        xyz="0 0 0"
-+        xyz="0 0 0.0035"
-         rpy="0 0 0" />
-       <geometry>
-         <mesh
-@@ -268,7 +268,7 @@
-     <child
-       link="link4" />
+@@ -164,8 +164,8 @@
      <axis
--      xyz="0 0 1" />
-+      xyz="0 0 -1" />
+       xyz="0 0 -1" />
      <limit
-       lower="-1.57"
-       upper="1.57"
-@@ -445,8 +445,8 @@
-     <axis
--      xyz="0 0 1" />
-+      xyz="0 0 -1" />
-     <limit
--      lower="-2.27"
--      upper="2.27"
-+      lower="0"
+-      lower="0"
+-      upper="3.14"
++      lower="-1.57"
 +      upper="1.57"
        effort="100"
        velocity="1" />
    </joint>
-@@ -503,10 +503,16 @@
+@@ -221,9 +221,9 @@
+       link="link3" />
      <axis
--      xyz="0 0 1" />
-+      xyz="0 0 -1" />
-     <limit
--      lower="-2.27"
--      upper="2.27"
+-      xyz="0 0 -1" />
++      xyz="0 0 1" />
+    <limit
+-      lower="-3.14"
+-      upper="0"
 +      lower="-1.57"
-+      upper="0"
++      upper="1.57"
        effort="100"
        velocity="1" />
-       <mimic joint="joint7_left" multiplier="-1" />
    </joint>
+@@ -280,8 +280,8 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+       lower="-1.57"
+-      upper="2.2"
++      upper="1.57"
+       effort="100"
+       velocity="1" />
+   </joint>
+@@ -338,8 +338,8 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+-      lower="-1.2"
+-      upper="1.2"
++      lower="-2.27"
++      upper="2.27"
+       effort="100"
+       velocity="1" />
+   </joint>
+@@ -396,8 +396,8 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+-      lower="-3.14"
+-      upper="3.14"
++      lower="-2.27"
++      upper="2.27"
+       effort="100"
+       velocity="1" />
+   </joint>
+@@ -453,9 +453,9 @@
+       link="link7_left" />
+     <axis
+       xyz="0 0 -1" />
+-    <limit
+-      lower="0"
+-      upper="1.57"
++    <limit
++      lower="0"
++      upper="1.5707963267948966"
+       effort="5"
+       velocity="3.14" />
+   </joint>
+@@ -511,11 +511,17 @@
+       link="link7_right" />
+     <axis
+       xyz="0 0 -1" />
+-    <limit
+-      lower="-1.57"
++    <limit
++      lower="-1.5707963267948966"
+       upper="0"
+       effort="5"
+       velocity="3.14" />
+-    <mimic joint="joint7_left" multiplier="-1" />
+-  </joint>
+-</robot>
++    <mimic joint="joint7_left" multiplier="-1" />
++  </joint>
 +  <link name="tcp_link" />
 +  <joint name="tcp_joint" type="fixed">
 +    <origin xyz="0 0 0" rpy="0 0 0" />
 +    <parent link="link6" />
 +    <child link="tcp_link" />
 +  </joint>
- </robot>
-diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
---- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
-+++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_description.srdf
-@@ -2,11 +2,5 @@
- <robot name="stararm102_description">
-     <!--GROUPS: Representation of a set of joints and links.-->
-     <group name="arm">
--        <joint name="virtual_joint"/>
--        <joint name="joint1"/>
--        <joint name="joint2"/>
--        <joint name="joint3"/>
--        <joint name="joint4"/>
--        <joint name="joint5"/>
--        <joint name="joint6"/>
-+        <chain base_link="base_link" tip_link="tcp_link"/>
-     </group>
++</robot>
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml b/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
+index 1021bc2..18192bf 100644
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
 +++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/kinematics.yaml
 @@ -1,4 +1,3 @@

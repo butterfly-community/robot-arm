@@ -45,7 +45,7 @@ WORKDIR /src
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/crates crates
 COPY backend/nodes nodes
-COPY tools/perception/assets /tools/perception/assets
+COPY tools/perception/fixtures /tools/perception/fixtures
 RUN --mount=type=cache,id=robot-arm-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=robot-arm-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=robot-arm-perception-target,target=/src/target,sharing=locked \

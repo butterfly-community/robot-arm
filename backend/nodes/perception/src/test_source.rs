@@ -10,7 +10,7 @@ use robot_arm_messages::{
 use crate::ros::ros_time;
 
 const GENERATED_RGB_ASSET: &[u8] =
-    include_bytes!("../../../../tools/perception/assets/pick-place-scene.png");
+    include_bytes!("../../../../tools/perception/fixtures/pick-place-scene.png");
 const GENERATED_DEPTH_SOURCE_ID: &str = "generated-test-depth-scene";
 const GENERATED_DEPTH_FRAME_ID: &str = "depth_sim_frame";
 
@@ -74,15 +74,15 @@ pub(super) fn generated_pick_place_calibration(
         source_id: GENERATED_DEPTH_SOURCE_ID.into(),
         parent_frame_id: "base_link".into(),
         frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        translation_m: [0.20, 0.06, 0.67],
+        translation_m: [0.15, 0.06, 0.67],
         orientation_xyzw: [half_sqrt_two, half_sqrt_two, 0.0, 0.0],
         width: 640,
         height: 480,
         distortion_model: "plumb_bob".into(),
         distortion: vec![0.0; 5],
-        camera_matrix: [850.0, 0.0, 319.5, 0.0, 850.0, 239.5, 0.0, 0.0, 1.0],
+        camera_matrix: [1800.0, 0.0, 319.5, 0.0, 1800.0, 239.5, 0.0, 0.0, 1.0],
         projection_matrix: [
-            850.0, 0.0, 319.5, 0.0, 0.0, 850.0, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0,
+            1800.0, 0.0, 319.5, 0.0, 0.0, 1800.0, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0,
         ],
     }
 }
@@ -185,7 +185,7 @@ pub(super) fn fill_generated_depth_from_instances(
         let mask =
             image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?.into_luma8();
         match instance.label.as_str() {
-            "red cube" => fill_masked_depth(&mut depth.depth, &mask, 630, 670),
+            "red cube" => fill_masked_depth(&mut depth.depth, &mask, 590, 670),
             "gray storage bin" => fill_masked_depth(&mut depth.depth, &mask, 590, 670),
             _ => {}
         }
@@ -289,7 +289,7 @@ fn fill_masked_depth(depth: &mut [u16], mask: &GrayImage, near: u16, far: u16) {
 #[cfg(test)]
 mod tests {
     use approx::assert_abs_diff_eq;
-    use perception_core::world_scene_from_aligned_depth;
+    use perception_core::world_scene_and_instance_clouds_from_aligned_depth;
 
     use super::*;
 
@@ -310,17 +310,18 @@ mod tests {
     fn generated_pick_and_place_points_share_one_support_plane() {
         let (_, mut depth, instances) = generated_rgbd(1, 2).unwrap();
         fill_generated_depth_from_instances(&mut depth, &instances).unwrap();
-        let scene = world_scene_from_aligned_depth(
+        let (scene, _) = world_scene_and_instance_clouds_from_aligned_depth(
             1,
             &depth,
             &generated_pick_place_calibration(1, 2),
             &instances,
+            &["gray storage bin".into()],
         )
         .unwrap();
         let cube = scene
             .objects
             .iter()
-            .find(|object| object.graspable)
+            .find(|object| object.label == "red cube")
             .unwrap();
         let bin = scene
             .objects
@@ -332,11 +333,8 @@ mod tests {
         let bin_bottom = bin.pose.position_m[2] - bin.size_m[2] / 2.0;
         assert_abs_diff_eq!(cube_bottom, bin_bottom);
         assert_abs_diff_eq!(cube_bottom, 0.0);
-        assert_abs_diff_eq!(
-            cube.pose.position_m[2],
-            placement.pose.position_m[2] + cube.size_m[2] / 2.0
-        );
-        assert_abs_diff_eq!(cube.pose.position_m[2], 0.02);
+        assert_abs_diff_eq!(placement.pose.position_m[2], bin.pose.position_m[2]);
+        assert_abs_diff_eq!(cube.pose.position_m[2], 0.04);
         assert_abs_diff_eq!(bin.pose.position_m[2], 0.04);
         assert_abs_diff_eq!(bin.size_m[2], 0.08);
     }

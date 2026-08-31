@@ -1,6 +1,8 @@
 Panels:
   - Class: rviz_common/Displays
     Name: Displays
+  - Class: moveit_task_constructor/Motion Planning Tasks
+    Name: Motion Planning Tasks
 Visualization Manager:
   Class: ""
   Global Options:

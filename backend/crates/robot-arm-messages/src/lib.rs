@@ -402,6 +402,8 @@ pub struct PerceptionState {
     pub compute_service_url: String,
     pub model: String,
     pub classes: Vec<String>,
+    #[serde(default)]
+    pub placement_labels: Vec<String>,
     pub last_frame_time_ns: Option<i64>,
     pub last_scene_sequence: Option<u64>,
     pub calibrated: bool,
@@ -417,6 +419,8 @@ pub struct PerceptionRequest {
     pub source_kind: Option<PerceptionSourceKind>,
     pub source_id: Option<String>,
     pub classes: Option<Vec<String>>,
+    #[serde(default)]
+    pub placement_labels: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -456,7 +460,7 @@ pub struct SceneObject {
     pub pose: Pose3,
     pub size_m: [f64; 3],
     pub confidence: f64,
-    pub graspable: bool,
+    pub grasp_candidates: Vec<Pose3>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -566,18 +570,6 @@ pub struct PickPlaceRequest {
     pub placement_region_id: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManipulationStep {
-    ApproachObject,
-    ReachObject,
-    CloseTool,
-    ApproachPlacement,
-    ReachPlacement,
-    OpenTool,
-    Complete,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ManipulationTaskState {
     pub schema_version: u32,
@@ -587,7 +579,9 @@ pub struct ManipulationTaskState {
     pub pick_position_m: Option<[f64; 3]>,
     pub place_position_m: Option<[f64; 3]>,
     pub state: RequestState,
-    pub step: Option<ManipulationStep>,
+    pub stage: Option<String>,
+    pub solution_count: Option<u32>,
+    pub selected_cost: Option<f64>,
     pub original_error: Option<String>,
 }
 
@@ -1464,7 +1458,7 @@ mod tests {
                 pose: pose.clone(),
                 size_m: [0.04; 3],
                 confidence: 0.9,
-                graspable: true,
+                grasp_candidates: vec![pose.clone()],
             }],
             placement_regions: vec![PlacementRegion {
                 region_id: "basket-interior".into(),

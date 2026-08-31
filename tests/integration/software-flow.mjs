@@ -139,6 +139,7 @@ const perceptionEnabled = await request("/api/motion/perception", {
   source_kind: "generated_test_scene",
   source_id: "generated:pick-place-scene",
   classes: null,
+  placement_labels: ["gray storage bin"],
 });
 assert.equal(perceptionEnabled.original_error, null);
 await waitFor(
@@ -147,12 +148,15 @@ await waitFor(
     state.values.perception_state?.enabled === true &&
     state.values.perception_state?.source_kind === "generated_test_scene" &&
     state.values.world_scene?.objects?.some(
-      (object) => object.label === "red cube" && object.graspable,
+      (object) =>
+        object.label === "red cube" && object.grasp_candidates.length > 0,
     ) &&
     state.values.world_scene?.placement_regions?.length === 1,
 );
 const perceptionScene = (await snapshot("motion")).values.world_scene;
-const graspable = perceptionScene.objects.find((object) => object.graspable);
+const graspable = perceptionScene.objects.find(
+  (object) => object.grasp_candidates.length > 0,
+);
 const placementRegion = perceptionScene.placement_regions[0];
 assert.ok(graspable, "generated perception scene has a graspable object");
 assert.ok(placementRegion, "generated perception scene has a placement region");
@@ -167,19 +171,20 @@ const pickPlaceResult = await observeManipulation(
     }),
 );
 assert.equal(pickPlaceResult.state, "succeeded");
-assert.equal(pickPlaceResult.step, "complete");
+assert.equal(pickPlaceResult.stage, "pick and place complete");
+assert.ok(pickPlaceResult.solution_count > 0);
+assert.equal(typeof pickPlaceResult.selected_cost, "number");
 assert.equal(pickPlaceResult.object_id, graspable.object_id);
 assert.equal(pickPlaceResult.placement_region_id, placementRegion.region_id);
 assert.deepEqual(pickPlaceResult.pick_position_m, [
   graspable.pose.position_m[0],
   graspable.pose.position_m[1],
-  graspable.pose.position_m[2] + graspable.size_m[2] / 2,
+  graspable.pose.position_m[2],
 ]);
 const expectedPlacePosition = [
   placementRegion.pose.position_m[0],
   placementRegion.pose.position_m[1],
-  placementRegion.pose.position_m[2] +
-    (placementRegion.size_m[2] + graspable.size_m[2] / 2),
+  placementRegion.pose.position_m[2],
 ];
 assert.deepEqual(
   pickPlaceResult.place_position_m.slice(0, 2),
@@ -191,20 +196,25 @@ assert.ok(
 );
 const executionPickPlace = await snapshot("arm-execution");
 const executionModel = executionPickPlace.values.robot_model_info;
-const pickPlaceTestTarget = executionModel.named_targets.find(
-  (target) => target.key === "test",
+const pickPlaceWorkTarget = executionModel.named_targets.find(
+  (target) => target.key === "work",
 );
-assert.ok(pickPlaceTestTarget, "robot model declares the test target");
-assert.deepEqual(
-  executionPickPlace.values.arm_state.joints_rad,
-  executionModel.joints.map(
-    (joint) => pickPlaceTestTarget.joint_positions_rad[joint.key],
+assert.ok(pickPlaceWorkTarget, "robot model declares the work target");
+assert.ok(
+  executionModel.joints.every(
+    (joint, index) =>
+      Math.abs(
+        executionPickPlace.values.arm_state.joints_rad[index] -
+          pickPlaceWorkTarget.joint_positions_rad[joint.key],
+      ) <=
+      Math.PI / 180,
   ),
+  "pick-place returns to the declared work target",
 );
 assert.deepEqual(
   executionPickPlace.values.arm_state.actuators_rad,
   executionModel.tool_actuators.map(
-    (actuator) => pickPlaceTestTarget.actuator_positions_rad[actuator.key],
+    (actuator) => pickPlaceWorkTarget.actuator_positions_rad[actuator.key],
   ),
 );
 assert.equal(
@@ -230,6 +240,7 @@ await request("/api/motion/perception", {
   source_kind: null,
   source_id: null,
   classes: null,
+  placement_labels: null,
 });
 await waitFor(
   () => snapshot("motion"),
@@ -243,6 +254,7 @@ if (originalPerception?.enabled) {
     source_kind: originalPerception.source_kind,
     source_id: originalPerception.source_id,
     classes: originalPerception.classes,
+    placement_labels: originalPerception.placement_labels,
   });
 }
 const discoveredSources = tracking.values.discovery_state?.sources ?? [];
@@ -586,47 +598,46 @@ const atActuatorTarget = await waitFor(
   (state) => state.values.arm_state.actuators_rad[0] > before.actuators_rad[0],
 );
 
-const start = model.named_targets.find((target) => target.key === "start");
-assert.ok(start, "model publishes the start target");
-assert.equal(start.joint_positions_rad.joint3, (-5 * Math.PI) / 180);
-const testTarget = model.named_targets.find((target) => target.key === "test");
-assert.ok(testTarget, "model publishes the test target");
-assert.equal(testTarget.joint_positions_rad.joint3, (-20 * Math.PI) / 180);
+const defaultTarget = model.named_targets.find(
+  (target) => target.key === "default",
+);
+assert.ok(defaultTarget, "model publishes the default target");
+assert.equal(defaultTarget.joint_positions_rad.joint3, 0);
 assert.equal(
-  Object.keys(testTarget.joint_positions_rad).length,
+  Object.keys(defaultTarget.joint_positions_rad).length,
   model.joints.length,
 );
-assert.equal(testTarget.actuator_positions_rad.gripper, 0);
-const startResult = await request("/api/motion/request", {
+assert.equal(defaultTarget.actuator_positions_rad.gripper, 0);
+const defaultResult = await request("/api/motion/request", {
   schema_version: 3,
-  request_id: "integration-start",
+  request_id: "integration-default",
   model_revision: model.model_revision,
   joints: model.joints.map((joint) => ({
     joint_key: joint.key,
-    position_rad: start.joint_positions_rad[joint.key],
+    position_rad: defaultTarget.joint_positions_rad[joint.key],
   })),
   actuators: model.tool_actuators.map((item) => ({
     actuator_key: item.key,
-    position_rad: start.actuator_positions_rad[item.key],
+    position_rad: defaultTarget.actuator_positions_rad[item.key],
   })),
   options: {},
   action: "apply",
 });
-assert.equal(startResult.value.state, "succeeded");
-const atStart = await waitFor(
+assert.equal(defaultResult.value.state, "succeeded");
+const atDefault = await waitFor(
   () => snapshot("arm-execution"),
   (state) =>
     model.joints.every(
       (joint, index) =>
         Math.abs(
           state.values.arm_state.joints_rad[index] -
-            start.joint_positions_rad[joint.key],
+            defaultTarget.joint_positions_rad[joint.key],
         ) < 1e-9,
     ) &&
     Math.abs(state.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
 );
 
-const cancellable = [...atStart.values.arm_state.joints_rad];
+const cancellable = [...atDefault.values.arm_state.joints_rad];
 cancellable[0] += Math.PI / 18;
 const interruptedRequest = request("/api/motion/request", {
   schema_version: 3,
@@ -638,7 +649,7 @@ const interruptedRequest = request("/api/motion/request", {
   })),
   actuators: model.tool_actuators.map((item, index) => ({
     actuator_key: item.key,
-    position_rad: atStart.values.arm_state.actuators_rad[index],
+    position_rad: atDefault.values.arm_state.actuators_rad[index],
   })),
   options: {},
   action: "apply",

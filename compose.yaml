@@ -24,7 +24,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.rust
       additional_contexts:
-        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102-clean}
     depends_on: {}
     command: ["dora", "coordinator", "--interface", "0.0.0.0"]
     healthcheck:
@@ -70,9 +70,16 @@ services:
 
   perception-compute:
     build:
-      context: ./backend/services/perception-compute
+      context: .
+      dockerfile: backend/services/perception-compute/Dockerfile
+      additional_contexts:
+        graspgenx_vendor: ${GRASPGENX_SOURCE:-../../../../temp/GraspGenX}
     networks: [robot-services]
-    volumes: ["perception-models:/models"]
+    environment:
+      GRASPGENX_SEED: ${GRASPGENX_SEED:-0}
+    volumes:
+      - ./backend/services/perception-compute/models:/models
+      - ./tools/graspgenx/assets:/grippers:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
 
@@ -157,7 +164,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.motion
       additional_contexts:
-        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102}
+        stararm_vendor: ${STAR_ARM_102_SOURCE:-../../../../temp/Star-Arm-102-clean}
         moveit_vendor: ${MOVEIT_SERVO_SOURCE:-../../../../temp/moveit2-2.12.4/moveit_ros/moveit_servo}
     command: ["dora", "daemon", "--coordinator-addr", "172.30.0.250", "--machine-id", "stararm-102-motion", "--zenoh-listen", "172.30.0.247:7447", "--zenoh-connect", "tcp/172.30.0.251:7447,tcp/172.30.0.252:7447,tcp/172.30.0.253:7447,tcp/172.30.0.254:7447,tcp/172.30.0.245:7447,tcp/172.30.0.246:7447", "--zenoh-no-multicast"]
     environment:
@@ -232,6 +239,3 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
-
-volumes:
-  perception-models:

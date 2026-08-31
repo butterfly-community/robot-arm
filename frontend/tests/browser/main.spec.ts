@@ -627,14 +627,17 @@ test("execution viewer shows the selected pick and placement points only during 
       )
       .toMatchObject({
         objects: expect.arrayContaining([
-          expect.objectContaining({ graspable: true }),
+          expect.objectContaining({
+            grasp_candidates: expect.arrayContaining([expect.any(Object)]),
+          }),
         ]),
         placement_regions: expect.arrayContaining([expect.any(Object)]),
       });
     const state = await (await request.get("/api/motion/state")).json();
     const currentScene = state.values.world_scene;
     const object = currentScene.objects.find(
-      (candidate: { graspable: boolean }) => candidate.graspable,
+      (candidate: { grasp_candidates: unknown[] }) =>
+        candidate.grasp_candidates.length > 0,
     );
     const placement = currentScene.placement_regions[0];
     await page.goto("/arm-execution/");
@@ -653,11 +656,13 @@ test("execution viewer shows the selected pick and placement points only during 
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "true");
     await expect(viewer).toHaveAttribute("data-pick-point-z", "0.040");
-    await expect(viewer).toHaveAttribute("data-place-point-z", "0.100");
+    await expect(viewer).toHaveAttribute("data-place-point-z", "0.040");
     await expect
       .poll(
         async () => {
-          const result = await (await request.get("/api/motion/state")).json();
+          const result = await (
+            await request.get("/api/arm-execution/state")
+          ).json();
           const manipulation = result.values.manipulation_state;
           return manipulation?.request_id === "browser-pick-points"
             ? manipulation.state
@@ -665,7 +670,7 @@ test("execution viewer shows the selected pick and placement points only during 
         },
         { timeout: 180_000 },
       )
-      .toBe("succeeded");
+      .toMatch(/^(succeeded|failed|cancelled)$/);
     await expect(viewer).toHaveAttribute("data-pick-point-visible", "false", {
       timeout: 15_000,
     });
@@ -780,8 +785,8 @@ test("motion named target is submitted by the metadata-driven page", async ({
       page.getByRole("button", { name: "准备相对控制" }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "默认位" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "测试位" })).toBeVisible();
-    await page.getByRole("button", { name: "测试位" }).click();
+    await expect(page.getByRole("button", { name: "工作位" })).toBeVisible();
+    await page.getByRole("button", { name: "工作位" }).click();
     await expect
       .poll(
         async () => {

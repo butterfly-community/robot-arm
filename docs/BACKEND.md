@@ -39,16 +39,22 @@ Action 只透明传递，不在此解释型号。矩阵与四元数使用 `nalge
 
 ## `perception-compute-service`
 
-`create_app()` 创建 FastAPI；lifespan 只加载一次 `YoloeBackend`。`/health` 和
+`create_app()` 创建 FastAPI；lifespan 只加载一次 `YoloeBackend` 和 `GraspGenXBackend`。`/health` 和
 `/v1/model` 报告实际模型、设备与许可；`/v1/segment` 解码 RGB，调用
 `YOLOE-26s-seg`，返回类别、置信度、边界框和 PNG 实例掩码。
 
+`/v1/grasps` 接收单个实例的点云和夹爪描述名，调用 GraspGenX，返回该夹爪真实 `tcp_link`
+在输入点云坐标系中的候选 SE(3)、置信度与分支。`GraspGenXBackend.infer()` 用上游
+`run_planner_on_object()` 和上游夹爪扫描体；推理锁只保护 PyTorch/采样器的共享模型状态，
+固定种子使相同点云可重复，不过滤或手写候选姿态。
+
 类别在请求中提供，修改类别时调用 Ultralytics `set_classes()`；CPU/CUDA 只改变
 `PERCEPTION_DEVICE`，接口与后续链路不变。服务不读取深度、不连接 ROS/Dora/MoveIt，也不
-推断抓取动作。
+编排抓放动作。
 
-手写边界：HTTP DTO 和 Ultralytics 结果归一化。库：FastAPI、Pydantic、Ultralytics、
-PyTorch、NumPy、Pillow、Uvicorn。许可为 Ultralytics AGPL-3.0 或企业许可。
+手写边界：HTTP DTO、Ultralytics 结果归一化、GraspGenX TCP 变换。库：FastAPI、Pydantic、
+Ultralytics、GraspGenX、PyTorch、NumPy、Pillow、Uvicorn。许可分别遵循 Ultralytics 与
+GraspGenX 仓库声明。
 
 ## `perception-node`
 
@@ -65,15 +71,16 @@ CameraInfo。真实场景只在彩色、对齐深度、内参和已应用外参�
 - `generated:pick-place-scene` 把固定 RGB 送入真实计算服务，用返回掩码填充确定性深度；
 - `generated:depth-grid` 生成 497 点测试云。
 
-`segment()` 是计算服务的唯一客户端。`decode_depth()` 接受 ROS `16UC1`；
+`segment()` 和 `estimate_grasps()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。
+`decode_depth()` 接受 ROS `16UC1`；
 `camera_calibration()` 把设备内参与持久化外参组合成唯一标定事实。
 
 ### 三维场景
 
-`perception-core::world_scene_from_aligned_depth()` 解码实例掩码、按内参反投影、应用
+`perception-core::world_scene_and_instance_clouds_from_aligned_depth()` 解码实例掩码、按内参反投影、应用
 `camera → base_link` 变换，并生成 `SceneObject`、`PlacementRegion` 与
-`SceneObstacle`。`aligned_obstacle_point_cloud()` 排除已经结构化的实例，使排障点云只
-表达未结构化的背景深度。
+`SceneObstacle`，同时保留每个实例在 `base_link` 中的点云供 GraspGenX 使用。
+`aligned_obstacle_point_cloud()` 排除已经结构化的实例，使排障点云只表达未结构化的背景深度。
 
 `publish_scene()` 只发布一份 Dora `WorldScene` 和解释性 Marker。`RosInterface` 发布
 标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF。深度点云用于感知与 RViz
@@ -96,34 +103,23 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 `tools/perception/`。这些代码只生成统一输入契约，生成后的消息仍进入同一感知、空间、MoveIt
 和 execution 链路，不实现测试专用业务流程。
 
-## `manipulation-core`
-
-`plan_pick_place()` 只按 ID 从 `WorldScene` 取可抓物和放置区，生成以打开夹爪开始的八步线性计划；
-`cartesian_target()` 只根据物体与放置区几何计算接近/到达位置：抓取点在物体顶面，放置点在
-放置区顶面上方半个物体高度。库不含 StarArm 轴数、
-关节角、串口或 MoveIt 类型，也没有状态机框架。
-
 ## `stararm-102-motion-node`
 
 `core::target_pose()` 把空间节点的设备无关增量组合成 StarArm-102 的 TCP 目标；旋转和
 四元数使用 `nalgebra`。`tool_position_rad()` 在此型号边界把 `primary_tool` 映射到
 90°→0° 夹爪行程。
 
-普通请求进入一个 FIFO，唯一 action worker 顺序执行“同步控制器、暂停 Servo、规划、执行、
-恢复 Servo”。前一个动作未结束时后一个只等待；没有状态机框架、并行规划器、固定队列上限
-或模拟/真机分支。
+普通关节运动和抓放请求进入同一个 `WorkItem` FIFO。唯一 ROS worker 顺序执行“同步控制器、
+暂停 Servo、规划/执行、恢复 Servo”；前一个动作未结束时后一个只等待，没有通用状态机框架、
+并行规划器、固定队列上限或模拟/真机分支。
 
-抓放的最后一步由型号节点通过同一普通运动队列回到模型声明的测试位，并恢复该目标声明的
-闭合夹爪状态；返回成功后才发布抓放完成。
-
-`ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性和
-PlanningScene 接口。型号节点向 MoveIt 提交 TCP 位置目标，不预先求 IK，也不附加末端姿态；
-MoveIt 在同一次规划中选择 IK 解与轨迹。`WorldScene` 只用于选择抓取目标、放置区和计算 TCP
-目标，不发布成 MoveIt CollisionObject、AttachedCollisionObject 或 OctoMap。规划场景中唯一
-的世界碰撞体是上表面位于 `base_link` Z=0 的刚性地面，普通规划与 Servo 均检查机械臂自身
-碰撞和地面碰撞。厂家网格未替换；只把底座 visual/collision 的模型原点上移 3.5 mm，使网格
-最低点与 Z=0 重合。Servo 作为从属 PlanningSceneMonitor 订阅同一个
-`/monitored_planning_scene`，不维护独立场景来源。
+`ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性、
+PlanningScene 和型号 MTC Action。普通关节请求仍由 MoveGroup 执行；抓放只把选中的结构化
+几何映射到强类型 MTC goal，不含手写 IK 或 stage 推进。`stararm_102_mtc` 使用标准
+`GeneratePose`、`GeneratePlacePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect`
+和 `ModifyPlanningScene`，整条方案规划成功后通过官方 `ExecuteTaskSolution` capability 执行。
+原始点云、掩码和凸包不进入规划。厂家网格未替换；底座 visual/collision 最低点与 Z=0 刚性
+地面重合。Servo 订阅同一 `/monitored_planning_scene`，不维护独立场景来源。
 
 ### 已弃用：构建期单凸包碰撞网格
 
@@ -188,7 +184,7 @@ RViz2、Openbox 和 KasmVNC 位于 motion 容器，通过 `192.168.100.10:6080` 
 | 消息与配置 | Dora、Arrow、Serde、json-config-store | 业务 DTO 和请求关联 |
 | 设备输入 | SDL3、hidapi、fusion-ahrs、one_euro_filter | NOLO 报告适配、Action 绑定 |
 | 几何 | nalgebra、image | 场景语义与型号工具几何 |
-| 识别分割 | Ultralytics YOLOE、PyTorch | HTTP DTO 归一化 |
+| 识别与抓取候选 | Ultralytics YOLOE、GraspGenX、PyTorch | HTTP DTO 与 TCP 结果归一化 |
 | 标定 | `opencv` crate、OpenCV 5 | 会话、样本和持久化 |
 | ROS/规划 | r2r、MoveIt、Servo、ros2_control | ROS JSON 边界与业务步骤 |
 | 串口 | serialport、fashionstar-uart | 舵机 ID 与型号命令映射 |

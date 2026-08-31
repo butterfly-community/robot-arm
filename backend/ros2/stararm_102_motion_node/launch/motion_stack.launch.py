@@ -72,10 +72,23 @@ def generate_launch_description() -> LaunchDescription:
                 move_group,
                 {
                     "allow_trajectory_execution": True,
+                    "capabilities": "move_group/ExecuteTaskSolutionCapability",
                     "trajectory_execution.allowed_start_tolerance": 0.0,
                     "publish_robot_description_semantic": True,
                     "moveit_manage_controllers": False,
                 },
+            ],
+            output="screen",
+        ),
+        Node(
+            package="stararm_102_mtc",
+            executable="pick_place_server",
+            parameters=[
+                moveit.robot_description,
+                moveit.robot_description_semantic,
+                moveit.robot_description_kinematics,
+                moveit.planning_pipelines,
+                moveit.joint_limits,
             ],
             output="screen",
         ),

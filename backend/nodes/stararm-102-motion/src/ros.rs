@@ -22,8 +22,6 @@ use crate::core::Pose;
 const MOVEIT_SUCCESS: i64 = 1;
 const MOVE_GROUP_DEFAULT_PLANNING_TIME_S: f64 = 5.0;
 const MOVE_GROUP_DEFAULT_SCALING_FACTOR: f64 = 1.0;
-// MoveGroupInterface::setPositionTarget() uses this MoveIt default.
-const MOVE_GROUP_DEFAULT_POSITION_TOLERANCE_M: f64 = 1e-4;
 // FCL's distance query used by MoveIt Servo does not support an infinite plane
 // reliably. This solid covers the complete StarArm-102-FL workspace and keeps
 // the same ground surface at Z=0.
@@ -49,6 +47,17 @@ pub enum RosEvent {
         request_id: String,
         result: Result<MotionResult, String>,
     },
+    ManipulationFeedback {
+        request_id: String,
+        state: String,
+        stage: String,
+        solution_count: u32,
+        selected_cost: f64,
+    },
+    ManipulationFinished {
+        request_id: String,
+        result: Result<ManipulationResult, String>,
+    },
 }
 
 #[derive(Debug)]
@@ -56,19 +65,31 @@ pub struct MotionResult {
     pub code: i64,
 }
 
-#[derive(Clone)]
-pub enum MotionTarget {
-    Joints(Vec<f64>),
-    Position([f64; 3]),
+#[derive(Debug)]
+pub struct ManipulationResult {
+    pub message: String,
+    pub solution_count: u32,
+    pub selected_cost: f64,
 }
 
 #[derive(Clone)]
 pub struct MotionJob {
     pub request_id: String,
     pub current: Vec<f64>,
-    pub target: MotionTarget,
+    pub target: Vec<f64>,
     pub actuator: f64,
     pub options: BTreeMap<String, f64>,
+}
+
+#[derive(Clone)]
+pub struct ManipulationJob {
+    pub request_id: String,
+    pub goal: Value,
+}
+
+enum RosWork {
+    Motion(MotionJob),
+    Manipulation(ManipulationJob),
 }
 
 #[derive(Clone)]
@@ -84,7 +105,7 @@ pub struct RosInterface {
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
     apply_planning_scene: Arc<ClientUntyped>,
-    motion_sender: Sender<MotionJob>,
+    work_sender: Sender<RosWork>,
     event_sender: Sender<RosEvent>,
 }
 
@@ -153,7 +174,7 @@ impl RosInterface {
             "moveit_msgs/srv/ApplyPlanningScene",
             QosProfile::default(),
         )?;
-        let (motion_sender, motion_receiver) = channel();
+        let (work_sender, work_receiver) = channel();
         let node = Arc::new(Mutex::new(node));
         let spin_node = Arc::clone(&node);
         thread::spawn(move || {
@@ -183,11 +204,11 @@ impl RosInterface {
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
             apply_planning_scene: Arc::new(apply_planning_scene),
-            motion_sender,
+            work_sender,
             event_sender,
         };
         let worker = interface.clone();
-        thread::spawn(move || worker.motion_loop(motion_receiver));
+        thread::spawn(move || worker.work_loop(work_receiver));
         interface.select_pose_mode();
         Ok(interface)
     }
@@ -270,8 +291,10 @@ impl RosInterface {
     }
 
     pub fn run_motion(&self, job: MotionJob) {
-        if let Err(error) = self.motion_sender.send(job) {
-            let job = error.0;
+        if let Err(error) = self.work_sender.send(RosWork::Motion(job)) {
+            let RosWork::Motion(job) = error.0 else {
+                unreachable!()
+            };
             let request_id = job.request_id.clone();
             let _ = self.event_sender.send(RosEvent::MotionFinished {
                 request_id,
@@ -280,7 +303,19 @@ impl RosInterface {
         }
     }
 
-    fn motion_loop(self, receiver: Receiver<MotionJob>) {
+    pub fn run_manipulation(&self, job: ManipulationJob) {
+        if let Err(error) = self.work_sender.send(RosWork::Manipulation(job)) {
+            let RosWork::Manipulation(job) = error.0 else {
+                unreachable!()
+            };
+            let _ = self.event_sender.send(RosEvent::ManipulationFinished {
+                request_id: job.request_id,
+                result: Err("MTC action worker 已结束".into()),
+            });
+        }
+    }
+
+    fn work_loop(self, receiver: Receiver<RosWork>) {
         let mut actions = match MotionActions::new(self.context.clone()) {
             Ok(actions) => actions,
             Err(error) => {
@@ -289,13 +324,40 @@ impl RosInterface {
             }
         };
         let mut ground_applied = false;
-        for job in receiver {
-            let request_id = job.request_id.clone();
-            let result = block_on(self.motion(job, &mut actions, &mut ground_applied))
-                .map_err(|error| error.to_string());
-            let _ = self
-                .event_sender
-                .send(RosEvent::MotionFinished { request_id, result });
+        for work in receiver {
+            match work {
+                RosWork::Motion(job) => {
+                    let request_id = job.request_id.clone();
+                    let result = block_on(self.motion(job, &mut actions, &mut ground_applied))
+                        .map_err(|error| error.to_string());
+                    let _ = self
+                        .event_sender
+                        .send(RosEvent::MotionFinished { request_id, result });
+                }
+                RosWork::Manipulation(job) => {
+                    let request_id = job.request_id.clone();
+                    let result = block_on(self.manipulation(job, &mut actions))
+                        .map_err(|error| error.to_string());
+                    let _ = self
+                        .event_sender
+                        .send(RosEvent::ManipulationFinished { request_id, result });
+                }
+            }
+        }
+    }
+
+    async fn manipulation(
+        &self,
+        job: ManipulationJob,
+        actions: &mut MotionActions,
+    ) -> EyreResult<ManipulationResult> {
+        self.pause(true).await?;
+        let result = actions.pick_place(job, &self.event_sender);
+        let resume = self.pause(false).await;
+        match (result, resume) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
         }
     }
 
@@ -435,39 +497,18 @@ impl RosInterface {
         matrix: Option<Value>,
         actions: &mut MotionActions,
     ) -> EyreResult<Value> {
-        let goal_constraints = match &job.target {
-            MotionTarget::Joints(target) => json!([{
-                "name": "joint_target",
-                "joint_constraints": JOINTS
-                    .iter()
-                    .zip(target)
-                    .map(|(name, position)| json!({
-                        "joint_name": name,
-                        "position": position,
-                        "weight": 1.0,
-                    }))
-                    .collect::<Vec<_>>(),
-            }]),
-            MotionTarget::Position([x, y, z]) => json!([{
-                "name": "position_target",
-                "position_constraints": [{
-                    "header": {"frame_id": BASE_FRAME},
-                    "link_name": TCP_FRAME,
-                    "target_point_offset": {"x": 0.0, "y": 0.0, "z": 0.0},
-                    "constraint_region": {
-                        "primitives": [{
-                            "type": 2,
-                            "dimensions": [MOVE_GROUP_DEFAULT_POSITION_TOLERANCE_M],
-                        }],
-                        "primitive_poses": [{
-                            "position": {"x": x, "y": y, "z": z},
-                            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
-                        }],
-                    },
+        let goal_constraints = json!([{
+            "name": "joint_target",
+            "joint_constraints": JOINTS
+                .iter()
+                .zip(&job.target)
+                .map(|(name, position)| json!({
+                    "joint_name": name,
+                    "position": position,
                     "weight": 1.0,
-                }],
-            }]),
-        };
+                }))
+                .collect::<Vec<_>>(),
+        }]);
         let mut request = json!({
             "group_name": "arm",
             "pipeline_id": "ompl",
@@ -581,6 +622,7 @@ struct MotionActions {
     node: Node,
     move_group: ActionClientUntyped,
     execute_trajectory: ActionClientUntyped,
+    pick_place: ActionClientUntyped,
 }
 
 impl MotionActions {
@@ -592,10 +634,15 @@ impl MotionActions {
             "/execute_trajectory",
             "moveit_msgs/action/ExecuteTrajectory",
         )?;
+        let pick_place = node.create_action_client_untyped(
+            "/stararm102/pick_place",
+            "stararm_102_mtc/action/PickPlace",
+        )?;
         Ok(Self {
             node,
             move_group,
             execute_trajectory,
+            pick_place,
         })
     }
 
@@ -605,6 +652,49 @@ impl MotionActions {
 
     fn execute(&mut self, goal: Value) -> EyreResult<Value> {
         action(&mut self.node, &self.execute_trajectory, goal)
+    }
+
+    fn pick_place(
+        &mut self,
+        job: ManipulationJob,
+        sender: &Sender<RosEvent>,
+    ) -> EyreResult<ManipulationResult> {
+        spin_until(&mut self.node, Node::is_available(&self.pick_place)?)?;
+        let (_handle, result, mut feedback) =
+            spin_until(&mut self.node, self.pick_place.send_goal_request(job.goal)?)?;
+        futures::pin_mut!(result);
+        loop {
+            self.node.spin_once(Duration::from_millis(10));
+            while let Some(Some(message)) = feedback.next().now_or_never() {
+                if let Ok(message) = message {
+                    let _ = sender.send(RosEvent::ManipulationFeedback {
+                        request_id: job.request_id.clone(),
+                        state: message["state"].as_str().unwrap_or_default().into(),
+                        stage: message["stage"].as_str().unwrap_or_default().into(),
+                        solution_count: message["solution_count"].as_u64().unwrap_or_default()
+                            as u32,
+                        selected_cost: message["selected_cost"].as_f64().unwrap_or_default(),
+                    });
+                }
+            }
+            let Some(result) = result.as_mut().now_or_never() else {
+                continue;
+            };
+            let (status, value) = result?;
+            let value = value.map_err(|error| eyre!(error))?;
+            if status != r2r::GoalStatus::Succeeded {
+                bail!(
+                    "MTC action ended with {status}, MoveIt/MTC code {}: {}",
+                    value["error_code"].as_i64().unwrap_or_default(),
+                    value["message"].as_str().unwrap_or_default()
+                );
+            }
+            return Ok(ManipulationResult {
+                message: value["message"].as_str().unwrap_or_default().into(),
+                solution_count: value["solution_count"].as_u64().unwrap_or_default() as u32,
+                selected_cost: value["selected_cost"].as_f64().unwrap_or_default(),
+            });
+        }
     }
 }
 

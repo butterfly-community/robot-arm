@@ -1,0 +1,22 @@
+string request_id
+string frame_id
+string object_id
+geometry_msgs/Pose object_pose
+geometry_msgs/Vector3 object_size
+geometry_msgs/Pose[] grasp_poses
+string placement_region_id
+geometry_msgs/Pose placement_pose
+geometry_msgs/Vector3 placement_size
+string[] obstacle_ids
+geometry_msgs/Pose[] obstacle_poses
+geometry_msgs/Vector3[] obstacle_sizes
+---
+int32 error_code
+string message
+uint32 solution_count
+float64 selected_cost
+---
+string state
+string stage
+uint32 solution_count
+float64 selected_cost

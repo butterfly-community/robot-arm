@@ -14,8 +14,8 @@
 
 ROS 深度相机 / 确定性 RGB-D 测试源
   → perception-node
-  → perception-compute-service（仅 RGB 实例分割）
-  → perception-node（深度几何、标定、WorldScene、ROS 感知话题）
+  → perception-compute-service（RGB 实例分割、实例点云抓取姿态）
+  → perception-node（深度几何、标定、抓取候选、WorldScene、ROS 感知话题）
   → stararm-102-motion-node（抓放目标与 MoveIt 规划）
   → 同一 ArmCommand / execution 链路
 ```
@@ -35,17 +35,18 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 | `controller-input-node` | NOLO HID、SDL3、模拟输入，能力发现，输入/反馈绑定，IMU 融合 | 空间积分、相机、运动学、机械臂参数 |
 | `spatial-transform-node` | 绝对位姿换基、Action 积分、设备无关 TCP 增量 | 设备驱动、IK、串口 |
 | `perception-node` | ROS 相机接入、RGB-D 对齐消费、深度反投影、标定、场景结构化、ROS 点云/图像/Marker/TF | 模型推理、机械臂轨迹 |
-| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割；CPU/CUDA 使用同一 HTTP 契约 | 深度、标定、MoveIt、Dora |
-| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、自碰撞检查、八步抓放编排 | 相机采集、设备输入、串口 |
+| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割、GraspGenX 点云抓取候选；CPU/CUDA 使用同一 HTTP 契约 | 深度、标定、MoveIt、Dora |
+| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、MTC 抓放桥接 | 相机采集、设备输入、串口 |
 | `stararm-102-execution-node` | 软件反馈与 FashionStar UART 的同一执行契约、模型资源、真机遥测 | IK、目标位姿解释 |
 | `service-status-node` | 根据配置聚合节点主动状态与依赖 | 业务探活特例、恢复策略 |
 | `web-gateway-node` | HTTP/WebSocket 与 Dora 消息转发 | 设备或机械臂语义 |
 
-`manipulation-core`、`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
+`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
 远程部署，但外部只和 `perception-node` 交互。
 
 StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂自身碰撞检查；感知点云、
-结构化物体和障碍物不写入 PlanningScene，因此环境场景不会影响规划耗时。
+原始点云和分割掩码不写入 PlanningScene；抓放只把选中物体和结构化障碍的紧凑盒几何交给
+MTC 的任务场景。
 
 ## 感知与抓放
 
@@ -63,17 +64,20 @@ StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂�
 仓库提供两个走正式链路的确定性来源：
 
 - `generated:pick-place-scene`：固定 RGB 资产经真实 YOLOE 分割，再组合确定性深度，生成
-  红色立方体、灰色置物筐和筐内放置区；用于完整抓放验收。
+  红色立方体、灰色置物筐和筐内放置区；实例点云继续送入真实 GraspGenX 生成抓取候选，
+  用于完整抓放验收。
 - `generated:depth-grid`：497 点测试云，用于 RViz 点云输入验收，不进入 MoveIt
   规划场景。
 
-抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`。通用库线性生成“打开、接近、到达、
-闭合、接近放置、到达放置、打开、完成”八步；型号 motion 节点提交 TCP 位置目标，由 MoveIt
-在一次规划中选择 IK 解和轨迹，再发出唯一 `ArmCommand`。`WorldScene` 只提供目标和放置区
-几何，不进入 MoveIt；规划只检查机械臂自身碰撞和 Z=0 刚性地面，不维护第二套抓放路径。
-完成步骤继续走同一普通运动队列回到 StarArm-102 测试位并闭合夹爪，成功后才报告任务完成。
-抓放状态直接携带 motion 已计算的两个目标坐标；执行页不镜像整份 `WorldScene`，只在任务
-执行期间用红点显示物体顶面抓取目标、绿点显示筐顶上方半个物体高度的放置目标。
+抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`。Rust motion 只做场景映射、唯一 FIFO 和
+Action 状态转发；同一容器内的 StarArm-102 MTC 组件用标准 stage 一次构造并选择完整任务解，
+负责候选抓取/放置位姿、IK、接近、夹爪、attach/detach、搬运、回撤和返回工作位。执行仍经
+MoveIt、ros2_control 和唯一 `ArmCommand`。任务开始先原地打开夹爪，放置后保持打开完成回撤，
+最后回到工作位再闭合。网页显示 MTC 状态、stage、候选数和选中代价；RViz 的 Motion Planning
+Tasks 面板显示候选、失败 stage 和选中轨迹。
+
+GraspGenX 的 StarArm-102 夹爪扫描体和 URDF 由 `tools/graspgenx` 从固定厂商提交应用项目模型
+patch 后导出。生产场景不硬编码抓取姿态；相同点云以可配置推理种子产生可复现候选。
 
 ## 标定
 
@@ -96,7 +100,11 @@ StarArm-102 的业务末端只有 `tcp_link`。它在 URDF 中通过零变换固
 `stararm_102_model::TCP_FRAME`。73.13 mm 只用于夹爪转轴圆弧演示，不是工具偏移。完整维护
 规则见 [StarArm-102 末端坐标](TCP.md)。
 
-默认位为 J3=-5°，测试位为 J3=-20°，其余 J1–J6 为 0°；两者都携带夹爪闭合目标。夹爪
+厂家源码固定在提交 `5979b346eb3a417840b29b76740754e4005d071a`。J3 轴向、关节范围、夹爪
+范围、TCP 和 ROS 2 打包修正只存在于 `backend/patches/star-arm-102-fl-moveit-model.patch`；
+构建和 GraspGenX 导出都先对干净提交应用该 patch，不维护运行时模型覆盖。
+
+默认位为 J1–J6 全 0°；工作位为 J3=60°、J4=60°，其余关节为 0°。两者都携带夹爪闭合目标。夹爪
 `primary_tool=0` 表示张开 90°，`1` 表示闭合 0°。J1–J6 与工具执行器在模型中分栏，但经
 同一命令、同一执行节点完成。
 

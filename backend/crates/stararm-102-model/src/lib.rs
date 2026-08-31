@@ -18,8 +18,15 @@ pub const TCP_FRAME: &str = "tcp_link";
 pub const JOINTS: [&str; 6] = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"];
 pub const GRIPPER_KEY: &str = "gripper";
 pub const GRIPPER_JOINT: &str = "joint7_left";
-pub const START_JOINTS_RAD: [f64; 6] = [0.0, 0.0, -5.0_f64.to_radians(), 0.0, 0.0, 0.0];
-pub const TEST_JOINTS_RAD: [f64; 6] = [0.0, 0.0, -20.0_f64.to_radians(), 0.0, 0.0, 0.0];
+pub const DEFAULT_JOINTS_RAD: [f64; 6] = [0.0; 6];
+pub const WORK_JOINTS_RAD: [f64; 6] = [
+    0.0,
+    0.0,
+    60.0_f64.to_radians(),
+    60.0_f64.to_radians(),
+    0.0,
+    0.0,
+];
 pub const CLOSED_GRIPPER_RAD: f64 = 0.0;
 pub const OPEN_GRIPPER_RAD: f64 = std::f64::consts::FRAC_PI_2;
 /// Offset from the gripper jaw pivot to `tcp_link` at the `link6` origin.
@@ -118,8 +125,8 @@ impl ModelCatalog {
                 visualization_joint_key: Some(GRIPPER_JOINT.into()),
             }],
             named_targets: vec![
-                named_target("start", "默认位", START_JOINTS_RAD),
-                named_target("test", "测试位", TEST_JOINTS_RAD),
+                named_target("default", "默认位", DEFAULT_JOINTS_RAD),
+                named_target("work", "工作位", WORK_JOINTS_RAD),
             ],
             motion_options: [
                 ("velocity_scaling", "速度倍率"),
@@ -240,12 +247,19 @@ mod tests {
 
     #[test]
     fn named_targets_share_the_declared_joint_order_and_closed_gripper() {
-        let target = named_target("start", "默认位", START_JOINTS_RAD);
+        let target = named_target("default", "默认位", DEFAULT_JOINTS_RAD);
         assert_eq!(target.joint_positions_rad.len(), JOINTS.len());
-        assert_eq!(target.joint_positions_rad["joint3"], -5.0_f64.to_radians());
+        assert_eq!(target.joint_positions_rad["joint3"], 0.0);
         assert_eq!(
             target.actuator_positions_rad[GRIPPER_KEY],
             CLOSED_GRIPPER_RAD
         );
+    }
+
+    #[test]
+    fn work_target_uses_the_declared_software_coordinates() {
+        let target = named_target("work", "工作位", WORK_JOINTS_RAD);
+        assert_eq!(target.joint_positions_rad["joint3"], 60.0_f64.to_radians());
+        assert_eq!(target.joint_positions_rad["joint4"], 60.0_f64.to_radians());
     }
 }

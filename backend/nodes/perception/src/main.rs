@@ -18,8 +18,11 @@ use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::Data
 use eyre::{Context, Result, bail, eyre};
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use json_config_store::{load_or_default, save};
-use nalgebra::{Matrix3, Quaternion, UnitQuaternion};
-use perception_core::{aligned_obstacle_point_cloud, world_scene_from_aligned_depth};
+use nalgebra::{Isometry3, Matrix3, Quaternion, Rotation3, Translation3, UnitQuaternion};
+use perception_core::{
+    InstancePointCloud, aligned_obstacle_point_cloud,
+    world_scene_and_instance_clouds_from_aligned_depth,
+};
 use robot_arm_messages::{
     AlignedDepthFrame, ArmState, CalibrationAction, CalibrationObservation, CalibrationRequest,
     CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DetectedInstance2D,
@@ -46,7 +49,10 @@ struct PerceptionConfig {
     source_id: Option<String>,
     compute_service_url: String,
     model: String,
+    gripper_name: String,
     classes: Vec<String>,
+    #[serde(default = "default_placement_labels")]
+    placement_labels: Vec<String>,
     depth_scale_m: f64,
     calibration: Option<CalibrationResult>,
     #[serde(default = "default_calibration_session")]
@@ -63,12 +69,18 @@ impl Default for PerceptionConfig {
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
             model: "yoloe-26s-seg.pt".into(),
+            gripper_name: "stararm-102-fl".into(),
             classes: vec!["red cube".into(), "gray storage bin".into()],
+            placement_labels: default_placement_labels(),
             depth_scale_m: 0.001,
             calibration: None,
             calibration_session: default_calibration_session(),
         }
     }
+}
+
+fn default_placement_labels() -> Vec<String> {
+    vec!["gray storage bin".into()]
 }
 
 #[derive(Default)]
@@ -123,6 +135,23 @@ struct SegmentInstance {
     mask_width: u32,
     mask_height: u32,
     mask_png_base64: String,
+}
+
+#[derive(Serialize)]
+struct GraspRequest<'a> {
+    points_xyz_m: &'a [[f32; 3]],
+    gripper_name: &'a str,
+}
+
+#[derive(Deserialize)]
+struct GraspResponse {
+    candidates: Vec<GraspCandidateResponse>,
+}
+
+#[derive(Deserialize)]
+struct GraspCandidateResponse {
+    transform: [[f64; 4]; 4],
+    confidence: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,12 +304,14 @@ impl PerceptionNode {
             &calibration,
             &instances,
         )?)?;
-        let scene = world_scene_from_aligned_depth(
+        let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
             self.sequence,
             &aligned_depth,
             &calibration,
             &instances,
+            &self.config.placement_labels,
         )?;
+        self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
         self.last_frame_time_ns = Some(aligned_depth.source_time_ns);
         self.publish_scene(node, scene)
     }
@@ -319,6 +350,49 @@ impl PerceptionNode {
             .collect()
     }
 
+    fn attach_grasp_candidates(
+        &self,
+        scene: &mut WorldScene,
+        instance_clouds: &[InstancePointCloud],
+    ) -> Result<()> {
+        let placement_sources = scene
+            .placement_regions
+            .iter()
+            .filter_map(|region| region.source_object_id.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        for object in &mut scene.objects {
+            if placement_sources.contains(object.object_id.as_str()) {
+                continue;
+            }
+            let cloud = instance_clouds
+                .iter()
+                .find(|cloud| cloud.instance_id == object.object_id)
+                .ok_or_else(|| eyre!("实例 {} 缺少点云", object.object_id))?;
+            let mut candidates = self
+                .http
+                .post(format!(
+                    "{}/v1/grasps",
+                    self.config.compute_service_url.trim_end_matches('/')
+                ))
+                .json(&GraspRequest {
+                    points_xyz_m: &cloud.points_xyz_m,
+                    gripper_name: &self.config.gripper_name,
+                })
+                .send()
+                .context("调用 GraspGenX")?
+                .error_for_status()
+                .context("GraspGenX 返回错误")?
+                .json::<GraspResponse>()?
+                .candidates;
+            candidates.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+            object.grasp_candidates = candidates
+                .iter()
+                .map(|candidate| candidate_tcp_pose_in_base(candidate.transform))
+                .collect::<Result<Vec<_>>>()?;
+        }
+        Ok(())
+    }
+
     fn publish_generated_scene(&mut self, node: &mut DoraNode) -> Result<()> {
         self.sequence += 1;
         let now = now_ns();
@@ -346,8 +420,14 @@ impl PerceptionNode {
             &calibration,
             &instances,
         )?)?;
-        let scene =
-            world_scene_from_aligned_depth(self.sequence, &depth, &calibration, &instances)?;
+        let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
+            self.sequence,
+            &depth,
+            &calibration,
+            &instances,
+            &self.config.placement_labels,
+        )?;
+        self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
         self.last_frame_time_ns = Some(now);
         self.generated_published = true;
         self.publish_scene(node, scene)
@@ -373,6 +453,9 @@ impl PerceptionNode {
                 }
                 if let Some(classes) = request.classes {
                     next.classes = classes;
+                }
+                if let Some(labels) = request.placement_labels {
+                    next.placement_labels = labels;
                 }
                 Ok(())
             }
@@ -614,6 +697,7 @@ impl PerceptionNode {
             compute_service_url: self.config.compute_service_url.clone(),
             model: self.config.model.clone(),
             classes: self.config.classes.clone(),
+            placement_labels: self.config.placement_labels.clone(),
             last_frame_time_ns: self.last_frame_time_ns,
             last_scene_sequence: self.last_scene.as_ref().map(|scene| scene.sequence),
             calibrated: self.config.calibration.is_some()
@@ -649,6 +733,28 @@ impl PerceptionNode {
         }
         Ok(())
     }
+}
+
+fn candidate_tcp_pose_in_base(base_tcp: [[f64; 4]; 4]) -> Result<Pose3> {
+    let base_tcp = Isometry3::from_parts(
+        Translation3::new(base_tcp[0][3], base_tcp[1][3], base_tcp[2][3]),
+        UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(Matrix3::new(
+            base_tcp[0][0],
+            base_tcp[0][1],
+            base_tcp[0][2],
+            base_tcp[1][0],
+            base_tcp[1][1],
+            base_tcp[1][2],
+            base_tcp[2][0],
+            base_tcp[2][1],
+            base_tcp[2][2],
+        ))),
+    );
+    let quaternion = base_tcp.rotation.quaternion();
+    Ok(Pose3 {
+        position_m: base_tcp.translation.vector.into(),
+        orientation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
+    })
 }
 
 fn pose_to_matrix(pose: &Pose3) -> Result<MatrixPose> {
@@ -909,15 +1015,26 @@ mod tests {
         let (_, mut depth, instances) = generated_rgbd(1, 2).unwrap();
         fill_generated_depth_from_instances(&mut depth, &instances).unwrap();
         let calibration = generated_pick_place_calibration(1, 2);
-        let scene = world_scene_from_aligned_depth(1, &depth, &calibration, &instances).unwrap();
+        let (scene, _) = world_scene_and_instance_clouds_from_aligned_depth(
+            1,
+            &depth,
+            &calibration,
+            &instances,
+            &["gray storage bin".into()],
+        )
+        .unwrap();
         assert_eq!(scene.objects.len(), 2);
         assert_eq!(scene.objects[0].label, "red cube");
-        assert!(scene.objects[0].graspable);
-        assert!((scene.objects[0].size_m[2] - 0.04).abs() < 0.001);
+        assert!(scene.objects[0].grasp_candidates.is_empty());
+        assert!((scene.objects[0].size_m[2] - 0.08).abs() < 0.001);
         assert_eq!(scene.placement_regions.len(), 1);
         assert_eq!(
-            scene.placement_regions[0].source_object_id.as_deref(),
-            Some("gray-storage-bin-0")
+            scene
+                .placement_regions
+                .iter()
+                .map(|region| region.source_object_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("gray-storage-bin-0")]
         );
         assert!(
             aligned_obstacle_point_cloud(1, &depth, &calibration, &instances)
@@ -925,6 +1042,19 @@ mod tests {
                 .points_xyz_m
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn graspgenx_tcp_pose_is_already_in_base_frame() {
+        let pose = candidate_tcp_pose_in_base([
+            [1.0, 0.0, 0.0, 0.1],
+            [0.0, 1.0, 0.0, 0.2],
+            [0.0, 0.0, 1.0, 0.3],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        .unwrap();
+        assert_eq!(pose.position_m, [0.1, 0.2, 0.3]);
+        assert_eq!(pose.orientation_xyzw, [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -939,6 +1069,8 @@ mod tests {
             source_kind: Some(PerceptionSourceKind::GeneratedTestScene),
             ..Default::default()
         };
+        assert_eq!(config.classes, ["red cube", "gray storage bin"]);
+        assert_eq!(config.placement_labels, ["gray storage bin"]);
         save(&path, &config).unwrap();
         assert_eq!(load_config(&path).unwrap().source_kind, config.source_kind);
         std::fs::remove_file(path).unwrap();

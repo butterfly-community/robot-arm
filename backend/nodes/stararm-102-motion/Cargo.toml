@@ -15,7 +15,6 @@ dora-node-api.workspace = true
 eyre.workspace = true
 futures.workspace = true
 json-config-store.workspace = true
-manipulation-core.workspace = true
 nalgebra.workspace = true
 r2r = { version = "0.9.5", default-features = false, optional = true }
 robot-arm-messages.workspace = true

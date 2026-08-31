@@ -161,6 +161,7 @@ export default function Page() {
               ? "ros:depth-camera"
               : null,
         classes: null,
+        placement_labels: null,
       });
     } catch (reason) {
       setError(String(reason));
@@ -207,7 +208,9 @@ export default function Page() {
 
   async function pickPlace() {
     const selectedObject =
-      objectId || scene?.objects.find((object) => object.graspable)?.object_id;
+      objectId ||
+      scene?.objects.find((object) => object.grasp_candidates.length > 0)
+        ?.object_id;
     const selectedRegion =
       placementRegionId || scene?.placement_regions[0]?.region_id;
     if (!selectedObject || !selectedRegion) return;
@@ -388,7 +391,7 @@ export default function Page() {
           {scene?.objects.map((object) => (
             <KeyValue
               key={object.object_id}
-              label={`${object.label}${object.graspable ? " · 可抓取" : ""}`}
+              label={`${object.label}${object.grasp_candidates.length > 0 ? " · 可抓取" : ""}`}
               value={`${object.pose.position_m.map((value) => value.toFixed(3)).join(" / ")} m`}
             />
           ))}
@@ -417,17 +420,18 @@ export default function Page() {
               <select
                 value={
                   objectId ||
-                  scene?.objects.find((object) => object.graspable)
-                    ?.object_id ||
+                  scene?.objects.find(
+                    (object) => object.grasp_candidates.length > 0,
+                  )?.object_id ||
                   ""
                 }
                 onChange={(event) => setObjectId(event.currentTarget.value)}
               >
-                {!scene?.objects.some((object) => object.graspable) && (
-                  <option value="">没有可抓取目标</option>
-                )}
+                {!scene?.objects.some(
+                  (object) => object.grasp_candidates.length > 0,
+                ) && <option value="">没有可抓取目标</option>}
                 {scene?.objects
-                  .filter((object) => object.graspable)
+                  .filter((object) => object.grasp_candidates.length > 0)
                   .map((object) => (
                     <option key={object.object_id} value={object.object_id}>
                       {object.label} · {object.object_id}
@@ -463,7 +467,9 @@ export default function Page() {
               disabled={
                 pickPlacePending ||
                 manipulation?.state === "executing" ||
-                !scene?.objects.some((object) => object.graspable) ||
+                !scene?.objects.some(
+                  (object) => object.grasp_candidates.length > 0,
+                ) ||
                 !scene?.placement_regions.length
               }
               onClick={pickPlace}
@@ -473,7 +479,15 @@ export default function Page() {
           </div>
           <div className="pose-comparison">
             <div>
-              <KeyValue label="当前步骤" value={manipulation?.step ?? "—"} />
+              <KeyValue label="当前阶段" value={manipulation?.stage ?? "—"} />
+              <KeyValue
+                label="候选方案"
+                value={manipulation?.solution_count?.toString() ?? "—"}
+              />
+              <KeyValue
+                label="选中代价"
+                value={manipulation?.selected_cost?.toFixed(3) ?? "—"}
+              />
             </div>
             <div>
               <KeyValue

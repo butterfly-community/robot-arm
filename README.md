@@ -23,10 +23,12 @@ Compose 停止 dataflow 时会向 Dora attach 会话发送 `SIGINT`，由 Dora �
 docker compose up -d --build
 ```
 
-motion 镜像默认从 `~/Develop/temp/Star-Arm-102` 读取机械臂模型，并从
+motion 镜像默认从固定在提交 `5979b346eb3a417840b29b76740754e4005d071a` 的
+`~/Develop/temp/Star-Arm-102-clean` 读取机械臂模型，并从
 `~/Develop/temp/moveit2-2.12.4/moveit_ros/moveit_servo` 读取 MoveIt Servo 2.12.4 源码。
 路径不同时分别用 `STAR_ARM_102_SOURCE` 和 `MOVEIT_SERVO_SOURCE` 覆盖；后者应直接指向
-`moveit_servo` 软件包目录。
+`moveit_servo` 软件包目录。构建过程始终把 `backend/patches/` 中的项目修正应用到干净厂商
+源码；不要直接修改 `STAR_ARM_102_SOURCE` 指向的仓库。
 
 页面入口为 `http://192.168.100.10:8765/`，业务路径是 `/tracking/`、`/spatial/`、
 `/motion/` 和 `/arm-execution/`。只有入口服务暴露主机端口。

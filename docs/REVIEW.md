@@ -18,7 +18,7 @@
 | 输入模拟 | `backend/nodes/controller-input/src/simulation.rs` | 生成设备无关 Action；仍走绑定、空间、motion、execution |
 | 离线测试工具 | `tools/perception` | 资产生成、计算服务探针和 ignored artifacts |
 | 标定运行时 | `perception-calibration` Rust binary | OpenCV 5 ChArUco、PnP、robot-world/hand-eye 和调试图 |
-| 模型计算 | `perception-compute-service` | YOLOE 实例分割；不读取深度、不连接 Dora/ROS/MoveIt |
+| 模型计算 | `perception-compute-service` | YOLOE 实例分割与 GraspGenX 点云抓取候选；不读取深度、不连接 Dora/ROS/MoveIt |
 
 普通单元测试使用 Rust `#[cfg(test)]`、Python `tests/`、Vitest 和 Playwright 的标准隔离方式，
 不会进入发布二进制。测试源虽然可在运行时由用户选择，但其生成逻辑与生产核心模块分开，且
@@ -46,12 +46,11 @@
 
 - motion 只保留 FIFO 和一个顺序 worker；前一个运动未结束时后一个等待，没有通用状态机、
   并行规划器、队列门限或永久错误状态。
-- 抓放由 `manipulation-core` 生成以打开夹爪开始的八步线性计划，型号 motion 负责 MoveIt 实现；没有额外编排
-  服务或第二套夹爪命令。
+- 抓放由型号 MTC package 使用官方 stage 构造完整任务，Rust motion 只保留统一 FIFO、契约映射和
+  Action 桥接，没有额外编排服务或第二套夹爪命令。
 - 网关对长时间抓放返回 `202 Accepted`，最终结果继续从既有 manipulation 状态流返回；没有
   HTTP 超时状态机或重复执行路径。
-- 结构化场景和点云用于目标计算与可视化，不进入 MoveIt 环境碰撞场景；唯一世界碰撞体是
-  Z=0 刚性地面。
+- 原始点云和掩码不进入 MoveIt；MTC 只接收选中物体、结构化盒障碍和 Z=0 刚性地面。
 - execution 是模型资源和硬件差异的唯一所有者；网页和 motion 不维护另一份参数。
 - 没有为低收益边界条件增加包装层、恢复服务、降级分支或用户未要求的保护门限。
 
@@ -63,8 +62,8 @@
 | 输入设备 | SDL3、hidapi、fusion-ahrs、one_euro_filter | NOLO 报告适配和 Action 绑定 |
 | 几何数学 | nalgebra、image | 场景语义、型号工具几何 |
 | 标定 | `opencv` crate、OpenCV 5 | 会话、样本和持久化 |
-| 识别分割 | Ultralytics YOLOE、PyTorch、FastAPI/Pydantic | HTTP DTO 归一化 |
-| ROS 与规划 | r2r、MoveIt、Servo、ros2_control | ROS 消息边界和抓放步骤执行 |
+| 识别与抓取候选 | Ultralytics YOLOE、GraspGenX、PyTorch、FastAPI/Pydantic | HTTP DTO 与 TCP 结果归一化 |
+| ROS 与规划 | r2r、MoveIt、MTC、Servo、ros2_control | ROS 消息边界和型号任务参数组装 |
 | 串口 | serialport、fashionstar-uart | 舵机 ID 与型号映射 |
 | Web/3D | Next.js 16、React、Radix、Three.js、Axum | 页面业务组合 |
 | 远程 GUI | RViz2、KasmVNC、Openbox | 项目 RViz 配置和最短启动脚本 |
@@ -78,22 +77,31 @@ ESLint 10 和 TypeScript 7 没有升级，因为当前 Next 插件和 typescript
 
 - Rust workspace：格式、Clippy（warnings 视为错误）和全部单元/文档测试通过。
 - 标定 helper：OpenCV 5 合成 hand-eye 求解与生成 ChArUco 检测自测通过。
-- Python 计算服务：Ruff 和 Pytest 通过；运行镜像使用 OpenCV Python 5.0.0.93。
+- Python 计算服务：Ruff 和 Pytest 通过；Ultralytics/GraspGenX 运行镜像统一使用
+  OpenCV Python 5.0.0.93，但标定仍只由 Rust `opencv` crate 承担。
 - 前端：Prettier、ESLint、TypeScript、Vitest、四个 Next.js 16.3.3 生产构建通过。
 - 浏览器：Playwright 21 项通过。
 - Compose：配置、全量镜像构建、冷停止/启动和服务健康检查通过。
 - 软件全链路：输入、空间、普通运动、抓放、模型资源、配置和最终状态集成测试通过。
-- 环境碰撞：点云、识别物、障碍物和已抓物体均不写入 MoveIt；规划只保留自身碰撞和用户
-  要求的 Z=0 刚性地面，抓放仍使用结构化场景计算目标。
+- 环境碰撞：点云和掩码不写入 MoveIt；MTC 只接收选中物体、结构化盒障碍和 Z=0 刚性地面，
+  并用标准 attach/detach 表达已抓物体。
 - 感知：497 点测试云继续通过标准 PointCloud2 发布，可在 RViz 独立显示，不生成 OctoMap。
-- 运行态场景：冷启动后的完整八步抓放与返回测试位通过；流程结束后 `collision_objects` 中只有
-  `ground`，`attached_collision_objects` 和 OctoMap 为空，Servo 进程保持存活并检查同一地面。
+- 运行态场景：抓放由一份完整 MTC solution 执行并返回工作位；任务临时对象完成后清理，
+  OctoMap 为空，Servo 进程保持存活并检查同一地面。
 - 执行可视化：抓放状态携带选中的物体、放置区 ID 和 motion 已计算的两个目标坐标；执行页
   只画点，不镜像整份 `WorldScene`，也不重复计算场景几何。
 - 测试场景坐标：机械臂、抓取点和放置点均直接使用 `base_link`；确定性立方体与置物筐的
-  底面同为 Z=0；立方体高 0.04 m，测试筐高 0.08 m，底座模型最低点和渲染地面也统一为
-  Z=0。抓取目标是立方体顶面 Z=0.04 m，放置目标是筐顶加半个立方体高度 Z=0.10 m。
-- 规划性能：结构化感知场景不进入碰撞世界；完整抓放无需对识别掩码或点云做碰撞查询。
+  底面同为 Z=0，高度均为 0.08 m，底座模型最低点和渲染地面也统一为 Z=0。抓取对象中心和
+  放置区中心均为 Z=0.04 m；MTC 的 object-relative 放置语义保持已抓物体变换。
+- 规划性能：仅紧凑结构化盒进入任务场景；完整抓放无需对识别掩码或点云做碰撞查询。
 - TCP：运行时 `link6 → tcp_link` 为零平移、单位旋转，所有业务调用使用 `tcp_link`。
+- 重复性：最终 MTC 确定性场景连续 20/20 成功，每轮 7 个完整方案，最终工作位最大误差
+  0.006°；原始数据和迁移前 19/20 基线见 [抓放重复性验收](PICK_PLACE_REPEATABILITY.md)。
+- RViz/KasmVNC：浏览器入口实测可用，StarArm 模型、刚性地面、MoveIt 规划界面和 MTC 的
+  Planning scene/trajectory 面板均正常显示。
+- 真机末次复测：主机和容器均能看到 `/dev/ttyUSB0`（CH340），串口没有被其他进程占用；正式
+  执行 API 连续两次打开串口后，舵机 ID 0 均在 Ping 阶段返回 `Operation timed out`，因此没有
+  获得真实关节反馈，也没有下发运动。随后通过同一 API 取消串口选择，系统已恢复软件反馈。
+  该结果只记录外部舵机总线当时未响应的事实，没有新增门限、备用执行路径或伪造真机通过。
 
 最终实现没有新增用户未要求的运动门限、确认流程、队列限制、拒绝条件或隐藏保护数值。
