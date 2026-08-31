@@ -14,7 +14,6 @@ use futures::{Future, FutureExt, StreamExt, executor::block_on};
 use r2r::{
     ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
 };
-use robot_arm_messages::{Pose3, WorldScene};
 use serde_json::{Value, json};
 use stararm_102_model::{BASE_FRAME, GRIPPER_JOINT, JOINTS, TCP_FRAME};
 
@@ -65,7 +64,6 @@ pub struct RosInterface {
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
-    collision_ids: Arc<Mutex<BTreeSet<String>>>,
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
@@ -73,7 +71,6 @@ pub struct RosInterface {
     inverse_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
-    apply_planning_scene: Arc<ClientUntyped>,
     motion_sender: Sender<MotionJob>,
     event_sender: Sender<RosEvent>,
 }
@@ -143,11 +140,6 @@ impl RosInterface {
             "moveit_msgs/srv/GetPlanningScene",
             QosProfile::default(),
         )?;
-        let apply_planning_scene = node.create_client_untyped(
-            "/apply_planning_scene",
-            "moveit_msgs/srv/ApplyPlanningScene",
-            QosProfile::default(),
-        )?;
         let (motion_sender, motion_receiver) = channel();
         let node = Arc::new(Mutex::new(node));
         let spin_node = Arc::clone(&node);
@@ -171,7 +163,6 @@ impl RosInterface {
             pose_publisher,
             hand_publisher,
             state_publisher,
-            collision_ids: Arc::new(Mutex::new(BTreeSet::new())),
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
@@ -179,7 +170,6 @@ impl RosInterface {
             inverse_kinematics: Arc::new(inverse_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
-            apply_planning_scene: Arc::new(apply_planning_scene),
             motion_sender,
             event_sender,
         };
@@ -197,138 +187,6 @@ impl RosInterface {
             "position": positions,
         }))?;
         Ok(())
-    }
-
-    pub fn publish_world_scene(&self, scene: &WorldScene) -> EyreResult<()> {
-        let placement_sources = scene
-            .placement_regions
-            .iter()
-            .filter_map(|region| region.source_object_id.as_deref())
-            .collect::<BTreeSet<_>>();
-        let next_ids = collision_object_ids(scene);
-        let mut previous_ids = self
-            .collision_ids
-            .lock()
-            .map_err(|_| eyre!("collision id lock poisoned"))?;
-        let mut collision_objects = previous_ids
-            .difference(&next_ids)
-            .map(|id| {
-                json!({
-                "header": {"frame_id": scene.frame_id},
-                "id": id,
-                "operation": 1,
-                })
-            })
-            .collect::<Vec<_>>();
-        collision_objects.extend(
-            scene
-                .objects
-                .iter()
-                .filter(|object| !placement_sources.contains(object.object_id.as_str()))
-                .map(|object| {
-                    collision_box(
-                        &scene.frame_id,
-                        &object.object_id,
-                        &object.pose,
-                        object.size_m,
-                    )
-                }),
-        );
-        collision_objects.extend(scene.obstacles.iter().map(|obstacle| {
-            collision_box(
-                &scene.frame_id,
-                &obstacle.obstacle_id,
-                &obstacle.pose,
-                obstacle.size_m,
-            )
-        }));
-        if !collision_objects.is_empty() {
-            self.apply_scene(json!({"world": {"collision_objects": collision_objects}}))?;
-        }
-        *previous_ids = next_ids;
-        Ok(())
-    }
-
-    pub fn clear_world_scene(&self) -> EyreResult<()> {
-        let mut ids = self
-            .collision_ids
-            .lock()
-            .map_err(|_| eyre!("collision id lock poisoned"))?;
-        if !ids.is_empty() {
-            let collision_objects = ids
-                .iter()
-                .map(|id| {
-                    json!({
-                        "header": {"frame_id": BASE_FRAME},
-                        "id": id,
-                        "operation": 1,
-                    })
-                })
-                .collect::<Vec<_>>();
-            self.apply_scene(json!({"world": {"collision_objects": collision_objects}}))?;
-        }
-        ids.clear();
-        Ok(())
-    }
-
-    pub fn remove_world_object(&self, object_id: &str) -> EyreResult<()> {
-        self.apply_scene(json!({
-            "world": {"collision_objects": [{
-                "header": {"frame_id": BASE_FRAME},
-                "id": object_id,
-                "operation": 1,
-            }]},
-        }))?;
-        self.collision_ids
-            .lock()
-            .map_err(|_| eyre!("collision id lock poisoned"))?
-            .remove(object_id);
-        Ok(())
-    }
-
-    pub fn attach_object(&self, object_id: &str, size_m: [f64; 3]) -> EyreResult<()> {
-        self.apply_scene(json!({
-            "robot_state": {
-                "is_diff": true,
-                "attached_collision_objects": [{
-                    "link_name": TCP_FRAME,
-                    "object": {
-                        "header": {"frame_id": TCP_FRAME},
-                        "id": object_id,
-                        "primitives": [{"type": 1, "dimensions": size_m}],
-                        "primitive_poses": [{
-                            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
-                        }],
-                        "operation": 0,
-                    },
-                    "touch_links": [TCP_FRAME, "link6", "link7_left", "link7_right"],
-                }],
-            },
-        }))
-    }
-
-    pub fn detach_object(&self, object_id: &str) -> EyreResult<()> {
-        self.apply_scene(json!({
-            "robot_state": {
-                "is_diff": true,
-                "attached_collision_objects": [{
-                    "link_name": TCP_FRAME,
-                    "object": {"id": object_id, "operation": 1},
-                }],
-            },
-        }))
-    }
-
-    fn apply_scene(&self, scene: Value) -> EyreResult<()> {
-        let mut scene = scene;
-        scene["is_diff"] = json!(true);
-        let response = block_on(call(&self.apply_planning_scene, json!({"scene": scene})))?;
-        if response["success"].as_bool() == Some(true) {
-            Ok(())
-        } else {
-            bail!("MoveIt 拒绝更新规划场景")
-        }
     }
 
     pub fn publish_pose(&self, pose: Pose) -> EyreResult<()> {
@@ -687,41 +545,6 @@ impl RosInterface {
     }
 }
 
-fn collision_box(frame_id: &str, id: &str, pose: &Pose3, size_m: [f64; 3]) -> Value {
-    let [x, y, z] = pose.position_m;
-    let [qx, qy, qz, qw] = pose.orientation_xyzw;
-    json!({
-        "header": {"frame_id": frame_id},
-        "id": id,
-        "primitives": [{"type": 1, "dimensions": size_m}],
-        "primitive_poses": [{
-            "position": {"x": x, "y": y, "z": z},
-            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-        }],
-        "operation": 0,
-    })
-}
-
-fn collision_object_ids(scene: &WorldScene) -> BTreeSet<String> {
-    let placement_sources = scene
-        .placement_regions
-        .iter()
-        .filter_map(|region| region.source_object_id.as_deref())
-        .collect::<BTreeSet<_>>();
-    scene
-        .objects
-        .iter()
-        .filter(|object| !placement_sources.contains(object.object_id.as_str()))
-        .map(|object| object.object_id.clone())
-        .chain(
-            scene
-                .obstacles
-                .iter()
-                .map(|obstacle| obstacle.obstacle_id.clone()),
-        )
-        .collect()
-}
-
 struct MotionActions {
     node: Node,
     move_group: ActionClientUntyped,
@@ -877,45 +700,7 @@ fn forward_stream(
 
 #[cfg(test)]
 mod tests {
-    use robot_arm_messages::{PlacementRegion, Pose3, SceneObject, WorldScene};
-
     use super::*;
-
-    #[test]
-    fn placement_container_bounds_are_not_published_as_solid_obstacles() {
-        let pose = Pose3 {
-            position_m: [0.0; 3],
-            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        };
-        let scene = WorldScene {
-            schema_version: 3,
-            sequence: 1,
-            sample_time_ns: 2,
-            frame_id: "base_link".into(),
-            objects: ["cube", "bin"]
-                .map(|id| SceneObject {
-                    object_id: id.into(),
-                    label: id.into(),
-                    pose: pose.clone(),
-                    size_m: [0.1; 3],
-                    confidence: 1.0,
-                    graspable: id == "cube",
-                })
-                .to_vec(),
-            placement_regions: vec![PlacementRegion {
-                region_id: "bin-interior".into(),
-                label: "interior".into(),
-                pose,
-                size_m: [0.1; 3],
-                source_object_id: Some("bin".into()),
-            }],
-            obstacles: vec![],
-        };
-        assert_eq!(
-            collision_object_ids(&scene),
-            BTreeSet::from(["cube".into()])
-        );
-    }
 
     #[test]
     fn collision_matrix_expands_symmetrically() {

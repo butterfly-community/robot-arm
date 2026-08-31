@@ -182,13 +182,11 @@ fn run() -> Result<()> {
                     }
                     "world_scene" => {
                         let scene: WorldScene = from_arrow(data.as_array())?;
-                        motion.ros.publish_world_scene(&scene)?;
                         motion.latest_scene = Some(scene);
                     }
                     "perception_state" => {
                         let state: PerceptionState = from_arrow(data.as_array())?;
                         if !state.enabled {
-                            motion.ros.clear_world_scene()?;
                             motion.latest_scene = None;
                         }
                     }
@@ -592,9 +590,6 @@ impl MotionNode {
                         .ok_or_else(|| eyre::eyre!("缺少当前 TCP 位姿"))?;
                     let position = cartesian_target(&plan, step)
                         .expect("cartesian manipulation step checked above");
-                    if step == ManipulationStep::ReachObject {
-                        self.ros.remove_world_object(&plan.object.object_id)?;
-                    }
                     let target = self.ros.solve_ik(
                         Pose {
                             position_m: position,
@@ -622,15 +617,8 @@ impl MotionNode {
                 ManipulationStep::CloseTool => {
                     self.publish_actuator(&plan.request_id, CLOSED_GRIPPER_RAD)?;
                 }
-                ManipulationStep::AttachObject => {
-                    self.ros
-                        .attach_object(&plan.object.object_id, plan.object.size_m)?;
-                }
                 ManipulationStep::OpenTool => {
                     self.publish_actuator(&plan.request_id, OPEN_GRIPPER_RAD)?;
-                }
-                ManipulationStep::DetachObject => {
-                    self.ros.detach_object(&plan.object.object_id)?;
                     if let Some(scene) = &mut self.latest_scene
                         && let Some(object) = scene
                             .objects
@@ -639,7 +627,6 @@ impl MotionNode {
                     {
                         object.pose.position_m = plan.placement_region.pose.position_m;
                         object.pose.position_m[2] += object.size_m[2] / 2.0;
-                        self.ros.publish_world_scene(scene)?;
                     }
                 }
                 ManipulationStep::Complete => {

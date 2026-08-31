@@ -38,7 +38,7 @@
 ## 坐标与 TCP 审查
 
 `tcp_link` 是唯一业务 TCP，位于两侧夹爪尖端中心。MoveIt group tip、FK、IK、目标位姿、
-附着物、标定观测和模型元数据都引用 `stararm_102_model::TCP_FRAME`。`link6` 只保留为结构
+标定观测和模型元数据都引用 `stararm_102_model::TCP_FRAME`。`link6` 只保留为结构
 链接，73.13 mm 只用于明确的圆弧演示几何。相机内参、对齐深度、外参和 `base_link`
 转换均只处理一次。维护规则见 [StarArm-102 末端坐标](TCP.md)。
 
@@ -46,11 +46,11 @@
 
 - motion 只保留 FIFO 和一个顺序 worker；前一个运动未结束时后一个等待，没有通用状态机、
   并行规划器、队列门限或永久错误状态。
-- 抓放由 `manipulation-core` 生成九步线性计划，型号 motion 负责 MoveIt 实现；没有额外编排
+- 抓放由 `manipulation-core` 生成七步线性计划，型号 motion 负责 MoveIt 实现；没有额外编排
   服务或第二套夹爪命令。
 - 网关对长时间抓放返回 `202 Accepted`，最终结果继续从既有 manipulation 状态流返回；没有
   HTTP 超时状态机或重复执行路径。
-- 结构化实例从障碍点云排除，避免同一物体同时作为 CollisionObject 和 OctoMap 障碍。
+- 结构化场景和点云用于目标计算与可视化，不进入 MoveIt 环境碰撞场景。
 - execution 是模型资源和硬件差异的唯一所有者；网页和 motion 不维护另一份参数。
 - 没有为低收益边界条件增加包装层、恢复服务、降级分支或用户未要求的保护门限。
 
@@ -82,11 +82,12 @@ ESLint 10 和 TypeScript 7 没有升级，因为当前 Next 插件和 typescript
 - 浏览器：Playwright 20 项通过。
 - Compose：配置、全量镜像构建、冷停止/启动和服务健康检查通过。
 - 软件全链路：输入、空间、普通运动、抓放、模型资源、配置和最终状态集成测试通过。
-- 规划性能：启用确定性抓放场景后，两轮共八次默认位/测试位往返请求为 1.06–2.48 秒；
-  末次轨迹时长 0.187 秒。原先 10–22 秒耗时来自用视觉高模作为 collision，现已
-  改为主体构建期凸包、凹形夹指原网格，并以同步 PlanningScene 服务消除抓放场景竞态。
-- 感知：497 点测试云在 MoveIt 0.1 m OctoMap 中形成已人工确认的 12 个体素块；停止后
-  OctoMap 清空且普通 CollisionObject 保留。
+- 环境碰撞：点云、识别物、障碍物和已抓物体均不写入 MoveIt；规划保留自身碰撞，抓放仍
+  使用结构化场景计算目标。
+- 感知：497 点测试云继续通过标准 PointCloud2 发布，可在 RViz 独立显示，不生成 OctoMap。
+- 运行态场景：冷启动后的完整七步抓放通过；流程结束后 `collision_objects`、
+  `attached_collision_objects` 和 OctoMap 数据均为空，Servo 自碰撞检查保持启用。
+- 规划性能：完整抓放日志中的 OMPL 规划阶段保持在约 12 ms，不再随感知场景增长到 10 秒以上。
 - TCP：运行时 `link6 → tcp_link` 为零平移、单位旋转，所有业务调用使用 `tcp_link`。
 
 最终实现没有新增用户未要求的运动门限、确认流程、队列限制、拒绝条件或隐藏保护数值。

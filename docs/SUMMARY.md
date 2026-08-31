@@ -36,7 +36,7 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 | `spatial-transform-node` | 绝对位姿换基、Action 积分、设备无关 TCP 增量 | 设备驱动、IK、串口 |
 | `perception-node` | ROS 相机接入、RGB-D 对齐消费、深度反投影、标定、场景结构化、ROS 点云/图像/Marker/TF | 模型推理、机械臂轨迹 |
 | `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割；CPU/CUDA 使用同一 HTTP 契约 | 深度、标定、MoveIt、Dora |
-| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、碰撞场景、九步抓放编排 | 相机采集、设备输入、串口 |
+| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、自碰撞检查、七步抓放编排 | 相机采集、设备输入、串口 |
 | `stararm-102-execution-node` | 软件反馈与 FashionStar UART 的同一执行契约、模型资源、真机遥测 | IK、目标位姿解释 |
 | `service-status-node` | 根据配置聚合节点主动状态与依赖 | 业务探活特例、恢复策略 |
 | `web-gateway-node` | HTTP/WebSocket 与 Dora 消息转发 | 设备或机械臂语义 |
@@ -44,9 +44,8 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 `manipulation-core`、`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
 远程部署，但外部只和 `perception-node` 交互。
 
-StarArm 的 visual 和凹形夹指 collision 保留厂家高质量 STL；其余 collision 在镜像构建时由
-OpenSCAD 从同一 STL 生成凸包。MoveIt 仍检查完整 PlanningScene，但不再用约十万个视觉
-三角面做在线碰撞查询；场景变更统一经同步 `ApplyPlanningScene` 服务提交。
+StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂自身碰撞检查；感知点云、
+结构化物体和障碍物不写入 PlanningScene，因此环境场景不会影响规划耗时。
 
 ## 感知与抓放
 
@@ -58,20 +57,20 @@ OpenSCAD 从同一 STL 生成凸包。MoveIt 仍检查完整 PlanningScene，但
 | 对齐深度 / 内参 | `/camera/camera/aligned_depth_to_color/image_raw`、`/camera/camera/aligned_depth_to_color/camera_info` |
 
 `perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
-占位场景；每次应用感知配置时会清除上一来源的 Marker 和 OctoMap，再发布当前来源；计算
+占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
 服务失败时保留原始错误，不切换模型或伪造结果。
 
 仓库提供两个走正式链路的确定性来源：
 
 - `generated:pick-place-scene`：固定 RGB 资产经真实 YOLOE 分割，再组合确定性深度，生成
   红色立方体、灰色置物筐和筐内放置区；用于完整抓放验收。
-- `generated:octomap-grid`：原有 497 点测试云；在 MoveIt 0.1 m OctoMap 中显示为已确认的
-  12 个体素块；用于 RViz/PlanningScene 验收。
+- `generated:depth-grid`：497 点测试云，用于 RViz 点云输入验收，不进入 MoveIt
+  规划场景。
 
 抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`。通用库线性生成“接近、到达、闭合、
-附着、接近放置、到达放置、打开、分离、完成”九步；型号 motion 节点求 IK、规划并发出唯一
-`ArmCommand`。作为放置容器来源的物体外包围盒不会作为实心碰撞盒发布，显式障碍物和其他
-场景物体仍进入 MoveIt。
+接近放置、到达放置、打开、完成”七步；型号 motion 节点求 IK、规划并发出唯一
+`ArmCommand`。`WorldScene` 只提供目标和放置区几何，不进入 MoveIt；规划仅检查机械臂
+自身碰撞，不维护第二套抓放路径。
 
 ## 标定
 

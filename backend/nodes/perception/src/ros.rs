@@ -8,11 +8,10 @@ use std::{
     time::Duration,
 };
 
-use eyre::{Context, Result, eyre};
+use eyre::{Context, Result};
 use futures::{StreamExt, executor::block_on};
-use r2r::{ClientUntyped, Context as RosContext, Node, Publisher, QosProfile};
+use r2r::{Context as RosContext, Node, Publisher, QosProfile};
 use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame, WorldScene};
-use serde_json::json;
 
 const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -34,7 +33,6 @@ pub struct RosInterface {
     segmentation_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
     calibration_debug_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
     static_tf_publisher: Publisher<r2r::tf2_msgs::msg::TFMessage>,
-    clear_octomap: ClientUntyped,
 }
 
 impl RosInterface {
@@ -60,11 +58,6 @@ impl RosInterface {
             node.create_publisher("/perception/debug/calibration", QosProfile::sensor_data())?;
         let static_tf_publisher =
             node.create_publisher("/tf_static", QosProfile::default().transient_local())?;
-        let clear_octomap = node.create_client_untyped(
-            "/clear_octomap",
-            "std_srvs/srv/Empty",
-            QosProfile::default(),
-        )?;
         let color = node.subscribe("/camera/camera/color/image_raw", QosProfile::sensor_data())?;
         let color_info = node.subscribe(
             "/camera/camera/color/camera_info",
@@ -102,7 +95,6 @@ impl RosInterface {
             segmentation_publisher,
             calibration_debug_publisher,
             static_tf_publisher,
-            clear_octomap,
         })
     }
 
@@ -330,16 +322,6 @@ impl RosInterface {
                 }],
             })?;
         Ok(())
-    }
-
-    pub fn clear_octomap(&self) -> Result<()> {
-        block_on(async {
-            self.clear_octomap
-                .request(json!({}))?
-                .await?
-                .map_err(|error| eyre!(error))?;
-            Result::<()>::Ok(())
-        })
     }
 }
 

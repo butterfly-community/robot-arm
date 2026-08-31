@@ -71,7 +71,6 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[
                 move_group,
                 {
-                    "octomap_frame": "base_link",
                     "allow_trajectory_execution": True,
                     "trajectory_execution.allowed_start_tolerance": 0.0,
                     "publish_robot_description_semantic": True,

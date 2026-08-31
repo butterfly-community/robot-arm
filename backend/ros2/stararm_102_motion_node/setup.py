@@ -15,7 +15,6 @@ setup(
             [
                 "config/controllers.yaml",
                 "config/servo.yaml",
-                "config/sensors_3d.yaml",
                 "config/stararm102.rviz",
             ],
         ),

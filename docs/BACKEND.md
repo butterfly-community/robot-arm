@@ -53,7 +53,7 @@ PyTorch、NumPy、Pillow、Uvicorn。许可为 Ultralytics AGPL-3.0 或企业许
 ## `perception-node`
 
 `PerceptionNode::apply_request()` 持久化启用状态、来源、模型类别和计算服务地址。每次应用
-配置或停止时先清除旧 Marker 与 MoveIt OctoMap，再由当前来源发布新场景，避免切换来源后
+配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后
 遗留占据数据。`tick()` 处理 ROS 帧或只发布一次确定性场景。
 
 ### 相机和测试输入
@@ -63,7 +63,7 @@ CameraInfo。真实场景只在彩色、对齐深度、内参和已应用外参�
 `process_camera_scene()`。测试来源复用后续全部处理：
 
 - `generated:pick-place-scene` 把固定 RGB 送入真实计算服务，用返回掩码填充确定性深度；
-- `generated:octomap-grid` 原样生成迁移前 497 点测试云。
+- `generated:depth-grid` 生成 497 点测试云。
 
 `segment()` 是计算服务的唯一客户端。`decode_depth()` 接受 ROS `16UC1`；
 `camera_calibration()` 把设备内参与持久化外参组合成唯一标定事实。
@@ -72,12 +72,12 @@ CameraInfo。真实场景只在彩色、对齐深度、内参和已应用外参�
 
 `perception-core::world_scene_from_aligned_depth()` 解码实例掩码、按内参反投影、应用
 `camera → base_link` 变换，并生成 `SceneObject`、`PlacementRegion` 与
-`SceneObstacle`。`aligned_obstacle_point_cloud()` 排除已经结构化的实例，避免同一物体
-同时成为点云障碍和 CollisionObject。
+`SceneObstacle`。`aligned_obstacle_point_cloud()` 排除已经结构化的实例，使排障点云只
+表达未结构化的背景深度。
 
 `publish_scene()` 只发布一份 Dora `WorldScene` 和解释性 Marker。`RosInterface` 发布
-标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF；MoveIt 的
-`PointCloudOctomapUpdater` 直接消费 `/perception/depth/points`。
+标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF。深度点云用于感知与 RViz
+排障，不进入 MoveIt 规划场景。
 
 ### 标定
 
@@ -98,7 +98,7 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 
 ## `manipulation-core`
 
-`plan_pick_place()` 只按 ID 从 `WorldScene` 取可抓物和放置区，生成九步线性计划；
+`plan_pick_place()` 只按 ID 从 `WorldScene` 取可抓物和放置区，生成七步线性计划；
 `cartesian_target()` 只根据物体与放置区几何计算接近/到达位置。库不含 StarArm 轴数、
 关节角、串口或 MoveIt 类型，也没有状态机框架。
 
@@ -113,18 +113,25 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 或模拟/真机分支。
 
 `ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、IK、状态有效性和
-PlanningScene 接口。它把 `WorldScene` 转成 MoveIt CollisionObject；放置容器来源物体不被
-错误建模为实心盒。抓取时物体附着到唯一 `TCP_FRAME`，随后仍由同一规划和命令链路移动。
+PlanningScene 接口。`WorldScene` 只用于选择抓取目标、放置区和计算 TCP 目标，不发布成
+MoveIt CollisionObject、AttachedCollisionObject 或 OctoMap，因此普通规划和 Servo 只保留
+机械臂自身碰撞检查。抓放仍由同一规划和命令链路移动。厂家 URDF 的 visual 与 collision
+网格保持原样，不在镜像构建时生成或替换碰撞几何。Servo 作为从属 PlanningSceneMonitor 订阅同一个
+`/monitored_planning_scene`，不维护独立场景来源。
 
-厂家 URDF 的高质量 STL 用于 visual；两个凹形夹指也保留原碰撞网格，避免凸包封住夹取空间。
-其余主体网格在镜像构建阶段由 OpenSCAD 从同一 STL 生成凸包，保留外部物体和 OctoMap 碰撞
-检查，同时避免规划器反复对约十万个视觉三角面执行查询。凸包是机械生成结果，不维护另一套
-手填尺寸。规划场景的增加、移除、附着和分离统一使用同步 `ApplyPlanningScene` 服务，场景更新
-被 MoveIt 接受后才继续抓放步骤；Servo 作为从属 PlanningSceneMonitor 订阅同一个
-`/monitored_planning_scene`，不再维护独立场景来源。
+### 已弃用：构建期单凸包碰撞网格
+
+曾为定位感知场景启用后规划耗时从亚秒级上升到 10 秒以上的问题，在 motion 镜像构建阶段用
+OpenSCAD 对厂家每个 STL 执行一次整体 `hull()`，再将结果替换为 URDF collision 网格。该方案
+证明了高面数机械臂网格与环境对象反复碰撞查询是主要性能来源，但单一凸包会填平凹槽和夹爪
+开口，不能作为可信的最终碰撞模型；构建时生成还会隐藏模型差异并增加工具依赖。因此相关
+Docker stage、OpenSCAD 脚本、URDF 补丁和生成目录均已删除，当前没有启用该方案。
+
+以后若重新启用环境碰撞，应重新制作并提交可审查的正式低面数碰撞资产，保留必要凹形结构，
+在 RViz 叠加核对 visual/collision 后再做规划和抓放回归；不得直接恢复构建期整体凸包。
 
 起点自碰撞恢复只在普通规划失败且 MoveIt 实测起点碰撞时，对同一次重试临时允许该 link 对；
-不写全局 ACM，不保留解锁状态，也没有 MoveIt 源码补丁。所有 FK、IK、附着和业务目标均使用
+不写全局 ACM，不保留解锁状态，也没有 MoveIt 源码补丁。所有 FK、IK 和业务目标均使用
 `tcp_link`，不得添加 `link6` 补偿。
 
 ## `stararm-102-execution-node`
@@ -162,7 +169,7 @@ PlanningScene 接口。它把 `WorldScene` 转成 MoveIt CollisionObject；放�
 | 标准感知输出 | `/perception/color/*`、`/perception/depth/*` |
 | 分割/标定调试 | `/perception/debug/segmentation`、`/perception/debug/calibration` |
 | 场景说明 | `/perception/debug/markers` |
-| MoveIt 世界/附着物 | `/apply_planning_scene`、`/get_planning_scene` |
+| MoveIt 自身碰撞状态 | `/get_planning_scene` |
 | 世界与坐标 | `/monitored_planning_scene`、`/tf`、`/tf_static` |
 
 RViz2、Openbox 和 KasmVNC 位于 motion 容器，通过 `192.168.100.10:6080` 暴露一个浏览器
@@ -174,7 +181,7 @@ RViz2、Openbox 和 KasmVNC 位于 motion 容器，通过 `192.168.100.10:6080` 
 | --- | --- | --- |
 | 消息与配置 | Dora、Arrow、Serde、json-config-store | 业务 DTO 和请求关联 |
 | 设备输入 | SDL3、hidapi、fusion-ahrs、one_euro_filter | NOLO 报告适配、Action 绑定 |
-| 几何 | nalgebra、image、OpenSCAD | 场景语义与型号工具几何 |
+| 几何 | nalgebra、image | 场景语义与型号工具几何 |
 | 识别分割 | Ultralytics YOLOE、PyTorch | HTTP DTO 归一化 |
 | 标定 | `opencv` crate、OpenCV 5 | 会话、样本和持久化 |
 | ROS/规划 | r2r、MoveIt、Servo、ros2_control | ROS JSON 边界与业务步骤 |

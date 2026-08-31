@@ -572,11 +572,9 @@ pub enum ManipulationStep {
     ApproachObject,
     ReachObject,
     CloseTool,
-    AttachObject,
     ApproachPlacement,
     ReachPlacement,
     OpenTool,
-    DetachObject,
     Complete,
 }
 

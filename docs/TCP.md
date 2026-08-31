@@ -46,8 +46,7 @@
 涉及机械臂模型或笛卡尔目标的修改至少应核对：
 
 1. 最终 URDF 中存在 `link6 -> tcp_joint -> tcp_link`，且 MoveIt group tip 是 `tcp_link`。
-2. `RobotModelInfo.tcp_frame`、FK 的 link、IK 的 link 和 AttachedCollisionObject 的 link
-   都来自同一个 `TCP_FRAME`。
+2. `RobotModelInfo.tcp_frame`、FK 的 link 和 IK 的 link 都来自同一个 `TCP_FRAME`。
 3. 平移目标只改变 `tcp_link` 位置；定点旋转不改变 `tcp_link` 位置；圆弧只使用
    `ARC_PIVOT_TO_TCP_M` 构造轨迹。
 4. 感知给出的抓取点可以直接作为 IK 目标，不出现额外 73.13 mm 加减。

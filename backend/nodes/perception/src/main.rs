@@ -322,7 +322,7 @@ impl PerceptionNode {
     fn publish_generated_scene(&mut self, node: &mut DoraNode) -> Result<()> {
         self.sequence += 1;
         let now = now_ns();
-        if self.config.source_id.as_deref() == Some("generated:octomap-grid") {
+        if self.config.source_id.as_deref() == Some("generated:depth-grid") {
             let calibration = generated_depth_test_calibration(self.sequence, now);
             self.ros.publish_calibration(&calibration)?;
             self.ros
@@ -398,7 +398,6 @@ impl PerceptionNode {
             self.frames = CameraFrames::default();
             self.last_scene = None;
             self.ros.clear_markers()?;
-            self.ros.clear_octomap()?;
         }
         self.last_error = error.clone();
         send(

@@ -3,15 +3,13 @@ use robot_arm_messages::{
 };
 use thiserror::Error;
 
-const PICK_PLACE_STEPS: [ManipulationStep; 9] = [
+const PICK_PLACE_STEPS: [ManipulationStep; 7] = [
     ManipulationStep::ApproachObject,
     ManipulationStep::ReachObject,
     ManipulationStep::CloseTool,
-    ManipulationStep::AttachObject,
     ManipulationStep::ApproachPlacement,
     ManipulationStep::ReachPlacement,
     ManipulationStep::OpenTool,
-    ManipulationStep::DetachObject,
     ManipulationStep::Complete,
 ];
 

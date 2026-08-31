@@ -257,11 +257,9 @@ export type ManipulationStep =
   | "approach_object"
   | "reach_object"
   | "close_tool"
-  | "attach_object"
   | "approach_placement"
   | "reach_placement"
   | "open_tool"
-  | "detach_object"
   | "complete";
 
 export interface ManipulationTaskState {

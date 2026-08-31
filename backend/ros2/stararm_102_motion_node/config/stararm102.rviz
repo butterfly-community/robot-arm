@@ -84,13 +84,6 @@ Visualization Manager:
             Value: /perception/depth/points
           Size (Pixels): 2
           Style: Points
-        - Class: rviz_default_plugins/PointCloud2
-          Name: Robot-filtered cloud
-          Enabled: false
-          Topic:
-            Value: /perception/depth/points_filtered
-          Size (Pixels): 2
-          Style: Points
     - Class: rviz_common/Group
       Name: 目标与放置区
       Enabled: true
