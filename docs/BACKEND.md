@@ -109,7 +109,7 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 ### 模拟与测试代码边界
 
 生产几何只在 `perception-core`，其中不导出测试源 API。确定性 RGB-D、497 点深度帧和测试相机
-参数集中在 `perception-node/src/test_source.rs`；输入动作回放集中在
+参数集中在 `perception-node/src/simulation.rs`；输入动作回放集中在
 `controller-input-node/src/simulation.rs`；编译进测试源的固定图片位于同节点 `test-assets/`。输入模拟
 仍经过 spatial、motion 和 execution，RGB-D 测试输入仍经过 perception、motion 和 execution；
 两者都不实现测试专用的下游业务流程。

@@ -30,7 +30,12 @@ for (const [path, title] of pages) {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`/${path}/`);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
-    await expect(page.getByRole("navigation").getByRole("link")).toHaveCount(5);
+    const navigation = page.getByRole("navigation");
+    await expect(navigation.getByRole("link")).toHaveCount(5);
+    await expect(navigation.locator('[aria-current="page"]')).toHaveAttribute(
+      "href",
+      `/${path}/`,
+    );
     const card = page.locator("section.card").first();
     const toggle = card.locator(".card-toggle");
     await expect(toggle).toHaveAttribute("aria-expanded", "true");

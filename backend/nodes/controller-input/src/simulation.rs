@@ -379,7 +379,7 @@ mod tests {
     ];
 
     #[test]
-    fn test_source_reports_exactly_the_fourteen_input_actions() {
+    fn simulation_source_reports_exactly_the_fourteen_input_actions() {
         let source = source_info();
         assert!(!source.position_capable);
         assert!(!source.orientation_capable);

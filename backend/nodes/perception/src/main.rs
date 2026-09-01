@@ -1,5 +1,5 @@
 mod ros;
-mod test_source;
+mod simulation;
 
 use std::{
     collections::BTreeMap,
@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ros::{RosEvent, RosInterface, time_ns},
-    test_source::{simulation_frame, simulation_source, simulation_sources},
+    simulation::{simulation_frame, simulation_source, simulation_sources},
 };
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;

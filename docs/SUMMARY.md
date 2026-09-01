@@ -25,7 +25,7 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 
 模拟和测试实现也与生产核心物理分开：输入回放在
 `backend/nodes/controller-input/src/simulation.rs`，感知测试源和它编译期使用的固定验证图片在
-`backend/nodes/perception/src/test_source.rs` 与同节点的 `test-assets/`。
+`backend/nodes/perception/src/simulation.rs` 与同节点的 `test-assets/`。
 `perception-core`、空间核心、运动学和执行节点不包含测试数据生成逻辑。
 
 ## 服务边界

@@ -124,7 +124,7 @@ export default function Page() {
 
   return (
     <Shell
-      section="04 / ARM EXECUTION"
+      section="05 / ARM EXECUTION"
       title="机械臂执行"
       description="三维反馈、最后命令、串口状态和舵机参数形成同一高密度执行台；原始连接状态与消息只在排障区展开。"
     >
