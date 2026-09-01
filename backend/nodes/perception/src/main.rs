@@ -347,7 +347,12 @@ impl PerceptionNode {
         Ok(unique.into_values().collect())
     }
 
-    fn clear_output(&mut self) -> Result<()> {
+    fn clear_output(&mut self, node: &mut DoraNode) -> Result<()> {
+        let frame_id = self
+            .last_scene
+            .as_ref()
+            .map(|scene| scene.frame_id.clone())
+            .unwrap_or_default();
         self.simulation_published = false;
         self.frames = CameraFrames::default();
         self.last_scene = None;
@@ -359,7 +364,21 @@ impl PerceptionNode {
         self.last_frame_time_ns = None;
         self.assets.clear();
         self.calibration_color = None;
-        self.ros.clear_markers()
+        self.ros.clear_markers()?;
+        self.sequence += 1;
+        send(
+            node,
+            "world_scene",
+            &WorldScene {
+                schema_version: SCHEMA_VERSION,
+                sequence: self.sequence,
+                sample_time_ns: now_ns(),
+                frame_id,
+                objects: vec![],
+                placement_regions: vec![],
+                obstacles: vec![],
+            },
+        )
     }
 
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
@@ -719,7 +738,7 @@ impl PerceptionNode {
         if error.is_none() && persist {
             self.config = next;
             self.available_sources = self.discover_sources()?;
-            self.clear_output()?;
+            self.clear_output(node)?;
         }
         self.last_error = error.clone();
         send(

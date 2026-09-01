@@ -49,7 +49,7 @@ export default function Page() {
     ManipulationTaskState | undefined;
   const model = values.robot_model_info as unknown as
     RobotModelInfo | undefined;
-  const [sourceId, setSourceId] = useState("");
+  const [sourceId, setSourceId] = useState<string>();
   const [objectId, setObjectId] = useState("");
   const [regionId, setRegionId] = useState("");
   const [board, setBoard] = useState(initialBoard);
@@ -58,7 +58,7 @@ export default function Page() {
   const [depthScale, setDepthScale] = useState("");
   const [pending, setPending] = useState(false);
 
-  const selectedSourceId = sourceId || perception?.source_id || "";
+  const selectedSourceId = sourceId ?? perception?.source_id ?? "";
   const selectedClasses = classes || perception?.classes.join(", ") || "";
   const selectedPlacementLabels =
     placementLabels || perception?.placement_labels.join(", ") || "";
@@ -123,6 +123,20 @@ export default function Page() {
     });
     if (action === "reset") setDepthScale("");
     if (action === "disconnect") setSourceId("");
+  }
+
+  async function selectCamera(nextSourceId: string) {
+    setSourceId(nextSourceId);
+    setDepthScale("");
+    await send("/api/perception/request", {
+      schema_version: schemaVersion,
+      request_id: requestId(),
+      action: nextSourceId ? "apply" : "disconnect",
+      source_id: nextSourceId || null,
+      depth_scale_m: null,
+      classes: null,
+      placement_labels: null,
+    });
   }
 
   async function pickPlace() {
@@ -245,13 +259,13 @@ export default function Page() {
         >
           <Field label="相机来源">
             <select
+              aria-label="相机来源"
               value={selectedSourceId}
               onChange={(event) => {
-                setSourceId(event.currentTarget.value);
-                setDepthScale("");
+                void selectCamera(event.currentTarget.value);
               }}
             >
-              <option value="">选择深度相机</option>
+              <option value="">不选择深度相机</option>
               {perception?.available_sources.map((source) => (
                 <option key={source.source_id} value={source.source_id}>
                   {source.display_name} · {source.source_id}
@@ -284,7 +298,7 @@ export default function Page() {
               disabled={pending || !selectedSourceId}
               onClick={() => perceptionRequest("apply")}
             >
-              保存配置并启用
+              保存相机参数并启用
             </Button>
             <Button
               variant="outline"

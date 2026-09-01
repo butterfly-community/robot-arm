@@ -450,12 +450,40 @@ test("perception page uses the simulation camera through the canonical path", as
   const original = before.values.perception_state;
   try {
     await page.goto("/perception/");
-    await page
-      .getByLabel("深度相机")
-      .selectOption("simulation:pick-place-scene");
-    await page.getByRole("button", { name: "保存配置并启用" }).click();
+    const camera = page.getByLabel("相机来源");
+    await camera.selectOption("simulation:depth-grid");
+    await expect
+      .poll(async () => {
+        const state = await (await request.get("/api/perception/state")).json();
+        return {
+          sourceId: state.values.perception_state?.source_id,
+          pointCount: state.values.perception_state?.point_count,
+          objectCount: state.values.world_scene?.objects.length,
+        };
+      })
+      .toEqual({
+        sourceId: "simulation:depth-grid",
+        pointCount: 497,
+        objectCount: 0,
+      });
+    await camera.selectOption("simulation:pick-place-scene");
     await expect(page.getByText("运行", { exact: true })).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
+    await camera.selectOption("");
+    await expect(camera).toHaveValue("");
+    await expect
+      .poll(async () => {
+        const state = await (await request.get("/api/perception/state")).json();
+        return {
+          sourceId: state.values.perception_state?.source_id,
+          objectCount: state.values.world_scene?.objects.length,
+        };
+      })
+      .toEqual({ sourceId: null, objectCount: 0 });
+    await expect(page.getByText("停用", { exact: true })).toBeVisible();
+    await page.reload();
+    await expect(camera).toHaveValue("");
+    await camera.selectOption("simulation:pick-place-scene");
     await page.reload();
     await expect(page.getByText("运行", { exact: true })).toBeVisible();
   } finally {
