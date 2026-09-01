@@ -1,9 +1,9 @@
 # fashionstar-uart
 
-StarArm-102 execution 节点使用的 FashionStar UART 协议库。生产路径只包含厂家协议已有的
-1 Mbps、8N1、Ping、Monitor、进阶内部参数读写和同步多圈位置命令；J1–J6 在本层不改符号，
-夹爪传动换算由型号 execution 节点完成。一次 Monitor 事务失败时，库清空残留输入并在同一
-串口完整重试一次；重试仍失败才把错误交给 execution 节点执行重连。
+FashionStar UART 协议库。生产路径只包含厂家协议已有的 1 Mbps、8N1、Ping、Monitor、进阶
+内部参数读写和同步多圈位置命令；关节符号和工具传动换算均由使用它的型号 execution 节点
+负责。一次 Monitor 事务失败时，库清空残留输入并在同一串口完整重试一次；重试仍失败才把
+错误交给 execution 节点执行重连。
 
 单元测试：
 

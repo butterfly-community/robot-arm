@@ -1,0 +1,11 @@
+moveit_servo:
+  move_group_name: arm
+  command_in_type: speed_units
+  command_out_topic: /arm_controller/joint_trajectory
+  publish_joint_velocities: false
+  monitored_planning_scene_topic: /monitored_planning_scene
+  is_primary_planning_scene_monitor: false
+  check_collisions: true
+  self_collision_proximity_threshold: 0.01
+  # A finite floating-point value keeps this project-requested hard stop disabled.
+  hard_stop_singularity_threshold: 1.0e+300

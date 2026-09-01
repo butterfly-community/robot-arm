@@ -20,7 +20,6 @@ const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 
 #[derive(Debug)]
 pub enum RosEvent {
     Color(String, r2r::sensor_msgs::msg::Image),
-    ColorInfo(String, r2r::sensor_msgs::msg::CameraInfo),
     Depth(String, r2r::sensor_msgs::msg::Image),
     DepthInfo(String, r2r::sensor_msgs::msg::CameraInfo),
 }
@@ -101,10 +100,7 @@ impl RosInterface {
         for depth_topic in names.iter().filter(|name| name.ends_with(DEPTH_SUFFIX)) {
             let source_id = depth_topic.trim_end_matches(DEPTH_SUFFIX).to_owned();
             let source = camera_source(source_id);
-            if names.contains(&source.color_topic)
-                && names.contains(&source.color_info_topic)
-                && names.contains(&source.depth_info_topic)
-            {
+            if names.contains(&source.color_topic) && names.contains(&source.depth_info_topic) {
                 sources.push(source);
             }
         }
@@ -124,7 +120,6 @@ impl RosInterface {
             .lock()
             .expect("ROS perception node mutex poisoned");
         let color = node.subscribe(&source.color_topic, QosProfile::sensor_data())?;
-        let color_info = node.subscribe(&source.color_info_topic, QosProfile::sensor_data())?;
         let depth = node.subscribe(&source.depth_topic, QosProfile::sensor_data())?;
         let depth_info = node.subscribe(&source.depth_info_topic, QosProfile::sensor_data())?;
         drop(node);
@@ -132,10 +127,6 @@ impl RosInterface {
         forward_stream(color, self.event_sender.clone(), {
             let id = id.clone();
             move |message| RosEvent::Color(id.clone(), message)
-        });
-        forward_stream(color_info, self.event_sender.clone(), {
-            let id = id.clone();
-            move |message| RosEvent::ColorInfo(id.clone(), message)
         });
         forward_stream(depth, self.event_sender.clone(), {
             let id = id.clone();
@@ -160,18 +151,8 @@ impl RosInterface {
         Ok(())
     }
 
-    pub fn publish_color_info(&self, message: r2r::sensor_msgs::msg::CameraInfo) -> Result<()> {
-        self.color_info_publisher.publish(&message)?;
-        Ok(())
-    }
-
     pub fn publish_depth(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
         self.depth_publisher.publish(&message)?;
-        Ok(())
-    }
-
-    pub fn publish_depth_info(&self, message: r2r::sensor_msgs::msg::CameraInfo) -> Result<()> {
-        self.depth_info_publisher.publish(&message)?;
         Ok(())
     }
 
@@ -386,7 +367,6 @@ fn camera_source(source_id: String) -> DepthCameraSourceInfo {
     let display_name = source_id.trim_start_matches('/').replace('/', " / ");
     DepthCameraSourceInfo {
         color_topic: format!("{source_id}/color/image_raw"),
-        color_info_topic: format!("{source_id}/color/camera_info"),
         depth_topic: format!("{source_id}/aligned_depth_to_color/image_raw"),
         depth_info_topic: format!("{source_id}/aligned_depth_to_color/camera_info"),
         source_id,

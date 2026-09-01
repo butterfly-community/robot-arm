@@ -39,7 +39,7 @@ class SegmentResponse(BaseModel):
 
 class GraspRequest(BaseModel):
     points_xyz_m: list[tuple[float, float, float]]
-    gripper_name: str
+    gripper_asset_id: str
     planner: str = "graspmoe"
 
 
@@ -99,7 +99,7 @@ class GraspGenXBackend:
         import torch
         from graspgenx.samplers import run_planner_on_object
 
-        key = request.gripper_name
+        key = request.gripper_asset_id
         with self._lock:
             np.random.seed(self.seed)
             torch.manual_seed(self.seed)
@@ -107,7 +107,7 @@ class GraspGenXBackend:
             if sampler is None:
                 sampler = self._sampler_type(
                     self._config,
-                    gripper_name=request.gripper_name,
+                    gripper_name=request.gripper_asset_id,
                     assets_dir=self.gripper_assets,
                     model=self._model,
                 )

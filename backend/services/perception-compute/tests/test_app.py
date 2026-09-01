@@ -41,7 +41,6 @@ class FakeGraspBackend:
 
     def infer(self, request: GraspRequest) -> GraspResponse:
         assert request.points_xyz_m == [(0.1, 0.2, 0.3)]
-        assert request.gripper_name == "stararm-102-fl"
         return GraspResponse(
             candidates=[
                 GraspCandidate(
@@ -52,7 +51,7 @@ class FakeGraspBackend:
                         (0.0, 0.0, 0.0, 1.0),
                     ),
                     confidence=0.9,
-                    branch="diff",
+                    branch=request.gripper_asset_id,
                 )
             ],
             inference_ms=12.0,
@@ -98,7 +97,14 @@ async def exercise_contract() -> None:
         grasp = endpoints["/v1/grasps"](
             GraspRequest(
                 points_xyz_m=[(0.1, 0.2, 0.3)],
-                gripper_name="stararm-102-fl",
+                gripper_asset_id="fixture-gripper",
             )
         )
-        assert grasp.candidates[0].branch == "diff"
+        assert grasp.candidates[0].branch == "fixture-gripper"
+        second_grasp = endpoints["/v1/grasps"](
+            GraspRequest(
+                points_xyz_m=[(0.1, 0.2, 0.3)],
+                gripper_asset_id="second-fixture-gripper",
+            )
+        )
+        assert second_grasp.candidates[0].branch == "second-fixture-gripper"

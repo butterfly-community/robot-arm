@@ -29,8 +29,8 @@ use robot_arm_messages::{
     CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DepthCameraSourceInfo,
     DetectedInstance2D, ImageFrameInfo, MotionState, PerceptionAssetRequest,
     PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionSourceKind,
-    PerceptionState, Pose3, RequestAction, RequestResult, SCHEMA_VERSION, ServiceState, ToolPose,
-    WorldScene, from_arrow, to_arrow,
+    PerceptionState, Pose3, RequestAction, RequestResult, RobotModelInfo, SCHEMA_VERSION,
+    ServiceState, ToolPose, WorldScene, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +52,6 @@ struct PerceptionConfig {
     source_id: Option<String>,
     compute_service_url: String,
     model: String,
-    gripper_name: String,
     classes: Vec<String>,
     #[serde(default = "default_placement_labels")]
     placement_labels: Vec<String>,
@@ -72,7 +71,6 @@ impl Default for PerceptionConfig {
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
             model: "yoloe-26s-seg.pt".into(),
-            gripper_name: "stararm-102-fl".into(),
             classes: vec!["red cube".into(), "gray storage bin".into()],
             placement_labels: default_placement_labels(),
             depth_scale_m: 0.001,
@@ -89,7 +87,6 @@ fn default_placement_labels() -> Vec<String> {
 #[derive(Default)]
 struct CameraFrames {
     color: Option<r2r::sensor_msgs::msg::Image>,
-    color_info: Option<r2r::sensor_msgs::msg::CameraInfo>,
     depth: Option<r2r::sensor_msgs::msg::Image>,
     depth_info: Option<r2r::sensor_msgs::msg::CameraInfo>,
 }
@@ -116,6 +113,7 @@ struct PerceptionNode {
     calibration_color: Option<r2r::sensor_msgs::msg::Image>,
     latest_arm_state: Option<ArmState>,
     latest_tool_pose: Option<ToolPose>,
+    robot_model: Option<RobotModelInfo>,
 }
 
 fn default_calibration_session() -> CalibrationSessionState {
@@ -150,7 +148,7 @@ struct SegmentInstance {
 #[derive(Serialize)]
 struct GraspRequest<'a> {
     points_xyz_m: &'a [[f32; 3]],
-    gripper_name: &'a str,
+    gripper_asset_id: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +234,7 @@ fn run() -> Result<()> {
         calibration_color: None,
         latest_arm_state: None,
         latest_tool_pose: None,
+        robot_model: None,
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
     perception.publish_snapshot(&mut node)?;
@@ -255,6 +254,9 @@ fn run() -> Result<()> {
                 "motion_state" => {
                     let state: MotionState = from_arrow(data.as_array())?;
                     perception.latest_tool_pose = state.current_tool_pose;
+                }
+                "robot_model_info" => {
+                    perception.robot_model = Some(from_arrow(data.as_array())?);
                 }
                 "snapshot" => perception.publish_snapshot(&mut node)?,
                 "tick" => perception.tick(&mut node)?,
@@ -301,16 +303,11 @@ impl PerceptionNode {
                 self.calibration_color = Some(message.clone());
                 self.frames.color = Some(message);
             }
-            RosEvent::ColorInfo(source_id, message) if self.selected_camera(&source_id) => {
-                self.ros.publish_color_info(message.clone())?;
-                self.frames.color_info = Some(message);
-            }
             RosEvent::Depth(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_depth(message.clone())?;
                 self.frames.depth = Some(message);
             }
             RosEvent::DepthInfo(source_id, message) if self.selected_camera(&source_id) => {
-                self.ros.publish_depth_info(message.clone())?;
                 self.frames.depth_info = Some(message);
             }
             _ => return Ok(()),
@@ -399,6 +396,13 @@ impl PerceptionNode {
         scene: &mut WorldScene,
         instance_clouds: &[InstancePointCloud],
     ) -> Result<()> {
+        let Some(descriptor_id) = self
+            .robot_model
+            .as_ref()
+            .and_then(|model| model.gripper_asset_id.as_deref())
+        else {
+            return Ok(());
+        };
         let placement_sources = scene
             .placement_regions
             .iter()
@@ -420,7 +424,7 @@ impl PerceptionNode {
                 ))
                 .json(&GraspRequest {
                     points_xyz_m: &cloud.points_xyz_m,
-                    gripper_name: &self.config.gripper_name,
+                    gripper_asset_id: descriptor_id,
                 })
                 .send()
                 .context("调用 GraspGenX")?
@@ -719,12 +723,7 @@ impl PerceptionNode {
                     .clone()
                     .ok_or_else(|| eyre!("尚无可应用的标定结果"))?;
                 self.config.calibration = Some(solved);
-                if let Some(info) = self
-                    .frames
-                    .color_info
-                    .as_ref()
-                    .or(self.frames.depth_info.as_ref())
-                {
+                if let Some(info) = self.frames.depth_info.as_ref() {
                     self.ros
                         .publish_calibration(&camera_calibration(info, &self.config)?)?;
                 }
@@ -752,9 +751,8 @@ impl PerceptionNode {
             .ok_or_else(|| eyre!("尚未收到彩色相机帧"))?;
         let info = self
             .frames
-            .color_info
+            .depth_info
             .as_ref()
-            .or(self.frames.depth_info.as_ref())
             .ok_or_else(|| eyre!("尚未收到相机内参"))?;
         let arm = self
             .latest_arm_state
@@ -944,7 +942,7 @@ fn matrix_pose_to_pose(value: &MatrixPose) -> Result<Pose3> {
 fn invoke_calibration_tool<T: for<'de> Deserialize<'de>>(payload: &serde_json::Value) -> Result<T> {
     let helper = std::env::var_os("PERCEPTION_CALIBRATION_HELPER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/robot-arm/bin/perception-calibration"));
+        .unwrap_or_else(|| PathBuf::from("/src/target/release/perception-calibration"));
     let mut child = Command::new(helper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

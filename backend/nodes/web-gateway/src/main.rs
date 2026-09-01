@@ -455,23 +455,7 @@ async fn model_asset(State(state): State<AppState>, Path(path): Path<String>) ->
         "relative_path": path,
     });
     let response = forward_value(state, "model_asset_request", body).await;
-    let Some(content) = response.get("content").and_then(Value::as_array) else {
-        return (StatusCode::NOT_FOUND, Json(response)).into_response();
-    };
-    let bytes = content
-        .iter()
-        .filter_map(Value::as_u64)
-        .map(|value| value as u8)
-        .collect::<Vec<_>>();
-    let mime = response
-        .get("mime_type")
-        .and_then(Value::as_str)
-        .unwrap_or("application/octet-stream");
-    let mut result = bytes.into_response();
-    if let Ok(value) = HeaderValue::from_str(mime) {
-        result.headers_mut().insert(header::CONTENT_TYPE, value);
-    }
-    result
+    binary_response(response)
 }
 
 async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>) -> Response {
@@ -489,6 +473,10 @@ async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>
         }),
     )
     .await;
+    binary_response(response)
+}
+
+fn binary_response(response: Value) -> Response {
     let Some(content) = response.get("content").and_then(Value::as_array) else {
         return (StatusCode::NOT_FOUND, Json(response)).into_response();
     };

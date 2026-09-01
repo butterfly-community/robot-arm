@@ -398,7 +398,6 @@ pub struct DepthCameraSourceInfo {
     pub source_id: String,
     pub display_name: String,
     pub color_topic: String,
-    pub color_info_topic: String,
     pub depth_topic: String,
     pub depth_info_topic: String,
 }
@@ -999,6 +998,8 @@ pub struct RobotModelInfo {
     pub display_name: String,
     pub base_frame: String,
     pub tcp_frame: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper_asset_id: Option<String>,
     pub joints: Vec<JointMetadata>,
     pub tool_actuators: Vec<ActuatorMetadata>,
     pub named_targets: Vec<NamedMotionTarget>,
@@ -1253,21 +1254,6 @@ pub struct ExecutionTransportState {
     pub latest_request_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RecordingManifest {
-    pub schema_version: u32,
-    pub build_versions: BTreeMap<String, String>,
-    pub message_schema_version: u32,
-    pub model_id: Option<String>,
-    pub model_hash: Option<String>,
-    pub config_versions: BTreeMap<String, u64>,
-    pub coordinate_convention: String,
-    pub units: BTreeMap<String, String>,
-    pub started_at_ns: i64,
-    pub ended_at_ns: i64,
-    pub sources: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,6 +1400,7 @@ mod tests {
             display_name: "Fixture".into(),
             base_frame: "base".into(),
             tcp_frame: "tool".into(),
+            gripper_asset_id: None,
             joints: (0..4)
                 .map(|index| JointMetadata {
                     key: format!("axis-{index}"),
@@ -1476,25 +1463,6 @@ mod tests {
             decoded.visualization.link_materials["fixture-link"].color_rgb,
             [0.2, 0.4, 0.6]
         );
-    }
-
-    #[test]
-    fn recording_manifest_round_trip_keeps_replay_provenance() {
-        let manifest = RecordingManifest {
-            schema_version: SCHEMA_VERSION,
-            build_versions: BTreeMap::from([("source".into(), "1.0.0".into())]),
-            message_schema_version: SCHEMA_VERSION,
-            model_id: Some("fixture".into()),
-            model_hash: Some("sha256:fixture".into()),
-            config_versions: BTreeMap::from([("spatial".into(), 4)]),
-            coordinate_convention: "+X forward, +Y left, +Z up".into(),
-            units: BTreeMap::from([("translation".into(), "m".into())]),
-            started_at_ns: 10,
-            ended_at_ns: 20,
-            sources: vec!["source/absolute_pose".into()],
-        };
-        let decoded: RecordingManifest = from_arrow(to_arrow(&manifest).unwrap().as_ref()).unwrap();
-        assert_eq!(decoded, manifest);
     }
 
     #[test]

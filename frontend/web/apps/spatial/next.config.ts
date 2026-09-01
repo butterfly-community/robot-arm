@@ -3,7 +3,6 @@ const config: NextConfig = {
   experimental: { useTypeScriptCli: false },
   basePath: "/spatial",
   trailingSlash: true,
-  output: "standalone",
   transpilePackages: [
     "@robot/contracts",
     "@robot/gateway-client",

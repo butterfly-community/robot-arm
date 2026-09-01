@@ -23,12 +23,16 @@ Compose 停止 dataflow 时会向 Dora attach 会话发送 `SIGINT`，由 Dora �
 docker compose up -d --build
 ```
 
-motion 镜像默认从固定在提交 `5979b346eb3a417840b29b76740754e4005d071a` 的
-`~/Develop/temp/Star-Arm-102-clean` 读取机械臂模型，并从
-`~/Develop/temp/moveit2-2.12.4/moveit_ros/moveit_servo` 读取 MoveIt Servo 2.12.4 源码。
-路径不同时分别用 `STAR_ARM_102_SOURCE` 和 `MOVEIT_SERVO_SOURCE` 覆盖；后者应直接指向
-`moveit_servo` 软件包目录。构建过程始终把 `backend/patches/` 中的项目修正应用到干净厂商
-源码；不要直接修改 `STAR_ARM_102_SOURCE` 指向的仓库。
+Compose 只维护两个工程基础镜像：`frontend-base` 与 `backend-base`。两者都基于 Ubuntu
+26.04 LTS；后端基础镜像统一提供 ROS 2 Lyrical、MoveIt、RealSense SDK/ROS 驱动、
+OpenCV 5 源码构建、Rust、Python、Dora、GraspGenX、模型权重和已应用补丁的 StarArm-102
+ROS 软件包。ROS 图像桥从与 Lyrical 对齐的 `cv_bridge 4.1.0` 源码链接同一套 OpenCV 5，
+不会再引入发行版 OpenCV 4。通用第三方仓库只在后端基础镜像构建中按固定提交处理；StarArm-102 的厂家源码、
+补丁、ROS 包和夹爪资产由 `backend/devices/stararm-102/docker/install-base.sh` 作为一个连续
+设备模块安装，主机不需要第三方源码目录。模型权重从
+`backend/services/perception-compute/models/` 复制进基础镜像，避免每次构建重新下载。各工程
+镜像只复制并构建本工程源码，不重复声明系统、厂商或模型依赖，也不拆分构建/运行层或逐个
+搬运产物。
 
 页面入口为 `http://192.168.100.10:8765/`，业务路径是 `/tracking/`、`/spatial/`、
 `/perception/`、`/motion/` 和 `/arm-execution/`。只有入口服务暴露主机端口。
@@ -66,5 +70,6 @@ docker compose --profile test run --rm integration-test
 ```
 
 架构与行为见 [docs/SUMMARY.md](docs/SUMMARY.md)，后端逐服务、逐方法和依赖边界见
-[docs/BACKEND.md](docs/BACKEND.md)，测试用记录/回放工具见
+[docs/BACKEND.md](docs/BACKEND.md)，最终审查与验收见 [docs/REVIEW.md](docs/REVIEW.md)，
+当前机械臂型号事实见 [docs/STARARM-102.md](docs/STARARM-102.md)，测试用记录/回放工具见
 [tools/replay/README.md](tools/replay/README.md)。

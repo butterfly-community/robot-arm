@@ -1,3 +1,5 @@
 target
+**/.venv
 **/__pycache__
 *.pyc
+services/perception-compute/models

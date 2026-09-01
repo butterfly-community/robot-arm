@@ -1,7 +1,7 @@
 # 后端方法与依赖
 
-本文记录最终实现，不记录迁移过程。系统总览见 [当前系统设计](SUMMARY.md)，TCP 维护约束见
-[StarArm-102 末端坐标](TCP.md)。
+本文记录最终实现。系统总览见 [当前系统设计](SUMMARY.md)，型号参数与 TCP 约束见
+[StarArm-102 型号适配](STARARM-102.md)。
 
 ## `controller-input-node`
 
@@ -43,8 +43,8 @@ Action 只透明传递，不在此解释型号。矩阵与四元数使用 `nalge
 `/v1/model` 报告实际模型、设备与许可；`/v1/segment` 解码 RGB，调用
 `YOLOE-26s-seg`，返回类别、置信度、边界框和 PNG 实例掩码。
 
-`/v1/grasps` 接收单个实例的点云和夹爪描述名，调用 GraspGenX，返回该夹爪真实 `tcp_link`
-在输入点云坐标系中的候选 SE(3)、置信度与分支。`GraspGenXBackend.infer()` 用上游
+`/v1/grasps` 接收单个实例点云和 `gripper_asset_id`，调用 GraspGenX，返回该资产声明的工具
+中心在输入点云坐标系中的候选 SE(3)、置信度与分支。`GraspGenXBackend.infer()` 用上游
 `run_planner_on_object()` 和上游夹爪扫描体；推理锁只保护 PyTorch/采样器的共享模型状态，
 固定种子使相同点云可重复，不过滤或手写候选姿态。
 
@@ -52,16 +52,20 @@ Action 只透明传递，不在此解释型号。矩阵与四元数使用 `nalge
 `PERCEPTION_DEVICE`，接口与后续链路不变。服务不读取深度、不连接 ROS/Dora/MoveIt，也不
 编排抓放动作。
 
+后端基础镜像从设备清单和已应用型号补丁的最终 URDF 自动生成全部夹爪资产；工程镜像直接
+继承 `/grippers/<asset-id>`，不再次下载、生成或搬运。清单可声明多套资产，请求 ID 决定
+sampler，计算服务不判断机械臂型号、厂家或夹爪关节名。
+
 手写边界：HTTP DTO、Ultralytics 结果归一化、GraspGenX TCP 变换。库：FastAPI、Pydantic、
 Ultralytics、GraspGenX、PyTorch、NumPy、Pillow、Uvicorn。许可分别遵循 Ultralytics 与
 GraspGenX 仓库声明。
 
 ## `perception-node`
 
-`PerceptionNode::apply_request()` 持久化启用状态、来源、模型类别和计算服务地址。每次应用
+`PerceptionNode::apply_request()` 持久化启用状态、来源和模型类别。每次应用
 配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后遗留占据数据。
 `apply_request()` 的 `Refresh` 分支只响应网页主动刷新；它从 ROS topic/type 图枚举成组的彩色
-图、对齐深度和两份 CameraInfo。`tick()` 处理所选 ROS 来源或只发布一次确定性场景。
+图、对齐深度和对齐后的 CameraInfo。`tick()` 处理所选 ROS 来源或只发布一次确定性场景。
 
 ### 相机和测试输入
 
@@ -74,7 +78,9 @@ GraspGenX 仓库声明。
 - `generated:pick-place-scene` 把固定 RGB 送入真实计算服务，用返回掩码填充确定性深度；
 - `generated:depth-grid` 生成 497 点测试云。
 
-`segment()` 和 `estimate_grasps()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。
+`segment()` 和 `estimate_grasps()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。抓取
+资产 ID 来自通用 `RobotModelInfo.gripper_asset_id`，感知配置不保存机械臂型号或夹爪几何；
+模型没有声明该能力时仍发布识别和结构化场景，只不请求抓取候选。
 `decode_depth()` 接受 ROS `16UC1`；
 `camera_calibration()` 把设备内参与持久化外参组合成唯一标定事实。
 
@@ -102,15 +108,15 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 
 生产几何只在 `perception-core`，其中不导出测试源 API。确定性 RGB-D、497 点云和测试相机
 参数集中在 `perception-node/src/test_source.rs`；输入动作回放集中在
-`controller-input-node/src/simulation.rs`；离线资产生成和计算服务探针集中在
-`tools/perception/`。这些代码只生成统一输入契约，生成后的消息仍进入同一感知、空间、MoveIt
-和 execution 链路，不实现测试专用业务流程。
+`controller-input-node/src/simulation.rs`；编译进测试源的固定图片位于同节点 `test-assets/`。输入模拟
+仍经过 spatial、motion 和 execution，RGB-D 测试输入仍经过 perception、motion 和 execution；
+两者都不实现测试专用的下游业务流程。
 
 ## `stararm-102-motion-node`
 
 `core::target_pose()` 把空间节点的设备无关增量组合成 StarArm-102 的 TCP 目标；旋转和
-四元数使用 `nalgebra`。`tool_position_rad()` 在此型号边界把 `primary_tool` 映射到
-90°→0° 夹爪行程。
+四元数使用 `nalgebra`。`tool_position_rad()` 在型号边界把通用 `primary_tool` 映射到模型声明的
+夹爪行程，具体定义见 [StarArm-102 型号适配](STARARM-102.md)。
 
 普通关节运动和抓放请求进入同一个 `WorkItem` FIFO。唯一 ROS worker 顺序执行“同步控制器、
 暂停 Servo、规划/执行、恢复 Servo”；前一个动作未结束时后一个只等待，没有通用状态机框架、
@@ -123,23 +129,15 @@ PlanningScene 和型号 MTC Action。普通关节请求仍由 MoveGroup 执行�
 `stararm_102_mtc` 使用标准
 `GeneratePose`、`GeneratePlacePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect`
 和 `ModifyPlanningScene`，整条方案规划成功后通过官方 `ExecuteTaskSolution` capability 执行。
-原始点云、掩码和凸包不进入规划。厂家网格未替换；底座 visual/collision 最低点与 Z=0 刚性
+原始点云和掩码不进入规划。厂家网格未替换；底座 visual/collision 最低点与 Z=0 刚性
 地面重合。Servo 订阅同一 `/monitored_planning_scene`，不维护独立场景来源。
 
-### 已弃用：构建期单凸包碰撞网格
-
-曾为定位感知场景启用后规划耗时从亚秒级上升到 10 秒以上的问题，在 motion 镜像构建阶段用
-OpenSCAD 对厂家每个 STL 执行一次整体 `hull()`，再将结果替换为 URDF collision 网格。该方案
-证明了高面数机械臂网格与环境对象反复碰撞查询是主要性能来源，但单一凸包会填平凹槽和夹爪
-开口，不能作为可信的最终碰撞模型；构建时生成还会隐藏模型差异并增加工具依赖。因此相关
-Docker stage、OpenSCAD 脚本、URDF 补丁和生成目录均已删除，当前没有启用该方案。
-
-以后若重新启用环境碰撞，应重新制作并提交可审查的正式低面数碰撞资产，保留必要凹形结构，
-在 RViz 叠加核对 visual/collision 后再做规划和抓放回归；不得直接恢复构建期整体凸包。
+ROS 绑定固定到官方 `r2r 0.9.6` 标签提交；该版本已声明支持 ROS 2 Lyrical，但尚未发布到
+crates.io，因此 workspace 只在一处声明官方 Git 提交，perception 与 motion 共用同一依赖。
 
 起点自碰撞恢复只在普通规划失败且 MoveIt 实测起点碰撞时，对同一次重试临时允许该 link 对；
-不写全局 ACM，不保留解锁状态，也没有 MoveIt 源码补丁。所有 FK、IK 和业务目标均使用
-`tcp_link`，不得添加 `link6` 补偿。
+不写全局 ACM，不保留解锁状态，也没有 MoveIt 源码补丁。型号坐标约束只在
+[StarArm-102 型号适配](STARARM-102.md) 维护。
 
 ## `stararm-102-execution-node`
 
@@ -147,8 +145,8 @@ Docker stage、OpenSCAD 脚本、URDF 补丁和生成目录均已删除，当前
 选择再连接/断开。未选串口时同一 `ArmCommand` 产生软件反馈；选中串口但连接失败时冻结最后
 状态，不隐式切换软件模式。
 
-`StarArmBus::encode_command()` 把 J1–J6 与夹爪绝对角编码成 FashionStar 命令。
-`read_sorted_monitors()` 读取 ID 0–6；`state_from_monitors()` 与
+`StarArmBus::encode_command()` 把模型关节与夹爪绝对角编码成 FashionStar 命令。
+`read_sorted_monitors()` 按模型舵机顺序读取；`state_from_monitors()` 与
 `telemetry_from_monitors()` 产生位置及遥测。Monitor 失败在同一串口重试一次，仍失败才
 重连。串口只在网页主动 discover 时枚举。
 
@@ -185,8 +183,8 @@ Docker stage、OpenSCAD 脚本、URDF 补丁和生成目录均已删除，当前
 | MoveIt 自身碰撞状态 | `/get_planning_scene` |
 | 世界与坐标 | `/monitored_planning_scene`、`/tf`、`/tf_static` |
 
-RViz2、Openbox 和 KasmVNC 位于 motion 容器，通过 `192.168.100.10:6080` 暴露一个浏览器
-入口。项目使用现成的 KasmVNC 显示与输入协议，不维护第二套远程桌面或网页规划器。
+RViz2、Openbox、TigerVNC 和 noVNC 位于 motion 容器，通过 `192.168.100.10:6080` 暴露一个
+浏览器入口。项目直接使用 Ubuntu 26.04 官方包，不维护远程桌面协议或第二套网页规划器。
 
 ## 方法级依赖结论
 

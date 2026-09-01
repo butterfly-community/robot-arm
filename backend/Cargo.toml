@@ -5,15 +5,15 @@ members = [
   "crates/perception-core",
   "crates/robot-arm-messages",
   "crates/spatial-core",
-  "crates/stararm-102-model",
+  "devices/stararm-102/crates/model",
   "crates/fashionstar-uart",
   "crates/nolo-cv1",
   "nodes/controller-input",
   "nodes/perception",
   "nodes/service-status",
   "nodes/spatial-transform",
-  "nodes/stararm-102-motion",
-  "nodes/stararm-102-execution",
+  "devices/stararm-102/nodes/motion",
+  "devices/stararm-102/nodes/execution",
   "nodes/web-gateway",
 ]
 
@@ -41,13 +41,14 @@ fashionstar-uart = { path = "crates/fashionstar-uart" }
 json-config-store = { path = "crates/json-config-store" }
 perception-core = { path = "crates/perception-core" }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+r2r = { git = "https://github.com/sequenceplanner/r2r.git", rev = "2d080c4dede3ec950620d2b82f6521bc4fa1e690", default-features = false }
 serialport = { version = "4.8.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_with = "3.22.0"
 sha2 = "0.11.0"
 spatial-core = { path = "crates/spatial-core" }
-stararm-102-model = { path = "crates/stararm-102-model" }
+stararm-102-model = { path = "devices/stararm-102/crates/model" }
 thiserror = "2.0.20"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "sync", "net", "signal"] }
 urdf-rs = "0.9.0"

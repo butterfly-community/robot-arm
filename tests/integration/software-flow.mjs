@@ -242,7 +242,24 @@ assert.ok(
   Math.abs(pickPlaceResult.place_position_m[2] - expectedPlacePosition[2]) <=
     Number.EPSILON,
 );
-const executionPickPlace = await snapshot("arm-execution");
+const executionPickPlace = await waitFor(
+  () => snapshot("arm-execution"),
+  (state) => {
+    const model = state.values.robot_model_info;
+    const target = model.named_targets.find((item) => item.key === "work");
+    return (
+      target != null &&
+      model.joints.every(
+        (joint, index) =>
+          Math.abs(
+            state.values.arm_state.joints_rad[index] -
+              target.joint_positions_rad[joint.key],
+          ) <=
+          Math.PI / 180,
+      )
+    );
+  },
+);
 const executionModel = executionPickPlace.values.robot_model_info;
 const pickPlaceWorkTarget = executionModel.named_targets.find(
   (target) => target.key === "work",
@@ -636,6 +653,7 @@ await waitFor(
 
 const actuator = model.tool_actuators[0];
 assert.equal(model.tcp_frame, "tcp_link");
+assert.equal(model.gripper_asset_id, "stararm-102-fl");
 assert.ok(actuator, "fixture model publishes an actuator");
 const actuatorTarget = before.actuators_rad[0] + Math.PI / 36;
 const actuatorResult = await request("/api/motion/actuator", {

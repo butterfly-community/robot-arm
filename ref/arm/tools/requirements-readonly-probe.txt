@@ -1,2 +1,0 @@
-# Official low-level SDK used by the reviewed Stararm102FL wrapper.
-fashionstar-uart-sdk==1.3.12

@@ -1,7 +1,7 @@
 {
   "name": "robot-arm-services-web",
   "private": true,
-  "packageManager": "pnpm@11.24.0",
+  "packageManager": "pnpm@11.25.0",
   "scripts": {
     "format:check": "prettier --check web tests *.config.* components.json ../tests/integration/*.mjs",
     "format": "prettier --write web tests *.config.* components.json ../tests/integration/*.mjs",

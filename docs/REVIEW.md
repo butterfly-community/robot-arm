@@ -1,116 +1,54 @@
-# 最终审查结果
+# 最终审查与验收
 
-## 结论
+## 审查结论
 
-当前实现只有一条端到端业务链路。真实设备、模拟输入、真实相机和确定性测试场景只在所属
-节点的输入或驱动适配层不同；它们输出统一契约，之后共用空间转换、感知结构化、MoveIt、
-`ArmCommand` 和 execution。没有兼容入口、备用服务或模拟专用运动链路。
+当前生产系统只有一条端到端链路。真实设备、模拟输入、真实相机和确定性 RGB-D 只在所属
+节点的驱动或输入适配层不同，下游共用正式消息契约。仓库不包含完整第三方源码、历史参考树、
+备用服务、兼容入口、测试专用规划路径或运行时模型覆盖。
 
-感知、标定、抓放、RViz/KasmVNC、统一 TCP 和异步抓放请求均已接入。OpenCV 标定使用 Rust
-`opencv` crate 调用 OpenCV 5；Python 只保留在必须承载 Ultralytics/PyTorch 的远程计算服务。
+架构和服务边界只在 [当前系统设计](SUMMARY.md) 维护；逐方法职责、采用的库和手写边界只在
+[后端方法与依赖](BACKEND.md) 维护；型号事实只在
+[StarArm-102 型号适配](STARARM-102.md) 维护。
 
-## 代码边界审查
+| 审查项 | 最终状态 |
+| --- | --- |
+| 服务与消息 | Dora 节点按职责拆分；感知计算只与 `perception-node` 交互；不存在无消费者 DTO |
+| 模拟与真机 | 输入适配后共用 spatial、motion、MoveIt、`ArmCommand` 和 execution |
+| 感知与规划 | 原始点云和掩码不进入 MoveIt；MTC 只接收当前任务所需的结构化几何 |
+| 坐标 | FK、IK、抓放、附着和模型元数据统一使用 `tcp_link` |
+| 型号隔离 | StarArm-102 源码和夹爪清单集中在 `backend/devices/stararm-102`；计算服务只按请求资产 ID 工作 |
+| 调度 | motion 只有一个 FIFO 和顺序 worker；没有通用状态机、并行规划器或隐藏恢复服务 |
+| 配置 | 各服务只持久化自身 JSON；状态和反馈不写配置；串口只在用户主动刷新时枚举 |
+| 前端 | 五个 Next.js 应用共用契约、网关客户端和 UI；业务页不复制后端几何或机械臂参数 |
+| 依赖 | Rust 使用 Cargo Machete 核对无未使用 crate；前端包声明与实际 import 对齐 |
+| 镜像 | 仅 `backend-base`、`frontend-base` 声明环境；三个应用 Dockerfile 只复制和构建工程，不存在 StarArm 专用 Dockerfile、按服务/语言分层或产物搬运层 |
+| 生成物 | 夹爪资产由镜像构建自动生成；仓库只提交语义清单、正式测试资产和最终验收数据 |
 
-| 范围 | 位置 | 边界 |
-| --- | --- | --- |
-| 生产感知几何 | `backend/crates/perception-core` | 深度反投影、掩码几何、场景结构化；不导出测试源 |
-| 感知测试源 | `backend/nodes/perception/src/test_source.rs` | 生成 RGB-D、测试相机参数和 497 点云；只输出正式输入契约 |
-| 输入模拟 | `backend/nodes/controller-input/src/simulation.rs` | 生成设备无关 Action；仍走绑定、空间、motion、execution |
-| 离线测试工具 | `tools/perception` | 资产生成、计算服务探针和 ignored artifacts |
-| 标定运行时 | `perception-calibration` Rust binary | OpenCV 5 ChArUco、PnP、robot-world/hand-eye 和调试图 |
-| 模型计算 | `perception-compute-service` | YOLOE 实例分割与 GraspGenX 点云抓取候选；不读取深度、不连接 Dora/ROS/MoveIt |
+没有新增运动门限、队列上限、确认流程、保护分支或失败降级。真实失败保留原始错误，不切换
+模拟、不伪造场景，也不以额外规则猜测抓取姿态。
 
-普通单元测试使用 Rust `#[cfg(test)]`、Python `tests/`、Vitest 和 Playwright 的标准隔离方式，
-不会进入发布二进制。测试源虽然可在运行时由用户选择，但其生成逻辑与生产核心模块分开，且
-没有复制下游处理。
+## 验收范围
 
-## 唯一链路与迁移审查
+- Rust：格式、Clippy（warnings 视为错误）、全部 workspace 单元测试和 Cargo Machete。
+- Python 计算服务：Ruff、Pytest；运行镜像加载 YOLOE、GraspGenX 和 CPU PyTorch。
+- Web：Prettier、ESLint、TypeScript、Vitest、五个 Next.js 生产构建和 Playwright。
+- 部署：Compose 配置、全部镜像构建、完整 `down`/`up -d` 冷启动和健康状态。
+- 全链路：输入、空间、普通运动、感知、抓放、模型资源、配置持久化和最终状态集成测试。
+- 可视化：五个 Web 入口、执行模型、感知资源，以及 RViz/noVNC 的模型、场景与轨迹。
 
-- `controller-input → spatial-transform → stararm-102-motion → MoveIt/Servo/ros2_control →
-  ArmCommand → stararm-102-execution → ArmState` 是唯一控制链路。
-- `ROS RGB-D/确定性测试源 → perception-node → perception-compute-service → perception-node
-  → WorldScene/ROS 感知 → stararm-102-motion` 是唯一感知链路。
-- 旧 controller 深度输出、motion 点云桥、Python motion、Python/C++ 标定桥、`model.json`、
-  第二份模型目录和直接 `link6` 业务目标均已移除。
-- 感知计算可以远程部署，但只与 `perception-node` 交互；CPU/CUDA 不改变协议和下游链路。
-- 感知容器内保留相机驱动适配层；感知核心按 ROS topic/type 组合契约主动枚举来源并动态订阅，
-  不向计算服务、运动节点或网页契约传播 D415 等型号分支。
-- 未启用相机或测试源时不发布空场景；错误直接返回，不切换模型或伪造数据。
+最终冷启动后，七个 Dora daemon、协调器、感知计算和五个 Web 应用持续运行超过 7 分钟，
+未出现心跳超时、断联或重部署。Dora 关闭的是可选的跨 daemon 直连优化，跨容器数据继续走其
+官方无损 daemon 转发路径；Compose 不再维护静态 IP 或 Zenoh 全连接列表。ROS
+`arm_controller`、`hand_controller` 与 `joint_state_broadcaster` 均为 `active`，Servo 参数以
+double 载入且进程持续存活。
 
-## 坐标与 TCP 审查
+依赖审查升级到 Node 24 LTS、pnpm 11.25、Next.js 16.3.3 及当时兼容的最新直接依赖。ESLint
+保持 9.39.5、TypeScript 保持 6.0.3、Node 类型保持 24.x：分别受当前 Next/ESLint 插件 peer、
+typescript-eslint peer 与 Node 24 运行时约束，未用忽略 peer 的方式强行升级。
 
-`tcp_link` 是唯一业务 TCP，位于两侧夹爪尖端中心。MoveIt group tip、FK、IK、目标位姿、
-标定观测和模型元数据都引用 `stararm_102_model::TCP_FRAME`。`link6` 只保留为结构
-链接，73.13 mm 只用于明确的圆弧演示几何。相机内参、对齐深度、外参和 `base_link`
-转换均只处理一次。维护规则见 [StarArm-102 末端坐标](TCP.md)。
+测试点云保持 497 点并可在 RViz 独立显示，不生成 OctoMap。机械臂、抓取物、放置区域和刚性
+地面统一使用 `base_link`；抓放完成后临时任务对象被清理，Servo 与同一 PlanningScene 继续
+运行。当前型号 20 轮抓放结果见 [StarArm-102 型号适配](STARARM-102.md)。
 
-## 复杂度与重复审查
-
-- motion 只保留 FIFO 和一个顺序 worker；前一个运动未结束时后一个等待，没有通用状态机、
-  并行规划器、队列门限或永久错误状态。
-- 抓放由型号 MTC package 使用官方 stage 构造完整任务，Rust motion 只保留统一 FIFO、契约映射和
-  Action 桥接，没有额外编排服务或第二套夹爪命令。
-- 网关对长时间抓放返回 `202 Accepted`，最终结果继续从既有 manipulation 状态流返回；没有
-  HTTP 超时状态机或重复执行路径。
-- 控制绑定、空间、感知、运动和执行是五个独立网页服务；感知只使用独立
-  `/api/perception/*` 与 `/ws/perception`，迁移后的 motion 感知入口已删除。
-- WebSocket 使用客户端消费确认和 `watch` 最新值实现自然背压；高频软件反馈不再把已过期完整
-  快照堆进浏览器，也没有为此增加固定刷新周期或业务数据门限。
-- 原始点云和掩码不进入 MoveIt；MTC 只接收选中物体、非目标结构化盒障碍、显式障碍和
-  Z=0 刚性地面。放置区域来源对象按 ID 关系排除，不读取标签，也不把可能中空的检测框当成
-  实心障碍。
-- execution 是模型资源和硬件差异的唯一所有者；网页和 motion 不维护另一份参数。
-- 没有为低收益边界条件增加包装层、恢复服务、降级分支或用户未要求的保护门限。
-
-## 方法级库审查
-
-| 能力 | 使用的库/标准实现 | 保留手写部分 |
-| --- | --- | --- |
-| 消息与配置 | Dora、Arrow、Serde、json-config-store | DTO 与请求关联 |
-| 输入设备 | SDL3、hidapi、fusion-ahrs、one_euro_filter | NOLO 报告适配和 Action 绑定 |
-| 几何数学 | nalgebra、image | 场景语义、型号工具几何 |
-| 标定 | `opencv` crate、OpenCV 5 | 会话、样本和持久化 |
-| 识别与抓取候选 | Ultralytics YOLOE、GraspGenX、PyTorch、FastAPI/Pydantic | HTTP DTO 与 TCP 结果归一化 |
-| ROS 与规划 | r2r、MoveIt、MTC、Servo、ros2_control | ROS 消息边界和型号任务参数组装 |
-| 串口 | serialport、fashionstar-uart | 舵机 ID 与型号映射 |
-| Web/3D | Next.js 16、React、Radix、Three.js、Axum | 页面业务组合 |
-| 远程 GUI | RViz2、KasmVNC、Openbox | 项目 RViz 配置和最短启动脚本 |
-
-未自制 IK、碰撞检测、轨迹插值、标定求解、实例分割、VNC、数据库、状态机框架或文件摘要
-实现。最终 API 核对采用 OpenCV 5 当前 ChArUco/Calib3d API；依赖锁文件没有可用的兼容更新。
-ESLint 10 和 TypeScript 7 没有升级，因为当前 Next 插件和 typescript-eslint 的 peer 约束尚不
-兼容；这不是保留历史运行路径。
-
-## 验收结果
-
-- Rust workspace：格式、Clippy（warnings 视为错误）和全部单元/文档测试通过。
-- 标定 helper：OpenCV 5 合成 hand-eye 求解与生成 ChArUco 检测自测通过。
-- Python 计算服务：Ruff 和 Pytest 通过；Ultralytics/GraspGenX 运行镜像统一使用
-  OpenCV Python 5.0.0.93，但标定仍只由 Rust `opencv` crate 承担。
-- 前端：Prettier、ESLint、TypeScript、Vitest、五个 Next.js 16.3.3 生产构建通过。
-- 浏览器：Playwright 23 项通过；覆盖五个独立入口、感知图像资源、模式切换、绑定、三维执行
-  视图和串口主动枚举。
-- Compose：配置、全量镜像构建、冷停止/启动和服务健康检查通过。
-- 软件全链路：输入、空间、普通运动、抓放、模型资源、配置和最终状态集成测试通过。
-- 环境碰撞：点云和掩码不写入 MoveIt；MTC 只接收选中物体、非目标结构化盒障碍、显式障碍
-  和 Z=0 刚性地面，并用标准 attach/detach 表达已抓物体。
-- 感知：497 点测试云继续通过标准 PointCloud2 发布，可在 RViz 独立显示，不生成 OctoMap。
-- 运行态场景：抓放由一份完整 MTC solution 执行并返回工作位；任务临时对象完成后清理，
-  OctoMap 为空，Servo 进程保持存活并检查同一地面。
-- 执行可视化：抓放状态携带选中的物体、放置区 ID 和 motion 已计算的两个目标坐标；执行页
-  只画点，不镜像整份 `WorldScene`，也不重复计算场景几何。
-- 测试场景坐标：机械臂、抓取点和放置点均直接使用 `base_link`；确定性立方体与置物筐的
-  底面同为 Z=0，高度均为 0.08 m，底座模型最低点和渲染地面也统一为 Z=0。抓取对象中心和
-  放置区中心均为 Z=0.04 m；MTC 的 object-relative 放置语义保持已抓物体变换。
-- 规划性能：仅紧凑结构化盒进入任务场景；完整抓放无需对识别掩码或点云做碰撞查询。
-- TCP：运行时 `link6 → tcp_link` 为零平移、单位旋转，所有业务调用使用 `tcp_link`。
-- 重复性：最终 MTC 确定性场景连续 20/20 成功，每轮 1 个完整方案，最终工作位最大误差
-  0.006°；原始数据和迁移前 19/20 基线见 [抓放重复性验收](PICK_PLACE_REPEATABILITY.md)。
-- RViz/KasmVNC：浏览器入口实测可用，StarArm 模型、刚性地面、MoveIt 规划界面和 MTC 的
-  Planning scene/trajectory 面板均正常显示。
-- 真机末次复测：主机和容器均能看到 `/dev/ttyUSB0`（CH340），串口没有被其他进程占用；正式
-  执行 API 连续两次打开串口后，舵机 ID 0 均在 Ping 阶段返回 `Operation timed out`，因此没有
-  获得真实关节反馈，也没有下发运动。随后通过同一 API 取消串口选择，系统已恢复软件反馈。
-  该结果只记录外部舵机总线当时未响应的事实，没有新增门限、备用执行路径或伪造真机通过。
-
-最终实现没有新增用户未要求的运动门限、确认流程、队列限制、拒绝条件或隐藏保护数值。
+最终实际结果为 Rust 106 项、Python 1 项、Vitest 11 项全部通过，Playwright 22 项通过、1 项按
+设计跳过；五个前端生产构建、全部 Compose 镜像构建和 `software-flow` 端到端测试均通过。

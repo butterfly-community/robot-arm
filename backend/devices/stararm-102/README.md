@@ -1,0 +1,16 @@
+# StarArm-102 设备域
+
+此目录集中保存 StarArm-102 独有的实现：
+
+- `crates/model`：关节、工具执行器、命名位、模型资源和抓取描述能力；
+- `nodes/motion`、`nodes/execution`：该型号的运动与执行服务；
+- `ros2`：MoveIt、Servo 和 MTC 适配；
+- `patches`：只适用于厂家 StarArm-102 源码的补丁；
+- `graspgenx`：从最终型号模型生成夹爪资产所需的最小语义清单；
+- `docker/install-base.sh`：在后端基础镜像中一次安装本型号的厂家补丁、ROS 包和夹爪资产；
+- `docker/motion-entrypoint.sh`、`docker/rviz-index.html`：本型号运动入口和 RViz 页面。
+
+FashionStar 串口帧解析仍是可复用的厂家协议库，保留在
+`backend/crates/fashionstar-uart`。通用消息、输入、空间转换、感知、状态和网页服务不得包含
+本型号的关节数、命名位、TCP 或夹爪几何。完整型号事实与验收记录见
+[`docs/STARARM-102.md`](../../../docs/STARARM-102.md)。

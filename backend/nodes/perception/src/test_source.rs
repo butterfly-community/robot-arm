@@ -9,8 +9,7 @@ use robot_arm_messages::{
 
 use crate::ros::ros_time;
 
-const GENERATED_RGB_ASSET: &[u8] =
-    include_bytes!("../../../../tools/perception/fixtures/pick-place-scene.png");
+const GENERATED_RGB_ASSET: &[u8] = include_bytes!("../test-assets/pick-place-scene.png");
 const GENERATED_DEPTH_SOURCE_ID: &str = "generated-test-depth-scene";
 const GENERATED_DEPTH_FRAME_ID: &str = "depth_sim_frame";
 
@@ -294,7 +293,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrated_depth_fixture_is_unchanged() {
+    fn depth_grid_fixture_has_the_declared_geometry() {
         let cloud = generated_depth_test_cloud(1, 2);
         assert_eq!(cloud.points_xyz_m.len(), 497);
         assert_abs_diff_eq!(cloud.points_xyz_m[0][0], -0.1);

@@ -44,6 +44,7 @@ export interface RobotModelInfo {
   display_name: string;
   base_frame: string;
   tcp_frame: string;
+  gripper_asset_id?: string;
   joints: JointMetadata[];
   tool_actuators: ActuatorMetadata[];
   named_targets: Array<{
@@ -208,7 +209,6 @@ export interface DepthCameraSourceInfo {
   source_id: string;
   display_name: string;
   color_topic: string;
-  color_info_topic: string;
   depth_topic: string;
   depth_info_topic: string;
 }
@@ -516,8 +516,8 @@ export const inputActionCatalog = [
     actionType: "boolean",
     domains: [],
     semantics: "按下触发",
-    motion: "夹爪打开到机械角 90°",
-    invariant: "J1–J6 目标不变",
+    motion: "夹爪打开到当前机械臂模型声明的张开位置",
+    invariant: "机械臂关节目标不变",
     reference: "夹爪执行器",
     prepare: true,
   },
@@ -529,8 +529,8 @@ export const inputActionCatalog = [
     domains: [],
     directions: ["张开", "闭合"],
     semantics: "0 为张开，1 为闭合",
-    motion: "输入 0→1 对应机械角 90°→0°",
-    invariant: "J1–J6 目标不变",
+    motion: "输入 0→1 对应模型声明的张开位置→闭合位置",
+    invariant: "机械臂关节目标不变",
     reference: "夹爪执行器",
     prepare: true,
   },

@@ -420,12 +420,8 @@ export default function Page() {
             value={activeSource?.depth_topic ?? "—"}
           />
           <KeyValue
-            label="CameraInfo"
-            value={
-              activeSource
-                ? `${activeSource.color_info_topic} / ${activeSource.depth_info_topic}`
-                : "—"
-            }
+            label="对齐深度 CameraInfo"
+            value={activeSource?.depth_info_topic ?? "—"}
           />
           <KeyValue
             label="内参 K"

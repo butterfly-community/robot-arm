@@ -24,8 +24,8 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 结构化、运动学、规划和执行均没有备用业务路径。
 
 模拟和测试实现也与生产核心物理分开：输入回放在
-`backend/nodes/controller-input/src/simulation.rs`，感知测试源在
-`backend/nodes/perception/src/test_source.rs`，离线生成器与探针在 `tools/perception/`。
+`backend/nodes/controller-input/src/simulation.rs`，感知测试源和它编译期使用的固定验证图片在
+`backend/nodes/perception/src/test_source.rs` 与同节点的 `test-assets/`。
 `perception-core`、空间核心、运动学和执行节点不包含测试数据生成逻辑。
 
 ## 服务边界
@@ -35,7 +35,7 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 | `controller-input-node` | NOLO HID、SDL3、模拟输入，能力发现，输入/反馈绑定，IMU 融合 | 空间积分、相机、运动学、机械臂参数 |
 | `spatial-transform-node` | 绝对位姿换基、Action 积分、设备无关 TCP 增量 | 设备驱动、IK、串口 |
 | `perception-node` | ROS 相机接入、RGB-D 对齐消费、深度反投影、标定、场景结构化、ROS 点云/图像/Marker/TF | 模型推理、机械臂轨迹 |
-| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割、GraspGenX 点云抓取候选；CPU/CUDA 使用同一 HTTP 契约 | 深度、标定、MoveIt、Dora |
+| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割、按请求资产 ID 生成 GraspGenX 点云抓取候选；CPU/CUDA 使用同一 HTTP 契约 | 设备型号、深度、标定、MoveIt、Dora |
 | `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、MTC 抓放桥接 | 相机采集、设备输入、串口 |
 | `stararm-102-execution-node` | 软件反馈与 FashionStar UART 的同一执行契约、模型资源、真机遥测 | IK、目标位姿解释 |
 | `service-status-node` | 根据配置聚合节点主动状态与依赖 | 业务探活特例、恢复策略 |
@@ -59,8 +59,8 @@ MTC 的任务场景。
 
 | 输入 | ROS topic |
 | --- | --- |
-| 彩色图 / 内参 | `{source}/color/image_raw`、`{source}/color/camera_info` |
-| 对齐深度 / 内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
+| 彩色图 | `{source}/color/image_raw` |
+| 对齐深度 / 对齐后的内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
 
 `perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
 占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
@@ -77,18 +77,13 @@ MTC 的任务场景。
 抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`，不读取类别名称。Rust motion 从放置区域的
 `source_object_id` 和物体几何推导放置高度；被抓物体及放置区域来源对象不重复作为实心 AABB，
 其余结构化对象与显式障碍按 ID 去重后进入任务场景。Rust motion 只做场景映射、唯一 FIFO 和
-Action 状态转发；同一容器内的 StarArm-102 MTC 组件用标准 stage 一次构造并选择完整任务解，
-负责候选抓取/放置位姿、IK、接近、夹爪、attach/detach、搬运、回撤和返回工作位。执行仍经
-MoveIt、ros2_control 和唯一 `ArmCommand`。任务开始先原地打开夹爪，放置后保持打开完成回撤，
-最后回到工作位再闭合。网页显示 MTC 状态、stage、候选数和选中代价；RViz 的 Motion Planning
-Tasks 面板显示候选、失败 stage 和选中轨迹。
+Action 状态转发；型号 MTC 组件用标准 stage 一次构造并选择完整任务解，负责候选位姿、IK、
+接近、工具动作、attach/detach、搬运、回撤和返回。执行仍经 MoveIt、ros2_control 和唯一
+`ArmCommand`。网页与 RViz 显示任务状态、候选、失败 stage 和选中轨迹。
 
-MTC 框架本身与机械臂和相机设备无关；当前 `stararm_102_mtc` package 只封装该型号的规划组、
-TCP、夹爪关节和命名工作位。换机械臂时替换这一薄型号配置，`WorldScene`、抓放请求与感知计算
-契约不变。
-
-GraspGenX 的 StarArm-102 夹爪扫描体和 URDF 由 `tools/graspgenx` 从固定厂商提交应用项目模型
-patch 后导出。生产场景不硬编码抓取姿态；相同点云以可配置推理种子产生可复现候选。
+每个机械臂适配器提供自己的规划组、TCP、工具关节、命名位与 GraspGenX 资产清单；构建时从
+最终 URDF 自动生成资产，运行请求只携带通用资产 ID。感知计算和抓放契约不读取型号参数。
+当前适配见 [StarArm-102 型号适配](STARARM-102.md)。
 
 ## 标定
 
@@ -104,20 +99,11 @@ patch 后导出。生产场景不硬编码抓取姿态；相同点云以可配�
 应用结果后，真实相机帧、点云、`WorldScene` 与 TF 使用同一份外参。标定板变换只参与标定，
 不得作为正常抓放的 TCP 补偿。
 
-## TCP 与机械臂模型
+## 机械臂适配
 
-StarArm-102 的业务末端只有 `tcp_link`。它在 URDF 中通过零变换固定到结构链接 `link6`，
-当前位置是两侧夹爪尖端中心。MoveIt group、FK/IK 和抓放目标全部使用
-`stararm_102_model::TCP_FRAME`。73.13 mm 只用于夹爪转轴圆弧演示，不是工具偏移。完整维护
-规则见 [StarArm-102 末端坐标](TCP.md)。
-
-厂家源码固定在提交 `5979b346eb3a417840b29b76740754e4005d071a`。J3 轴向、关节范围、夹爪
-范围、TCP 和 ROS 2 打包修正只存在于 `backend/patches/star-arm-102-fl-moveit-model.patch`；
-构建和 GraspGenX 导出都先对干净提交应用该 patch，不维护运行时模型覆盖。
-
-默认位为 J1–J6 全 0°；工作位为 J3=60°、J4=60°，其余关节为 0°。两者都携带夹爪闭合目标。夹爪
-`primary_tool=0` 表示张开 90°，`1` 表示闭合 0°。J1–J6 与工具执行器在模型中分栏，但经
-同一命令、同一执行节点完成。
+机械臂独有的 URDF 补丁、TCP、关节方向、命名位、工具映射和规划参数都归属型号 model、
+motion、MTC 与 execution 边界，不进入输入、空间、感知或网页共享契约。当前实现集中记录于
+[StarArm-102 型号适配](STARARM-102.md)。
 
 ## 输入与空间语义
 
@@ -137,7 +123,7 @@ docker compose down
 ```
 
 - Web：`http://192.168.100.10:8765`
-- RViz/KasmVNC：`http://192.168.100.10:6080`
+- RViz/noVNC：`http://192.168.100.10:6080`
 
 Compose 使用私有 bridge network，只映射这两个入口。配置持久化于
 `backend/config/runtime/*.json`。串口只在执行页点击“刷新串口”时枚举。
@@ -156,4 +142,4 @@ docker compose up -d
 node tests/integration/software-flow.mjs
 ```
 
-测试工具和生成物位于 `tools/`。过程缓存和生成的 RGB-D artifacts 不提交。
+诊断和记录工具位于 `tools/`；运行缓存和中间产物不提交。

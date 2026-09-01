@@ -1,0 +1,26 @@
+[package]
+name = "stararm-102-motion-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["ros-doc-only"]
+ros-doc-only = ["dep:r2r", "r2r/doc-only"]
+ros-runtime = ["dep:r2r"]
+
+[dependencies]
+dora-node-api.workspace = true
+eyre.workspace = true
+futures.workspace = true
+json-config-store.workspace = true
+nalgebra.workspace = true
+r2r = { workspace = true, optional = true }
+robot-arm-messages.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stararm-102-model.workspace = true
+
+[dev-dependencies]
+approx.workspace = true

@@ -30,7 +30,7 @@ json-config-store.workspace = true
 nalgebra.workspace = true
 opencv = { workspace = true, optional = true }
 perception-core.workspace = true
-r2r = { version = "0.9.5", default-features = false, optional = true }
+r2r = { workspace = true, optional = true }
 reqwest.workspace = true
 robot-arm-messages.workspace = true
 serde.workspace = true

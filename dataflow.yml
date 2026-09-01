@@ -4,7 +4,7 @@ debug:
 
 nodes:
   - id: controller-input-node
-    path: /opt/robot-arm/bin/controller-input-node
+    path: /src/target/release/controller-input-node
     restart_policy: on-failure
     deploy:
       machine: controller-input
@@ -33,7 +33,7 @@ nodes:
       - simulation_request_result
 
   - id: perception-node
-    path: /opt/robot-arm/bin/perception-node
+    path: /src/target/release/perception-node
     restart_policy: on-failure
     deploy:
       machine: perception
@@ -54,6 +54,7 @@ nodes:
         source: stararm-102-motion-node/motion_state
         queue_size: 1
         queue_policy: drop_oldest
+      robot_model_info: stararm-102-execution-node/robot_model_info
     outputs:
       - perception_state
       - world_scene
@@ -64,7 +65,7 @@ nodes:
       - service_state
 
   - id: spatial-transform-node
-    path: /opt/robot-arm/bin/spatial-transform-node
+    path: /src/target/release/spatial-transform-node
     deploy:
       machine: spatial-transform
     inputs:
@@ -86,7 +87,7 @@ nodes:
       - request_result
 
   - id: stararm-102-motion-node
-    path: /opt/robot-arm/bin/stararm-102-motion-node
+    path: /src/target/release/stararm-102-motion-node
     deploy:
       machine: stararm-102-motion
     inputs:
@@ -129,7 +130,7 @@ nodes:
       - manipulation_request_result
 
   - id: stararm-102-execution-node
-    path: /opt/robot-arm/bin/stararm-102-execution-node
+    path: /src/target/release/stararm-102-execution-node
     deploy:
       machine: stararm-102-execution
     inputs:
@@ -155,7 +156,7 @@ nodes:
       - request_result
 
   - id: service-status-node
-    path: /opt/robot-arm/bin/service-status-node
+    path: /src/target/release/service-status-node
     deploy:
       machine: service-status
     inputs:
@@ -168,7 +169,7 @@ nodes:
       - system_readiness
 
   - id: web-gateway-node
-    path: /opt/robot-arm/bin/web-gateway-node
+    path: /src/target/release/web-gateway-node
     deploy:
       machine: web-gateway
     inputs:

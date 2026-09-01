@@ -1,9 +1,0 @@
-[package]
-name = "fashionstar-uart"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-description = "FashionStar UART packet protocol and serial bus"
-
-[dependencies]
-serialport = { version = "4.8", default-features = false }

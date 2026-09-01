@@ -1,0 +1,40 @@
+diff --git a/cv_bridge/CMakeLists.txt b/cv_bridge/CMakeLists.txt
+index c47ea15..4366040 100644
+--- a/cv_bridge/CMakeLists.txt
++++ b/cv_bridge/CMakeLists.txt
+@@ -39,22 +39,13 @@ find_package(rclcpp REQUIRED)
+ find_package(rcpputils REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ 
+-find_package(OpenCV 4 QUIET
++find_package(OpenCV 5 REQUIRED
+   COMPONENTS
+     opencv_core
+     opencv_imgproc
+     opencv_imgcodecs
+   CONFIG
+ )
+-if(NOT OpenCV_FOUND)
+-  find_package(OpenCV 3 REQUIRED
+-    COMPONENTS
+-      opencv_core
+-      opencv_imgproc
+-      opencv_imgcodecs
+-    CONFIG
+-  )
+-endif()
+ 
+ if(NOT CV_BRIDGE_DISABLE_PYTHON)
+   ament_python_install_package(${PROJECT_NAME}
+diff --git a/cv_bridge/include/cv_bridge/cv_bridge.hpp b/cv_bridge/include/cv_bridge/cv_bridge.hpp
+index 50b8e00..64ee18f 100644
+--- a/cv_bridge/include/cv_bridge/cv_bridge.hpp
++++ b/cv_bridge/include/cv_bridge/cv_bridge.hpp
+@@ -42,7 +42,6 @@
+ #include <sensor_msgs/image_encodings.hpp>
+ #include <opencv2/core/core.hpp>
+ #include <opencv2/imgproc/imgproc.hpp>
+-#include <opencv2/imgproc/types_c.h>
+ #include <cv_bridge/cv_bridge_export.h>
+ 
+ #include <memory>

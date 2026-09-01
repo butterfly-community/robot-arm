@@ -1,0 +1,22 @@
+{
+  "descriptors": [
+    {
+      "id": "stararm-102-fl",
+      "source_urdf": "ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf",
+      "source_package_root": "ROS2_HUMBLE/src/stararm102_description",
+      "source_base_link": "link6",
+      "tcp_link": "tcp_link",
+      "finger_joints": ["joint7_left", "joint7_right"],
+      "open": {
+        "joint7_left": 1.5707963267948966,
+        "joint7_right": -1.5707963267948966
+      },
+      "close": {
+        "joint7_left": 0.0,
+        "joint7_right": 0.0
+      },
+      "type": "revolute_2f",
+      "symmetric": true
+    }
+  ]
+}
