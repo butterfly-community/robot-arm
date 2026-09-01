@@ -119,6 +119,7 @@ export default function Page() {
         : null,
     });
     if (action === "reset") setDepthScale("");
+    if (action === "disconnect") setSourceId("");
   }
 
   async function pickPlace() {

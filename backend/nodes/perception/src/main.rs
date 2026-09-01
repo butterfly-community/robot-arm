@@ -700,6 +700,7 @@ impl PerceptionNode {
             }
             RequestAction::Cancel | RequestAction::Disconnect => {
                 next.enabled = false;
+                next.source_id = None;
                 Ok(())
             }
             action => Err(eyre!(
@@ -1300,6 +1301,13 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_configuration_has_no_selected_camera() {
+        let config = PerceptionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.source_id, None);
+    }
 
     #[test]
     fn graspgenx_tcp_pose_is_already_in_base_frame() {
