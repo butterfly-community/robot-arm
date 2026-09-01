@@ -91,6 +91,7 @@ fn main() -> Result<()> {
                 let input = id.as_str();
                 if (input.ends_with("request_result")
                     || input == "model_asset_response"
+                    || input == "perception_asset_response"
                     || input == "actuator_status")
                     && let Some(request_id) = value.get("request_id").and_then(Value::as_str)
                     && let Some(sender) = pending.remove(request_id)
@@ -116,13 +117,19 @@ fn main() -> Result<()> {
 
 impl AppState {
     fn new(requests: mpsc::Sender<OutgoingRequest>) -> Self {
-        let channels = ["tracking", "spatial", "motion", "arm-execution"]
-            .into_iter()
-            .map(|name| {
-                let (sender, _) = watch::channel(String::new());
-                (name.to_owned(), sender)
-            })
-            .collect();
+        let channels = [
+            "tracking",
+            "spatial",
+            "perception",
+            "motion",
+            "arm-execution",
+        ]
+        .into_iter()
+        .map(|name| {
+            let (sender, _) = watch::channel(String::new());
+            (name.to_owned(), sender)
+        })
+        .collect();
         Self {
             snapshots: Arc::new(Mutex::new(BTreeMap::new())),
             sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -195,15 +202,15 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "motion_state"
         | "motion_status"
         | "motion_request_result"
-        | "manipulation_state"
-        | "manipulation_request_result"
         | "actuator_status"
-        | "mode_request_result"
-        | "perception_state"
+        | "mode_request_result" => Some("motion"),
+        "perception_state"
         | "world_scene"
         | "perception_request_result"
         | "calibration_state"
-        | "calibration_request_result" => Some("motion"),
+        | "calibration_request_result"
+        | "manipulation_state"
+        | "manipulation_request_result" => Some("perception"),
         "execution_info"
         | "transport_state"
         | "execution_service_state"
@@ -215,8 +222,9 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
 
 fn mirrored_namespaces(input: &str) -> &'static [&'static str] {
     match input {
-        "arm_state" => &["motion"],
-        "robot_model_info" | "motion_state" | "manipulation_state" => &["arm-execution"],
+        "arm_state" => &["motion", "perception"],
+        "robot_model_info" | "motion_state" => &["arm-execution", "perception"],
+        "manipulation_state" => &["arm-execution"],
         _ => &[],
     }
 }
@@ -233,6 +241,15 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/spatial/state", get(snapshot_spatial))
         .route("/api/spatial/config", patch(request_spatial_config))
         .route("/api/spatial/snapshot", post(request_spatial_snapshot))
+        .route("/api/perception/state", get(snapshot_perception))
+        .route("/api/perception/request", post(request_perception))
+        .route("/api/perception/calibration", post(request_calibration))
+        .route("/api/perception/pick-place", post(request_pick_place))
+        .route(
+            "/api/perception/snapshot",
+            post(request_perception_snapshot),
+        )
+        .route("/api/perception/assets/{key}", get(perception_asset))
         .route("/api/motion/state", get(snapshot_motion))
         .route("/api/motion/mode", post(request_mode))
         .route(
@@ -242,12 +259,6 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/motion/request", post(request_motion))
         .route("/api/motion/cancel", post(request_motion))
         .route("/api/motion/actuator", post(request_actuator))
-        .route("/api/motion/pick-place", post(request_pick_place))
-        .route("/api/motion/perception", post(request_perception))
-        .route(
-            "/api/motion/perception/calibration",
-            post(request_calibration),
-        )
         .route("/api/motion/snapshot", post(request_motion_snapshot))
         .route("/api/motion/assets/{*path}", get(model_asset))
         .route("/api/arm-execution/state", get(snapshot_execution))
@@ -262,6 +273,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         )
         .route("/ws/tracking", get(ws_tracking))
         .route("/ws/spatial", get(ws_spatial))
+        .route("/ws/perception", get(ws_perception))
         .route("/ws/motion", get(ws_motion))
         .route("/ws/arm-execution", get(ws_execution))
         .with_state(state);
@@ -285,6 +297,7 @@ macro_rules! snapshot_handler {
 snapshot_handler!(snapshot_system, "system");
 snapshot_handler!(snapshot_tracking, "tracking");
 snapshot_handler!(snapshot_spatial, "spatial");
+snapshot_handler!(snapshot_perception, "perception");
 snapshot_handler!(snapshot_motion, "motion");
 snapshot_handler!(snapshot_execution, "arm-execution");
 
@@ -415,13 +428,10 @@ async fn request_spatial_snapshot(State(s): State<AppState>) -> Response {
     fire(s, "spatial_snapshot").await
 }
 async fn request_motion_snapshot(State(s): State<AppState>) -> Response {
-    let motion = fire(s.clone(), "motion_snapshot").await;
-    let perception = fire(s, "perception_snapshot").await;
-    if motion.status().is_success() && perception.status().is_success() {
-        StatusCode::ACCEPTED.into_response()
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE.into_response()
-    }
+    fire(s, "motion_snapshot").await
+}
+async fn request_perception_snapshot(State(s): State<AppState>) -> Response {
+    fire(s, "perception_snapshot").await
 }
 async fn request_execution_snapshot(State(s): State<AppState>) -> Response {
     fire(s, "execution_snapshot").await
@@ -445,6 +455,40 @@ async fn model_asset(State(state): State<AppState>, Path(path): Path<String>) ->
         "relative_path": path,
     });
     let response = forward_value(state, "model_asset_request", body).await;
+    let Some(content) = response.get("content").and_then(Value::as_array) else {
+        return (StatusCode::NOT_FOUND, Json(response)).into_response();
+    };
+    let bytes = content
+        .iter()
+        .filter_map(Value::as_u64)
+        .map(|value| value as u8)
+        .collect::<Vec<_>>();
+    let mime = response
+        .get("mime_type")
+        .and_then(Value::as_str)
+        .unwrap_or("application/octet-stream");
+    let mut result = bytes.into_response();
+    if let Ok(value) = HeaderValue::from_str(mime) {
+        result.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    result
+}
+
+async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>) -> Response {
+    let request_id = format!(
+        "perception-asset-{}-{key}",
+        state.request_sequence.fetch_add(1, Ordering::Relaxed)
+    );
+    let response = forward_value(
+        state,
+        "perception_asset_request",
+        json!({
+            "schema_version": SCHEMA_VERSION,
+            "request_id": request_id,
+            "asset_key": key,
+        }),
+    )
+    .await;
     let Some(content) = response.get("content").and_then(Value::as_array) else {
         return (StatusCode::NOT_FOUND, Json(response)).into_response();
     };
@@ -497,6 +541,7 @@ macro_rules! ws_handler {
 }
 ws_handler!(ws_tracking, "tracking");
 ws_handler!(ws_spatial, "spatial");
+ws_handler!(ws_perception, "perception");
 ws_handler!(ws_motion, "motion");
 ws_handler!(ws_execution, "arm-execution");
 
@@ -512,15 +557,18 @@ async fn websocket(mut socket: WebSocket, state: AppState, namespace: &'static s
     {
         return;
     }
+    let mut ready = false;
     loop {
         tokio::select! {
-            changed = receiver.changed() => {
+            changed = receiver.changed(), if ready => {
                 if changed.is_err() { break; }
                 let update = receiver.borrow_and_update().clone();
                 if socket.send(Message::Text(update.into())).await.is_err() { break; }
+                ready = false;
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(Message::Text(message))) if message.as_str() == "next" => ready = true,
                 _ => {}
             },
         }
@@ -568,9 +616,15 @@ mod tests {
     }
     #[test]
     fn model_feedback_and_target_state_are_available_to_both_robot_pages() {
-        assert_eq!(mirrored_namespaces("arm_state"), ["motion"]);
-        assert_eq!(mirrored_namespaces("robot_model_info"), ["arm-execution"]);
-        assert_eq!(mirrored_namespaces("motion_state"), ["arm-execution"]);
+        assert_eq!(mirrored_namespaces("arm_state"), ["motion", "perception"]);
+        assert_eq!(
+            mirrored_namespaces("robot_model_info"),
+            ["arm-execution", "perception"]
+        );
+        assert_eq!(
+            mirrored_namespaces("motion_state"),
+            ["arm-execution", "perception"]
+        );
         assert_eq!(mirrored_namespaces("manipulation_state"), ["arm-execution"]);
         assert!(mirrored_namespaces("world_scene").is_empty());
         assert!(mirrored_namespaces("absolute_pose").is_empty());

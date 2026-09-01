@@ -6,6 +6,7 @@ RUN corepack enable && corepack prepare pnpm@11.24.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/apps/arm-execution/package.json web/apps/arm-execution/package.json
 COPY web/apps/motion/package.json web/apps/motion/package.json
+COPY web/apps/perception/package.json web/apps/perception/package.json
 COPY web/apps/spatial/package.json web/apps/spatial/package.json
 COPY web/apps/tracking/package.json web/apps/tracking/package.json
 COPY web/packages/contracts/package.json web/packages/contracts/package.json
@@ -16,7 +17,7 @@ RUN pnpm install --frozen-lockfile
 COPY web web
 RUN pnpm -r --filter './web/apps/*' build
 RUN set -eu; \
-    for app in tracking spatial motion arm-execution; do \
+    for app in tracking spatial perception motion arm-execution; do \
       destination="/runtime/$app"; \
       mkdir -p "$destination/web/apps/$app/.next"; \
       cp -a "web/apps/$app/.next/standalone/." "$destination/"; \

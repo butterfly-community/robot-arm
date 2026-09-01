@@ -44,6 +44,7 @@ nodes:
         queue_policy: drop_oldest
       request: web-gateway-node/perception_request
       calibration_request: web-gateway-node/calibration_request
+      asset_request: web-gateway-node/perception_asset_request
       snapshot: web-gateway-node/perception_snapshot
       arm_state:
         source: stararm-102-execution-node/arm_state
@@ -59,6 +60,7 @@ nodes:
       - request_result
       - calibration_state
       - calibration_request_result
+      - asset_response
       - service_state
 
   - id: spatial-transform-node
@@ -188,6 +190,7 @@ nodes:
       perception_request_result: perception-node/request_result
       calibration_state: perception-node/calibration_state
       calibration_request_result: perception-node/calibration_request_result
+      perception_asset_response: perception-node/asset_response
       spatial_pose:
         source: spatial-transform-node/spatial_pose
         queue_size: 1
@@ -229,6 +232,7 @@ nodes:
       - perception_snapshot
       - perception_request
       - calibration_request
+      - perception_asset_request
       - spatial_snapshot
       - update_spatial_config_request
       - motion_snapshot

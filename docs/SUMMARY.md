@@ -50,12 +50,17 @@ MTC 的任务场景。
 
 ## 感知与抓放
 
-真实相机使用 ROS 主线已经发布的彩色图、对齐到彩色的深度图和 CameraInfo。当前订阅接口为：
+感知容器内的相机适配层负责启动首个 RealSense ROS 驱动；感知核心只使用 ROS 主线已经发布的
+彩色图、对齐到彩色的深度图和 CameraInfo。网页主动刷新时，节点从 ROS topic/type 图发现所有
+满足以下组合契约的来源，连接多个已发布来源时可按来源 ID 选择：
+
+相机驱动是 `perception-node` 的内部设备适配层，不另设相机采集服务；型号差异止于该适配层，
+结构化感知、远程计算和运动节点只接收统一契约。
 
 | 输入 | ROS topic |
 | --- | --- |
-| 彩色图 / 内参 | `/camera/camera/color/image_raw`、`/camera/camera/color/camera_info` |
-| 对齐深度 / 内参 | `/camera/camera/aligned_depth_to_color/image_raw`、`/camera/camera/aligned_depth_to_color/camera_info` |
+| 彩色图 / 内参 | `{source}/color/image_raw`、`{source}/color/camera_info` |
+| 对齐深度 / 内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
 
 `perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
 占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
@@ -69,12 +74,18 @@ MTC 的任务场景。
 - `generated:depth-grid`：497 点测试云，用于 RViz 点云输入验收，不进入 MoveIt
   规划场景。
 
-抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`。Rust motion 只做场景映射、唯一 FIFO 和
+抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`，不读取类别名称。Rust motion 从放置区域的
+`source_object_id` 和物体几何推导放置高度；被抓物体及放置区域来源对象不重复作为实心 AABB，
+其余结构化对象与显式障碍按 ID 去重后进入任务场景。Rust motion 只做场景映射、唯一 FIFO 和
 Action 状态转发；同一容器内的 StarArm-102 MTC 组件用标准 stage 一次构造并选择完整任务解，
 负责候选抓取/放置位姿、IK、接近、夹爪、attach/detach、搬运、回撤和返回工作位。执行仍经
 MoveIt、ros2_control 和唯一 `ArmCommand`。任务开始先原地打开夹爪，放置后保持打开完成回撤，
 最后回到工作位再闭合。网页显示 MTC 状态、stage、候选数和选中代价；RViz 的 Motion Planning
 Tasks 面板显示候选、失败 stage 和选中轨迹。
+
+MTC 框架本身与机械臂和相机设备无关；当前 `stararm_102_mtc` package 只封装该型号的规划组、
+TCP、夹爪关节和命名工作位。换机械臂时替换这一薄型号配置，`WorldScene`、抓放请求与感知计算
+契约不变。
 
 GraspGenX 的 StarArm-102 夹爪扫描体和 URDF 由 `tools/graspgenx` 从固定厂商提交应用项目模型
 patch 后导出。生产场景不硬编码抓取姿态；相同点云以可配置推理种子产生可复现候选。

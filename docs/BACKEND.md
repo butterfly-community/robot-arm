@@ -59,13 +59,16 @@ GraspGenX 仓库声明。
 ## `perception-node`
 
 `PerceptionNode::apply_request()` 持久化启用状态、来源、模型类别和计算服务地址。每次应用
-配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后
-遗留占据数据。`tick()` 处理 ROS 帧或只发布一次确定性场景。
+配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后遗留占据数据。
+`apply_request()` 的 `Refresh` 分支只响应网页主动刷新；它从 ROS topic/type 图枚举成组的彩色
+图、对齐深度和两份 CameraInfo。`tick()` 处理所选 ROS 来源或只发布一次确定性场景。
 
 ### 相机和测试输入
 
-`RosInterface::start()` 订阅 ROS 主线的彩色图、彩色 CameraInfo、对齐深度图和对应
-CameraInfo。真实场景只在彩色、对齐深度、内参和已应用外参同时存在时进入
+感知容器内的首个设备适配器启动 ROS `realsense2_camera`；它只负责把 RealSense 系列相机
+发布为标准 ROS 接口。`RosInterface::discover_cameras()` 不依赖相机型号，而是从 ROS 图发现
+任意符合 RGB-D 组合契约的来源；`select_camera()` 切换动态订阅，来源切换后旧帧会按来源 ID
+丢弃。真实场景只在彩色、对齐深度、内参和已应用外参同时存在时进入
 `process_camera_scene()`。测试来源复用后续全部处理：
 
 - `generated:pick-place-scene` 把固定 RGB 送入真实计算服务，用返回掩码填充确定性深度；
@@ -115,7 +118,9 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 
 `ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性、
 PlanningScene 和型号 MTC Action。普通关节请求仍由 MoveGroup 执行；抓放只把选中的结构化
-几何映射到强类型 MTC goal，不含手写 IK 或 stage 推进。`stararm_102_mtc` 使用标准
+几何映射到强类型 MTC goal，不含手写 IK 或 stage 推进。被抓对象和放置区域的来源对象按
+契约 ID 排除，其他结构化对象及显式障碍按 ID 去重后映射为紧凑 AABB；代码不读取类别名称。
+`stararm_102_mtc` 使用标准
 `GeneratePose`、`GeneratePlacePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect`
 和 `ModifyPlanningScene`，整条方案规划成功后通过官方 `ExecuteTaskSolution` capability 执行。
 原始点云、掩码和凸包不进入规划。厂家网格未替换；底座 visual/collision 最低点与 Z=0 刚性
@@ -158,16 +163,22 @@ Docker stage、OpenSCAD 脚本、URDF 补丁和生成目录均已删除，当前
 
 `service-status-node` 从 JSON 读取服务和依赖，只聚合主动 `ServiceState`。没有业务节点
 硬编码、超时门限或恢复分支。`web-gateway-node` 使用 Axum 转发 HTTP/WebSocket 与 Dora
-消息，不解释轴数、设备或感知语义。
+消息，不解释轴数、设备或感知语义。WebSocket 每次发送最新快照后等待客户端确认已消费，再从
+`watch` channel 取得当时最新值；高频反馈不会在代理和浏览器之间累积旧快照，也没有固定刷新
+频率或丢弃业务消息的数值门限。
 
-共享网页客户端按浏览器动画帧合并实时快照。只有采集页“采集频率”文字每秒重算一次；后端
+共享网页客户端按浏览器动画帧合并实时快照。只有控制绑定页“采集频率”文字每秒重算一次；后端
 采样、输入测试、位姿、关节反馈和感知不受这个显示节拍限制。
+
+网页按职责拆为控制绑定、空间转换、场景感知、机械臂运动和机械臂执行五个 Next.js 服务。
+感知页使用独立 `/api/perception/*` 与 `/ws/perception`，图片资源按需读取，不塞入实时状态；
+运动页只保留相对、手动和感知三种模式及型号运动接口。
 
 ## ROS 与 RViz 接口
 
 | 用途 | ROS 接口 |
 | --- | --- |
-| 真实相机输入 | `/camera/camera/color/*`、`/camera/camera/aligned_depth_to_color/*` |
+| 真实相机输入 | `{所选来源}/color/*`、`{所选来源}/aligned_depth_to_color/*` |
 | 标准感知输出 | `/perception/color/*`、`/perception/depth/*` |
 | 分割/标定调试 | `/perception/debug/segmentation`、`/perception/debug/calibration` |
 | 场景说明 | `/perception/debug/markers` |

@@ -254,6 +254,11 @@ private:
       lift->setDirection(direction(goal.frame_id, 1.0));
       pick->insert(std::move(lift));
 
+      auto restore_ground = std::make_unique<mtc::stages::ModifyPlanningScene>(
+          "restore ground collision after lift");
+      restore_ground->allowCollisions(goal.object_id, kGroundId, false);
+      pick->insert(std::move(restore_ground));
+
       pick_stage = pick.get();
       task.add(std::move(pick));
     }

@@ -328,6 +328,14 @@ impl MotionNode {
     }
 
     fn handle_motion_request(&mut self, node: &mut DoraNode, request: MotionRequest) -> Result<()> {
+        if self.config.control_mode != ControlMode::Manual {
+            return self.fail_motion(
+                node,
+                request.request_id,
+                "普通关节运动只在手动控制模式接受".into(),
+                RequestAction::Apply,
+            );
+        }
         if request.action != RequestAction::Apply {
             return self.fail_motion(
                 node,
@@ -483,6 +491,23 @@ impl MotionNode {
         node: &mut DoraNode,
         request: ToolActuatorRequest,
     ) -> Result<()> {
+        if self.config.control_mode != ControlMode::Manual {
+            let request_id = request.request_id.clone();
+            self.actuator_status = Some(ToolActuatorStatus {
+                schema_version: SCHEMA_VERSION,
+                request_id,
+                actuator_key: request.actuator_key,
+                state: RequestState::Failed,
+                result_code: None,
+                result_message: Some("夹爪手动命令只在手动控制模式接受".into()),
+            });
+            send(
+                node,
+                "actuator_status",
+                self.actuator_status.as_ref().expect("assigned above"),
+            )?;
+            return self.publish_state(node);
+        }
         if request.model_revision != MODEL_REVISION
             || request.actuator_key != GRIPPER_KEY
             || !request.position_rad.is_finite()
@@ -524,6 +549,16 @@ impl MotionNode {
 
     fn handle_pick_place(&mut self, node: &mut DoraNode, request: PickPlaceRequest) -> Result<()> {
         let request_id = request.request_id.clone();
+        if self.config.control_mode != ControlMode::Perception {
+            self.manipulation_state = ManipulationTaskState {
+                request_id,
+                state: RequestState::Failed,
+                original_error: Some("抓放任务只在感知控制模式接受".into()),
+                ..idle_manipulation_state()
+            };
+            send(node, "manipulation_state", &self.manipulation_state)?;
+            return self.send_manipulation_result(node);
+        }
         let result = self
             .latest_scene
             .as_ref()
@@ -997,6 +1032,25 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         })
     };
     let size = |[x, y, z]: [f64; 3]| json!({"x": x, "y": y, "z": z});
+    let support = placement
+        .source_object_id
+        .as_deref()
+        .and_then(|id| scene.objects.iter().find(|item| item.object_id == id));
+    let mut placement_pose = placement.pose.clone();
+    if let Some(support) = support {
+        placement_pose.position_m[2] =
+            support.pose.position_m[2] + support.size_m[2] / 2.0 + object.size_m[2] / 2.0;
+    }
+    let mut obstacles = BTreeMap::new();
+    for item in scene.objects.iter().filter(|item| {
+        item.object_id != object.object_id
+            && Some(item.object_id.as_str()) != placement.source_object_id.as_deref()
+    }) {
+        obstacles.insert(item.object_id.clone(), (item.pose.clone(), item.size_m));
+    }
+    for item in &scene.obstacles {
+        obstacles.insert(item.obstacle_id.clone(), (item.pose.clone(), item.size_m));
+    }
     let goal = json!({
         "request_id": request.request_id,
         "frame_id": scene.frame_id,
@@ -1005,11 +1059,11 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         "object_size": size(object.size_m),
         "grasp_poses": object.grasp_candidates.iter().map(pose).collect::<Vec<_>>(),
         "placement_region_id": placement.region_id,
-        "placement_pose": pose(&placement.pose),
+        "placement_pose": pose(&placement_pose),
         "placement_size": size(placement.size_m),
-        "obstacle_ids": scene.obstacles.iter().map(|item| item.obstacle_id.clone()).collect::<Vec<_>>(),
-        "obstacle_poses": scene.obstacles.iter().map(|item| pose(&item.pose)).collect::<Vec<_>>(),
-        "obstacle_sizes": scene.obstacles.iter().map(|item| size(item.size_m)).collect::<Vec<_>>(),
+        "obstacle_ids": obstacles.keys().cloned().collect::<Vec<_>>(),
+        "obstacle_poses": obstacles.values().map(|(item, _)| pose(item)).collect::<Vec<_>>(),
+        "obstacle_sizes": obstacles.values().map(|(_, item)| size(*item)).collect::<Vec<_>>(),
     });
     Ok(PendingManipulation {
         job: ManipulationJob {
@@ -1022,7 +1076,7 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
             object_id: Some(object.object_id.clone()),
             placement_region_id: Some(placement.region_id.clone()),
             pick_position_m: Some(object.pose.position_m),
-            place_position_m: Some(placement.pose.position_m),
+            place_position_m: Some(placement_pose.position_m),
             state: RequestState::Planning,
             stage: Some("等待 MTC 规划".into()),
             solution_count: None,
@@ -1085,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn mtc_goal_maps_the_selected_scene_geometry_without_cartesian_offsets() {
+    fn mtc_goal_maps_generic_scene_geometry_and_support_surface() {
         let pose = Pose3 {
             position_m: [0.1, 0.2, 0.02],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -1095,23 +1149,36 @@ mod tests {
             sequence: 1,
             sample_time_ns: 2,
             frame_id: "base_link".into(),
-            objects: vec![SceneObject {
-                object_id: "cube".into(),
-                label: "cube".into(),
-                pose: pose.clone(),
-                size_m: [0.04; 3],
-                confidence: 1.0,
-                grasp_candidates: vec![pose.clone()],
-            }],
+            objects: vec![
+                SceneObject {
+                    object_id: "selected".into(),
+                    label: "arbitrary target".into(),
+                    pose: pose.clone(),
+                    size_m: [0.04; 3],
+                    confidence: 1.0,
+                    grasp_candidates: vec![pose.clone()],
+                },
+                SceneObject {
+                    object_id: "support".into(),
+                    label: "arbitrary support".into(),
+                    pose: Pose3 {
+                        position_m: [-0.1, 0.2, 0.04],
+                        orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    },
+                    size_m: [0.08, 0.08, 0.08],
+                    confidence: 1.0,
+                    grasp_candidates: vec![],
+                },
+            ],
             placement_regions: vec![PlacementRegion {
-                region_id: "bin".into(),
-                label: "bin".into(),
+                region_id: "destination".into(),
+                label: "arbitrary destination".into(),
                 pose: Pose3 {
                     position_m: [-0.1, 0.2, 0.04],
                     orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
                 },
                 size_m: [0.08, 0.08, 0.08],
-                source_object_id: None,
+                source_object_id: Some("support".into()),
             }],
             obstacles: vec![],
         };
@@ -1120,14 +1187,15 @@ mod tests {
             PickPlaceRequest {
                 schema_version: SCHEMA_VERSION,
                 request_id: "request".into(),
-                object_id: "cube".into(),
-                placement_region_id: "bin".into(),
+                object_id: "selected".into(),
+                placement_region_id: "destination".into(),
             },
         )
         .unwrap();
         assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
         assert_eq!(pending.job.goal["object_size"]["z"], 0.04);
+        assert_eq!(pending.job.goal["obstacle_ids"], json!([]));
         assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));
-        assert_eq!(pending.state.place_position_m, Some([-0.1, 0.2, 0.04]));
+        assert_eq!(pending.state.place_position_m, Some([-0.1, 0.2, 0.1]));
     }
 }

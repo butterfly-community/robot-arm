@@ -6,7 +6,8 @@ export const virtualFeedbackTarget = {
 
 export type Json =
   null | boolean | number | string | Json[] | { [key: string]: Json };
-export type Namespace = "tracking" | "spatial" | "motion" | "arm-execution";
+export type Namespace =
+  "tracking" | "spatial" | "perception" | "motion" | "arm-execution";
 export type RequestAction =
   | "apply"
   | "cancel"
@@ -100,7 +101,7 @@ export interface ToolPose {
 }
 
 export interface MotionState {
-  control_mode: "relative" | "manual";
+  control_mode: "relative" | "manual" | "perception";
   current_tool_pose?: ToolPose | null;
   target_tool_pose?: ToolPose | null;
 }
@@ -203,6 +204,72 @@ export type InputSimulationItem =
 
 export type PerceptionSourceKind = "camera" | "generated_test_scene";
 
+export interface DepthCameraSourceInfo {
+  source_id: string;
+  display_name: string;
+  color_topic: string;
+  color_info_topic: string;
+  depth_topic: string;
+  depth_info_topic: string;
+}
+
+export interface ImageFrameInfo {
+  width: number;
+  height: number;
+  encoding: string;
+  frame_id: string;
+}
+
+export interface DepthCameraCalibration {
+  schema_version: number;
+  sequence: number;
+  source_time_ns: number;
+  source_id: string;
+  parent_frame_id: string;
+  frame_id: string;
+  translation_m: [number, number, number];
+  orientation_xyzw: [number, number, number, number];
+  width: number;
+  height: number;
+  distortion_model: string;
+  distortion: number[];
+  camera_matrix: [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  projection_matrix: [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+}
+
+export interface PerceptionInstanceSummary {
+  instance_id: string;
+  label: string;
+  confidence: number;
+  bounding_box_xyxy: [number, number, number, number];
+  position_m?: [number, number, number] | null;
+  size_m?: [number, number, number] | null;
+  grasp_candidate_count: number;
+}
+
 export interface PerceptionState {
   schema_version: number;
   enabled: boolean;
@@ -212,6 +279,13 @@ export interface PerceptionState {
   model: string;
   classes: string[];
   placement_labels: string[];
+  available_sources: DepthCameraSourceInfo[];
+  color_frame?: ImageFrameInfo | null;
+  depth_frame?: ImageFrameInfo | null;
+  camera_calibration?: DepthCameraCalibration | null;
+  depth_scale_m: number;
+  instances: PerceptionInstanceSummary[];
+  point_count?: number | null;
   last_frame_time_ns?: number | null;
   last_scene_sequence?: number | null;
   calibrated: boolean;

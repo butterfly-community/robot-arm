@@ -393,6 +393,35 @@ pub enum PerceptionSourceKind {
     GeneratedTestScene,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DepthCameraSourceInfo {
+    pub source_id: String,
+    pub display_name: String,
+    pub color_topic: String,
+    pub color_info_topic: String,
+    pub depth_topic: String,
+    pub depth_info_topic: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageFrameInfo {
+    pub width: u32,
+    pub height: u32,
+    pub encoding: String,
+    pub frame_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerceptionInstanceSummary {
+    pub instance_id: String,
+    pub label: String,
+    pub confidence: f64,
+    pub bounding_box_xyxy: [f64; 4],
+    pub position_m: Option<[f64; 3]>,
+    pub size_m: Option<[f64; 3]>,
+    pub grasp_candidate_count: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PerceptionState {
     pub schema_version: u32,
@@ -404,11 +433,37 @@ pub struct PerceptionState {
     pub classes: Vec<String>,
     #[serde(default)]
     pub placement_labels: Vec<String>,
+    #[serde(default)]
+    pub available_sources: Vec<DepthCameraSourceInfo>,
+    pub color_frame: Option<ImageFrameInfo>,
+    pub depth_frame: Option<ImageFrameInfo>,
+    pub camera_calibration: Option<DepthCameraCalibration>,
+    pub depth_scale_m: f64,
+    #[serde(default)]
+    pub instances: Vec<PerceptionInstanceSummary>,
+    pub point_count: Option<u64>,
     pub last_frame_time_ns: Option<i64>,
     pub last_scene_sequence: Option<u64>,
     pub calibrated: bool,
     pub original_error: Option<String>,
     pub service: ServiceState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerceptionAssetRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub asset_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerceptionAssetResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub asset_key: String,
+    pub mime_type: Option<String>,
+    pub content: Option<Vec<u8>>,
+    pub original_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1023,6 +1078,7 @@ pub struct ToolActuatorStatus {
 pub enum ControlMode {
     Relative,
     Manual,
+    Perception,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

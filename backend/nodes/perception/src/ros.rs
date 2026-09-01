@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -11,19 +12,23 @@ use std::{
 use eyre::{Context, Result};
 use futures::{StreamExt, executor::block_on};
 use r2r::{Context as RosContext, Node, Publisher, QosProfile};
+use robot_arm_messages::DepthCameraSourceInfo;
 use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame, WorldScene};
 
 const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 #[derive(Debug)]
 pub enum RosEvent {
-    Color(r2r::sensor_msgs::msg::Image),
-    ColorInfo(r2r::sensor_msgs::msg::CameraInfo),
-    Depth(r2r::sensor_msgs::msg::Image),
-    DepthInfo(r2r::sensor_msgs::msg::CameraInfo),
+    Color(String, r2r::sensor_msgs::msg::Image),
+    ColorInfo(String, r2r::sensor_msgs::msg::CameraInfo),
+    Depth(String, r2r::sensor_msgs::msg::Image),
+    DepthInfo(String, r2r::sensor_msgs::msg::CameraInfo),
 }
 
 pub struct RosInterface {
+    node: Arc<Mutex<Node>>,
+    event_sender: Sender<RosEvent>,
+    subscribed_sources: Arc<Mutex<BTreeSet<String>>>,
     color_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
     color_info_publisher: Publisher<r2r::sensor_msgs::msg::CameraInfo>,
     depth_publisher: Publisher<r2r::sensor_msgs::msg::Image>,
@@ -58,34 +63,20 @@ impl RosInterface {
             node.create_publisher("/perception/debug/calibration", QosProfile::sensor_data())?;
         let static_tf_publisher =
             node.create_publisher("/tf_static", QosProfile::default().transient_local())?;
-        let color = node.subscribe("/camera/camera/color/image_raw", QosProfile::sensor_data())?;
-        let color_info = node.subscribe(
-            "/camera/camera/color/camera_info",
-            QosProfile::sensor_data(),
-        )?;
-        let depth = node.subscribe(
-            "/camera/camera/aligned_depth_to_color/image_raw",
-            QosProfile::sensor_data(),
-        )?;
-        let depth_info = node.subscribe(
-            "/camera/camera/aligned_depth_to_color/camera_info",
-            QosProfile::sensor_data(),
-        )?;
-        forward_stream(color, event_sender.clone(), RosEvent::Color);
-        forward_stream(color_info, event_sender.clone(), RosEvent::ColorInfo);
-        forward_stream(depth, event_sender.clone(), RosEvent::Depth);
-        forward_stream(depth_info, event_sender.clone(), RosEvent::DepthInfo);
-        drop(event_sender);
-
         let node = Arc::new(Mutex::new(node));
+        let spin_node = Arc::clone(&node);
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                node.lock()
+                spin_node
+                    .lock()
                     .expect("ROS perception node mutex poisoned")
                     .spin_once(Duration::from_millis(10));
             }
         });
         Ok(Self {
+            node,
+            event_sender,
+            subscribed_sources: Arc::new(Mutex::new(BTreeSet::new())),
             color_publisher,
             color_info_publisher,
             depth_publisher,
@@ -96,6 +87,72 @@ impl RosInterface {
             calibration_debug_publisher,
             static_tf_publisher,
         })
+    }
+
+    pub fn discover_cameras(&self) -> Result<Vec<DepthCameraSourceInfo>> {
+        const DEPTH_SUFFIX: &str = "/aligned_depth_to_color/image_raw";
+        let topics = self
+            .node
+            .lock()
+            .expect("ROS perception node mutex poisoned")
+            .get_topic_names_and_types()?;
+        let names = topics.keys().cloned().collect::<BTreeSet<_>>();
+        let mut sources = Vec::new();
+        for depth_topic in names.iter().filter(|name| name.ends_with(DEPTH_SUFFIX)) {
+            let source_id = depth_topic.trim_end_matches(DEPTH_SUFFIX).to_owned();
+            let source = camera_source(source_id);
+            if names.contains(&source.color_topic)
+                && names.contains(&source.color_info_topic)
+                && names.contains(&source.depth_info_topic)
+            {
+                sources.push(source);
+            }
+        }
+        Ok(sources)
+    }
+
+    pub fn select_camera(&self, source: &DepthCameraSourceInfo) -> Result<()> {
+        let mut selected = self
+            .subscribed_sources
+            .lock()
+            .expect("ROS camera subscription mutex poisoned");
+        if !selected.insert(source.source_id.clone()) {
+            return Ok(());
+        }
+        let mut node = self
+            .node
+            .lock()
+            .expect("ROS perception node mutex poisoned");
+        let color = node.subscribe(&source.color_topic, QosProfile::sensor_data())?;
+        let color_info = node.subscribe(&source.color_info_topic, QosProfile::sensor_data())?;
+        let depth = node.subscribe(&source.depth_topic, QosProfile::sensor_data())?;
+        let depth_info = node.subscribe(&source.depth_info_topic, QosProfile::sensor_data())?;
+        drop(node);
+        let id = source.source_id.clone();
+        forward_stream(color, self.event_sender.clone(), {
+            let id = id.clone();
+            move |message| RosEvent::Color(id.clone(), message)
+        });
+        forward_stream(color_info, self.event_sender.clone(), {
+            let id = id.clone();
+            move |message| RosEvent::ColorInfo(id.clone(), message)
+        });
+        forward_stream(depth, self.event_sender.clone(), {
+            let id = id.clone();
+            move |message| RosEvent::Depth(id.clone(), message)
+        });
+        forward_stream(depth_info, self.event_sender.clone(), move |message| {
+            RosEvent::DepthInfo(id.clone(), message)
+        });
+        Ok(())
+    }
+
+    pub fn select_camera_id(&self, source_id: &str) -> Result<()> {
+        self.select_camera(&camera_source(source_id.to_owned()))
+    }
+
+    pub fn camera_source_info(source_id: &str) -> DepthCameraSourceInfo {
+        camera_source(source_id.to_owned())
     }
 
     pub fn publish_color(&self, message: r2r::sensor_msgs::msg::Image) -> Result<()> {
@@ -325,10 +382,22 @@ impl RosInterface {
     }
 }
 
+fn camera_source(source_id: String) -> DepthCameraSourceInfo {
+    let display_name = source_id.trim_start_matches('/').replace('/', " / ");
+    DepthCameraSourceInfo {
+        color_topic: format!("{source_id}/color/image_raw"),
+        color_info_topic: format!("{source_id}/color/camera_info"),
+        depth_topic: format!("{source_id}/aligned_depth_to_color/image_raw"),
+        depth_info_topic: format!("{source_id}/aligned_depth_to_color/camera_info"),
+        source_id,
+        display_name,
+    }
+}
+
 fn forward_stream<T: Send + 'static>(
     mut stream: impl futures::Stream<Item = T> + Unpin + Send + 'static,
     sender: Sender<RosEvent>,
-    wrap: fn(T) -> RosEvent,
+    wrap: impl Fn(T) -> RosEvent + Send + 'static,
 ) {
     thread::spawn(move || {
         block_on(async move {

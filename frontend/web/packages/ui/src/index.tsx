@@ -254,10 +254,11 @@ export function RangeControls({
 }
 
 const navigation = [
-  ["/tracking/", "采集", "Input", "01"],
+  ["/tracking/", "控制绑定", "Bindings", "01"],
   ["/spatial/", "空间", "Spatial", "02"],
-  ["/motion/", "运动", "Motion", "03"],
-  ["/arm-execution/", "执行", "Execution", "04"],
+  ["/perception/", "感知", "Perception", "03"],
+  ["/motion/", "运动", "Motion", "04"],
+  ["/arm-execution/", "执行", "Execution", "05"],
 ] as const;
 
 function VirtualFeedbackOverlay() {

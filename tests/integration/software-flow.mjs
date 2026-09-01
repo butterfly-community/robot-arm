@@ -45,6 +45,7 @@ async function observeMotionRequest(requestId, run) {
     socket.onerror = reject;
   });
   socket.onmessage = (event) => {
+    socket.send("next");
     const snapshot = JSON.parse(event.data);
     const status = snapshot.values?.motion_status;
     if (status?.request_id === requestId) states.add(status.state);
@@ -65,7 +66,7 @@ async function observeMotionRequest(requestId, run) {
 }
 
 async function observeManipulation(requestId, run) {
-  const socket = new WebSocket(`${websocketBase}/ws/motion`);
+  const socket = new WebSocket(`${websocketBase}/ws/perception`);
   await new Promise((resolve, reject) => {
     socket.onopen = resolve;
     socket.onerror = reject;
@@ -73,6 +74,7 @@ async function observeManipulation(requestId, run) {
   try {
     const terminal = new Promise((resolve, reject) => {
       socket.onmessage = (event) => {
+        socket.send("next");
         const state = JSON.parse(event.data).values?.manipulation_state;
         if (state?.request_id !== requestId) return;
         if (state.state === "succeeded") resolve(state);
@@ -91,7 +93,13 @@ async function observeManipulation(requestId, run) {
   }
 }
 
-for (const page of ["tracking", "spatial", "motion", "arm-execution"]) {
+for (const page of [
+  "tracking",
+  "spatial",
+  "perception",
+  "motion",
+  "arm-execution",
+]) {
   const response = await waitFor(
     () => fetch(`${base}/${page}/`),
     (value) => value.ok,
@@ -130,9 +138,11 @@ const tracking = await waitFor(
   () => snapshot("tracking"),
   (state) => state.namespace === "tracking",
 );
-const motionBeforePerception = await snapshot("motion");
-const originalPerception = motionBeforePerception.values.perception_state;
-const perceptionEnabled = await request("/api/motion/perception", {
+const perceptionBefore = await snapshot("perception");
+const originalPerception = perceptionBefore.values.perception_state;
+const originalPerceptionConfigVersion =
+  originalPerception?.service?.config_version ?? 0;
+const perceptionEnabled = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-enable",
   action: "apply",
@@ -142,28 +152,59 @@ const perceptionEnabled = await request("/api/motion/perception", {
   placement_labels: ["gray storage bin"],
 });
 assert.equal(perceptionEnabled.original_error, null);
-await waitFor(
-  () => snapshot("motion"),
+const readyPerceptionSnapshot = await waitFor(
+  () => snapshot("perception"),
   (state) =>
     state.values.perception_state?.enabled === true &&
     state.values.perception_state?.source_kind === "generated_test_scene" &&
+    state.values.perception_state?.source_id === "generated:pick-place-scene" &&
+    state.values.perception_state?.service?.config_version >
+      originalPerceptionConfigVersion &&
+    state.values.perception_state?.last_scene_sequence != null &&
+    state.values.perception_state.last_scene_sequence ===
+      state.values.world_scene?.sequence &&
     state.values.world_scene?.objects?.some(
       (object) =>
         object.label === "red cube" && object.grasp_candidates.length > 0,
     ) &&
     state.values.world_scene?.placement_regions?.length === 1,
 );
-const perceptionScene = (await snapshot("motion")).values.world_scene;
+const perceptionScene = readyPerceptionSnapshot.values.world_scene;
+const perceptionSnapshot = readyPerceptionSnapshot;
+assert.equal(perceptionSnapshot.values.perception_state.color_frame.width, 640);
+assert.equal(
+  perceptionSnapshot.values.perception_state.depth_frame.height,
+  480,
+);
+assert.equal(
+  typeof perceptionSnapshot.values.perception_state.point_count,
+  "number",
+);
+for (const asset of ["color.png", "overlay.png", "depth.png"]) {
+  const response = await fetch(`${base}/api/perception/assets/${asset}`);
+  assert.equal(response.ok, true, `perception asset ${asset}`);
+  assert.match(response.headers.get("content-type") ?? "", /^image\/png/);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assert.deepEqual(
+    Array.from(bytes.slice(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
+}
 const graspable = perceptionScene.objects.find(
   (object) => object.grasp_candidates.length > 0,
 );
 const placementRegion = perceptionScene.placement_regions[0];
 assert.ok(graspable, "generated perception scene has a graspable object");
 assert.ok(placementRegion, "generated perception scene has a placement region");
+await request("/api/motion/mode", {
+  schema_version: 3,
+  request_id: "integration-perception-mode",
+  mode: "perception",
+});
 const pickPlaceResult = await observeManipulation(
   "integration-pick-place",
   () =>
-    request("/api/motion/pick-place", {
+    request("/api/perception/pick-place", {
       schema_version: 3,
       request_id: "integration-pick-place",
       object_id: graspable.object_id,
@@ -181,10 +222,17 @@ assert.deepEqual(pickPlaceResult.pick_position_m, [
   graspable.pose.position_m[1],
   graspable.pose.position_m[2],
 ]);
+const placementSupport = perceptionScene.objects.find(
+  (object) => object.object_id === placementRegion.source_object_id,
+);
 const expectedPlacePosition = [
   placementRegion.pose.position_m[0],
   placementRegion.pose.position_m[1],
-  placementRegion.pose.position_m[2],
+  placementSupport
+    ? placementSupport.pose.position_m[2] +
+      placementSupport.size_m[2] / 2 +
+      graspable.size_m[2] / 2
+    : placementRegion.pose.position_m[2],
 ];
 assert.deepEqual(
   pickPlaceResult.place_position_m.slice(0, 2),
@@ -233,7 +281,7 @@ assert.deepEqual(
   executionPickPlace.values.manipulation_state.place_position_m,
   pickPlaceResult.place_position_m,
 );
-await request("/api/motion/perception", {
+await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-stop",
   action: "disconnect",
@@ -243,11 +291,11 @@ await request("/api/motion/perception", {
   placement_labels: null,
 });
 await waitFor(
-  () => snapshot("motion"),
+  () => snapshot("perception"),
   (state) => state.values.perception_state?.enabled === false,
 );
 if (originalPerception?.enabled) {
-  await request("/api/motion/perception", {
+  await request("/api/perception/request", {
     schema_version: 3,
     request_id: "integration-perception-restore",
     action: "apply",
@@ -503,6 +551,11 @@ const motion = await waitFor(
 );
 const model = motion.values.robot_model_info;
 const before = motion.values.arm_state;
+await request("/api/motion/mode", {
+  schema_version: 3,
+  request_id: "integration-manual-mode",
+  mode: "manual",
+});
 assert.equal(model.joints.length, before.joints_rad.length);
 const moved = [...before.joints_rad];
 moved[0] += Math.PI / 36;

@@ -15,8 +15,9 @@ test.beforeEach(async ({ request }) => {
 });
 
 const pages = [
-  ["tracking", "输入采集"],
+  ["tracking", "手动控制绑定"],
   ["spatial", "空间转换"],
+  ["perception", "场景感知"],
   ["motion", "机械臂运动"],
   ["arm-execution", "机械臂执行"],
 ] as const;
@@ -29,7 +30,7 @@ for (const [path, title] of pages) {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`/${path}/`);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
-    await expect(page.getByRole("navigation").getByRole("link")).toHaveCount(4);
+    await expect(page.getByRole("navigation").getByRole("link")).toHaveCount(5);
     const card = page.locator("section.card").first();
     const toggle = card.locator(".card-toggle");
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -436,23 +437,21 @@ test("tracking page persists a custom input device name", async ({
   }
 });
 
-test("motion perception uses the generated RGB-D source through the canonical path", async ({
+test("perception page uses the generated RGB-D source through the canonical path", async ({
   page,
   request,
 }) => {
-  const before = await (await request.get("/api/motion/state")).json();
+  const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
   try {
-    await page.goto("/motion/");
+    await page.goto("/perception/");
     await page.getByRole("button", { name: "测试 RGB-D 场景" }).click();
-    await expect(page.getByText("已启用", { exact: true })).toBeVisible();
-    await expect(
-      page.getByText("red cube · 可抓取", { exact: true }),
-    ).toBeVisible();
+    await expect(page.getByText("运行", { exact: true })).toBeVisible();
+    await expect(page.getByText("red cube", { exact: true })).toBeVisible();
     await page.reload();
-    await expect(page.getByText("已启用", { exact: true })).toBeVisible();
+    await expect(page.getByText("运行", { exact: true })).toBeVisible();
   } finally {
-    await request.post("/api/motion/perception", {
+    await request.post("/api/perception/request", {
       data: {
         schema_version: 3,
         request_id: "browser-perception-stop",
@@ -463,7 +462,7 @@ test("motion perception uses the generated RGB-D source through the canonical pa
       },
     });
     if (original?.enabled)
-      await request.post("/api/motion/perception", {
+      await request.post("/api/perception/request", {
         data: {
           schema_version: 3,
           request_id: "browser-perception-restore",
@@ -596,7 +595,7 @@ test("execution viewer shows the selected pick and placement points only during 
   page,
   request,
 }) => {
-  const before = await (await request.get("/api/motion/state")).json();
+  const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
   try {
     await request.post("/api/arm-execution/disconnect", {
@@ -607,7 +606,7 @@ test("execution viewer shows the selected pick and placement points only during 
         fields: {},
       },
     });
-    await request.post("/api/motion/perception", {
+    await request.post("/api/perception/request", {
       data: {
         schema_version: 3,
         request_id: "browser-pick-points-scene",
@@ -620,7 +619,9 @@ test("execution viewer shows the selected pick and placement points only during 
     await expect
       .poll(
         async () => {
-          const state = await (await request.get("/api/motion/state")).json();
+          const state = await (
+            await request.get("/api/perception/state")
+          ).json();
           return state.values.world_scene;
         },
         { timeout: 30_000 },
@@ -633,16 +634,23 @@ test("execution viewer shows the selected pick and placement points only during 
         ]),
         placement_regions: expect.arrayContaining([expect.any(Object)]),
       });
-    const state = await (await request.get("/api/motion/state")).json();
+    const state = await (await request.get("/api/perception/state")).json();
     const currentScene = state.values.world_scene;
     const object = currentScene.objects.find(
       (candidate: { grasp_candidates: unknown[] }) =>
         candidate.grasp_candidates.length > 0,
     );
     const placement = currentScene.placement_regions[0];
+    await request.post("/api/motion/mode", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-mode",
+        mode: "perception",
+      },
+    });
     await page.goto("/arm-execution/");
     const viewer = page.getByLabel("机械臂三维反馈与目标预览");
-    const response = await request.post("/api/motion/pick-place", {
+    const response = await request.post("/api/perception/pick-place", {
       data: {
         schema_version: 3,
         request_id: "browser-pick-points",
@@ -656,7 +664,19 @@ test("execution viewer shows the selected pick and placement points only during 
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "true");
     await expect(viewer).toHaveAttribute("data-pick-point-z", "0.040");
-    await expect(viewer).toHaveAttribute("data-place-point-z", "0.040");
+    const support = currentScene.objects.find(
+      (candidate: { object_id: string }) =>
+        candidate.object_id === placement.source_object_id,
+    );
+    const expectedPlaceZ = support
+      ? support.pose.position_m[2] +
+        support.size_m[2] / 2 +
+        object.size_m[2] / 2
+      : placement.pose.position_m[2];
+    await expect(viewer).toHaveAttribute(
+      "data-place-point-z",
+      expectedPlaceZ.toFixed(3),
+    );
     await expect
       .poll(
         async () => {
@@ -676,7 +696,7 @@ test("execution viewer shows the selected pick and placement points only during 
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "false");
   } finally {
-    await request.post("/api/motion/perception", {
+    await request.post("/api/perception/request", {
       data: original?.enabled
         ? {
             schema_version: 3,
@@ -764,6 +784,13 @@ test("motion named target is submitted by the metadata-driven page", async ({
   const previousRequest = before.values.motion_state.latest_motion.request_id;
   const originalMode = before.values.motion_state.control_mode;
   try {
+    await request.post("/api/motion/mode", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-named-target-manual-mode",
+        mode: "manual",
+      },
+    });
     await request.post("/api/motion/actuator", {
       data: {
         schema_version: 3,
@@ -837,6 +864,7 @@ test("motion actuator slider submits and restores a software command", async ({
     })
     .toBe(true);
   await page.goto("/motion/");
+  await page.getByRole("button", { name: "手动控制" }).click();
   const slider = page.locator('input[type="range"]').last();
   await expect(slider).toBeVisible();
   const original = Number(await slider.inputValue());
@@ -883,6 +911,13 @@ test("motion actuator slider submits and restores a software command", async ({
     const current = await (
       await request.get("/api/arm-execution/state")
     ).json();
+    await request.post("/api/motion/mode", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-actuator-restore-manual-mode",
+        mode: "manual",
+      },
+    });
     await request.post("/api/motion/actuator", {
       data: {
         schema_version: 3,

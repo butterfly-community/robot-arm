@@ -548,9 +548,9 @@ export default function Page() {
 
   return (
     <Shell
-      section="01 / INPUT ACQUISITION"
-      title="输入采集"
-      description="连接输入设备，选择位置与姿态来源，并把实际按钮和轴绑定为设备无关的功能动作。"
+      section="01 / MANUAL CONTROL BINDINGS"
+      title="手动控制绑定"
+      description="发现输入设备，选择位置与姿态能力，把按钮和轴绑定为设备无关的控制动作，并测试或模拟输入。"
     >
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">

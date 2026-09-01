@@ -33,6 +33,8 @@
 - 旧 controller 深度输出、motion 点云桥、Python motion、Python/C++ 标定桥、`model.json`、
   第二份模型目录和直接 `link6` 业务目标均已移除。
 - 感知计算可以远程部署，但只与 `perception-node` 交互；CPU/CUDA 不改变协议和下游链路。
+- 感知容器内保留相机驱动适配层；感知核心按 ROS topic/type 组合契约主动枚举来源并动态订阅，
+  不向计算服务、运动节点或网页契约传播 D415 等型号分支。
 - 未启用相机或测试源时不发布空场景；错误直接返回，不切换模型或伪造数据。
 
 ## 坐标与 TCP 审查
@@ -50,7 +52,13 @@
   Action 桥接，没有额外编排服务或第二套夹爪命令。
 - 网关对长时间抓放返回 `202 Accepted`，最终结果继续从既有 manipulation 状态流返回；没有
   HTTP 超时状态机或重复执行路径。
-- 原始点云和掩码不进入 MoveIt；MTC 只接收选中物体、结构化盒障碍和 Z=0 刚性地面。
+- 控制绑定、空间、感知、运动和执行是五个独立网页服务；感知只使用独立
+  `/api/perception/*` 与 `/ws/perception`，迁移后的 motion 感知入口已删除。
+- WebSocket 使用客户端消费确认和 `watch` 最新值实现自然背压；高频软件反馈不再把已过期完整
+  快照堆进浏览器，也没有为此增加固定刷新周期或业务数据门限。
+- 原始点云和掩码不进入 MoveIt；MTC 只接收选中物体、非目标结构化盒障碍、显式障碍和
+  Z=0 刚性地面。放置区域来源对象按 ID 关系排除，不读取标签，也不把可能中空的检测框当成
+  实心障碍。
 - execution 是模型资源和硬件差异的唯一所有者；网页和 motion 不维护另一份参数。
 - 没有为低收益边界条件增加包装层、恢复服务、降级分支或用户未要求的保护门限。
 
@@ -79,12 +87,13 @@ ESLint 10 和 TypeScript 7 没有升级，因为当前 Next 插件和 typescript
 - 标定 helper：OpenCV 5 合成 hand-eye 求解与生成 ChArUco 检测自测通过。
 - Python 计算服务：Ruff 和 Pytest 通过；Ultralytics/GraspGenX 运行镜像统一使用
   OpenCV Python 5.0.0.93，但标定仍只由 Rust `opencv` crate 承担。
-- 前端：Prettier、ESLint、TypeScript、Vitest、四个 Next.js 16.3.3 生产构建通过。
-- 浏览器：Playwright 21 项通过。
+- 前端：Prettier、ESLint、TypeScript、Vitest、五个 Next.js 16.3.3 生产构建通过。
+- 浏览器：Playwright 23 项通过；覆盖五个独立入口、感知图像资源、模式切换、绑定、三维执行
+  视图和串口主动枚举。
 - Compose：配置、全量镜像构建、冷停止/启动和服务健康检查通过。
 - 软件全链路：输入、空间、普通运动、抓放、模型资源、配置和最终状态集成测试通过。
-- 环境碰撞：点云和掩码不写入 MoveIt；MTC 只接收选中物体、结构化盒障碍和 Z=0 刚性地面，
-  并用标准 attach/detach 表达已抓物体。
+- 环境碰撞：点云和掩码不写入 MoveIt；MTC 只接收选中物体、非目标结构化盒障碍、显式障碍
+  和 Z=0 刚性地面，并用标准 attach/detach 表达已抓物体。
 - 感知：497 点测试云继续通过标准 PointCloud2 发布，可在 RViz 独立显示，不生成 OctoMap。
 - 运行态场景：抓放由一份完整 MTC solution 执行并返回工作位；任务临时对象完成后清理，
   OctoMap 为空，Servo 进程保持存活并检查同一地面。
@@ -95,7 +104,7 @@ ESLint 10 和 TypeScript 7 没有升级，因为当前 Next 插件和 typescript
   放置区中心均为 Z=0.04 m；MTC 的 object-relative 放置语义保持已抓物体变换。
 - 规划性能：仅紧凑结构化盒进入任务场景；完整抓放无需对识别掩码或点云做碰撞查询。
 - TCP：运行时 `link6 → tcp_link` 为零平移、单位旋转，所有业务调用使用 `tcp_link`。
-- 重复性：最终 MTC 确定性场景连续 20/20 成功，每轮 7 个完整方案，最终工作位最大误差
+- 重复性：最终 MTC 确定性场景连续 20/20 成功，每轮 1 个完整方案，最终工作位最大误差
   0.006°；原始数据和迁移前 19/20 基线见 [抓放重复性验收](PICK_PLACE_REPEATABILITY.md)。
 - RViz/KasmVNC：浏览器入口实测可用，StarArm 模型、刚性地面、MoveIt 规划界面和 MTC 的
   Planning scene/trajectory 面板均正常显示。

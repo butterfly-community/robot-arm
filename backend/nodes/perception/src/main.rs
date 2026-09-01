@@ -2,6 +2,7 @@ mod ros;
 mod test_source;
 
 use std::{
+    collections::BTreeMap,
     io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -25,9 +26,11 @@ use perception_core::{
 };
 use robot_arm_messages::{
     AlignedDepthFrame, ArmState, CalibrationAction, CalibrationObservation, CalibrationRequest,
-    CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DetectedInstance2D,
-    MotionState, PerceptionRequest, PerceptionSourceKind, PerceptionState, Pose3, RequestAction,
-    RequestResult, SCHEMA_VERSION, ServiceState, ToolPose, WorldScene, from_arrow, to_arrow,
+    CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DepthCameraSourceInfo,
+    DetectedInstance2D, ImageFrameInfo, MotionState, PerceptionAssetRequest,
+    PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionSourceKind,
+    PerceptionState, Pose3, RequestAction, RequestResult, SCHEMA_VERSION, ServiceState, ToolPose,
+    WorldScene, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +104,13 @@ struct PerceptionNode {
     sequence: u64,
     last_frame_time_ns: Option<i64>,
     last_scene: Option<WorldScene>,
+    available_sources: Vec<DepthCameraSourceInfo>,
+    color_frame: Option<ImageFrameInfo>,
+    depth_frame: Option<ImageFrameInfo>,
+    camera_calibration: Option<DepthCameraCalibration>,
+    instances: Vec<PerceptionInstanceSummary>,
+    point_count: Option<u64>,
+    assets: BTreeMap<String, (String, Vec<u8>)>,
     last_error: Option<String>,
     generated_published: bool,
     calibration_color: Option<r2r::sensor_msgs::msg::Image>,
@@ -191,6 +201,19 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/config/perception.json"));
     let config = load_config(&config_path)?;
+    let available_sources = config
+        .source_id
+        .as_deref()
+        .filter(|_| config.source_kind == Some(PerceptionSourceKind::Camera))
+        .map(RosInterface::camera_source_info)
+        .into_iter()
+        .collect();
+    if config.enabled
+        && config.source_kind == Some(PerceptionSourceKind::Camera)
+        && let Some(source_id) = config.source_id.as_deref()
+    {
+        ros.select_camera_id(source_id)?;
+    }
     let mut perception = PerceptionNode {
         config_path,
         config,
@@ -201,6 +224,13 @@ fn run() -> Result<()> {
         sequence: 0,
         last_frame_time_ns: None,
         last_scene: None,
+        available_sources,
+        color_frame: None,
+        depth_frame: None,
+        camera_calibration: None,
+        instances: vec![],
+        point_count: None,
+        assets: BTreeMap::new(),
         last_error: None,
         generated_published: false,
         calibration_color: None,
@@ -215,6 +245,9 @@ fn run() -> Result<()> {
                 "request" => perception.apply_request(&mut node, from_arrow(data.as_array())?)?,
                 "calibration_request" => {
                     perception.apply_calibration_request(&mut node, from_arrow(data.as_array())?)?
+                }
+                "asset_request" => {
+                    perception.send_asset(&mut node, from_arrow(data.as_array())?)?
                 }
                 "arm_state" => {
                     perception.latest_arm_state = Some(from_arrow(data.as_array())?);
@@ -236,6 +269,10 @@ fn run() -> Result<()> {
 }
 
 impl PerceptionNode {
+    fn selected_camera(&self, source_id: &str) -> bool {
+        self.config.source_id.as_deref() == Some(source_id)
+    }
+
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
         while let Ok(event) = self.ros_events.try_recv() {
             if let Err(error) = self.handle_ros_event(node, event) {
@@ -259,23 +296,24 @@ impl PerceptionNode {
             return Ok(());
         }
         match event {
-            RosEvent::Color(message) => {
+            RosEvent::Color(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_color(message.clone())?;
                 self.calibration_color = Some(message.clone());
                 self.frames.color = Some(message);
             }
-            RosEvent::ColorInfo(message) => {
+            RosEvent::ColorInfo(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_color_info(message.clone())?;
                 self.frames.color_info = Some(message);
             }
-            RosEvent::Depth(message) => {
+            RosEvent::Depth(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_depth(message.clone())?;
                 self.frames.depth = Some(message);
             }
-            RosEvent::DepthInfo(message) => {
+            RosEvent::DepthInfo(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_depth_info(message.clone())?;
                 self.frames.depth_info = Some(message);
             }
+            _ => return Ok(()),
         }
         if self.frames.color.is_some()
             && self.frames.depth.is_some()
@@ -295,15 +333,13 @@ impl PerceptionNode {
         let calibration = camera_calibration(info, &self.config)?;
         self.ros.publish_calibration(&calibration)?;
         let instances = self.segment(&color)?;
-        self.ros
-            .publish_segmentation(segmentation_debug_image(&color, &instances)?)?;
+        let overlay = segmentation_debug_image(&color, &instances)?;
+        self.ros.publish_segmentation(overlay.clone())?;
         self.sequence += 1;
-        self.ros.publish_cloud(aligned_obstacle_point_cloud(
-            self.sequence,
-            &aligned_depth,
-            &calibration,
-            &instances,
-        )?)?;
+        let cloud =
+            aligned_obstacle_point_cloud(self.sequence, &aligned_depth, &calibration, &instances)?;
+        self.point_count = Some(cloud.points_xyz_m.len() as u64);
+        self.ros.publish_cloud(cloud)?;
         let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
             self.sequence,
             &aligned_depth,
@@ -312,6 +348,14 @@ impl PerceptionNode {
             &self.config.placement_labels,
         )?;
         self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
+        self.store_frame_details(
+            &color,
+            &aligned_depth,
+            &overlay,
+            &calibration,
+            &instances,
+            &scene,
+        )?;
         self.last_frame_time_ns = Some(aligned_depth.source_time_ns);
         self.publish_scene(node, scene)
     }
@@ -399,8 +443,10 @@ impl PerceptionNode {
         if self.config.source_id.as_deref() == Some("generated:depth-grid") {
             let calibration = generated_depth_test_calibration(self.sequence, now);
             self.ros.publish_calibration(&calibration)?;
-            self.ros
-                .publish_cloud(generated_depth_test_cloud(self.sequence, now))?;
+            let cloud = generated_depth_test_cloud(self.sequence, now);
+            self.point_count = Some(cloud.points_xyz_m.len() as u64);
+            self.camera_calibration = Some(calibration);
+            self.ros.publish_cloud(cloud)?;
             self.last_frame_time_ns = Some(now);
             self.generated_published = true;
             return Ok(());
@@ -412,14 +458,11 @@ impl PerceptionNode {
         let instances = self.segment(&color)?;
         fill_generated_depth_from_instances(&mut depth, &instances)?;
         self.ros.publish_depth(depth_image(&depth))?;
-        self.ros
-            .publish_segmentation(segmentation_debug_image(&color, &instances)?)?;
-        self.ros.publish_cloud(aligned_obstacle_point_cloud(
-            self.sequence,
-            &depth,
-            &calibration,
-            &instances,
-        )?)?;
+        let overlay = segmentation_debug_image(&color, &instances)?;
+        self.ros.publish_segmentation(overlay.clone())?;
+        let cloud = aligned_obstacle_point_cloud(self.sequence, &depth, &calibration, &instances)?;
+        self.point_count = Some(cloud.points_xyz_m.len() as u64);
+        self.ros.publish_cloud(cloud)?;
         let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
             self.sequence,
             &depth,
@@ -428,6 +471,7 @@ impl PerceptionNode {
             &self.config.placement_labels,
         )?;
         self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
+        self.store_frame_details(&color, &depth, &overlay, &calibration, &instances, &scene)?;
         self.last_frame_time_ns = Some(now);
         self.generated_published = true;
         self.publish_scene(node, scene)
@@ -438,6 +482,74 @@ impl PerceptionNode {
         send(node, "world_scene", &scene)?;
         self.last_scene = Some(scene);
         Ok(())
+    }
+
+    fn store_frame_details(
+        &mut self,
+        color: &r2r::sensor_msgs::msg::Image,
+        depth: &AlignedDepthFrame,
+        overlay: &r2r::sensor_msgs::msg::Image,
+        calibration: &DepthCameraCalibration,
+        instances: &[DetectedInstance2D],
+        scene: &WorldScene,
+    ) -> Result<()> {
+        self.color_frame = Some(image_frame_info(color));
+        self.depth_frame = Some(ImageFrameInfo {
+            width: depth.width,
+            height: depth.height,
+            encoding: "16UC1".into(),
+            frame_id: depth.frame_id.clone(),
+        });
+        self.camera_calibration = Some(calibration.clone());
+        self.instances = instances
+            .iter()
+            .map(|instance| {
+                let object = scene
+                    .objects
+                    .iter()
+                    .find(|object| object.object_id == instance.instance_id);
+                PerceptionInstanceSummary {
+                    instance_id: instance.instance_id.clone(),
+                    label: instance.label.clone(),
+                    confidence: instance.confidence,
+                    bounding_box_xyxy: instance.bounding_box_xyxy,
+                    position_m: object.map(|object| object.pose.position_m),
+                    size_m: object.map(|object| object.size_m),
+                    grasp_candidate_count: object
+                        .map(|object| object.grasp_candidates.len() as u32)
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        self.assets
+            .insert("color.png".into(), ("image/png".into(), color_png(color)?));
+        self.assets.insert(
+            "overlay.png".into(),
+            ("image/png".into(), color_png(overlay)?),
+        );
+        self.assets.insert(
+            "depth.png".into(),
+            ("image/png".into(), depth_preview_png(depth)?),
+        );
+        Ok(())
+    }
+
+    fn send_asset(&self, node: &mut DoraNode, request: PerceptionAssetRequest) -> Result<()> {
+        let asset = self.assets.get(&request.asset_key);
+        send(
+            node,
+            "asset_response",
+            &PerceptionAssetResponse {
+                schema_version: SCHEMA_VERSION,
+                request_id: request.request_id,
+                asset_key: request.asset_key.clone(),
+                mime_type: asset.map(|(mime, _)| mime.clone()),
+                content: asset.map(|(_, content)| content.clone()),
+                original_error: asset
+                    .is_none()
+                    .then(|| format!("感知资源 {} 尚未生成", request.asset_key)),
+            },
+        )
     }
 
     fn apply_request(&mut self, node: &mut DoraNode, request: PerceptionRequest) -> Result<()> {
@@ -457,6 +569,17 @@ impl PerceptionNode {
                 if let Some(labels) = request.placement_labels {
                     next.placement_labels = labels;
                 }
+                if next.source_kind == Some(PerceptionSourceKind::Camera) {
+                    let source_id = next
+                        .source_id
+                        .as_deref()
+                        .ok_or_else(|| eyre!("请选择深度相机来源"))?;
+                    self.ros.select_camera_id(source_id)?;
+                }
+                Ok(())
+            }
+            RequestAction::Refresh => {
+                self.available_sources = self.ros.discover_cameras()?;
                 Ok(())
             }
             RequestAction::Cancel | RequestAction::Disconnect => {
@@ -467,19 +590,31 @@ impl PerceptionNode {
                 "perception request action {action:?} is not supported"
             )),
         };
+        let persist = request.action != RequestAction::Refresh;
         let error = result
             .and_then(|()| {
+                if !persist {
+                    return Ok(());
+                }
                 next.config_version += 1;
                 save(&self.config_path, &next)?;
                 Ok(())
             })
             .err()
             .map(|error: eyre::Report| error.to_string());
-        if error.is_none() {
+        if error.is_none() && persist {
             self.config = next;
             self.generated_published = false;
             self.frames = CameraFrames::default();
             self.last_scene = None;
+            self.color_frame = None;
+            self.depth_frame = None;
+            self.camera_calibration = None;
+            self.instances.clear();
+            self.point_count = None;
+            self.last_frame_time_ns = None;
+            self.assets.clear();
+            self.calibration_color = None;
             self.ros.clear_markers()?;
         }
         self.last_error = error.clone();
@@ -698,6 +833,13 @@ impl PerceptionNode {
             model: self.config.model.clone(),
             classes: self.config.classes.clone(),
             placement_labels: self.config.placement_labels.clone(),
+            available_sources: self.available_sources.clone(),
+            color_frame: self.color_frame.clone(),
+            depth_frame: self.depth_frame.clone(),
+            camera_calibration: self.camera_calibration.clone(),
+            depth_scale_m: self.config.depth_scale_m,
+            instances: self.instances.clone(),
+            point_count: self.point_count,
             last_frame_time_ns: self.last_frame_time_ns,
             last_scene_sequence: self.last_scene.as_ref().map(|scene| scene.sequence),
             calibrated: self.config.calibration.is_some()
@@ -920,6 +1062,35 @@ fn color_png(message: &r2r::sensor_msgs::msg::Image) -> Result<Vec<u8>> {
     let rgb = color_rgb(message)?;
     let mut output = Cursor::new(Vec::new());
     DynamicImage::ImageRgb8(rgb).write_to(&mut output, ImageFormat::Png)?;
+    Ok(output.into_inner())
+}
+
+fn image_frame_info(message: &r2r::sensor_msgs::msg::Image) -> ImageFrameInfo {
+    ImageFrameInfo {
+        width: message.width,
+        height: message.height,
+        encoding: message.encoding.clone(),
+        frame_id: message.header.frame_id.clone(),
+    }
+}
+
+fn depth_preview_png(depth: &AlignedDepthFrame) -> Result<Vec<u8>> {
+    let maximum = depth.depth.iter().copied().max().unwrap_or_default();
+    let pixels = depth
+        .depth
+        .iter()
+        .map(|value| {
+            if maximum == 0 {
+                0
+            } else {
+                (u32::from(*value) * 255 / u32::from(maximum)) as u8
+            }
+        })
+        .collect::<Vec<_>>();
+    let image = image::GrayImage::from_raw(depth.width, depth.height, pixels)
+        .ok_or_else(|| eyre!("深度图尺寸与数据长度不一致"))?;
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageLuma8(image).write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
 }
 

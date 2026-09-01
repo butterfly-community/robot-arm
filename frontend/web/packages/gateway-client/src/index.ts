@@ -88,7 +88,10 @@ export function subscribe(
   const connect = () => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${scheme}://${location.host}/ws/${namespace}`);
-    socket.onmessage = (event) => update(JSON.parse(event.data) as Snapshot);
+    socket.onmessage = (event) => {
+      update(JSON.parse(event.data) as Snapshot);
+      socket?.send("next");
+    };
     socket.onclose = () => {
       if (!stopped) retry = setTimeout(connect, 1000);
     };

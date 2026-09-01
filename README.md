@@ -3,7 +3,7 @@
 本目录是前后端分离的 Dora 服务化实现：
 
 - `backend/`：Rust/Dora 节点、FashionStar UART、ROS 2/MoveIt 型号节点和后端镜像。
-- `frontend/`：四个 Next.js 应用、共享 UI/契约/客户端和单一前端镜像。
+- `frontend/`：五个 Next.js 应用、共享 UI/契约/客户端和单一前端镜像。
 - 根目录：Compose、Dora dataflow、跨端验收、记录工具和当前设计文档。
 
 ## 启停
@@ -31,13 +31,13 @@ motion 镜像默认从固定在提交 `5979b346eb3a417840b29b76740754e4005d071a`
 源码；不要直接修改 `STAR_ARM_102_SOURCE` 指向的仓库。
 
 页面入口为 `http://192.168.100.10:8765/`，业务路径是 `/tracking/`、`/spatial/`、
-`/motion/` 和 `/arm-execution/`。只有入口服务暴露主机端口。
+`/perception/`、`/motion/` 和 `/arm-execution/`。只有入口服务暴露主机端口。
 
 ## 配置
 
 可修改的服务配置保存在宿主 `backend/config/runtime/`，Compose 将这个目录挂载为容器内
 `/config`。目录中的 JSON 被 Git 忽略，但 `.gitignore` 本身受版本控制，因此 `down`、重新构建和
-`up -d` 都不会丢失配置。采集、空间、motion 和执行节点各自只读写自己的文件；文件不存在时使用
+`up -d` 都不会丢失配置。控制绑定、空间、感知、motion 和执行节点各自只读写自己的文件；文件不存在时使用
 默认值，已有文件损坏时服务直接报告启动错误。
 
 `backend/config/service-status.json` 是受版本控制的静态依赖配置。实时姿态、控制会话、模拟状态、

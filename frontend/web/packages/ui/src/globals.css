@@ -948,6 +948,51 @@ input[type="range"] {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+.perception-preview {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #070a0e;
+}
+
+.visual-empty {
+  display: grid;
+  min-height: 14rem;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.data-table th,
+.data-table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: var(--text-muted);
+  font-size: var(--font-label);
+  font-weight: 600;
+}
+
+.data-table td small {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--text-muted);
+}
 .parameter-table {
   width: max-content;
   min-width: 100%;
