@@ -28,18 +28,15 @@ use robot_arm_messages::{
     AlignedDepthFrame, ArmState, CalibrationAction, CalibrationObservation, CalibrationRequest,
     CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DepthCameraSourceInfo,
     DetectedInstance2D, ImageFrameInfo, MotionState, PerceptionAssetRequest,
-    PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionSourceKind,
-    PerceptionState, Pose3, RequestAction, RequestResult, RobotModelInfo, SCHEMA_VERSION,
-    ServiceState, ToolPose, WorldScene, from_arrow, to_arrow,
+    PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionState, Pose3,
+    RequestAction, RequestResult, RobotModelInfo, SCHEMA_VERSION, ServiceState, ToolPose,
+    WorldScene, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ros::{RosEvent, RosInterface, time_ns},
-    test_source::{
-        depth_image, fill_generated_depth_from_instances, generated_depth_test_calibration,
-        generated_depth_test_cloud, generated_pick_place_calibration, generated_rgbd,
-    },
+    test_source::{simulation_frame, simulation_source, simulation_sources},
 };
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -48,17 +45,32 @@ struct PerceptionConfig {
     schema_version: u32,
     config_version: u64,
     enabled: bool,
-    source_kind: Option<PerceptionSourceKind>,
     source_id: Option<String>,
     compute_service_url: String,
     model: String,
     classes: Vec<String>,
     #[serde(default = "default_placement_labels")]
     placement_labels: Vec<String>,
-    depth_scale_m: f64,
-    calibration: Option<CalibrationResult>,
+    #[serde(default)]
+    cameras: BTreeMap<String, CameraConfig>,
     #[serde(default = "default_calibration_session")]
     calibration_session: CalibrationSessionState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CameraConfig {
+    #[serde(default = "default_depth_scale_m")]
+    depth_scale_m: f64,
+    calibration: Option<CalibrationResult>,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            depth_scale_m: default_depth_scale_m(),
+            calibration: None,
+        }
+    }
 }
 
 impl Default for PerceptionConfig {
@@ -67,17 +79,19 @@ impl Default for PerceptionConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
             config_version: 0,
             enabled: false,
-            source_kind: None,
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
             model: "yoloe-26s-seg.pt".into(),
             classes: vec!["red cube".into(), "gray storage bin".into()],
             placement_labels: default_placement_labels(),
-            depth_scale_m: 0.001,
-            calibration: None,
+            cameras: BTreeMap::new(),
             calibration_session: default_calibration_session(),
         }
     }
+}
+
+fn default_depth_scale_m() -> f64 {
+    0.001
 }
 
 fn default_placement_labels() -> Vec<String> {
@@ -89,6 +103,7 @@ struct CameraFrames {
     color: Option<r2r::sensor_msgs::msg::Image>,
     depth: Option<r2r::sensor_msgs::msg::Image>,
     depth_info: Option<r2r::sensor_msgs::msg::CameraInfo>,
+    driver_calibration: Option<DepthCameraCalibration>,
 }
 
 struct PerceptionNode {
@@ -109,7 +124,7 @@ struct PerceptionNode {
     point_count: Option<u64>,
     assets: BTreeMap<String, (String, Vec<u8>)>,
     last_error: Option<String>,
-    generated_published: bool,
+    simulation_published: bool,
     calibration_color: Option<r2r::sensor_msgs::msg::Image>,
     latest_arm_state: Option<ArmState>,
     latest_tool_pose: Option<ToolPose>,
@@ -199,18 +214,14 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/config/perception.json"));
     let config = load_config(&config_path)?;
-    let available_sources = config
-        .source_id
-        .as_deref()
-        .filter(|_| config.source_kind == Some(PerceptionSourceKind::Camera))
-        .map(RosInterface::camera_source_info)
-        .into_iter()
-        .collect();
-    if config.enabled
-        && config.source_kind == Some(PerceptionSourceKind::Camera)
-        && let Some(source_id) = config.source_id.as_deref()
+    let mut available_sources = simulation_sources()?;
+    if let Some(source_id) = config.source_id.as_deref()
+        && simulation_source(source_id)?.is_none()
     {
-        ros.select_camera_id(source_id)?;
+        available_sources.push(RosInterface::camera_source_info(source_id));
+        if config.enabled {
+            ros.select_camera_id(source_id)?;
+        }
     }
     let mut perception = PerceptionNode {
         config_path,
@@ -230,12 +241,13 @@ fn run() -> Result<()> {
         point_count: None,
         assets: BTreeMap::new(),
         last_error: None,
-        generated_published: false,
+        simulation_published: false,
         calibration_color: None,
         latest_arm_state: None,
         latest_tool_pose: None,
         robot_model: None,
     };
+    perception.refresh_source_config();
     let (mut node, mut events) = DoraNode::init_from_env()?;
     perception.publish_snapshot(&mut node)?;
     while let Some(event) = events.recv() {
@@ -256,7 +268,17 @@ fn run() -> Result<()> {
                     perception.latest_tool_pose = state.current_tool_pose;
                 }
                 "robot_model_info" => {
+                    let refresh_simulation = if let Some(source_id) =
+                        perception.config.source_id.as_deref()
+                    {
+                        perception.last_scene.is_some() && simulation_source(source_id)?.is_some()
+                    } else {
+                        false
+                    };
                     perception.robot_model = Some(from_arrow(data.as_array())?);
+                    if refresh_simulation {
+                        perception.simulation_published = false;
+                    }
                 }
                 "snapshot" => perception.publish_snapshot(&mut node)?,
                 "tick" => perception.tick(&mut node)?,
@@ -275,18 +297,110 @@ impl PerceptionNode {
         self.config.source_id.as_deref() == Some(source_id)
     }
 
+    fn depth_scale_m(&self, source_id: &str) -> f64 {
+        self.config
+            .cameras
+            .get(source_id)
+            .map(|camera| camera.depth_scale_m)
+            .or_else(|| {
+                self.available_sources
+                    .iter()
+                    .find(|source| source.source_id == source_id)
+                    .map(|source| source.depth_scale_m)
+            })
+            .unwrap_or_else(default_depth_scale_m)
+    }
+
+    fn has_calibration(&self) -> bool {
+        let Some(source_id) = self.config.source_id.as_deref() else {
+            return false;
+        };
+        self.frames.driver_calibration.is_some()
+            || self
+                .config
+                .cameras
+                .get(source_id)
+                .and_then(|camera| camera.calibration.as_ref())
+                .is_some()
+    }
+
+    fn refresh_source_config(&mut self) {
+        for source in &mut self.available_sources {
+            if let Some(camera) = self.config.cameras.get(&source.source_id) {
+                source.depth_scale_m = camera.depth_scale_m;
+                source.calibrated |= camera.calibration.is_some();
+            }
+        }
+    }
+
+    fn discover_sources(&self) -> Result<Vec<DepthCameraSourceInfo>> {
+        let mut sources = simulation_sources()?;
+        sources.extend(self.ros.discover_cameras()?);
+        let mut unique = BTreeMap::new();
+        for mut source in sources {
+            if let Some(camera) = self.config.cameras.get(&source.source_id) {
+                source.depth_scale_m = camera.depth_scale_m;
+                source.calibrated |= camera.calibration.is_some();
+            }
+            unique.insert(source.source_id.clone(), source);
+        }
+        Ok(unique.into_values().collect())
+    }
+
+    fn clear_output(&mut self) -> Result<()> {
+        self.simulation_published = false;
+        self.frames = CameraFrames::default();
+        self.last_scene = None;
+        self.color_frame = None;
+        self.depth_frame = None;
+        self.camera_calibration = None;
+        self.instances.clear();
+        self.point_count = None;
+        self.last_frame_time_ns = None;
+        self.assets.clear();
+        self.calibration_color = None;
+        self.ros.clear_markers()
+    }
+
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
         while let Ok(event) = self.ros_events.try_recv() {
             if let Err(error) = self.handle_ros_event(node, event) {
                 self.last_error = Some(error.to_string());
             }
         }
-        if self.config.enabled
-            && self.config.source_kind == Some(PerceptionSourceKind::GeneratedTestScene)
-            && !self.generated_published
-        {
-            match self.publish_generated_scene(node) {
-                Ok(()) => self.last_error = None,
+        if self.config.enabled && !self.simulation_published {
+            let source_id = self.config.source_id.clone().unwrap_or_default();
+            match simulation_frame(
+                &source_id,
+                self.sequence + 1,
+                now_ns(),
+                self.depth_scale_m(&source_id),
+            ) {
+                Ok(Some(frame)) => {
+                    self.frames.driver_calibration = Some(frame.calibration);
+                    let result = self
+                        .handle_ros_event(node, RosEvent::Color(source_id.clone(), frame.color))
+                        .and_then(|()| {
+                            self.handle_ros_event(
+                                node,
+                                RosEvent::Depth(source_id.clone(), frame.depth),
+                            )
+                        })
+                        .and_then(|()| {
+                            self.handle_ros_event(
+                                node,
+                                RosEvent::DepthInfo(source_id, frame.camera_info),
+                            )
+                        });
+                    match result {
+                        Ok(()) => {
+                            self.simulation_published = true;
+                            self.last_error = None;
+                        }
+                        Err(error) => self.last_error = Some(error.to_string()),
+                    }
+                }
+                Ok(None) => {}
                 Err(error) => self.last_error = Some(error.to_string()),
             }
         }
@@ -294,7 +408,7 @@ impl PerceptionNode {
     }
 
     fn handle_ros_event(&mut self, node: &mut DoraNode, event: RosEvent) -> Result<()> {
-        if !self.config.enabled || self.config.source_kind != Some(PerceptionSourceKind::Camera) {
+        if !self.config.enabled {
             return Ok(());
         }
         match event {
@@ -315,7 +429,7 @@ impl PerceptionNode {
         if self.frames.color.is_some()
             && self.frames.depth.is_some()
             && self.frames.depth_info.is_some()
-            && self.config.calibration.is_some()
+            && self.has_calibration()
         {
             self.process_camera_scene(node)?;
         }
@@ -326,13 +440,34 @@ impl PerceptionNode {
         let color = self.frames.color.take().expect("checked color frame");
         let depth = self.frames.depth.take().expect("checked depth frame");
         let info = self.frames.depth_info.as_ref().expect("checked depth info");
-        let aligned_depth = decode_depth(&depth, &self.config)?;
-        let calibration = camera_calibration(info, &self.config)?;
+        let source_id = self
+            .config
+            .source_id
+            .as_deref()
+            .ok_or_else(|| eyre!("尚未选择深度相机"))?;
+        let mut aligned_depth = decode_depth(&depth, source_id, self.depth_scale_m(source_id))?;
+        let mut calibration = self
+            .frames
+            .driver_calibration
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                camera_calibration(
+                    info,
+                    source_id,
+                    self.config
+                        .cameras
+                        .get(source_id)
+                        .and_then(|camera| camera.calibration.as_ref()),
+                )
+            })?;
+        self.sequence += 1;
+        aligned_depth.sequence = self.sequence;
+        calibration.sequence = self.sequence;
         self.ros.publish_calibration(&calibration)?;
         let instances = self.segment(&color)?;
         let overlay = segmentation_debug_image(&color, &instances)?;
         self.ros.publish_segmentation(overlay.clone())?;
-        self.sequence += 1;
         let cloud =
             aligned_obstacle_point_cloud(self.sequence, &aligned_depth, &calibration, &instances)?;
         self.point_count = Some(cloud.points_xyz_m.len() as u64);
@@ -441,46 +576,6 @@ impl PerceptionNode {
         Ok(())
     }
 
-    fn publish_generated_scene(&mut self, node: &mut DoraNode) -> Result<()> {
-        self.sequence += 1;
-        let now = now_ns();
-        if self.config.source_id.as_deref() == Some("generated:depth-grid") {
-            let calibration = generated_depth_test_calibration(self.sequence, now);
-            self.ros.publish_calibration(&calibration)?;
-            let cloud = generated_depth_test_cloud(self.sequence, now);
-            self.point_count = Some(cloud.points_xyz_m.len() as u64);
-            self.camera_calibration = Some(calibration);
-            self.ros.publish_cloud(cloud)?;
-            self.last_frame_time_ns = Some(now);
-            self.generated_published = true;
-            return Ok(());
-        }
-        let calibration = generated_pick_place_calibration(self.sequence, now);
-        self.ros.publish_calibration(&calibration)?;
-        let (color, mut depth, _) = generated_rgbd(self.sequence, now)?;
-        self.ros.publish_color(color.clone())?;
-        let instances = self.segment(&color)?;
-        fill_generated_depth_from_instances(&mut depth, &instances)?;
-        self.ros.publish_depth(depth_image(&depth))?;
-        let overlay = segmentation_debug_image(&color, &instances)?;
-        self.ros.publish_segmentation(overlay.clone())?;
-        let cloud = aligned_obstacle_point_cloud(self.sequence, &depth, &calibration, &instances)?;
-        self.point_count = Some(cloud.points_xyz_m.len() as u64);
-        self.ros.publish_cloud(cloud)?;
-        let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
-            self.sequence,
-            &depth,
-            &calibration,
-            &instances,
-            &self.config.placement_labels,
-        )?;
-        self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
-        self.store_frame_details(&color, &depth, &overlay, &calibration, &instances, &scene)?;
-        self.last_frame_time_ns = Some(now);
-        self.generated_published = true;
-        self.publish_scene(node, scene)
-    }
-
     fn publish_scene(&mut self, node: &mut DoraNode, scene: WorldScene) -> Result<()> {
         self.ros.publish_markers(&scene)?;
         send(node, "world_scene", &scene)?;
@@ -561,10 +656,7 @@ impl PerceptionNode {
         let result = match request.action {
             RequestAction::Apply => {
                 next.enabled = true;
-                if let Some(source_kind) = request.source_kind {
-                    next.source_kind = Some(source_kind);
-                }
-                if let Some(source_id) = request.source_id {
+                if let Some(source_id) = request.source_id.clone() {
                     next.source_id = Some(source_id);
                 }
                 if let Some(classes) = request.classes {
@@ -573,17 +665,37 @@ impl PerceptionNode {
                 if let Some(labels) = request.placement_labels {
                     next.placement_labels = labels;
                 }
-                if next.source_kind == Some(PerceptionSourceKind::Camera) {
-                    let source_id = next
-                        .source_id
-                        .as_deref()
-                        .ok_or_else(|| eyre!("请选择深度相机来源"))?;
+                let source_id = next
+                    .source_id
+                    .as_deref()
+                    .ok_or_else(|| eyre!("请选择深度相机来源"))?;
+                if let Some(depth_scale_m) = request.depth_scale_m {
+                    next.cameras
+                        .entry(source_id.into())
+                        .or_default()
+                        .depth_scale_m = depth_scale_m;
+                }
+                if simulation_source(source_id)?.is_none() {
                     self.ros.select_camera_id(source_id)?;
                 }
                 Ok(())
             }
             RequestAction::Refresh => {
-                self.available_sources = self.ros.discover_cameras()?;
+                self.available_sources = self.discover_sources()?;
+                Ok(())
+            }
+            RequestAction::Reset => {
+                let source_id = request
+                    .source_id
+                    .as_deref()
+                    .or(next.source_id.as_deref())
+                    .ok_or_else(|| eyre!("请选择要重置的深度相机"))?
+                    .to_owned();
+                next.cameras.remove(&source_id);
+                if next.calibration_session.camera_source_id.as_deref() == Some(source_id.as_str())
+                {
+                    next.calibration_session = default_calibration_session();
+                }
                 Ok(())
             }
             RequestAction::Cancel | RequestAction::Disconnect => {
@@ -608,18 +720,8 @@ impl PerceptionNode {
             .map(|error: eyre::Report| error.to_string());
         if error.is_none() && persist {
             self.config = next;
-            self.generated_published = false;
-            self.frames = CameraFrames::default();
-            self.last_scene = None;
-            self.color_frame = None;
-            self.depth_frame = None;
-            self.camera_calibration = None;
-            self.instances.clear();
-            self.point_count = None;
-            self.last_frame_time_ns = None;
-            self.assets.clear();
-            self.calibration_color = None;
-            self.ros.clear_markers()?;
+            self.available_sources = self.discover_sources()?;
+            self.clear_output()?;
         }
         self.last_error = error.clone();
         send(
@@ -722,11 +824,20 @@ impl PerceptionNode {
                     .solved_result
                     .clone()
                     .ok_or_else(|| eyre!("尚无可应用的标定结果"))?;
-                self.config.calibration = Some(solved);
+                let source_id = solved.camera_source_id.clone();
+                self.config
+                    .cameras
+                    .entry(source_id.clone())
+                    .or_default()
+                    .calibration = Some(solved.clone());
                 if let Some(info) = self.frames.depth_info.as_ref() {
-                    self.ros
-                        .publish_calibration(&camera_calibration(info, &self.config)?)?;
+                    self.ros.publish_calibration(&camera_calibration(
+                        info,
+                        &source_id,
+                        Some(&solved),
+                    )?)?;
                 }
+                self.refresh_source_config();
             }
             CalibrationAction::Cancel => {
                 self.config.calibration_session = default_calibration_session();
@@ -825,7 +936,6 @@ impl PerceptionNode {
         PerceptionState {
             schema_version: SCHEMA_VERSION,
             enabled: self.config.enabled,
-            source_kind: self.config.source_kind,
             source_id: self.config.source_id.clone(),
             compute_service_url: self.config.compute_service_url.clone(),
             model: self.config.model.clone(),
@@ -835,13 +945,26 @@ impl PerceptionNode {
             color_frame: self.color_frame.clone(),
             depth_frame: self.depth_frame.clone(),
             camera_calibration: self.camera_calibration.clone(),
-            depth_scale_m: self.config.depth_scale_m,
+            depth_scale_m: self
+                .config
+                .source_id
+                .as_deref()
+                .map(|source_id| self.depth_scale_m(source_id))
+                .unwrap_or_else(default_depth_scale_m),
             instances: self.instances.clone(),
             point_count: self.point_count,
             last_frame_time_ns: self.last_frame_time_ns,
             last_scene_sequence: self.last_scene.as_ref().map(|scene| scene.sequence),
-            calibrated: self.config.calibration.is_some()
-                || self.config.source_kind == Some(PerceptionSourceKind::GeneratedTestScene),
+            calibrated: self
+                .config
+                .source_id
+                .as_deref()
+                .and_then(|source_id| {
+                    self.available_sources
+                        .iter()
+                        .find(|source| source.source_id == source_id)
+                })
+                .is_some_and(|source| source.calibrated),
             original_error: self.last_error.clone(),
             service: self.service_state(),
         }
@@ -976,17 +1099,15 @@ fn load_config(path: &Path) -> Result<PerceptionConfig> {
 
 fn camera_calibration(
     info: &r2r::sensor_msgs::msg::CameraInfo,
-    config: &PerceptionConfig,
+    source_id: &str,
+    result: Option<&CalibrationResult>,
 ) -> Result<DepthCameraCalibration> {
-    let result = config
-        .calibration
-        .as_ref()
-        .ok_or_else(|| eyre!("相机尚未完成外参标定"))?;
+    let result = result.ok_or_else(|| eyre!("相机尚未完成外参标定"))?;
     Ok(DepthCameraCalibration {
         schema_version: SCHEMA_VERSION,
         sequence: 0,
         source_time_ns: time_ns(&info.header.stamp),
-        source_id: config.source_id.clone().unwrap_or_else(|| "camera".into()),
+        source_id: source_id.into(),
         parent_frame_id: "base_link".into(),
         frame_id: info.header.frame_id.clone(),
         translation_m: result.camera_in_base.position_m,
@@ -1010,7 +1131,8 @@ fn camera_calibration(
 
 fn decode_depth(
     message: &r2r::sensor_msgs::msg::Image,
-    config: &PerceptionConfig,
+    source_id: &str,
+    depth_scale_m: f64,
 ) -> Result<AlignedDepthFrame> {
     if message.encoding != "16UC1" && message.encoding != "mono16" {
         bail!("不支持的对齐深度编码 {}", message.encoding);
@@ -1030,11 +1152,11 @@ fn decode_depth(
         schema_version: SCHEMA_VERSION,
         sequence: 0,
         source_time_ns: time_ns(&message.header.stamp),
-        source_id: config.source_id.clone().unwrap_or_else(|| "camera".into()),
+        source_id: source_id.into(),
         frame_id: message.header.frame_id.clone(),
         width: message.width,
         height: message.height,
-        depth_scale_m: config.depth_scale_m,
+        depth_scale_m,
         depth,
     })
 }
@@ -1180,40 +1302,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_scene_uses_the_same_geometry_contract() {
-        let (_, mut depth, instances) = generated_rgbd(1, 2).unwrap();
-        fill_generated_depth_from_instances(&mut depth, &instances).unwrap();
-        let calibration = generated_pick_place_calibration(1, 2);
-        let (scene, _) = world_scene_and_instance_clouds_from_aligned_depth(
-            1,
-            &depth,
-            &calibration,
-            &instances,
-            &["gray storage bin".into()],
-        )
-        .unwrap();
-        assert_eq!(scene.objects.len(), 2);
-        assert_eq!(scene.objects[0].label, "red cube");
-        assert!(scene.objects[0].grasp_candidates.is_empty());
-        assert!((scene.objects[0].size_m[2] - 0.08).abs() < 0.001);
-        assert_eq!(scene.placement_regions.len(), 1);
-        assert_eq!(
-            scene
-                .placement_regions
-                .iter()
-                .map(|region| region.source_object_id.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("gray-storage-bin-0")]
-        );
-        assert!(
-            aligned_obstacle_point_cloud(1, &depth, &calibration, &instances)
-                .unwrap()
-                .points_xyz_m
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn graspgenx_tcp_pose_is_already_in_base_frame() {
         let pose = candidate_tcp_pose_in_base([
             [1.0, 0.0, 0.0, 0.1],
@@ -1235,13 +1323,25 @@ mod tests {
         ));
         let config = PerceptionConfig {
             enabled: true,
-            source_kind: Some(PerceptionSourceKind::GeneratedTestScene),
+            source_id: Some("simulation:pick-place-scene".into()),
+            cameras: BTreeMap::from([(
+                "simulation:pick-place-scene".into(),
+                CameraConfig {
+                    depth_scale_m: 0.002,
+                    calibration: None,
+                },
+            )]),
             ..Default::default()
         };
         assert_eq!(config.classes, ["red cube", "gray storage bin"]);
         assert_eq!(config.placement_labels, ["gray storage bin"]);
         save(&path, &config).unwrap();
-        assert_eq!(load_config(&path).unwrap().source_kind, config.source_kind);
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.source_id, config.source_id);
+        assert_eq!(
+            loaded.cameras["simulation:pick-place-scene"].depth_scale_m,
+            0.002
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

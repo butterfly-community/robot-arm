@@ -79,6 +79,7 @@ pub enum RequestAction {
     Disconnect,
     Discover,
     Refresh,
+    Reset,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -386,20 +387,16 @@ pub struct DepthCameraCalibration {
     pub projection_matrix: [f64; 12],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PerceptionSourceKind {
-    Camera,
-    GeneratedTestScene,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DepthCameraSourceInfo {
     pub source_id: String,
+    pub driver_id: String,
     pub display_name: String,
-    pub color_topic: String,
-    pub depth_topic: String,
-    pub depth_info_topic: String,
+    pub color_stream: String,
+    pub depth_stream: String,
+    pub camera_info_stream: String,
+    pub depth_scale_m: f64,
+    pub calibrated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -425,7 +422,6 @@ pub struct PerceptionInstanceSummary {
 pub struct PerceptionState {
     pub schema_version: u32,
     pub enabled: bool,
-    pub source_kind: Option<PerceptionSourceKind>,
     pub source_id: Option<String>,
     pub compute_service_url: String,
     pub model: String,
@@ -470,8 +466,8 @@ pub struct PerceptionRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub action: RequestAction,
-    pub source_kind: Option<PerceptionSourceKind>,
     pub source_id: Option<String>,
+    pub depth_scale_m: Option<f64>,
     pub classes: Option<Vec<String>>,
     #[serde(default)]
     pub placement_labels: Option<Vec<String>>,
@@ -1522,6 +1518,19 @@ mod tests {
         let decoded: CalibrationResult =
             from_arrow(to_arrow(&calibration).unwrap().as_ref()).unwrap();
         assert_eq!(decoded, calibration);
+
+        let camera_request = PerceptionRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "reset-camera-1".into(),
+            action: RequestAction::Reset,
+            source_id: Some("simulation:pick-place-scene".into()),
+            depth_scale_m: None,
+            classes: None,
+            placement_labels: None,
+        };
+        let decoded: PerceptionRequest =
+            from_arrow(to_arrow(&camera_request).unwrap().as_ref()).unwrap();
+        assert_eq!(decoded, camera_request);
 
         let request = PickPlaceRequest {
             schema_version: SCHEMA_VERSION,

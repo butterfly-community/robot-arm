@@ -62,17 +62,21 @@ MTC 的任务场景。
 | 彩色图 | `{source}/color/image_raw` |
 | 对齐深度 / 对齐后的内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
 
-`perception-node` 只在已应用相机外参后把真实帧转换到 `base_link`。未启用感知时不发布
+`perception-node` 只在所选来源具备相机外参后把帧转换到 `base_link`。未启用感知时不发布
 占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
 服务失败时保留原始错误，不切换模型或伪造结果。
 
-仓库提供两个走正式链路的确定性来源：
+仓库提供两个由 `simulation` 驱动声明的确定性相机。它们和 ROS 相机一样枚举为
+`DepthCameraSourceInfo`，发布同一组 RGB、对齐深度、CameraInfo 和标定输入，后续不再分流：
 
-- `generated:pick-place-scene`：固定 RGB 资产经真实 YOLOE 分割，再组合确定性深度，生成
+- `simulation:pick-place-scene`：固定 RGB 与确定性深度经真实 YOLOE 分割，生成
   红色立方体、灰色置物筐和筐内放置区；实例点云继续送入真实 GraspGenX 生成抓取候选，
   用于完整抓放验收。
-- `generated:depth-grid`：497 点测试云，用于 RViz 点云输入验收，不进入 MoveIt
+- `simulation:depth-grid`：标准 RGB-D 帧内的 497 个有效深度像素，用于 RViz 点云输入验收，不进入 MoveIt
   规划场景。
+
+感知服务按 `source_id` 在自己的 JSON 中保存深度比例和外参。网页不保存相机配置。重置只删除
+当前来源的保存项：`simulation` 随即恢复仓库预设，真实来源回到未标定状态，其他相机不受影响。
 
 抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`，不读取类别名称。Rust motion 从放置区域的
 `source_object_id` 和物体几何推导放置高度；被抓物体及放置区域来源对象不重复作为实心 AABB，

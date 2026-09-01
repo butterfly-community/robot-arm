@@ -437,7 +437,7 @@ test("tracking page persists a custom input device name", async ({
   }
 });
 
-test("perception page uses the generated RGB-D source through the canonical path", async ({
+test("perception page uses the simulation camera through the canonical path", async ({
   page,
   request,
 }) => {
@@ -445,7 +445,10 @@ test("perception page uses the generated RGB-D source through the canonical path
   const original = before.values.perception_state;
   try {
     await page.goto("/perception/");
-    await page.getByRole("button", { name: "测试 RGB-D 场景" }).click();
+    await page
+      .getByLabel("深度相机")
+      .selectOption("simulation:pick-place-scene");
+    await page.getByRole("button", { name: "保存配置并启用" }).click();
     await expect(page.getByText("运行", { exact: true })).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
     await page.reload();
@@ -456,8 +459,8 @@ test("perception page uses the generated RGB-D source through the canonical path
         schema_version: 3,
         request_id: "browser-perception-stop",
         action: "disconnect",
-        source_kind: null,
         source_id: null,
+        depth_scale_m: null,
         classes: null,
       },
     });
@@ -467,8 +470,8 @@ test("perception page uses the generated RGB-D source through the canonical path
           schema_version: 3,
           request_id: "browser-perception-restore",
           action: "apply",
-          source_kind: original.source_kind,
           source_id: original.source_id,
+          depth_scale_m: original.depth_scale_m,
           classes: original.classes,
         },
       });
@@ -611,8 +614,8 @@ test("execution viewer shows the selected pick and placement points only during 
         schema_version: 3,
         request_id: "browser-pick-points-scene",
         action: "apply",
-        source_kind: "generated_test_scene",
-        source_id: "generated:pick-place-scene",
+        source_id: "simulation:pick-place-scene",
+        depth_scale_m: null,
         classes: null,
       },
     });
@@ -702,16 +705,16 @@ test("execution viewer shows the selected pick and placement points only during 
             schema_version: 3,
             request_id: "browser-pick-points-restore",
             action: "apply",
-            source_kind: original.source_kind,
             source_id: original.source_id,
+            depth_scale_m: original.depth_scale_m,
             classes: original.classes,
           }
         : {
             schema_version: 3,
             request_id: "browser-pick-points-restore",
             action: "disconnect",
-            source_kind: null,
             source_id: null,
+            depth_scale_m: null,
             classes: null,
           },
     });

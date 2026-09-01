@@ -13,12 +13,12 @@
 | 审查项 | 最终状态 |
 | --- | --- |
 | 服务与消息 | Dora 节点按职责拆分；感知计算只与 `perception-node` 交互；不存在无消费者 DTO |
-| 模拟与真机 | 输入适配后共用 spatial、motion、MoveIt、`ArmCommand` 和 execution |
+| 模拟与真机 | 控制输入适配后共用 spatial、motion、MoveIt、`ArmCommand` 和 execution；相机适配后共用 RGB-D、识别、几何和抓放链路 |
 | 感知与规划 | 原始点云和掩码不进入 MoveIt；MTC 只接收当前任务所需的结构化几何 |
 | 坐标 | FK、IK、抓放、附着和模型元数据统一使用 `tcp_link` |
 | 型号隔离 | StarArm-102 源码和夹爪清单集中在 `backend/devices/stararm-102`；计算服务只按请求资产 ID 工作 |
 | 调度 | motion 只有一个 FIFO 和顺序 worker；没有通用状态机、并行规划器或隐藏恢复服务 |
-| 配置 | 各服务只持久化自身 JSON；状态和反馈不写配置；串口只在用户主动刷新时枚举 |
+| 配置 | 共享 `json-config-store`，各服务只拥有自己的 JSON；网页不持久化服务参数；感知参数与标定按相机隔离且可单独重置 |
 | 前端 | 五个 Next.js 应用共用契约、网关客户端和 UI；业务页不复制后端几何或机械臂参数 |
 | 依赖 | Rust 使用 Cargo Machete 核对无未使用 crate；前端包声明与实际 import 对齐 |
 | 镜像 | 仅 `backend-base`、`frontend-base` 声明环境；三个应用 Dockerfile 只复制和构建工程，不存在 StarArm 专用 Dockerfile、按服务/语言分层或产物搬运层 |
@@ -46,7 +46,9 @@ double 载入且进程持续存活。
 保持 9.39.5、TypeScript 保持 6.0.3、Node 类型保持 24.x：分别受当前 Next/ESLint 插件 peer、
 typescript-eslint peer 与 Node 24 运行时约束，未用忽略 peer 的方式强行升级。
 
-测试点云保持 497 点并可在 RViz 独立显示，不生成 OctoMap。机械臂、抓取物、放置区域和刚性
+`simulation:depth-grid` 通过标准深度帧保持 497 个有效点并可在 RViz 独立显示，不生成 OctoMap。
+`simulation:pick-place-scene` 冷启动时即使先于机械臂模型发布，模型信息到达后也会沿同一链路
+重算抓取候选。机械臂、抓取物、放置区域和刚性
 地面统一使用 `base_link`；抓放完成后临时任务对象被清理，Servo 与同一 PlanningScene 继续
 运行。当前型号 20 轮抓放结果见 [StarArm-102 型号适配](STARARM-102.md)。
 

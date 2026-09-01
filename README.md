@@ -42,7 +42,8 @@ ROS 软件包。ROS 图像桥从与 Lyrical 对齐的 `cv_bridge 4.1.0` 源码�
 可修改的服务配置保存在宿主 `backend/config/runtime/`，Compose 将这个目录挂载为容器内
 `/config`。目录中的 JSON 被 Git 忽略，但 `.gitignore` 本身受版本控制，因此 `down`、重新构建和
 `up -d` 都不会丢失配置。控制绑定、空间、感知、motion 和执行节点各自只读写自己的文件；文件不存在时使用
-默认值，已有文件损坏时服务直接报告启动错误。
+默认值，已有文件损坏时服务直接报告启动错误。后端统一通过 `json-config-store` 加载和保存，网页只提交
+配置请求，不把服务参数保存在浏览器中。
 
 `backend/config/service-status.json` 是受版本控制的静态依赖配置。实时姿态、控制会话、模拟状态、
 关节反馈、串口连接状态和错误不会写入配置文件。

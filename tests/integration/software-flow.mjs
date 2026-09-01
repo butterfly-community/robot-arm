@@ -146,8 +146,8 @@ const perceptionEnabled = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-enable",
   action: "apply",
-  source_kind: "generated_test_scene",
-  source_id: "generated:pick-place-scene",
+  source_id: "simulation:pick-place-scene",
+  depth_scale_m: null,
   classes: null,
   placement_labels: ["gray storage bin"],
 });
@@ -156,8 +156,8 @@ const readyPerceptionSnapshot = await waitFor(
   () => snapshot("perception"),
   (state) =>
     state.values.perception_state?.enabled === true &&
-    state.values.perception_state?.source_kind === "generated_test_scene" &&
-    state.values.perception_state?.source_id === "generated:pick-place-scene" &&
+    state.values.perception_state?.source_id ===
+      "simulation:pick-place-scene" &&
     state.values.perception_state?.service?.config_version >
       originalPerceptionConfigVersion &&
     state.values.perception_state?.last_scene_sequence != null &&
@@ -190,12 +190,44 @@ for (const asset of ["color.png", "overlay.png", "depth.png"]) {
     [137, 80, 78, 71, 13, 10, 26, 10],
   );
 }
+await request("/api/perception/request", {
+  schema_version: 3,
+  request_id: "integration-perception-camera-config",
+  action: "apply",
+  source_id: "simulation:pick-place-scene",
+  depth_scale_m: 0.002,
+  classes: null,
+  placement_labels: null,
+});
+await waitFor(
+  () => snapshot("perception"),
+  (state) => state.values.perception_state?.depth_scale_m === 0.002,
+);
+await request("/api/perception/request", {
+  schema_version: 3,
+  request_id: "integration-perception-camera-reset",
+  action: "reset",
+  source_id: "simulation:pick-place-scene",
+  depth_scale_m: null,
+  classes: null,
+  placement_labels: null,
+});
+await waitFor(
+  () => snapshot("perception"),
+  (state) =>
+    state.values.perception_state?.depth_scale_m === 0.001 &&
+    state.values.perception_state?.calibrated === true &&
+    state.values.perception_state?.last_scene_sequence != null,
+);
 const graspable = perceptionScene.objects.find(
   (object) => object.grasp_candidates.length > 0,
 );
 const placementRegion = perceptionScene.placement_regions[0];
-assert.ok(graspable, "generated perception scene has a graspable object");
-assert.ok(placementRegion, "generated perception scene has a placement region");
+assert.ok(graspable, "simulation perception scene has a graspable object");
+assert.ok(
+  placementRegion,
+  "simulation perception scene has a placement region",
+);
 await request("/api/motion/mode", {
   schema_version: 3,
   request_id: "integration-perception-mode",
@@ -302,8 +334,8 @@ await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-stop",
   action: "disconnect",
-  source_kind: null,
   source_id: null,
+  depth_scale_m: null,
   classes: null,
   placement_labels: null,
 });
@@ -316,8 +348,8 @@ if (originalPerception?.enabled) {
     schema_version: 3,
     request_id: "integration-perception-restore",
     action: "apply",
-    source_kind: originalPerception.source_kind,
     source_id: originalPerception.source_id,
+    depth_scale_m: originalPerception.depth_scale_m,
     classes: originalPerception.classes,
     placement_labels: originalPerception.placement_labels,
   });

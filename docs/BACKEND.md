@@ -62,10 +62,11 @@ GraspGenX 仓库声明。
 
 ## `perception-node`
 
-`PerceptionNode::apply_request()` 持久化启用状态、来源和模型类别。每次应用
+`PerceptionNode::apply_request()` 持久化启用状态、来源、模型类别及按 `source_id` 隔离的相机配置。每次应用
 配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后遗留占据数据。
 `apply_request()` 的 `Refresh` 分支只响应网页主动刷新；它从 ROS topic/type 图枚举成组的彩色
-图、对齐深度和对齐后的 CameraInfo。`tick()` 处理所选 ROS 来源或只发布一次确定性场景。
+图、对齐深度和对齐后的 CameraInfo，并与 `simulation` 驱动声明的相机合并。`Reset` 只删除
+当前来源的深度比例与标定保存项；模拟相机恢复编译期配置，真实相机回到无保存标定的状态。
 
 ### 相机和测试输入
 
@@ -73,16 +74,17 @@ GraspGenX 仓库声明。
 发布为标准 ROS 接口。`RosInterface::discover_cameras()` 不依赖相机型号，而是从 ROS 图发现
 任意符合 RGB-D 组合契约的来源；`select_camera()` 切换动态订阅，来源切换后旧帧会按来源 ID
 丢弃。真实场景只在彩色、对齐深度、内参和已应用外参同时存在时进入
-`process_camera_scene()`。测试来源复用后续全部处理：
+`process_camera_scene()`。`simulation` 适配器也只生成这三种标准帧与预设外参，然后进入同一个
+`handle_ros_event()` 和 `process_camera_scene()`：
 
-- `generated:pick-place-scene` 把固定 RGB 送入真实计算服务，用返回掩码填充确定性深度；
-- `generated:depth-grid` 生成 497 点测试云。
+- `simulation:pick-place-scene` 把固定 RGB 与确定性深度送入真实计算服务；
+- `simulation:depth-grid` 在标准深度帧中提供 497 个有效像素。
 
-`segment()` 和 `estimate_grasps()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。抓取
+`segment()` 和 `attach_grasp_candidates()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。抓取
 资产 ID 来自通用 `RobotModelInfo.gripper_asset_id`，感知配置不保存机械臂型号或夹爪几何；
 模型没有声明该能力时仍发布识别和结构化场景，只不请求抓取候选。
-`decode_depth()` 接受 ROS `16UC1`；
-`camera_calibration()` 把设备内参与持久化外参组合成唯一标定事实。
+`decode_depth()` 接受统一 `16UC1`；`camera_calibration()` 把设备内参与当前来源持久化外参组合成
+唯一标定事实。参数与标定只由后端 `json-config-store` 读写，网页没有配置副本。
 
 ### 三维场景
 
@@ -106,7 +108,7 @@ Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 Ch
 
 ### 模拟与测试代码边界
 
-生产几何只在 `perception-core`，其中不导出测试源 API。确定性 RGB-D、497 点云和测试相机
+生产几何只在 `perception-core`，其中不导出测试源 API。确定性 RGB-D、497 点深度帧和测试相机
 参数集中在 `perception-node/src/test_source.rs`；输入动作回放集中在
 `controller-input-node/src/simulation.rs`；编译进测试源的固定图片位于同节点 `test-assets/`。输入模拟
 仍经过 spatial、motion 和 execution，RGB-D 测试输入仍经过 perception、motion 和 execution；

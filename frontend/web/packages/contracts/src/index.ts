@@ -16,7 +16,8 @@ export type RequestAction =
   | "connect"
   | "disconnect"
   | "discover"
-  | "refresh";
+  | "refresh"
+  | "reset";
 
 export interface Snapshot {
   schema_version: number;
@@ -203,14 +204,15 @@ export type InputSimulationItem =
   | "tool_axis_translation"
   | "tool_helical_motion";
 
-export type PerceptionSourceKind = "camera" | "generated_test_scene";
-
 export interface DepthCameraSourceInfo {
   source_id: string;
+  driver_id: string;
   display_name: string;
-  color_topic: string;
-  depth_topic: string;
-  depth_info_topic: string;
+  color_stream: string;
+  depth_stream: string;
+  camera_info_stream: string;
+  depth_scale_m: number;
+  calibrated: boolean;
 }
 
 export interface ImageFrameInfo {
@@ -273,7 +275,6 @@ export interface PerceptionInstanceSummary {
 export interface PerceptionState {
   schema_version: number;
   enabled: boolean;
-  source_kind?: PerceptionSourceKind | null;
   source_id?: string | null;
   compute_service_url: string;
   model: string;

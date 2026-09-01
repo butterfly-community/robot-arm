@@ -55,6 +55,7 @@ export default function Page() {
   const [board, setBoard] = useState(initialBoard);
   const [classes, setClasses] = useState("");
   const [placementLabels, setPlacementLabels] = useState("");
+  const [depthScale, setDepthScale] = useState("");
   const [pending, setPending] = useState(false);
 
   const selectedSourceId = sourceId || perception?.source_id || "";
@@ -73,6 +74,11 @@ export default function Page() {
   const activeSource = perception?.available_sources.find(
     (item) => item.source_id === perception?.source_id,
   );
+  const selectedSource = perception?.available_sources.find(
+    (item) => item.source_id === selectedSourceId,
+  );
+  const selectedDepthScale =
+    depthScale || String(selectedSource?.depth_scale_m ?? "");
 
   async function send(path: string, body: Record<string, unknown>) {
     setPending(true);
@@ -86,34 +92,33 @@ export default function Page() {
     }
   }
 
-  function perceptionRequest(
-    action: "apply" | "disconnect" | "refresh",
-    kind?: "camera" | "generated_test_scene",
+  async function perceptionRequest(
+    action: "apply" | "disconnect" | "refresh" | "reset",
   ) {
-    return send("/api/perception/request", {
+    const appliesConfiguration = action === "apply";
+    await send("/api/perception/request", {
       schema_version: schemaVersion,
       request_id: requestId(),
       action,
-      source_kind: kind ?? null,
-      source_id:
-        kind === "camera"
-          ? selectedSourceId
-          : kind
-            ? "generated:pick-place-scene"
-            : null,
-      classes: kind
+      source_id: action === "refresh" ? null : selectedSourceId || null,
+      depth_scale_m:
+        appliesConfiguration && selectedDepthScale
+          ? Number(selectedDepthScale)
+          : null,
+      classes: appliesConfiguration
         ? selectedClasses
             .split(",")
             .map((value) => value.trim())
             .filter(Boolean)
         : null,
-      placement_labels: kind
+      placement_labels: appliesConfiguration
         ? selectedPlacementLabels
             .split(",")
             .map((value) => value.trim())
             .filter(Boolean)
         : null,
     });
+    if (action === "reset") setDepthScale("");
   }
 
   async function pickPlace() {
@@ -238,9 +243,12 @@ export default function Page() {
             <Field label="深度相机">
               <select
                 value={selectedSourceId}
-                onChange={(event) => setSourceId(event.currentTarget.value)}
+                onChange={(event) => {
+                  setSourceId(event.currentTarget.value);
+                  setDepthScale("");
+                }}
               >
-                <option value="">选择 ROS RGB-D 来源</option>
+                <option value="">选择深度相机</option>
                 {perception?.available_sources.map((source) => (
                   <option key={source.source_id} value={source.source_id}>
                     {source.display_name} · {source.source_id}
@@ -249,6 +257,18 @@ export default function Page() {
               </select>
             </Field>
             <KeyValue label="计算模型" value={perception?.model ?? "—"} />
+            <KeyValue label="驱动" value={selectedSource?.driver_id ?? "—"} />
+            <KeyValue
+              label="参数与标定"
+              value={selectedSource?.calibrated ? "已配置" : "未配置"}
+            />
+            <Field label="深度比例 · m / unit">
+              <Input
+                type="number"
+                value={selectedDepthScale}
+                onChange={(event) => setDepthScale(event.currentTarget.value)}
+              />
+            </Field>
             <Field label="识别类别">
               <Input
                 value={selectedClasses}
@@ -275,16 +295,16 @@ export default function Page() {
             <Button
               variant="outline"
               disabled={pending || !selectedSourceId}
-              onClick={() => perceptionRequest("apply", "camera")}
+              onClick={() => perceptionRequest("apply")}
             >
-              连接所选相机
+              保存配置并启用
             </Button>
             <Button
               variant="outline"
-              disabled={pending}
-              onClick={() => perceptionRequest("apply", "generated_test_scene")}
+              disabled={pending || !selectedSourceId}
+              onClick={() => perceptionRequest("reset")}
             >
-              测试 RGB-D 场景
+              重置当前相机配置
             </Button>
             <Button
               variant="outline"
@@ -306,6 +326,10 @@ export default function Page() {
           <KeyValue
             label="当前来源"
             value={perception?.source_id ?? "未选择"}
+          />
+          <KeyValue
+            label="配置管理"
+            value="参数与标定由感知服务按相机保存；重置只作用于当前相机"
           />
           <KeyValue
             label="错误"
@@ -411,17 +435,11 @@ export default function Page() {
           eyebrow="Camera parameters"
           title="相机参数"
         >
+          <KeyValue label="彩色流" value={activeSource?.color_stream ?? "—"} />
+          <KeyValue label="深度流" value={activeSource?.depth_stream ?? "—"} />
           <KeyValue
-            label="彩色 Topic"
-            value={activeSource?.color_topic ?? "—"}
-          />
-          <KeyValue
-            label="深度 Topic"
-            value={activeSource?.depth_topic ?? "—"}
-          />
-          <KeyValue
-            label="对齐深度 CameraInfo"
-            value={activeSource?.depth_info_topic ?? "—"}
+            label="相机参数流"
+            value={activeSource?.camera_info_stream ?? "—"}
           />
           <KeyValue
             label="内参 K"
@@ -587,7 +605,7 @@ export default function Page() {
               disabled={pending || !calibration?.solved_result}
               onClick={() => calibrate("apply")}
             >
-              应用
+              应用并保存
             </Button>
             <Button
               variant="outline"

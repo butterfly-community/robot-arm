@@ -100,7 +100,7 @@ impl RosInterface {
         for depth_topic in names.iter().filter(|name| name.ends_with(DEPTH_SUFFIX)) {
             let source_id = depth_topic.trim_end_matches(DEPTH_SUFFIX).to_owned();
             let source = camera_source(source_id);
-            if names.contains(&source.color_topic) && names.contains(&source.depth_info_topic) {
+            if names.contains(&source.color_stream) && names.contains(&source.camera_info_stream) {
                 sources.push(source);
             }
         }
@@ -119,9 +119,9 @@ impl RosInterface {
             .node
             .lock()
             .expect("ROS perception node mutex poisoned");
-        let color = node.subscribe(&source.color_topic, QosProfile::sensor_data())?;
-        let depth = node.subscribe(&source.depth_topic, QosProfile::sensor_data())?;
-        let depth_info = node.subscribe(&source.depth_info_topic, QosProfile::sensor_data())?;
+        let color = node.subscribe(&source.color_stream, QosProfile::sensor_data())?;
+        let depth = node.subscribe(&source.depth_stream, QosProfile::sensor_data())?;
+        let depth_info = node.subscribe(&source.camera_info_stream, QosProfile::sensor_data())?;
         drop(node);
         let id = source.source_id.clone();
         forward_stream(color, self.event_sender.clone(), {
@@ -366,9 +366,12 @@ impl RosInterface {
 fn camera_source(source_id: String) -> DepthCameraSourceInfo {
     let display_name = source_id.trim_start_matches('/').replace('/', " / ");
     DepthCameraSourceInfo {
-        color_topic: format!("{source_id}/color/image_raw"),
-        depth_topic: format!("{source_id}/aligned_depth_to_color/image_raw"),
-        depth_info_topic: format!("{source_id}/aligned_depth_to_color/camera_info"),
+        driver_id: "ros2".into(),
+        color_stream: format!("{source_id}/color/image_raw"),
+        depth_stream: format!("{source_id}/aligned_depth_to_color/image_raw"),
+        camera_info_stream: format!("{source_id}/aligned_depth_to_color/camera_info"),
+        depth_scale_m: 0.001,
+        calibrated: false,
         source_id,
         display_name,
     }

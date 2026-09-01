@@ -1,107 +1,176 @@
 use std::io::Cursor;
 
 use eyre::{Result, eyre};
-use image::{DynamicImage, GrayImage, ImageFormat, Luma, imageops::FilterType};
+use image::{DynamicImage, GrayImage, ImageFormat, Luma, RgbImage, imageops::FilterType};
 use robot_arm_messages::{
-    AlignedDepthFrame, DepthCameraCalibration, DepthPointCloudFrame, DetectedInstance2D,
+    AlignedDepthFrame, DepthCameraCalibration, DepthCameraSourceInfo, DetectedInstance2D,
     SCHEMA_VERSION,
 };
+use serde::Deserialize;
 
 use crate::ros::ros_time;
 
-const GENERATED_RGB_ASSET: &[u8] = include_bytes!("../test-assets/pick-place-scene.png");
-const GENERATED_DEPTH_SOURCE_ID: &str = "generated-test-depth-scene";
-const GENERATED_DEPTH_FRAME_ID: &str = "depth_sim_frame";
+const SIMULATION_CONFIG: &str = include_str!("../test-assets/simulation-cameras.json");
+const PICK_PLACE_RGB: &[u8] = include_bytes!("../test-assets/pick-place-scene.png");
 
-pub(super) fn generated_depth_test_cloud(sequence: u64, now_ns: i64) -> DepthPointCloudFrame {
-    let mut points = Vec::with_capacity(497);
-    for x in -10..=10 {
-        for y in 30..=50 {
-            points.push([x as f32 * 0.01, y as f32 * 0.01, 0.0]);
-        }
-    }
-    for x in -3..=3 {
-        for z in 1..=8 {
-            points.push([x as f32 * 0.01, 0.4, z as f32 * 0.01]);
-        }
-    }
-    DepthPointCloudFrame {
-        schema_version: SCHEMA_VERSION,
-        sequence,
-        source_time_ns: now_ns,
-        source_id: GENERATED_DEPTH_SOURCE_ID.into(),
-        frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        width: points.len() as u32,
-        height: 1,
-        points_xyz_m: points,
-    }
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SimulationKind {
+    PickPlace,
+    DepthGrid,
 }
 
-pub(super) fn generated_depth_test_calibration(
+#[derive(Clone, Deserialize)]
+struct SimulationCameraConfig {
+    source_id: String,
+    display_name: String,
+    simulation: SimulationKind,
+    color_stream: String,
+    depth_stream: String,
+    camera_info_stream: String,
+    depth_scale_m: f64,
+    calibration: SimulationCalibration,
+}
+
+#[derive(Clone, Deserialize)]
+struct SimulationCalibration {
+    parent_frame_id: String,
+    frame_id: String,
+    translation_m: [f64; 3],
+    orientation_xyzw: [f64; 4],
+    width: u32,
+    height: u32,
+    distortion_model: String,
+    distortion: Vec<f64>,
+    camera_matrix: [f64; 9],
+    projection_matrix: [f64; 12],
+}
+
+pub(super) struct SimulationFrame {
+    pub color: r2r::sensor_msgs::msg::Image,
+    pub depth: r2r::sensor_msgs::msg::Image,
+    pub camera_info: r2r::sensor_msgs::msg::CameraInfo,
+    pub calibration: DepthCameraCalibration,
+}
+
+pub(super) fn simulation_sources() -> Result<Vec<DepthCameraSourceInfo>> {
+    Ok(configs()?
+        .into_iter()
+        .map(|config| DepthCameraSourceInfo {
+            source_id: config.source_id,
+            driver_id: "simulation".into(),
+            display_name: config.display_name,
+            color_stream: config.color_stream,
+            depth_stream: config.depth_stream,
+            camera_info_stream: config.camera_info_stream,
+            depth_scale_m: config.depth_scale_m,
+            calibrated: true,
+        })
+        .collect())
+}
+
+pub(super) fn simulation_frame(
+    source_id: &str,
+    sequence: u64,
+    now_ns: i64,
+    depth_scale_m: f64,
+) -> Result<Option<SimulationFrame>> {
+    let Some(config) = configs()?
+        .into_iter()
+        .find(|config| config.source_id == source_id)
+    else {
+        return Ok(None);
+    };
+    let calibration = calibration(&config, sequence, now_ns);
+    let (color, depth, _) = match config.simulation {
+        SimulationKind::PickPlace => pick_place_rgbd(&config, sequence, now_ns, depth_scale_m)?,
+        SimulationKind::DepthGrid => depth_grid_rgbd(&config, sequence, now_ns, depth_scale_m),
+    };
+    Ok(Some(SimulationFrame {
+        color,
+        depth: depth_image(&depth),
+        camera_info: camera_info(&calibration),
+        calibration,
+    }))
+}
+
+pub(super) fn simulation_source(source_id: &str) -> Result<Option<DepthCameraSourceInfo>> {
+    Ok(simulation_sources()?
+        .into_iter()
+        .find(|source| source.source_id == source_id))
+}
+
+fn configs() -> Result<Vec<SimulationCameraConfig>> {
+    Ok(serde_json::from_str(SIMULATION_CONFIG)?)
+}
+
+fn calibration(
+    config: &SimulationCameraConfig,
     sequence: u64,
     now_ns: i64,
 ) -> DepthCameraCalibration {
+    let value = &config.calibration;
     DepthCameraCalibration {
         schema_version: SCHEMA_VERSION,
         sequence,
         source_time_ns: now_ns,
-        source_id: GENERATED_DEPTH_SOURCE_ID.into(),
-        parent_frame_id: "base_link".into(),
-        frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        translation_m: [0.0; 3],
-        orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        width: 640,
-        height: 480,
-        distortion_model: "plumb_bob".into(),
-        distortion: vec![0.0; 5],
-        camera_matrix: [500.0, 0.0, 319.5, 0.0, 500.0, 239.5, 0.0, 0.0, 1.0],
-        projection_matrix: [
-            500.0, 0.0, 319.5, 0.0, 0.0, 500.0, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0,
-        ],
+        source_id: config.source_id.clone(),
+        parent_frame_id: value.parent_frame_id.clone(),
+        frame_id: value.frame_id.clone(),
+        translation_m: value.translation_m,
+        orientation_xyzw: value.orientation_xyzw,
+        width: value.width,
+        height: value.height,
+        distortion_model: value.distortion_model.clone(),
+        distortion: value.distortion.clone(),
+        camera_matrix: value.camera_matrix,
+        projection_matrix: value.projection_matrix,
     }
 }
 
-pub(super) fn generated_pick_place_calibration(
-    sequence: u64,
-    now_ns: i64,
-) -> DepthCameraCalibration {
-    let half_sqrt_two = std::f64::consts::FRAC_1_SQRT_2;
-    DepthCameraCalibration {
-        schema_version: SCHEMA_VERSION,
-        sequence,
-        source_time_ns: now_ns,
-        source_id: GENERATED_DEPTH_SOURCE_ID.into(),
-        parent_frame_id: "base_link".into(),
-        frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        translation_m: [0.15, 0.06, 0.67],
-        orientation_xyzw: [half_sqrt_two, half_sqrt_two, 0.0, 0.0],
-        width: 640,
-        height: 480,
-        distortion_model: "plumb_bob".into(),
-        distortion: vec![0.0; 5],
-        camera_matrix: [1800.0, 0.0, 319.5, 0.0, 1800.0, 239.5, 0.0, 0.0, 1.0],
-        projection_matrix: [
-            1800.0, 0.0, 319.5, 0.0, 0.0, 1800.0, 239.5, 0.0, 0.0, 0.0, 1.0, 0.0,
-        ],
+fn camera_info(calibration: &DepthCameraCalibration) -> r2r::sensor_msgs::msg::CameraInfo {
+    r2r::sensor_msgs::msg::CameraInfo {
+        header: r2r::std_msgs::msg::Header {
+            stamp: ros_time(calibration.source_time_ns),
+            frame_id: calibration.frame_id.clone(),
+        },
+        height: calibration.height,
+        width: calibration.width,
+        distortion_model: calibration.distortion_model.clone(),
+        d: calibration.distortion.clone(),
+        k: calibration.camera_matrix.to_vec(),
+        r: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        p: calibration.projection_matrix.to_vec(),
+        binning_x: 0,
+        binning_y: 0,
+        roi: r2r::sensor_msgs::msg::RegionOfInterest {
+            x_offset: 0,
+            y_offset: 0,
+            height: 0,
+            width: 0,
+            do_rectify: false,
+        },
     }
 }
 
-pub(super) fn generated_rgbd(
+fn pick_place_rgbd(
+    config: &SimulationCameraConfig,
     sequence: u64,
     now_ns: i64,
+    depth_scale_m: f64,
 ) -> Result<(
     r2r::sensor_msgs::msg::Image,
     AlignedDepthFrame,
     Vec<DetectedInstance2D>,
 )> {
-    const WIDTH: u32 = 640;
-    const HEIGHT: u32 = 480;
-    let rgb = image::load_from_memory(GENERATED_RGB_ASSET)?
-        .resize_exact(WIDTH, HEIGHT, FilterType::Lanczos3)
+    let width = config.calibration.width;
+    let height = config.calibration.height;
+    let rgb = image::load_from_memory(PICK_PLACE_RGB)?
+        .resize_exact(width, height, FilterType::Lanczos3)
         .to_rgb8();
     let cube_mask = polygon_mask(
-        WIDTH,
-        HEIGHT,
+        width,
+        height,
         &[
             (80, 265),
             (101, 230),
@@ -113,8 +182,8 @@ pub(super) fn generated_rgbd(
         ],
     );
     let bin_mask = polygon_mask(
-        WIDTH,
-        HEIGHT,
+        width,
+        height,
         &[
             (264, 219),
             (312, 127),
@@ -127,72 +196,91 @@ pub(super) fn generated_rgbd(
             (263, 271),
         ],
     );
-    let bin_interior_mask = polygon_mask(
-        WIDTH,
-        HEIGHT,
-        &[
-            (303, 224),
-            (334, 146),
-            (381, 138),
-            (548, 177),
-            (562, 219),
-            (549, 278),
-            (519, 301),
-            (309, 259),
-        ],
-    );
-    let color = r2r::sensor_msgs::msg::Image {
-        header: r2r::std_msgs::msg::Header {
-            stamp: ros_time(now_ns),
-            frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        },
-        height: HEIGHT,
-        width: WIDTH,
-        encoding: "rgb8".into(),
-        is_bigendian: 0,
-        step: WIDTH * 3,
-        data: rgb.into_raw(),
-    };
-    let mut values = vec![700_u16; (WIDTH * HEIGHT) as usize];
-    fill_masked_depth(&mut values, &cube_mask, 590, 620);
-    fill_masked_depth(&mut values, &bin_mask, 620, 660);
-    fill_masked_depth(&mut values, &bin_interior_mask, 680, 690);
-    let depth = AlignedDepthFrame {
-        schema_version: SCHEMA_VERSION,
-        sequence,
-        source_time_ns: now_ns,
-        source_id: GENERATED_DEPTH_SOURCE_ID.into(),
-        frame_id: GENERATED_DEPTH_FRAME_ID.into(),
-        width: WIDTH,
-        height: HEIGHT,
-        depth_scale_m: 0.001,
-        depth: values,
-    };
+    let color = color_image(rgb, &config.calibration.frame_id, now_ns);
+    let mut values = vec![0_u16; (width * height) as usize];
+    fill_masked_depth(&mut values, &cube_mask, 590, 670);
+    fill_masked_depth(&mut values, &bin_mask, 590, 670);
+    let depth = aligned_depth(config, sequence, now_ns, depth_scale_m, values);
     let instances = vec![
-        generated_instance("red-cube-0", "red cube", cube_mask)?,
-        generated_instance("gray-storage-bin-0", "gray storage bin", bin_mask)?,
+        simulated_instance("red-cube-0", "red cube", cube_mask)?,
+        simulated_instance("gray-storage-bin-0", "gray storage bin", bin_mask)?,
     ];
     Ok((color, depth, instances))
 }
 
-pub(super) fn fill_generated_depth_from_instances(
-    depth: &mut AlignedDepthFrame,
-    instances: &[DetectedInstance2D],
-) -> Result<()> {
-    depth.depth.fill(0);
-    for instance in instances {
-        let mask =
-            image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?.into_luma8();
-        match instance.label.as_str() {
-            "red cube" => fill_masked_depth(&mut depth.depth, &mask, 590, 670),
-            "gray storage bin" => fill_masked_depth(&mut depth.depth, &mask, 590, 670),
-            _ => {}
+fn depth_grid_rgbd(
+    config: &SimulationCameraConfig,
+    sequence: u64,
+    now_ns: i64,
+    depth_scale_m: f64,
+) -> (
+    r2r::sensor_msgs::msg::Image,
+    AlignedDepthFrame,
+    Vec<DetectedInstance2D>,
+) {
+    let width = config.calibration.width;
+    let height = config.calibration.height;
+    let color = color_image(
+        RgbImage::new(width, height),
+        &config.calibration.frame_id,
+        now_ns,
+    );
+    let mut values = vec![0_u16; (width * height) as usize];
+    for y in 210..=230 {
+        for x in 310..=330 {
+            values[(y * width + x) as usize] = 400;
         }
     }
-    Ok(())
+    for y in 210..=217 {
+        for x in 350..=356 {
+            values[(y * width + x) as usize] = 350 + (y - 210) as u16 * 10;
+        }
+    }
+    (
+        color,
+        aligned_depth(config, sequence, now_ns, depth_scale_m, values),
+        vec![],
+    )
 }
 
-pub(super) fn depth_image(depth: &AlignedDepthFrame) -> r2r::sensor_msgs::msg::Image {
+fn color_image(rgb: RgbImage, frame_id: &str, now_ns: i64) -> r2r::sensor_msgs::msg::Image {
+    let width = rgb.width();
+    let height = rgb.height();
+    r2r::sensor_msgs::msg::Image {
+        header: r2r::std_msgs::msg::Header {
+            stamp: ros_time(now_ns),
+            frame_id: frame_id.into(),
+        },
+        height,
+        width,
+        encoding: "rgb8".into(),
+        is_bigendian: 0,
+        step: width * 3,
+        data: rgb.into_raw(),
+    }
+}
+
+fn aligned_depth(
+    config: &SimulationCameraConfig,
+    sequence: u64,
+    now_ns: i64,
+    depth_scale_m: f64,
+    depth: Vec<u16>,
+) -> AlignedDepthFrame {
+    AlignedDepthFrame {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        source_time_ns: now_ns,
+        source_id: config.source_id.clone(),
+        frame_id: config.calibration.frame_id.clone(),
+        width: config.calibration.width,
+        height: config.calibration.height,
+        depth_scale_m,
+        depth,
+    }
+}
+
+fn depth_image(depth: &AlignedDepthFrame) -> r2r::sensor_msgs::msg::Image {
     r2r::sensor_msgs::msg::Image {
         header: r2r::std_msgs::msg::Header {
             stamp: ros_time(depth.source_time_ns),
@@ -211,8 +299,8 @@ pub(super) fn depth_image(depth: &AlignedDepthFrame) -> r2r::sensor_msgs::msg::I
     }
 }
 
-fn generated_instance(id: &str, label: &str, mask: GrayImage) -> Result<DetectedInstance2D> {
-    let bounds = mask_bounds(&mask).ok_or_else(|| eyre!("generated mask is empty"))?;
+fn simulated_instance(id: &str, label: &str, mask: GrayImage) -> Result<DetectedInstance2D> {
+    let bounds = mask_bounds(&mask).ok_or_else(|| eyre!("simulation mask is empty"))?;
     let width = mask.width();
     let height = mask.height();
     let mut output = Cursor::new(Vec::new());
@@ -273,7 +361,7 @@ fn mask_bounds(mask: &GrayImage) -> Option<[u32; 4]> {
 }
 
 fn fill_masked_depth(depth: &mut [u16], mask: &GrayImage, near: u16, far: u16) {
-    let [_, minimum_y, _, maximum_y] = mask_bounds(mask).expect("generated mask has bounds");
+    let [_, minimum_y, _, maximum_y] = mask_bounds(mask).expect("simulation mask has bounds");
     let span = maximum_y - minimum_y;
     for (x, y, mask_value) in mask.enumerate_pixels() {
         if mask_value[0] != 0 {
@@ -293,26 +381,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn depth_grid_fixture_has_the_declared_geometry() {
-        let cloud = generated_depth_test_cloud(1, 2);
-        assert_eq!(cloud.points_xyz_m.len(), 497);
-        assert_abs_diff_eq!(cloud.points_xyz_m[0][0], -0.1);
-        assert_abs_diff_eq!(cloud.points_xyz_m[0][1], 0.3);
-        assert_abs_diff_eq!(cloud.points_xyz_m[440][0], 0.1);
-        assert_abs_diff_eq!(cloud.points_xyz_m[440][1], 0.5);
-        assert_abs_diff_eq!(cloud.points_xyz_m[496][0], 0.03);
-        assert_abs_diff_eq!(cloud.points_xyz_m[496][1], 0.4);
-        assert_abs_diff_eq!(cloud.points_xyz_m[496][2], 0.08);
+    fn simulation_cameras_are_declared_by_the_prebuilt_config() {
+        let sources = simulation_sources().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.driver_id == "simulation")
+        );
+        assert!(sources.iter().all(|source| source.calibrated));
     }
 
     #[test]
-    fn generated_pick_and_place_points_share_one_support_plane() {
-        let (_, mut depth, instances) = generated_rgbd(1, 2).unwrap();
-        fill_generated_depth_from_instances(&mut depth, &instances).unwrap();
+    fn depth_grid_is_a_standard_rgbd_camera_frame() {
+        let frame = simulation_frame("simulation:depth-grid", 1, 2, 0.001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.depth.encoding, "16UC1");
+        assert_eq!(
+            frame
+                .depth
+                .data
+                .chunks_exact(2)
+                .filter(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) != 0)
+                .count(),
+            497
+        );
+        assert_eq!(
+            frame.camera_info.k,
+            frame.calibration.camera_matrix.to_vec()
+        );
+    }
+
+    #[test]
+    fn simulated_pick_and_place_points_share_one_support_plane() {
+        let mut configs = configs().unwrap();
+        let config = configs.remove(0);
+        let (_, depth, instances) = pick_place_rgbd(&config, 1, 2, 0.001).unwrap();
+        let calibration = calibration(&config, 1, 2);
         let (scene, _) = world_scene_and_instance_clouds_from_aligned_depth(
             1,
             &depth,
-            &generated_pick_place_calibration(1, 2),
+            &calibration,
             &instances,
             &["gray storage bin".into()],
         )
