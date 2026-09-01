@@ -655,28 +655,25 @@ impl PerceptionNode {
         let mut next = self.config.clone();
         let result = match request.action {
             RequestAction::Apply => {
-                next.enabled = true;
-                if let Some(source_id) = request.source_id.clone() {
-                    next.source_id = Some(source_id);
-                }
+                let source_id = request.source_id.clone();
                 if let Some(classes) = request.classes {
                     next.classes = classes;
                 }
                 if let Some(labels) = request.placement_labels {
                     next.placement_labels = labels;
                 }
-                let source_id = next
-                    .source_id
-                    .as_deref()
-                    .ok_or_else(|| eyre!("请选择深度相机来源"))?;
-                if let Some(depth_scale_m) = request.depth_scale_m {
-                    next.cameras
-                        .entry(source_id.into())
-                        .or_default()
-                        .depth_scale_m = depth_scale_m;
-                }
-                if simulation_source(source_id)?.is_none() {
-                    self.ros.select_camera_id(source_id)?;
+                if let Some(source_id) = source_id {
+                    next.enabled = true;
+                    next.source_id = Some(source_id.clone());
+                    if let Some(depth_scale_m) = request.depth_scale_m {
+                        next.cameras
+                            .entry(source_id.clone())
+                            .or_default()
+                            .depth_scale_m = depth_scale_m;
+                    }
+                    if simulation_source(&source_id)?.is_none() {
+                        self.ros.select_camera_id(&source_id)?;
+                    }
                 }
                 Ok(())
             }

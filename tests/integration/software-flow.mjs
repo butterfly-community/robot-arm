@@ -142,6 +142,30 @@ const perceptionBefore = await snapshot("perception");
 const originalPerception = perceptionBefore.values.perception_state;
 const originalPerceptionConfigVersion =
   originalPerception?.service?.config_version ?? 0;
+const perceptionModelConfigured = await request("/api/perception/request", {
+  schema_version: 3,
+  request_id: "integration-perception-model-config",
+  action: "apply",
+  source_id: null,
+  depth_scale_m: null,
+  classes: ["red cube", "gray storage bin"],
+  placement_labels: ["gray storage bin"],
+});
+assert.equal(perceptionModelConfigured.original_error, null);
+const modelOnlyPerceptionSnapshot = await waitFor(
+  () => snapshot("perception"),
+  (state) =>
+    state.values.perception_state?.service?.config_version >
+    originalPerceptionConfigVersion,
+);
+assert.equal(
+  modelOnlyPerceptionSnapshot.values.perception_state.source_id,
+  originalPerception?.source_id ?? null,
+);
+assert.equal(
+  modelOnlyPerceptionSnapshot.values.perception_state.enabled,
+  originalPerception?.enabled ?? false,
+);
 const perceptionEnabled = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-enable",

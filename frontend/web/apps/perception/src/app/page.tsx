@@ -94,24 +94,27 @@ export default function Page() {
 
   async function perceptionRequest(
     action: "apply" | "disconnect" | "refresh" | "reset",
+    target: "camera" | "model" = "camera",
   ) {
-    const appliesConfiguration = action === "apply";
+    const appliesCamera = action === "apply" && target === "camera";
+    const appliesModel = action === "apply" && target === "model";
     await send("/api/perception/request", {
       schema_version: schemaVersion,
       request_id: requestId(),
       action,
-      source_id: action === "refresh" ? null : selectedSourceId || null,
-      depth_scale_m:
-        appliesConfiguration && selectedDepthScale
-          ? Number(selectedDepthScale)
+      source_id:
+        target === "camera" && action !== "refresh"
+          ? selectedSourceId || null
           : null,
-      classes: appliesConfiguration
+      depth_scale_m:
+        appliesCamera && selectedDepthScale ? Number(selectedDepthScale) : null,
+      classes: appliesModel
         ? selectedClasses
             .split(",")
             .map((value) => value.trim())
             .filter(Boolean)
         : null,
-      placement_labels: appliesConfiguration
+      placement_labels: appliesModel
         ? selectedPlacementLabels
             .split(",")
             .map((value) => value.trim())
@@ -219,9 +222,9 @@ export default function Page() {
         </div>
 
         <Card
-          className="span-12"
-          eyebrow="Source"
-          title="深度相机与数据来源"
+          className="span-6 aligned-row-card"
+          eyebrow="Camera"
+          title="深度相机"
           action={
             <StatusBadge
               tone={
@@ -240,51 +243,34 @@ export default function Page() {
             </StatusBadge>
           }
         >
-          <div className="diagnostic-grid">
-            <Field label="深度相机">
-              <select
-                value={selectedSourceId}
-                onChange={(event) => {
-                  setSourceId(event.currentTarget.value);
-                  setDepthScale("");
-                }}
-              >
-                <option value="">选择深度相机</option>
-                {perception?.available_sources.map((source) => (
-                  <option key={source.source_id} value={source.source_id}>
-                    {source.display_name} · {source.source_id}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <KeyValue label="计算模型" value={perception?.model ?? "—"} />
-            <KeyValue label="驱动" value={selectedSource?.driver_id ?? "—"} />
-            <KeyValue
-              label="参数与标定"
-              value={selectedSource?.calibrated ? "已配置" : "未配置"}
+          <Field label="相机来源">
+            <select
+              value={selectedSourceId}
+              onChange={(event) => {
+                setSourceId(event.currentTarget.value);
+                setDepthScale("");
+              }}
+            >
+              <option value="">选择深度相机</option>
+              {perception?.available_sources.map((source) => (
+                <option key={source.source_id} value={source.source_id}>
+                  {source.display_name} · {source.source_id}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <KeyValue label="驱动" value={selectedSource?.driver_id ?? "—"} />
+          <KeyValue
+            label="参数与标定"
+            value={selectedSource?.calibrated ? "已配置" : "未配置"}
+          />
+          <Field label="深度比例 · m / unit">
+            <Input
+              type="number"
+              value={selectedDepthScale}
+              onChange={(event) => setDepthScale(event.currentTarget.value)}
             />
-            <Field label="深度比例 · m / unit">
-              <Input
-                type="number"
-                value={selectedDepthScale}
-                onChange={(event) => setDepthScale(event.currentTarget.value)}
-              />
-            </Field>
-            <Field label="识别类别">
-              <Input
-                value={selectedClasses}
-                onChange={(event) => setClasses(event.currentTarget.value)}
-              />
-            </Field>
-            <Field label="放置区域类别">
-              <Input
-                value={selectedPlacementLabels}
-                onChange={(event) =>
-                  setPlacementLabels(event.currentTarget.value)
-                }
-              />
-            </Field>
-          </div>
+          </Field>
           <div className="card-actions card-actions-leading">
             <Button
               variant="outline"
@@ -335,6 +321,41 @@ export default function Page() {
           <KeyValue
             label="错误"
             value={perception?.original_error ?? error ?? "无"}
+          />
+        </Card>
+
+        <Card
+          className="span-6 aligned-row-card"
+          eyebrow="Model"
+          title="识别模型"
+        >
+          <KeyValue label="计算模型" value={perception?.model ?? "—"} />
+          <Field label="识别类别">
+            <Input
+              value={selectedClasses}
+              onChange={(event) => setClasses(event.currentTarget.value)}
+            />
+          </Field>
+          <Field label="放置区域类别">
+            <Input
+              value={selectedPlacementLabels}
+              onChange={(event) =>
+                setPlacementLabels(event.currentTarget.value)
+              }
+            />
+          </Field>
+          <div className="card-actions card-actions-leading">
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => perceptionRequest("apply", "model")}
+            >
+              保存模型配置
+            </Button>
+          </div>
+          <KeyValue
+            label="配置管理"
+            value="识别类别与放置区域类别由感知服务保存"
           />
         </Card>
 
