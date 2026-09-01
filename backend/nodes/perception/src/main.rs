@@ -27,7 +27,7 @@ use perception_core::{
 use robot_arm_messages::{
     AlignedDepthFrame, ArmState, CalibrationAction, CalibrationObservation, CalibrationRequest,
     CalibrationResult, CalibrationSessionState, DepthCameraCalibration, DepthCameraSourceInfo,
-    DetectedInstance2D, ImageFrameInfo, MotionState, PerceptionAssetRequest,
+    DepthPointCloudFrame, DetectedInstance2D, ImageFrameInfo, MotionState, PerceptionAssetRequest,
     PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionState, Pose3,
     RequestAction, RequestResult, RobotModelInfo, SCHEMA_VERSION, ServiceState, ToolPose,
     WorldScene, from_arrow, to_arrow,
@@ -122,6 +122,7 @@ struct PerceptionNode {
     camera_calibration: Option<DepthCameraCalibration>,
     instances: Vec<PerceptionInstanceSummary>,
     point_count: Option<u64>,
+    last_cloud: Option<DepthPointCloudFrame>,
     assets: BTreeMap<String, (String, Vec<u8>)>,
     last_error: Option<String>,
     simulation_published: bool,
@@ -239,6 +240,7 @@ fn run() -> Result<()> {
         camera_calibration: None,
         instances: vec![],
         point_count: None,
+        last_cloud: None,
         assets: BTreeMap::new(),
         last_error: None,
         simulation_published: false,
@@ -353,6 +355,10 @@ impl PerceptionNode {
             .as_ref()
             .map(|scene| scene.frame_id.clone())
             .unwrap_or_default();
+        let cloud_frame_id = self
+            .camera_calibration
+            .as_ref()
+            .map(|calibration| calibration.frame_id.clone());
         self.simulation_published = false;
         self.frames = CameraFrames::default();
         self.last_scene = None;
@@ -361,18 +367,32 @@ impl PerceptionNode {
         self.camera_calibration = None;
         self.instances.clear();
         self.point_count = None;
+        self.last_cloud = None;
         self.last_frame_time_ns = None;
         self.assets.clear();
         self.calibration_color = None;
         self.ros.clear_markers()?;
         self.sequence += 1;
+        let sample_time_ns = now_ns();
+        if let Some(cloud_frame_id) = cloud_frame_id {
+            self.ros.publish_cloud(DepthPointCloudFrame {
+                schema_version: SCHEMA_VERSION,
+                sequence: self.sequence,
+                source_time_ns: sample_time_ns,
+                source_id: String::new(),
+                frame_id: cloud_frame_id,
+                width: 0,
+                height: 1,
+                points_xyz_m: vec![],
+            })?;
+        }
         send(
             node,
             "world_scene",
             &WorldScene {
                 schema_version: SCHEMA_VERSION,
                 sequence: self.sequence,
-                sample_time_ns: now_ns(),
+                sample_time_ns,
                 frame_id,
                 objects: vec![],
                 placement_regions: vec![],
@@ -422,6 +442,15 @@ impl PerceptionNode {
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error.to_string()),
             }
+        }
+        if self.simulation_published
+            && let Some(source_id) = self.config.source_id.as_deref()
+            && simulation_source(source_id)?.is_some()
+            && let Some(cloud) = &self.last_cloud
+        {
+            let mut cloud = cloud.clone();
+            cloud.source_time_ns = now_ns();
+            self.ros.publish_cloud(cloud)?;
         }
         self.publish_state(node)
     }
@@ -490,7 +519,8 @@ impl PerceptionNode {
         let cloud =
             aligned_obstacle_point_cloud(self.sequence, &aligned_depth, &calibration, &instances)?;
         self.point_count = Some(cloud.points_xyz_m.len() as u64);
-        self.ros.publish_cloud(cloud)?;
+        self.ros.publish_cloud(cloud.clone())?;
+        self.last_cloud = Some(cloud);
         let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
             self.sequence,
             &aligned_depth,
