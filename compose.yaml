@@ -113,7 +113,9 @@ services:
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro
     device_cgroup_rules:
+      - "c 81:* rwm"
       - "c 189:* rwm"
+      - "c 235:* rwm"
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
 
