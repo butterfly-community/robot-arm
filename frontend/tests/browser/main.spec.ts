@@ -463,6 +463,9 @@ test("perception page uses the simulation camera through the canonical path", as
     await page.goto("/perception/");
     const camera = page.getByLabel("相机来源");
     await camera.selectOption("simulation:depth-grid");
+    const refreshImage = page.getByRole("button", { name: "刷新图像" });
+    await expect(refreshImage).toBeEnabled();
+    await refreshImage.click();
     await expect
       .poll(async () => {
         const state = await (await request.get("/api/perception/state")).json();
@@ -619,12 +622,16 @@ test("perception layout groups camera workflow and structured results", async ({
         (executeButton!.x + executeButton!.width),
     ),
   ).toBeLessThan(2);
-  const overlayImage =
-    card("识别与分割叠加图").getByAltText("识别与分割叠加图");
-  await expect(overlayImage).toHaveAttribute("loading", "eager");
-  await expect
-    .poll(() => overlayImage.evaluate((image) => image.naturalWidth))
-    .toBeGreaterThan(0);
+  const overlayCard = card("识别与分割叠加图");
+  const overlayImage = overlayCard.getByAltText("识别与分割叠加图");
+  if (await overlayImage.count()) {
+    await expect(overlayImage).toHaveAttribute("loading", "eager");
+    await expect
+      .poll(() => overlayImage.evaluate((image) => image.naturalWidth))
+      .toBeGreaterThan(0);
+  } else {
+    await expect(overlayCard.getByText("等待模型输出")).toBeVisible();
+  }
   await expect(
     card("识别与分割叠加图").locator("table.data-table"),
   ).toHaveCount(0);

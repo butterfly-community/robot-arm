@@ -79,6 +79,7 @@ pub enum RequestAction {
     Disconnect,
     Discover,
     Refresh,
+    Snapshot,
     Reset,
 }
 
@@ -392,6 +393,12 @@ pub struct DepthCameraSourceInfo {
     pub source_id: String,
     pub driver_id: String,
     pub display_name: String,
+    pub device_model: Option<String>,
+    pub serial_number: Option<String>,
+    pub firmware_version: Option<String>,
+    pub connection_type: Option<String>,
+    pub physical_port: Option<String>,
+    pub sensors: Vec<String>,
     pub color_stream: String,
     pub depth_stream: String,
     pub camera_info_stream: String,

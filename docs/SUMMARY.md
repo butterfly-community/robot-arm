@@ -56,14 +56,18 @@ StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂�
 满足以下组合契约的来源，连接多个已发布来源时可按来源 ID 选择：
 
 相机驱动是 `perception-node` 的内部设备适配层，不另设相机采集服务；型号差异止于该适配层，
-结构化感知、远程计算和运动节点只接收统一契约。
+结构化感知、远程计算和运动节点只接收统一契约。RealSense 适配器在主动刷新时补充型号、
+序列号、固件、USB 类型和物理端口；分辨率、帧率和编码完全采用驱动实际消息，不写成设备或
+业务默认值。
 
 | 输入 | ROS topic |
 | --- | --- |
 | 彩色图 | `{source}/color/image_raw` |
 | 对齐深度 / 对齐后的内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
 
-`perception-node` 只在所选来源具备相机外参后把帧转换到 `base_link`。未启用感知时不发布
+所选来源的原始彩色和深度帧不依赖外参，可直接用于网页预览与标定；`perception-node` 只在
+具备相机外参后把三维结果转换到 `base_link`。网页按需刷新的是同一输入缓存中的最新帧，
+不是独立的视频或采集路径。未启用感知时不发布
 占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
 服务失败时保留原始错误，不切换模型或伪造结果。
 

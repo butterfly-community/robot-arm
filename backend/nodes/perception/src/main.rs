@@ -123,6 +123,7 @@ struct PerceptionNode {
     occupied_voxel_extent_m: f64,
     simulation_published: bool,
     calibration_color: Option<r2r::sensor_msgs::msg::Image>,
+    preview_depth: Option<r2r::sensor_msgs::msg::Image>,
     latest_arm_state: Option<ArmState>,
     latest_tool_pose: Option<ToolPose>,
     robot_model: Option<RobotModelInfo>,
@@ -267,6 +268,7 @@ fn run() -> Result<()> {
         occupied_voxel_extent_m: octomap_resolution_m,
         simulation_published: false,
         calibration_color: None,
+        preview_depth: None,
         latest_arm_state: None,
         latest_tool_pose: None,
         robot_model: None,
@@ -350,6 +352,12 @@ impl PerceptionNode {
 
     fn refresh_source_config(&mut self) {
         for source in &mut self.available_sources {
+            let baseline = simulation_source(&source.source_id).ok().flatten();
+            source.depth_scale_m = baseline
+                .as_ref()
+                .map(|source| source.depth_scale_m)
+                .unwrap_or_else(default_depth_scale_m);
+            source.calibrated = baseline.is_some_and(|source| source.calibrated);
             if let Some(camera) = self.config.cameras.get(&source.source_id) {
                 source.depth_scale_m = camera.depth_scale_m;
                 source.calibrated |= camera.calibration.is_some();
@@ -393,6 +401,7 @@ impl PerceptionNode {
         self.last_frame_time_ns = None;
         self.assets.clear();
         self.calibration_color = None;
+        self.preview_depth = None;
         self.ros.clear_markers()?;
         self.sequence += 1;
         let sample_time_ns = now_ns();
@@ -481,10 +490,27 @@ impl PerceptionNode {
             RosEvent::Color(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_color(message.clone())?;
                 self.calibration_color = Some(message.clone());
+                if self.color_frame.is_none() {
+                    self.color_frame = Some(image_frame_info(&message));
+                    self.assets.insert(
+                        "color.png".into(),
+                        ("image/png".into(), color_png(&message)?),
+                    );
+                }
                 self.frames.color = Some(message);
             }
             RosEvent::Depth(source_id, message) if self.selected_camera(&source_id) => {
                 self.ros.publish_depth(message.clone())?;
+                if self.depth_frame.is_none() {
+                    let depth = decode_depth(&message, &source_id, self.depth_scale_m(&source_id))?;
+                    self.depth_frame = Some(image_frame_info(&message));
+                    self.assets.insert(
+                        "depth.png".into(),
+                        ("image/png".into(), depth_preview_png(&depth)?),
+                    );
+                    self.last_frame_time_ns = Some(depth.source_time_ns);
+                }
+                self.preview_depth = Some(message.clone());
                 self.frames.depth = Some(message);
             }
             RosEvent::DepthInfo(source_id, message) if self.selected_camera(&source_id) => {
@@ -767,6 +793,7 @@ impl PerceptionNode {
                 self.available_sources = self.discover_sources()?;
                 Ok(())
             }
+            RequestAction::Snapshot => self.snapshot_previews(),
             RequestAction::Reset => {
                 let source_id = request
                     .source_id
@@ -790,7 +817,10 @@ impl PerceptionNode {
                 "perception request action {action:?} is not supported"
             )),
         };
-        let persist = request.action != RequestAction::Refresh;
+        let persist = !matches!(
+            request.action,
+            RequestAction::Refresh | RequestAction::Snapshot
+        );
         let error = result
             .and_then(|()| {
                 if !persist {
@@ -804,7 +834,7 @@ impl PerceptionNode {
             .map(|error: eyre::Report| error.to_string());
         if error.is_none() && persist {
             self.config = next;
-            self.available_sources = self.discover_sources()?;
+            self.refresh_source_config();
             self.clear_output(node)?;
         }
         self.last_error = error.clone();
@@ -820,6 +850,33 @@ impl PerceptionNode {
             },
         )?;
         self.publish_state(node)
+    }
+
+    fn snapshot_previews(&mut self) -> Result<()> {
+        let color = self
+            .calibration_color
+            .as_ref()
+            .ok_or_else(|| eyre!("尚未收到彩色图"))?;
+        let depth_message = self
+            .preview_depth
+            .as_ref()
+            .ok_or_else(|| eyre!("尚未收到深度图"))?;
+        let source_id = self
+            .config
+            .source_id
+            .as_deref()
+            .ok_or_else(|| eyre!("尚未选择深度相机"))?;
+        let depth = decode_depth(depth_message, source_id, self.depth_scale_m(source_id))?;
+        let color_png = color_png(color)?;
+        let depth_png = depth_preview_png(&depth)?;
+        self.color_frame = Some(image_frame_info(color));
+        self.depth_frame = Some(image_frame_info(depth_message));
+        self.assets
+            .insert("color.png".into(), ("image/png".into(), color_png));
+        self.assets
+            .insert("depth.png".into(), ("image/png".into(), depth_png));
+        self.last_frame_time_ns = Some(depth.source_time_ns);
+        Ok(())
     }
 
     fn apply_calibration_request(

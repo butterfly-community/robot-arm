@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +15,7 @@ use futures::{StreamExt, executor::block_on};
 use r2r::{Context as RosContext, Node, Publisher, QosProfile};
 use robot_arm_messages::DepthCameraSourceInfo;
 use robot_arm_messages::{DepthCameraCalibration, DepthPointCloudFrame, WorldScene};
+use serde_json::Value;
 
 const RECTIFICATION_MATRIX: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -66,10 +68,13 @@ impl RosInterface {
         let spin_node = Arc::clone(&node);
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                spin_node
-                    .lock()
-                    .expect("ROS perception node mutex poisoned")
-                    .spin_once(Duration::from_millis(10));
+                {
+                    spin_node
+                        .lock()
+                        .expect("ROS perception node mutex poisoned")
+                        .spin_once(Duration::from_millis(10));
+                }
+                thread::yield_now();
             }
         });
         Ok(Self {
@@ -102,6 +107,20 @@ impl RosInterface {
             let source = camera_source(source_id);
             if names.contains(&source.color_stream) && names.contains(&source.camera_info_stream) {
                 sources.push(source);
+            }
+        }
+        let device_info = enumerate_realsense_device_info();
+        let single_source_and_device = sources.len() == 1 && device_info.len() == 1;
+        for source in &mut sources {
+            let matching = device_info
+                .iter()
+                .find(|info| {
+                    string_field(info, "serial_number")
+                        .is_some_and(|serial| source.source_id.contains(&serial))
+                })
+                .or_else(|| single_source_and_device.then(|| &device_info[0]));
+            if let Some(info) = matching {
+                apply_realsense_device_info(source, info);
             }
         }
         Ok(sources)
@@ -373,6 +392,12 @@ fn camera_source(source_id: String) -> DepthCameraSourceInfo {
     let display_name = source_id.trim_start_matches('/').replace('/', " / ");
     DepthCameraSourceInfo {
         driver_id: "ros2".into(),
+        device_model: None,
+        serial_number: None,
+        firmware_version: None,
+        connection_type: None,
+        physical_port: None,
+        sensors: Vec::new(),
         color_stream: format!("{source_id}/color/image_raw"),
         depth_stream: format!("{source_id}/aligned_depth_to_color/image_raw"),
         camera_info_stream: format!("{source_id}/aligned_depth_to_color/camera_info"),
@@ -381,6 +406,82 @@ fn camera_source(source_id: String) -> DepthCameraSourceInfo {
         source_id,
         display_name,
     }
+}
+
+fn enumerate_realsense_device_info() -> Vec<Value> {
+    let Ok(output) = Command::new("rs-enumerate-devices").arg("-c").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_realsense_device_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_realsense_device_info(output: &str) -> Vec<Value> {
+    let mut devices = Vec::new();
+    let mut current = None::<serde_json::Map<String, Value>>;
+    for line in output.lines() {
+        if line.trim() == "Device info:" {
+            if let Some(device) = current.take() {
+                devices.push(Value::Object(device));
+            }
+            current = Some(serde_json::Map::new());
+            continue;
+        }
+        let Some(device) = current.as_mut() else {
+            continue;
+        };
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = match label.trim() {
+            "Name" => "device_name",
+            "Serial Number" => "serial_number",
+            "Firmware Version" => "firmware_version",
+            "Physical Port" => "physical_port",
+            "Usb Type Descriptor" => "usb_type_descriptor",
+            _ => continue,
+        };
+        device.insert(key.into(), Value::String(value.trim().to_owned()));
+    }
+    if let Some(device) = current {
+        devices.push(Value::Object(device));
+    }
+    devices
+}
+
+fn apply_realsense_device_info(source: &mut DepthCameraSourceInfo, info: &Value) {
+    let raw_model = string_field(info, "device_name");
+    source.device_model = raw_model.as_deref().map(realsense_model_name);
+    source.serial_number = string_field(info, "serial_number");
+    source.firmware_version = string_field(info, "firmware_version");
+    source.connection_type =
+        string_field(info, "usb_type_descriptor").map(|version| format!("USB {version}"));
+    source.physical_port = string_field(info, "physical_port");
+    source.sensors = vec!["color".into(), "depth".into()];
+    if let Some(model) = source.device_model.as_deref() {
+        source.display_name = match source.serial_number.as_deref() {
+            Some(serial) => format!("{model} · {serial}"),
+            None => model.to_owned(),
+        };
+    }
+}
+
+fn string_field(value: &Value, field: &str) -> Option<String> {
+    value[field]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn realsense_model_name(raw: &str) -> String {
+    if raw.starts_with("RealSense ") {
+        return raw.to_owned();
+    }
+    let model = raw.strip_prefix("realsense_").unwrap_or(raw);
+    format!("RealSense {}", model.replace('_', " ").to_uppercase())
 }
 
 fn forward_stream<T: Send + 'static>(
@@ -406,4 +507,56 @@ pub fn ros_time(time_ns: i64) -> r2r::builtin_interfaces::msg::Time {
 
 pub fn time_ns(time: &r2r::builtin_interfaces::msg::Time) -> i64 {
     i64::from(time.sec) * 1_000_000_000 + i64::from(time.nanosec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realsense_device_info_populates_generic_camera_metadata() {
+        let mut source = camera_source("/camera/camera".into());
+        apply_realsense_device_info(
+            &mut source,
+            &serde_json::json!({
+                "device_name": "realsense_d415",
+                "serial_number": "924322061032",
+                "firmware_version": "5.12.7.100",
+                "usb_type_descriptor": "2.1",
+                "sensors": "depth_module,rgb_camera",
+                "physical_port": "/sys/devices/example/video0",
+            }),
+        );
+
+        assert_eq!(source.display_name, "RealSense D415 · 924322061032");
+        assert_eq!(source.device_model.as_deref(), Some("RealSense D415"));
+        assert_eq!(source.connection_type.as_deref(), Some("USB 2.1"));
+        assert_eq!(source.sensors, ["color", "depth"]);
+    }
+
+    #[test]
+    fn parses_compact_device_fields_without_stream_profile_assumptions() {
+        let devices = parse_realsense_device_info(
+            "Device info:\n\
+                 Name : RealSense D415\n\
+                 Serial Number : 924322061032\n\
+                 Firmware Version : 5.12.7.100\n\
+                 Physical Port : /sys/devices/example/video0\n\
+                 Usb Type Descriptor : 2.1\n\n\
+             Stream Profiles supported by Stereo Module\n\
+                 Depth 1280x720 Z16 @ 6 Hz\n",
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            string_field(&devices[0], "device_name").as_deref(),
+            Some("RealSense D415")
+        );
+        assert_eq!(
+            string_field(&devices[0], "serial_number").as_deref(),
+            Some("924322061032")
+        );
+        assert!(devices[0].get("width").is_none());
+        assert!(devices[0].get("fps").is_none());
+    }
 }

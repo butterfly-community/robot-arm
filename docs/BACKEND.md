@@ -73,7 +73,14 @@ GraspGenX 仓库声明。
 感知容器内的首个设备适配器启动 ROS `realsense2_camera`；它只负责把 RealSense 系列相机
 发布为标准 ROS 接口。`RosInterface::discover_cameras()` 不依赖相机型号，而是从 ROS 图发现
 任意符合 RGB-D 组合契约的来源；`select_camera()` 切换动态订阅，来源切换后旧帧会按来源 ID
-丢弃。真实场景只在彩色、对齐深度、内参和已应用外参同时存在时进入
+丢弃。主动刷新时，RealSense 适配器用随 SDK 提供的 `rs-enumerate-devices` 补充型号、序列号、
+固件、USB 类型和物理端口；这些字段以通用相机元数据发布，不进入下游计算。分辨率、帧率和
+编码不设设备默认值，运行状态始终取自驱动实际发布的 Image 消息。
+
+所选真实相机的首个彩色帧和深度帧在没有外参时也会生成网页预览并重发布到标准感知 topic，
+便于完成标定；网页的“刷新图像”从同一输入缓存显式生成一组新预览，不引入视频或第二条采集
+路径。只有三维场景、点云、识别与抓取候选等待外参。真实场景在彩色、对齐深度、
+内参和已应用外参同时存在时进入
 `process_camera_scene()`。`simulation` 适配器也只生成这三种标准帧与预设外参，然后进入同一个
 `handle_ros_event()` 和 `process_camera_scene()`：
 

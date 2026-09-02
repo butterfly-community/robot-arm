@@ -17,6 +17,7 @@ export type RequestAction =
   | "disconnect"
   | "discover"
   | "refresh"
+  | "snapshot"
   | "reset";
 
 export interface Snapshot {
@@ -208,6 +209,12 @@ export interface DepthCameraSourceInfo {
   source_id: string;
   driver_id: string;
   display_name: string;
+  device_model: string | null;
+  serial_number: string | null;
+  firmware_version: string | null;
+  connection_type: string | null;
+  physical_port: string | null;
+  sensors: string[];
   color_stream: string;
   depth_stream: string;
   camera_info_stream: string;

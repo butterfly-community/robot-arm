@@ -61,6 +61,6 @@ Servo 与同一 PlanningScene 继续运行。当前型号既有 20 轮重复性�
 [StarArm-102 型号适配](STARARM-102.md)。
 
 最终干净镜像构建明确执行 OpenCV 5.0.0 标定自检并通过，避免宿主 ROS 的 OpenCV 4
-`pkg-config` 或缓存镜像掩盖依赖错误。最终实际结果为 Rust 111 项、Python 2 项、ROS 配置
+`pkg-config` 或缓存镜像掩盖依赖错误。最终实际结果为 Rust 113 项、Python 2 项、ROS 配置
 1 项、Vitest 11 项全部通过，Playwright 26 项通过、1 项按当前设备状态设计跳过；五个前端
 生产构建、全部 Compose 镜像构建和 `software-flow` 端到端测试均通过。

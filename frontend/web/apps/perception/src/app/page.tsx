@@ -107,7 +107,8 @@ export default function Page() {
   const selectedPrompts = promptText || perception?.classes.join(", ") || "";
   const selectedPlacementLabels =
     placementLabels || perception?.placement_labels.join(", ") || "";
-  const imageVersion = perception?.last_scene_sequence ?? 0;
+  const imageVersion =
+    perception?.last_frame_time_ns ?? perception?.last_scene_sequence ?? 0;
   const asset = (name: string) =>
     `/api/perception/assets/${name}?v=${imageVersion}`;
   const selectedObject =
@@ -143,7 +144,7 @@ export default function Page() {
   }
 
   async function perceptionRequest(
-    action: "apply" | "disconnect" | "refresh" | "reset",
+    action: "apply" | "disconnect" | "refresh" | "snapshot" | "reset",
     target: "camera" | "model" = "camera",
   ) {
     const appliesCamera = action === "apply" && target === "camera";
@@ -476,12 +477,40 @@ export default function Page() {
                 <option value="">不选择深度相机</option>
                 {perception?.available_sources.map((source) => (
                   <option key={source.source_id} value={source.source_id}>
-                    {source.display_name} · {source.source_id}
+                    {source.display_name}
                   </option>
                 ))}
               </select>
             </Field>
+            <KeyValue
+              label="设备型号"
+              value={selectedSource?.device_model ?? "—"}
+            />
+            <KeyValue
+              label="序列号"
+              value={selectedSource?.serial_number ?? "—"}
+            />
+            <KeyValue
+              label="固件版本"
+              value={selectedSource?.firmware_version ?? "—"}
+            />
+            <KeyValue
+              label="连接"
+              value={selectedSource?.connection_type ?? "—"}
+            />
+            <KeyValue
+              label="传感器"
+              value={selectedSource?.sensors.join("、") || "—"}
+            />
             <KeyValue label="驱动" value={selectedSource?.driver_id ?? "—"} />
+            <KeyValue
+              label="来源 ID"
+              value={selectedSource?.source_id ?? "—"}
+            />
+            <KeyValue
+              label="物理端口"
+              value={selectedSource?.physical_port ?? "—"}
+            />
             <KeyValue
               label="参数与标定"
               value={selectedSource?.calibrated ? "已配置" : "未配置"}
@@ -505,6 +534,20 @@ export default function Page() {
                 {pendingPerceptionAction === "camera:refresh"
                   ? "正在刷新…"
                   : "刷新相机列表"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={
+                  pending ||
+                  !perception?.enabled ||
+                  !perception.color_frame ||
+                  !perception.depth_frame
+                }
+                onClick={() => perceptionRequest("snapshot")}
+              >
+                {pendingPerceptionAction === "camera:snapshot"
+                  ? "正在刷新…"
+                  : "刷新图像"}
               </Button>
               <Button
                 variant="outline"
@@ -1028,7 +1071,8 @@ export default function Page() {
             eyebrow="Inference overlay"
             title="识别与分割叠加图"
           >
-            {perception?.color_frame ? (
+            {perception?.last_scene_sequence != null &&
+            perception.color_frame ? (
               <Image
                 className="perception-preview"
                 src={asset("overlay.png")}
