@@ -357,12 +357,12 @@ test("tracking page applies and displays a controller binding", async ({
         );
         return {
           configured: binding.configured_components,
-          active: binding.active,
+          sourceId: binding.source_id,
         };
       })
       .toEqual({
         configured: [componentPath],
-        active: true,
+        sourceId: selectedRuntimeSource.source_id,
       });
   } finally {
     const current = await (await request.get("/api/tracking/state")).json();
@@ -449,6 +449,17 @@ test("perception page uses the simulation camera through the canonical path", as
   const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
   try {
+    await request.post("/api/perception/request", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-perception-prompts",
+        action: "apply",
+        source_id: null,
+        depth_scale_m: null,
+        classes: ["red cube", "gray storage bin"],
+        placement_labels: ["gray storage bin"],
+      },
+    });
     await page.goto("/perception/");
     const camera = page.getByLabel("相机来源");
     await camera.selectOption("simulation:depth-grid");
@@ -495,6 +506,7 @@ test("perception page uses the simulation camera through the canonical path", as
         source_id: null,
         depth_scale_m: null,
         classes: null,
+        placement_labels: null,
       },
     });
     if (original?.enabled)
@@ -506,9 +518,125 @@ test("perception page uses the simulation camera through the canonical path", as
           source_id: original.source_id,
           depth_scale_m: original.depth_scale_m,
           classes: original.classes,
+          placement_labels: original.placement_labels,
         },
       });
   }
+});
+
+test("card status precedes the collapse button and collapse state persists", async ({
+  page,
+}) => {
+  await page.goto("/perception/");
+  await page.evaluate(() =>
+    localStorage.removeItem("robot-arm:card:/perception/:相机外参标定"),
+  );
+  await page.reload();
+
+  const card = page.locator("section.card").filter({
+    has: page.getByText("相机外参标定", { exact: true }),
+  });
+  const status = card.locator(":scope > .card-heading > .card-action");
+  const collapse = card.locator(
+    ":scope > .card-heading > .card-collapse-toggle",
+  );
+  const statusBox = await status.boundingBox();
+  const collapseBox = await collapse.boundingBox();
+  expect(statusBox).not.toBeNull();
+  expect(collapseBox).not.toBeNull();
+  expect(statusBox!.x + statusBox!.width).toBeLessThanOrEqual(collapseBox!.x);
+
+  await collapse.click();
+  await expect(card).toHaveAttribute("data-state", "closed");
+  await page.reload();
+  await expect(card).toHaveAttribute("data-state", "closed");
+});
+
+test("spatial renders a neutral position and orientation before valid input", async ({
+  page,
+}) => {
+  await page.goto("/spatial/");
+  const viewer = page.getByLabel("空间节点转换后的空间位置和设备自身姿态");
+  await expect(viewer).toHaveAttribute("data-pose-ready", "true");
+  await expect(viewer.locator(".pose-displacement")).toContainText(
+    "X 0.000 · Y 0.000 · Z 0.000 m",
+  );
+});
+
+test("motion control modes use separate buttons", async ({ page }) => {
+  await page.goto("/motion/");
+  const card = page.locator("section.card").filter({
+    has: page.getByText("控制模式 / 规划", { exact: true }),
+  });
+  const buttons = card.locator(".card-actions").first().locator(".button");
+  await expect(buttons).toHaveCount(3);
+  const boxes = await buttons.evaluateAll((items) =>
+    items.map((item) => item.getBoundingClientRect().toJSON()),
+  );
+  expect(boxes[1].left - boxes[0].right).toBeGreaterThanOrEqual(10);
+  expect(boxes[2].left - boxes[1].right).toBeGreaterThanOrEqual(10);
+});
+
+test("perception layout groups camera workflow and structured results", async ({
+  page,
+}) => {
+  await page.goto("/perception/");
+  const card = (title: string) =>
+    page.locator("section.card").filter({
+      has: page.getByText(title, { exact: true }),
+    });
+  const camera = await card("相机来源与配置").boundingBox();
+  const task = await card("感知任务").boundingBox();
+  const calibration = await card("相机外参标定").boundingBox();
+  const parameters = await card("相机内参与外参").boundingBox();
+  expect(camera).not.toBeNull();
+  expect(task).not.toBeNull();
+  expect(calibration).not.toBeNull();
+  expect(parameters).not.toBeNull();
+  expect(camera!.x).toBeLessThan(task!.x);
+  expect(Math.abs(camera!.y - task!.y)).toBeLessThan(2);
+  expect(calibration!.x).toBeLessThan(parameters!.x);
+  expect(Math.abs(calibration!.y - parameters!.y)).toBeLessThan(2);
+
+  await expect(card("识别与分割模型")).toHaveCount(0);
+  const modelSelect = card("感知任务").locator(
+    'select[aria-label="提示词模型"]',
+  );
+  await expect(modelSelect).toHaveValue(/.+/);
+  await expect(modelSelect.locator("option")).toHaveCount(1);
+  const savePromptButton = await card("感知任务")
+    .getByRole("button", { name: "保存提示词配置" })
+    .boundingBox();
+  const executeButton = await card("感知任务")
+    .getByRole("button", { name: "执行抓放" })
+    .boundingBox();
+  expect(savePromptButton).not.toBeNull();
+  expect(executeButton).not.toBeNull();
+  expect(
+    Math.abs(
+      savePromptButton!.x +
+        savePromptButton!.width -
+        (executeButton!.x + executeButton!.width),
+    ),
+  ).toBeLessThan(2);
+  const overlayImage =
+    card("识别与分割叠加图").getByAltText("识别与分割叠加图");
+  await expect(overlayImage).toHaveAttribute("loading", "eager");
+  await expect
+    .poll(() => overlayImage.evaluate((image) => image.naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(
+    card("识别与分割叠加图").locator("table.data-table"),
+  ).toHaveCount(0);
+  await expect(card("结构化三维场景").locator("table.data-table")).toHaveCount(
+    1,
+  );
+  const overlay = await card("识别与分割叠加图").boundingBox();
+  const structuredScene = await card("结构化三维场景").boundingBox();
+  expect(overlay).not.toBeNull();
+  expect(structuredScene).not.toBeNull();
+  expect(overlay!.x).toBeLessThan(structuredScene!.x);
+  expect(Math.abs(overlay!.y - structuredScene!.y)).toBeLessThan(2);
 });
 
 test("virtual feedback is selectable, draggable, and visible across pages", async ({
@@ -649,7 +777,8 @@ test("execution viewer shows the selected pick and placement points only during 
         action: "apply",
         source_id: "simulation:pick-place-scene",
         depth_scale_m: null,
-        classes: null,
+        classes: ["red cube", "gray storage bin"],
+        placement_labels: ["gray storage bin"],
       },
     });
     await expect
@@ -699,7 +828,10 @@ test("execution viewer shows the selected pick and placement points only during 
       timeout: 15_000,
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "true");
-    await expect(viewer).toHaveAttribute("data-pick-point-z", "0.040");
+    await expect(viewer).toHaveAttribute(
+      "data-pick-point-z",
+      object.pose.position_m[2].toFixed(3),
+    );
     const support = currentScene.objects.find(
       (candidate: { object_id: string }) =>
         candidate.object_id === placement.source_object_id,
@@ -741,6 +873,7 @@ test("execution viewer shows the selected pick and placement points only during 
             source_id: original.source_id,
             depth_scale_m: original.depth_scale_m,
             classes: original.classes,
+            placement_labels: original.placement_labels,
           }
         : {
             schema_version: 3,
@@ -749,6 +882,7 @@ test("execution viewer shows the selected pick and placement points only during 
             source_id: null,
             depth_scale_m: null,
             classes: null,
+            placement_labels: null,
           },
     });
   }
@@ -843,7 +977,9 @@ test("motion named target is submitted by the metadata-driven page", async ({
       })
       .toBeLessThanOrEqual((2 * Math.PI) / 180);
     await page.goto("/motion/");
-    await page.getByRole("button", { name: "手动控制" }).click();
+    await expect(
+      page.getByRole("button", { name: "当前为手动控制", exact: true }),
+    ).toBeDisabled();
     await expect(
       page.getByRole("button", { name: "准备相对控制" }),
     ).toBeVisible();

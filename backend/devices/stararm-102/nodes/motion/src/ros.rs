@@ -101,6 +101,7 @@ pub struct RosInterface {
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
+    clear_octomap: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
@@ -154,6 +155,11 @@ impl RosInterface {
             "std_srvs/srv/SetBool",
             QosProfile::default(),
         )?;
+        let clear_octomap = node.create_client_untyped(
+            "/clear_octomap",
+            "std_srvs/srv/Empty",
+            QosProfile::default(),
+        )?;
         let forward_kinematics = node.create_client_untyped(
             "/compute_fk",
             "moveit_msgs/srv/GetPositionFK",
@@ -200,6 +206,7 @@ impl RosInterface {
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
+            clear_octomap: Arc::new(clear_octomap),
             forward_kinematics: Arc::new(forward_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
@@ -288,6 +295,11 @@ impl RosInterface {
             let result = block_on(interface.synchronize()).map_err(|error| error.to_string());
             let _ = interface.event_sender.send(RosEvent::SyncFinished(result));
         });
+    }
+
+    pub fn clear_octomap(&self) -> EyreResult<()> {
+        block_on(call(&self.clear_octomap, json!({})))?;
+        Ok(())
     }
 
     pub fn run_motion(&self, job: MotionJob) {

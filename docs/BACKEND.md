@@ -91,11 +91,14 @@ GraspGenX 仓库声明。
 `perception-core::world_scene_and_instance_clouds_from_aligned_depth()` 解码实例掩码、按内参反投影、应用
 `camera → base_link` 变换，并生成 `SceneObject`、`PlacementRegion` 与
 `SceneObstacle`，同时保留每个实例在 `base_link` 中的点云供 GraspGenX 使用。
-`aligned_obstacle_point_cloud()` 排除已经结构化的实例，使排障点云只表达未结构化的背景深度。
+`aligned_obstacle_point_cloud()` 按实例二维范围排除已经作为结构化碰撞物体表达的区域，并按
+共享 OctoMap 体素尺寸覆盖量化后仍会重复占据的边缘。放置区域的来源对象不在排除集合中，
+因此容器由真实深度表面表达，而不是由实心外包围盒表达；代码不读取类别名称。
 
 `publish_scene()` 只发布一份 Dora `WorldScene` 和解释性 Marker。`RosInterface` 发布
-标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF。深度点云用于感知与 RViz
-排障，不进入 MoveIt 规划场景。
+标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF。`PointCloud2` 经 MoveIt 官方
+`occupancy_map_monitor/PointCloudOctomapUpdater` 进入唯一 PlanningScene；感知节点不手写
+OctoMap、碰撞检测或第二套 ROS 转换。
 
 ### 标定
 
@@ -131,8 +134,9 @@ PlanningScene 和型号 MTC Action。普通关节请求仍由 MoveGroup 执行�
 `stararm_102_mtc` 使用标准
 `GeneratePose`、`GeneratePlacePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect`
 和 `ModifyPlanningScene`，整条方案规划成功后通过官方 `ExecuteTaskSolution` capability 执行。
-原始点云和掩码不进入规划。厂家网格未替换；底座 visual/collision 最低点与 Z=0 刚性
-地面重合。Servo 订阅同一 `/monitored_planning_scene`，不维护独立场景来源。
+障碍点云由同一 `move_group` 的官方 Occupancy Map Monitor 消费；抓放临时允许已附着对象与
+支撑表面接触，离开支撑后恢复碰撞。厂家网格未替换；底座 visual/collision 最低点与 Z=0
+刚性地面重合。Servo 订阅同一 `/monitored_planning_scene`，不维护独立场景来源。
 
 ROS 绑定固定到官方 `r2r 0.9.6` 标签提交；该版本已声明支持 ROS 2 Lyrical，但尚未发布到
 crates.io，因此 workspace 只在一处声明官方 Git 提交，perception 与 motion 共用同一依赖。
@@ -147,7 +151,7 @@ crates.io，因此 workspace 只在一处声明官方 Git 提交，perception �
 选择再连接/断开。未选串口时同一 `ArmCommand` 产生软件反馈；选中串口但连接失败时冻结最后
 状态，不隐式切换软件模式。
 
-`StarArmBus::encode_command()` 把模型关节与夹爪绝对角编码成 FashionStar 命令。
+`StarArmBus::encode_command()` 把模型关节与夹爪驱动关节绝对角编码成 FashionStar 命令。
 `read_sorted_monitors()` 按模型舵机顺序读取；`state_from_monitors()` 与
 `telemetry_from_monitors()` 产生位置及遥测。Monitor 失败在同一串口重试一次，仍失败才
 重连。串口只在网页主动 discover 时枚举。

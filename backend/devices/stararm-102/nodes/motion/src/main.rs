@@ -24,7 +24,8 @@ use robot_arm_messages::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use stararm_102_model::{
-    CLOSED_GRIPPER_RAD, DEFAULT_JOINTS_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION,
+    DEFAULT_JOINTS_RAD, GRIPPER_DRIVE_JOINT_CLOSED_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS,
+    MODEL_REVISION,
 };
 
 use crate::{
@@ -84,6 +85,7 @@ struct MotionNode {
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
     latest_scene: Option<WorldScene>,
+    perception_config_version: Option<u64>,
     active_manipulation: Option<String>,
     manipulation_state: ManipulationTaskState,
 }
@@ -130,6 +132,7 @@ fn run() -> Result<()> {
         actuator_status: None,
         last_error: None,
         latest_scene: None,
+        perception_config_version: None,
         active_manipulation: None,
         manipulation_state: idle_manipulation_state(),
     };
@@ -186,6 +189,12 @@ fn run() -> Result<()> {
                     }
                     "perception_state" => {
                         let state: PerceptionState = from_arrow(data.as_array())?;
+                        if let Some(config_version) = motion.perception_config_version
+                            && config_version != state.service.config_version
+                        {
+                            motion.ros.clear_octomap()?;
+                        }
+                        motion.perception_config_version = Some(state.service.config_version);
                         if !state.enabled {
                             motion.latest_scene = None;
                         }
@@ -321,7 +330,7 @@ impl MotionNode {
             request_id,
             current: state.joints_rad.clone(),
             target: DEFAULT_JOINTS_RAD.to_vec(),
-            actuator: CLOSED_GRIPPER_RAD,
+            actuator: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
             options: BTreeMap::new(),
         };
         self.queue_or_start_motion(node, job, true)

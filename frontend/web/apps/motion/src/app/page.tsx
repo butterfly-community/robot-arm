@@ -58,6 +58,7 @@ export default function Page() {
   const [options, setOptions] = useState<Record<string, number | undefined>>(
     {},
   );
+  const [pendingAction, setPendingAction] = useState<string>();
 
   if (arm && !editing && previousArmKey !== armKey) {
     setPreviousArmKey(armKey);
@@ -81,6 +82,7 @@ export default function Page() {
 
   async function mode(value: "relative" | "manual") {
     setError(undefined);
+    setPendingAction(`mode:${value}`);
     try {
       await post("/api/motion/mode", {
         schema_version: schemaVersion,
@@ -89,20 +91,26 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
   async function prepareRelative() {
     setError(undefined);
+    setPendingAction("prepare-relative");
     try {
       await prepareRelativeControl();
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
   async function cancel() {
     setError(undefined);
+    setPendingAction("cancel");
     try {
       await post("/api/motion/cancel", {
         schema_version: schemaVersion,
@@ -111,6 +119,8 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
@@ -122,9 +132,14 @@ export default function Page() {
     });
   }
 
-  async function move(jointTarget = positions, actuatorTarget = actuators) {
+  async function move(
+    jointTarget = positions,
+    actuatorTarget = actuators,
+    action = "manual-motion",
+  ) {
     if (!model) return;
     setError(undefined);
+    setPendingAction(action);
     try {
       await manualMode();
       await post("/api/motion/request", {
@@ -146,12 +161,15 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
   async function actuator(key: string, value: number) {
     if (!model) return;
     setError(undefined);
+    setPendingAction(`actuator:${key}`);
     try {
       await manualMode();
       await post("/api/motion/actuator", {
@@ -164,6 +182,8 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
@@ -280,22 +300,36 @@ export default function Page() {
           eyebrow="Control ownership"
           title="控制模式 / 规划"
         >
-          <div className="mode-list">
+          <div className="card-actions card-actions-leading">
             <Button
               variant={
                 motion?.control_mode === "relative" ? "default" : "outline"
               }
+              disabled={
+                Boolean(pendingAction) || motion?.control_mode === "relative"
+              }
               onClick={() => mode("relative")}
             >
-              相对控制
+              {pendingAction === "mode:relative"
+                ? "正在切换…"
+                : motion?.control_mode === "relative"
+                  ? "当前为相对控制"
+                  : "相对控制"}
             </Button>
             <Button
               variant={
                 motion?.control_mode === "manual" ? "default" : "outline"
               }
+              disabled={
+                Boolean(pendingAction) || motion?.control_mode === "manual"
+              }
               onClick={() => mode("manual")}
             >
-              手动控制
+              {pendingAction === "mode:manual"
+                ? "正在切换…"
+                : motion?.control_mode === "manual"
+                  ? "当前为手动控制"
+                  : "手动控制"}
             </Button>
             <Button
               asChild
@@ -357,27 +391,39 @@ export default function Page() {
             </Field>
           ))}
           <div className="target-list">
-            <Button disabled={motionBusy} onClick={prepareRelative}>
-              准备相对控制
+            <Button
+              disabled={motionBusy || Boolean(pendingAction)}
+              onClick={prepareRelative}
+            >
+              {pendingAction === "prepare-relative"
+                ? "正在准备…"
+                : "准备相对控制"}
             </Button>
             {(model?.named_targets ?? []).map((item) => (
               <Button
                 key={item.key}
-                disabled={motionBusy}
+                disabled={motionBusy || Boolean(pendingAction)}
                 onClick={() => {
                   setPositions(item.joint_positions_rad);
                   setActuators(item.actuator_positions_rad);
                   void move(
                     item.joint_positions_rad,
                     item.actuator_positions_rad,
+                    `target:${item.key}`,
                   );
                 }}
               >
-                {item.label}
+                {pendingAction === `target:${item.key}`
+                  ? `正在前往${item.label}…`
+                  : item.label}
               </Button>
             ))}
-            <Button variant="danger" onClick={cancel}>
-              取消普通运动
+            <Button
+              variant="danger"
+              disabled={Boolean(pendingAction)}
+              onClick={cancel}
+            >
+              {pendingAction === "cancel" ? "正在取消…" : "取消普通运动"}
             </Button>
           </div>
         </Card>

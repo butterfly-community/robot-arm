@@ -153,12 +153,18 @@ class YoloeBackend:
         self._classes: tuple[str, ...] = ()
 
     def segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
+        if not classes:
+            return []
         requested = tuple(classes)
         if requested != self._classes:
             self._model.set_classes(classes)
             self._classes = requested
         result = self._model.predict(
-            np.asarray(image.convert("RGB")), device=self.device, verbose=False
+            image.convert("RGB"),
+            device=self.device,
+            retina_masks=True,
+            conf=0.18,
+            verbose=False,
         )[0]
         if result.boxes is None or result.masks is None:
             return []
@@ -170,15 +176,14 @@ class YoloeBackend:
         for index, (box, score, class_id, mask) in enumerate(
             zip(boxes, scores, class_ids, masks, strict=True)
         ):
-            mask_image = Image.fromarray((mask * 255).astype(np.uint8)).resize(
-                image.size, Image.Resampling.NEAREST
-            )
+            label = result.names[class_id]
+            mask_image = Image.fromarray((mask * 255).astype(np.uint8))
             encoded = io.BytesIO()
             mask_image.save(encoded, format="PNG")
             instances.append(
                 Instance(
-                    instance_id=f"{classes[class_id]}-{index}",
-                    label=classes[class_id],
+                    instance_id=f"{label}-{index}",
+                    label=label,
                     confidence=float(score),
                     bounding_box_xyxy=tuple(float(value) for value in box),
                     mask_width=image.width,

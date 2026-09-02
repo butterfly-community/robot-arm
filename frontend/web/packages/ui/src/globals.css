@@ -280,6 +280,24 @@ nav a > span:first-child {
 .translation-dot:hover {
   background: var(--cyan);
 }
+.label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.help-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #6f7b8b;
+  cursor: help;
+}
+.help-dot:hover,
+.help-dot:focus-visible {
+  background: var(--cyan);
+  outline: none;
+}
 
 .dashboard-grid {
   display: grid;
@@ -376,13 +394,23 @@ nav a > span:first-child {
   flex: 1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   border: 0;
-  padding: 11px 20px;
+  padding: 11px 0 11px 20px;
   color: inherit;
   background: transparent;
   text-align: left;
+  cursor: pointer;
+}
+.card-collapse-toggle {
+  min-width: 48px;
+  min-height: 55px;
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  border: 0;
+  padding: 0 20px 0 12px;
+  color: inherit;
+  background: transparent;
   cursor: pointer;
 }
 .card-content {
@@ -425,13 +453,12 @@ nav a > span:first-child {
   transform: rotate(45deg);
   transition: transform 160ms ease;
 }
-.card-toggle[data-state="open"] .card-chevron {
+.card-collapse-toggle[data-state="open"] .card-chevron {
   margin-bottom: -4px;
   transform: rotate(225deg);
 }
 .card-action {
   flex: 0 0 auto;
-  padding-right: 20px;
 }
 @keyframes collapsible-open {
   from {
@@ -493,11 +520,15 @@ nav a > span:first-child {
   border-color: #7a4d55;
   background: rgb(236 106 114 / 7%);
 }
+.button:not(:disabled):active {
+  transform: translateY(1px);
+}
 .button:focus-visible,
 .input:focus-visible,
 select:focus-visible,
 input[type="range"]:focus-visible,
 .card-toggle:focus-visible,
+.card-collapse-toggle:focus-visible,
 a:focus-visible,
 summary:focus-visible {
   outline: 2px solid var(--cyan);
@@ -537,11 +568,6 @@ datalist option {
   font-size: var(--text-label);
   font-weight: 650;
   line-height: 1.45;
-}
-.field > small {
-  color: var(--muted);
-  font-size: var(--text-caption);
-  line-height: 1.5;
 }
 .row {
   display: flex;
@@ -957,6 +983,227 @@ input[type="range"] {
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: #070a0e;
+}
+
+.perception-section {
+  min-width: 0;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 16px;
+}
+.perception-section + .perception-section {
+  margin-top: 8px;
+}
+.perception-section-heading {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 18px 2px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.perception-section-heading > span {
+  padding-top: 4px;
+  color: var(--cyan);
+  font:
+    var(--text-caption) / 1 ui-monospace,
+    monospace;
+  letter-spacing: 0.08em;
+}
+.perception-section-heading h2,
+.perception-section-heading p,
+.calibration-step-heading h3 {
+  margin: 0;
+}
+.perception-section-heading h2 {
+  font-size: 16px;
+  line-height: 1.35;
+}
+.perception-section-heading p {
+  max-width: 900px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--text-control);
+  line-height: 1.6;
+}
+.calibration-context,
+.calibration-fixed-parameters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 24px;
+}
+.calibration-fixed-parameters {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+}
+.calibration-flow {
+  margin-top: 12px;
+}
+.calibration-step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 14px;
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+}
+.calibration-step:first-child {
+  border-top: 0;
+}
+.calibration-step-index {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-bright);
+  border-radius: 50%;
+  color: var(--cyan);
+  background: #0d1014;
+  font:
+    600 var(--text-control) / 1 ui-monospace,
+    monospace;
+}
+.calibration-step-body {
+  min-width: 0;
+}
+.calibration-step-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.calibration-step-heading h3 {
+  font-size: var(--text-section);
+  line-height: 1.4;
+}
+.calibration-board-parameters {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #0b0e12;
+}
+.calibration-board-parameters > summary {
+  padding: 14px 16px;
+  color: var(--muted-strong);
+  font-size: var(--text-control);
+  font-weight: 650;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.calibration-board-parameters[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+.calibration-board-parameters .calibration-fixed-parameters,
+.calibration-board-parameters .calibration-parameter-grid {
+  padding-right: 16px;
+  padding-left: 16px;
+}
+.calibration-board-parameters .calibration-parameter-grid {
+  padding-bottom: 18px;
+}
+.calibration-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 24px;
+  margin-top: 22px;
+}
+.calibration-parameter-grid .field,
+.perception-task-grid .field {
+  margin-bottom: 0;
+}
+.calibration-step-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 18px 0 8px;
+}
+.point-cloud-summary {
+  display: grid;
+  aspect-ratio: 4 / 3;
+  place-content: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background:
+    radial-gradient(circle, rgb(91 156 255 / 20%) 1px, transparent 1.5px) 0 0 /
+      18px 18px,
+    #070a0e;
+  text-align: center;
+}
+.point-cloud-summary strong {
+  font:
+    650 28px/1 ui-monospace,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+.point-cloud-summary span {
+  color: var(--muted);
+  font:
+    var(--text-caption) / 1 ui-monospace,
+    monospace;
+}
+.perception-task-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.perception-task-actions {
+  justify-content: flex-end;
+  margin-bottom: 24px;
+}
+.perception-task-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.perception-task-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #0b0e12;
+}
+.perception-task-summary span {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+.perception-task-summary strong {
+  overflow-wrap: anywhere;
+  font-size: var(--text-control);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.perception-model-settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+  gap: 18px 24px;
+}
+.perception-model-settings .field {
+  margin-bottom: 0;
+}
+.perception-instance-table {
+  margin-top: 18px;
+}
+.perception-scene-results {
+  min-width: 0;
+}
+.perception-camera-source {
+  order: 1;
+}
+.perception-task-card {
+  order: 2;
+}
+.perception-camera-calibration {
+  order: 3;
+}
+.perception-camera-parameters {
+  order: 4;
 }
 
 .visual-empty {
@@ -1480,6 +1727,18 @@ input[type="range"] {
   }
   .binding-grid {
     grid-template-columns: 1fr;
+  }
+  .calibration-context,
+  .calibration-fixed-parameters,
+  .calibration-parameter-grid,
+  .perception-task-summary,
+  .perception-task-grid,
+  .perception-model-settings {
+    grid-template-columns: 1fr;
+  }
+  .calibration-step-heading {
+    flex-direction: column;
+    gap: 10px;
   }
   .binding-row,
   .feedback-binding-row,

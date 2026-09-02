@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM base
 
 # The backend project image builds the workspace once on top of backend-base.

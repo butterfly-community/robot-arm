@@ -1,5 +1,7 @@
 name: robot-arm-services
 
+x-octomap-resolution: &octomap-resolution "0.005"
+
 x-dora-environment: &dora-environment
   DORA_COORDINATOR_HOST: dora-coordinator
   DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
@@ -100,6 +102,7 @@ services:
       <<: *dora-environment
       DORA_MACHINE_ID: perception
       PERCEPTION_CONFIG: /config/perception.json
+      OCTOMAP_RESOLUTION_M: *octomap-resolution
       ROS_DOMAIN_ID: "42"
     depends_on:
       dora-coordinator: { condition: service_started }
@@ -149,6 +152,7 @@ services:
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: stararm-102-motion
+      OCTOMAP_RESOLUTION_M: *octomap-resolution
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     ports: ["192.168.100.10:6080:6080"]

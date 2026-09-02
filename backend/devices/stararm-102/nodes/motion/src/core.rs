@@ -4,7 +4,7 @@ use json_config_store::{load_or_default, save};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use robot_arm_messages::{ControlMode, TransformedControlFrame};
 use serde::{Deserialize, Serialize};
-use stararm_102_model::ARC_PIVOT_TO_TCP_M;
+use stararm_102_model::{ARC_PIVOT_TO_TCP_M, GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD};
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -119,7 +119,7 @@ pub fn tool_action_transition(previous: Option<f64>, current: f64) -> Option<f64
 }
 
 pub fn tool_position_rad(value: f64) -> f64 {
-    (90.0 * (1.0 - value)).to_radians()
+    GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD * (1.0 - value)
 }
 
 fn quaternion([x, y, z, w]: [f64; 4]) -> UnitQuaternion<f64> {
@@ -204,8 +204,8 @@ mod tests {
     }
 
     #[test]
-    fn gripper_mapping_preserves_the_existing_zero_to_ninety_semantics() {
-        assert_eq!(tool_position_rad(0.0), 90.0_f64.to_radians());
+    fn gripper_mapping_uses_the_device_working_open_pose() {
+        assert_eq!(tool_position_rad(0.0), GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD);
         assert_eq!(tool_position_rad(1.0), 0.0);
         assert_eq!(tool_action_transition(None, 0.5), None);
         assert_eq!(tool_action_transition(Some(0.5), 0.5), None);

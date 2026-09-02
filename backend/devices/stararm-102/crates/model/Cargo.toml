@@ -12,3 +12,7 @@ robot-arm-messages.workspace = true
 sha2.workspace = true
 urdf-rs.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+quick-xml = "0.36.2"
+serde_json.workspace = true

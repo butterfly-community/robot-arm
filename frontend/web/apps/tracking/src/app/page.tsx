@@ -33,6 +33,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type InputMode = "button" | "buttons" | "axis";
 type ActionDefinition = (typeof inputActionCatalog)[number];
+const simulationPhaseLabels: Record<string, string> = {
+  starting: "正在开始",
+  lifting: "正在抬升",
+  outbound: "正在执行",
+  return: "正在返回",
+  opening: "正在打开",
+  opened: "已经打开",
+  closing: "正在闭合",
+  active: "正在执行",
+  increasing: "反馈增强",
+  decreasing: "反馈减弱",
+  complete: "演示完成",
+};
 type BindingDraft = {
   configKey: string;
   paths: Record<string, string>;
@@ -101,6 +114,10 @@ function sourceLabel(
   );
 }
 
+function simulationPhaseLabel(phase: string | null | undefined) {
+  return simulationPhaseLabels[phase ?? ""] ?? "演示中";
+}
+
 function sampleValue(input: ControlInputFrame | undefined, key: string) {
   const samples =
     key === "primary_tool" || key === "primary_tool_open"
@@ -156,7 +173,7 @@ function DeviceNameEditor({
       />
       <Button
         variant="outline"
-        disabled={saving}
+        disabled={saving || name === savedName}
         onClick={async () => {
           setSaving(true);
           try {
@@ -166,7 +183,7 @@ function DeviceNameEditor({
           }
         }}
       >
-        {saving ? "保存中" : "保存名称"}
+        {saving ? "保存中…" : name === savedName ? "已保存" : "保存名称"}
       </Button>
     </div>
   );
@@ -225,14 +242,19 @@ export default function Page() {
     feedbackSourceIds,
     feedbackPaths,
   } = draft;
-  const updateDraft = (patch: Partial<BindingDraft>) =>
-    setEditedDraft({ ...draft, ...patch, configKey });
   const [testSourceId, setTestSourceId] = useState("");
   const [simulationRequest, setSimulationRequest] = useState<string>();
+  const [poseSourceRequest, setPoseSourceRequest] = useState<
+    "position" | "orientation"
+  >();
   const [bindingsApplying, setBindingsApplying] = useState(false);
   const [bindingsResult, setBindingsResult] = useState<
     "idle" | "success" | "error"
   >("idle");
+  const updateDraft = (patch: Partial<BindingDraft>) => {
+    setEditedDraft({ ...draft, ...patch, configKey });
+    setBindingsResult("idle");
+  };
 
   const positionSource = sources.find(
     (source) => source.source_id === discovery.position_source_id,
@@ -249,6 +271,7 @@ export default function Page() {
     source: Record<string, unknown>,
   ) {
     setError(undefined);
+    setPoseSourceRequest(component);
     try {
       await post("/api/tracking/pose-source", {
         schema_version: schemaVersion,
@@ -261,11 +284,14 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPoseSourceRequest(undefined);
     }
   }
 
   async function unselect(component: "position" | "orientation") {
     setError(undefined);
+    setPoseSourceRequest(component);
     try {
       await post("/api/tracking/pose-source", {
         schema_version: schemaVersion,
@@ -278,6 +304,8 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPoseSourceRequest(undefined);
     }
   }
 
@@ -626,17 +654,29 @@ export default function Page() {
                     {Boolean(source.position_capable) && (
                       <Button
                         variant="outline"
+                        disabled={Boolean(poseSourceRequest) || positionCurrent}
                         onClick={() => select("position", source)}
                       >
-                        {positionCurrent ? "当前空间来源" : "用作空间来源"}
+                        {poseSourceRequest === "position"
+                          ? "正在设置…"
+                          : positionCurrent
+                            ? "当前空间来源"
+                            : "用作空间来源"}
                       </Button>
                     )}
                     {Boolean(source.orientation_capable) && (
                       <Button
                         variant="outline"
+                        disabled={
+                          Boolean(poseSourceRequest) || orientationCurrent
+                        }
                         onClick={() => select("orientation", source)}
                       >
-                        {orientationCurrent ? "当前姿态来源" : "用作姿态来源"}
+                        {poseSourceRequest === "orientation"
+                          ? "正在设置…"
+                          : orientationCurrent
+                            ? "当前姿态来源"
+                            : "用作姿态来源"}
                       </Button>
                     )}
                   </div>
@@ -645,11 +685,21 @@ export default function Page() {
             })}
           </div>
           <div className="card-actions">
-            <Button variant="outline" onClick={() => unselect("position")}>
-              清除空间来源
+            <Button
+              variant="outline"
+              disabled={Boolean(poseSourceRequest) || !positionSource}
+              onClick={() => unselect("position")}
+            >
+              {poseSourceRequest === "position" ? "正在清除…" : "清除空间来源"}
             </Button>
-            <Button variant="outline" onClick={() => unselect("orientation")}>
-              清除姿态来源
+            <Button
+              variant="outline"
+              disabled={Boolean(poseSourceRequest) || !orientationSource}
+              onClick={() => unselect("orientation")}
+            >
+              {poseSourceRequest === "orientation"
+                ? "正在清除…"
+                : "清除姿态来源"}
             </Button>
           </div>
         </Card>
@@ -717,7 +767,7 @@ export default function Page() {
           action={
             simulation.active ? (
               <StatusBadge tone="cyan">
-                {String(simulation.phase ?? "演示中")}
+                {simulationPhaseLabel(simulation.phase)}
               </StatusBadge>
             ) : undefined
           }
@@ -971,7 +1021,7 @@ export default function Page() {
                               {simulation.active &&
                                 simulation.item === definition.key && (
                                   <StatusBadge tone="cyan">
-                                    {String(simulation.phase ?? "运行中")}
+                                    {simulationPhaseLabel(simulation.phase)}
                                   </StatusBadge>
                                 )}
                             </div>
@@ -986,7 +1036,10 @@ export default function Page() {
           </div>
 
           <div className="card-actions binding-submit">
-            <Button disabled={bindingsApplying} onClick={applyBindings}>
+            <Button
+              disabled={bindingsApplying || bindingsResult === "success"}
+              onClick={applyBindings}
+            >
               {bindingsApplying
                 ? "正在应用绑定"
                 : bindingsResult === "success"

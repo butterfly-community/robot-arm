@@ -120,7 +120,7 @@ index 7af5b15..23ff77f 100644
 -      upper="1.57"
 +    <limit
 +      lower="0"
-+      upper="1.5707963267948966"
++      upper="1.570796327"
        effort="5"
        velocity="3.14" />
    </joint>
@@ -131,7 +131,7 @@ index 7af5b15..23ff77f 100644
 -    <limit
 -      lower="-1.57"
 +    <limit
-+      lower="-1.5707963267948966"
++      lower="-1.570796327"
        upper="0"
        effort="5"
        velocity="3.14" />

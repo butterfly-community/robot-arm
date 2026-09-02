@@ -14,7 +14,7 @@
 | --- | --- |
 | 服务与消息 | Dora 节点按职责拆分；感知计算只与 `perception-node` 交互；不存在无消费者 DTO |
 | 模拟与真机 | 控制输入适配后共用 spatial、motion、MoveIt、`ArmCommand` 和 execution；相机适配后共用 RGB-D、识别、几何和抓放链路 |
-| 感知与规划 | 原始点云和掩码不进入 MoveIt；MTC 只接收当前任务所需的结构化几何 |
+| 感知与规划 | 对齐后的障碍点云经官方 `PointCloudOctomapUpdater` 进入 MoveIt；任务对象使用结构化几何，放置容器保留深度表面而不退化为实心外包围盒 |
 | 坐标 | FK、IK、抓放、附着和模型元数据统一使用 `tcp_link` |
 | 型号隔离 | StarArm-102 源码和夹爪清单集中在 `backend/devices/stararm-102`；计算服务只按请求资产 ID 工作 |
 | 调度 | motion 只有一个 FIFO 和顺序 worker；没有通用状态机、并行规划器或隐藏恢复服务 |
@@ -46,11 +46,21 @@ double 载入且进程持续存活。
 保持 9.39.5、TypeScript 保持 6.0.3、Node 类型保持 24.x：分别受当前 Next/ESLint 插件 peer、
 typescript-eslint peer 与 Node 24 运行时约束，未用忽略 peer 的方式强行升级。
 
-`simulation:depth-grid` 通过标准深度帧保持 497 个有效点并可在 RViz 独立显示，不生成 OctoMap。
-`simulation:pick-place-scene` 冷启动时即使先于机械臂模型发布，模型信息到达后也会沿同一链路
-重算抓取候选。机械臂、抓取物、放置区域和刚性
-地面统一使用 `base_link`；抓放完成后临时任务对象被清理，Servo 与同一 PlanningScene 继续
-运行。当前型号 20 轮抓放结果见 [StarArm-102 型号适配](STARARM-102.md)。
+`simulation:depth-grid` 通过标准深度帧保持 497 个有效点；`simulation:pick-place-scene` 当前生成
+58,138 个障碍点。二者与真实相机共用 `/perception/depth/points`，由 MoveIt 官方
+`PointCloudOctomapUpdater` 生成 5 mm OctoMap。该分辨率与模拟深度中可见表面相比足够细，且
+实测普通工作位规划约 169 ms；未增加抽样、padding、刷新定时器或第二套场景同步代码。抓取
+目标对应的图像区域从障碍点云剔除并继续作为可附着 `CollisionObject`，放置区域来源保留原始
+深度表面，因此筐壁和底部可碰撞而筐内仍是自由空间。
 
-最终实际结果为 Rust 106 项、Python 1 项、Vitest 11 项全部通过，Playwright 22 项通过、1 项按
-设计跳过；五个前端生产构建、全部 Compose 镜像构建和 `software-flow` 端到端测试均通过。
+冷启动和配置切换均验证 OctoMap 为非空 `OcTree`、分辨率为 0.005 m；配置变化只清除一次旧
+OctoMap，模拟源只发布新生成的帧，不再周期性改时间戳重发静态点云。带非空 OctoMap 的完整
+MTC 抓放连续三次成功，每次得到 2 个完整方案，后两次耗时分别为 12.126 s 和 12.124 s。
+机械臂、抓取物、放置区域和刚性地面统一使用 `base_link`；抓放完成后临时任务对象被清理，
+Servo 与同一 PlanningScene 继续运行。当前型号既有 20 轮重复性结果见
+[StarArm-102 型号适配](STARARM-102.md)。
+
+最终干净镜像构建明确执行 OpenCV 5.0.0 标定自检并通过，避免宿主 ROS 的 OpenCV 4
+`pkg-config` 或缓存镜像掩盖依赖错误。最终实际结果为 Rust 111 项、Python 2 项、ROS 配置
+1 项、Vitest 11 项全部通过，Playwright 26 项通过、1 项按当前设备状态设计跳过；五个前端
+生产构建、全部 Compose 镜像构建和 `software-flow` 端到端测试均通过。

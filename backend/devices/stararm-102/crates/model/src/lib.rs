@@ -20,16 +20,24 @@ pub const JOINTS: [&str; 6] = ["joint1", "joint2", "joint3", "joint4", "joint5",
 pub const GRIPPER_KEY: &str = "gripper";
 pub const GRIPPER_JOINT: &str = "joint7_left";
 pub const DEFAULT_JOINTS_RAD: [f64; 6] = [0.0; 6];
+pub const WORK_JOINT_ANGLE_DEGREES: f64 = 60.0;
+pub const WORK_JOINT_ANGLE_RAD: f64 = WORK_JOINT_ANGLE_DEGREES.to_radians();
 pub const WORK_JOINTS_RAD: [f64; 6] = [
     0.0,
     0.0,
-    60.0_f64.to_radians(),
-    60.0_f64.to_radians(),
+    WORK_JOINT_ANGLE_RAD,
+    WORK_JOINT_ANGLE_RAD,
     0.0,
     0.0,
 ];
-pub const CLOSED_GRIPPER_RAD: f64 = 0.0;
-pub const OPEN_GRIPPER_RAD: f64 = std::f64::consts::FRAC_PI_2;
+pub const GRIPPER_DRIVE_JOINT_CLOSED_DEGREES: f64 = 0.0;
+pub const GRIPPER_DRIVE_JOINT_CLOSED_RAD: f64 = GRIPPER_DRIVE_JOINT_CLOSED_DEGREES.to_radians();
+pub const GRIPPER_DRIVE_JOINT_WORK_OPEN_DEGREES: f64 = 60.0;
+pub const GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD: f64 =
+    GRIPPER_DRIVE_JOINT_WORK_OPEN_DEGREES.to_radians();
+pub const GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_DEGREES: f64 = 90.0;
+pub const GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD: f64 =
+    GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_DEGREES.to_radians();
 /// Offset from the gripper jaw pivot to `tcp_link` at the `link6` origin.
 ///
 /// Both finger meshes extend from their z=-73.13 mm pivots back to z=0, so
@@ -118,14 +126,7 @@ impl ModelCatalog {
                     }
                 })
                 .collect(),
-            tool_actuators: vec![ActuatorMetadata {
-                key: GRIPPER_KEY.into(),
-                label: "夹爪".into(),
-                unit: "rad".into(),
-                minimum: 0.0,
-                maximum: 90.0_f64.to_radians(),
-                visualization_joint_key: Some(GRIPPER_JOINT.into()),
-            }],
+            tool_actuators: tool_actuators(),
             named_targets: vec![
                 named_target("default", "默认位", DEFAULT_JOINTS_RAD),
                 named_target("work", "工作位", WORK_JOINTS_RAD),
@@ -204,10 +205,21 @@ fn named_target(key: &str, label: &str, joints: [f64; 6]) -> NamedMotionTarget {
             .zip(joints)
             .map(|(name, position)| (name.into(), position))
             .collect(),
-        actuator_positions_rad: [(GRIPPER_KEY.into(), CLOSED_GRIPPER_RAD)]
+        actuator_positions_rad: [(GRIPPER_KEY.into(), GRIPPER_DRIVE_JOINT_CLOSED_RAD)]
             .into_iter()
             .collect(),
     }
+}
+
+fn tool_actuators() -> Vec<ActuatorMetadata> {
+    vec![ActuatorMetadata {
+        key: GRIPPER_KEY.into(),
+        label: "夹爪驱动关节角".into(),
+        unit: "rad".into(),
+        minimum: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
+        maximum: GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD,
+        visualization_joint_key: Some(GRIPPER_JOINT.into()),
+    }]
 }
 
 fn link_materials() -> BTreeMap<String, LinkMaterial> {
@@ -246,6 +258,62 @@ fn link_materials() -> BTreeMap<String, LinkMaterial> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quick_xml::{Reader, events::Event, name::QName};
+
+    const GRASPGENX_MANIFEST: &str = include_str!("../../../graspgenx/manifest.json");
+    const MOVEIT_SRDF: &str =
+        include_str!("../../../ros2/motion-node/config/stararm102_description.srdf");
+    const MODEL_PATCH: &str = include_str!("../../../patches/model.patch");
+    const TOPIC_IO_PATCH: &str = include_str!("../../../patches/topic-io.patch");
+    const SERIALIZED_RAD_TOLERANCE: f64 = 0.5e-9;
+
+    fn assert_serialized_rad(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= SERIALIZED_RAD_TOLERANCE,
+            "serialized angle {actual} differs from model angle {expected}"
+        );
+    }
+
+    fn srdf_group_state_joint(group_state: &str, joint: &str) -> f64 {
+        let mut reader = Reader::from_str(MOVEIT_SRDF);
+        let mut active_group_state = false;
+        loop {
+            match reader.read_event().expect("SRDF must be valid XML") {
+                Event::Start(element) if element.name() == QName(b"group_state") => {
+                    active_group_state = element.attributes().flatten().any(|attribute| {
+                        attribute.key == QName(b"name")
+                            && attribute.value.as_ref() == group_state.as_bytes()
+                    });
+                }
+                Event::Empty(element)
+                    if active_group_state && element.name() == QName(b"joint") =>
+                {
+                    let mut name_matches = false;
+                    let mut value = None;
+                    for attribute in element.attributes().flatten() {
+                        if attribute.key == QName(b"name") {
+                            name_matches = attribute.value.as_ref() == joint.as_bytes();
+                        } else if attribute.key == QName(b"value") {
+                            value = Some(
+                                std::str::from_utf8(attribute.value.as_ref())
+                                    .expect("joint value must be UTF-8")
+                                    .parse::<f64>()
+                                    .expect("joint value must be numeric"),
+                            );
+                        }
+                    }
+                    if name_matches {
+                        return value.expect("matching SRDF joint must have a value");
+                    }
+                }
+                Event::End(element) if element.name() == QName(b"group_state") => {
+                    active_group_state = false;
+                }
+                Event::Eof => panic!("missing {group_state}/{joint} in SRDF"),
+                _ => {}
+            }
+        }
+    }
 
     #[test]
     fn named_targets_share_the_declared_joint_order_and_closed_gripper() {
@@ -254,14 +322,68 @@ mod tests {
         assert_eq!(target.joint_positions_rad["joint3"], 0.0);
         assert_eq!(
             target.actuator_positions_rad[GRIPPER_KEY],
-            CLOSED_GRIPPER_RAD
+            GRIPPER_DRIVE_JOINT_CLOSED_RAD
         );
     }
 
     #[test]
     fn work_target_uses_the_declared_software_coordinates() {
         let target = named_target("work", "工作位", WORK_JOINTS_RAD);
-        assert_eq!(target.joint_positions_rad["joint3"], 60.0_f64.to_radians());
-        assert_eq!(target.joint_positions_rad["joint4"], 60.0_f64.to_radians());
+        assert_eq!(target.joint_positions_rad["joint3"], WORK_JOINT_ANGLE_RAD);
+        assert_eq!(target.joint_positions_rad["joint4"], WORK_JOINT_ANGLE_RAD);
+    }
+
+    #[test]
+    fn public_actuator_range_uses_the_working_open_pose() {
+        let actuator = &tool_actuators()[0];
+        assert_eq!(actuator.minimum, GRIPPER_DRIVE_JOINT_CLOSED_RAD);
+        assert_eq!(actuator.maximum, GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD);
+    }
+
+    #[test]
+    fn moveit_and_graspgenx_use_the_model_working_values() {
+        let manifest: serde_json::Value = serde_json::from_str(GRASPGENX_MANIFEST).unwrap();
+        let descriptor = &manifest["descriptors"][0];
+        assert_eq!(
+            descriptor["drive_joint_work_open_degrees"]["joint7_left"],
+            GRIPPER_DRIVE_JOINT_WORK_OPEN_DEGREES
+        );
+        assert_eq!(
+            descriptor["drive_joint_work_open_degrees"]["joint7_right"],
+            -GRIPPER_DRIVE_JOINT_WORK_OPEN_DEGREES
+        );
+        assert_eq!(
+            descriptor["drive_joint_closed_degrees"]["joint7_left"],
+            GRIPPER_DRIVE_JOINT_CLOSED_DEGREES
+        );
+        assert_eq!(
+            descriptor["drive_joint_closed_degrees"]["joint7_right"],
+            GRIPPER_DRIVE_JOINT_CLOSED_DEGREES
+        );
+
+        assert_serialized_rad(
+            srdf_group_state_joint("work", "joint3"),
+            WORK_JOINT_ANGLE_RAD,
+        );
+        assert_serialized_rad(
+            srdf_group_state_joint("work", "joint4"),
+            WORK_JOINT_ANGLE_RAD,
+        );
+        assert_serialized_rad(
+            srdf_group_state_joint("open", GRIPPER_JOINT),
+            GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD,
+        );
+        assert_serialized_rad(
+            srdf_group_state_joint("closed", GRIPPER_JOINT),
+            GRIPPER_DRIVE_JOINT_CLOSED_RAD,
+        );
+    }
+
+    #[test]
+    fn urdf_and_ros_control_share_the_mechanical_limit() {
+        let limit = format!("{GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD:.9}");
+        assert!(MODEL_PATCH.contains(&format!("upper=\"{limit}\"")));
+        assert!(MODEL_PATCH.contains(&format!("lower=\"-{limit}\"")));
+        assert!(TOPIC_IO_PATCH.contains(&format!(">{limit}</param>")));
     }
 }

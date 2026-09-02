@@ -13,3 +13,4 @@
 /backend/services/perception-compute/.venv/
 /backend/services/perception-compute/.uv-cache/
 /backend/services/perception-compute/models/
+/temp

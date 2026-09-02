@@ -16,7 +16,11 @@ import {
   Shell,
   StatusBadge,
 } from "@robot/ui";
-import { PoseViewer, relativeMotionPose } from "@robot/visualization";
+import {
+  PoseViewer,
+  relativeMotionPose,
+  type PoseVisualization,
+} from "@robot/visualization";
 import { useState } from "react";
 
 function centimeters(value: number | undefined) {
@@ -39,6 +43,11 @@ const componentSwitches = [
   ["tool_axis_translation", "工具轴向平移"],
   ["tool_helical_motion", "工具轴向螺旋"],
 ] as const;
+
+const neutralPose: PoseVisualization = {
+  position_m: [0, 0, 0],
+  orientation_xyzw: [0, 0, 0, 1],
+};
 
 export default function Page() {
   const { snapshot, error, setError } = useGateway("spatial");
@@ -69,7 +78,11 @@ export default function Page() {
 
   const translation = motion?.translation_m;
   const active = Boolean(motion?.active);
-  const displayPose = active && motion ? relativeMotionPose(motion) : pose;
+  const validPose =
+    pose && (pose.flags.position_valid || pose.flags.orientation_valid)
+      ? pose
+      : neutralPose;
+  const displayPose = active && motion ? relativeMotionPose(motion) : validPose;
 
   return (
     <Shell

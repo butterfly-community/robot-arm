@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM ubuntu:26.04
 
 SHELL ["/bin/bash", "-c"]
@@ -34,6 +33,7 @@ ENV ROS_DISTRO=lyrical
 RUN apt-get update \
     && apt-get install --yes \
        ros-lyrical-moveit \
+       ros-lyrical-moveit-ros-perception \
        ros-lyrical-moveit-task-constructor-capabilities \
        ros-lyrical-moveit-task-constructor-core \
        ros-lyrical-moveit-task-constructor-msgs \
@@ -156,12 +156,13 @@ RUN mkdir -p /service \
     && ln -s /models/mobileclip2_b.ts /service/mobileclip2_b.ts
 
 # Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --default-toolchain 1.97.0
+RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh \
+       https://sh.rustup.rs \
+    && sh /tmp/rustup-init.sh -y --default-toolchain 1.97.0
 ENV PATH=/root/.cargo/bin:$PATH
 
 # Dora runtime and replay tool
-RUN git clone --filter=blob:none https://github.com/dora-rs/dora.git /dora-src \
+RUN git clone https://github.com/dora-rs/dora.git /dora-src \
     && git -C /dora-src checkout 06254f3d3353132f1184020d693680be4733bc2c \
     && cargo build --manifest-path /dora-src/Cargo.toml --release \
        -p dora-cli -p dora-replay-node \
@@ -179,3 +180,6 @@ ARG STARARM_REF=5979b346eb3a417840b29b76740754e4005d071a
 COPY backend/devices/stararm-102 /opt/devices/stararm-102/project
 RUN /opt/devices/stararm-102/project/docker/install-base.sh \
       "$STARARM_REPOSITORY" "$STARARM_REF"
+
+# opencv-rust must use the OpenCV 5 CMake package above instead of ROS's OpenCV 4 pkg-config file.
+ENV OPENCV_DISABLE_PROBES=pkg_config

@@ -13,7 +13,7 @@ import type {
   InputHTMLAttributes,
   ReactNode,
 } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function cn(...values: ClassValue[]) {
   return clsx(values);
@@ -67,8 +67,25 @@ export function Card({
   action?: ReactNode;
   defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem(
+      `robot-arm:card:${window.location.pathname}:${title}`,
+    );
+    if (saved !== null) setOpen(saved === "open");
+  }, [title]);
+
+  function updateOpen(nextOpen: boolean) {
+    setOpen(nextOpen);
+    window.localStorage.setItem(
+      `robot-arm:card:${window.location.pathname}:${title}`,
+      nextOpen ? "open" : "closed",
+    );
+  }
+
   return (
-    <Collapsible.Root defaultOpen={defaultOpen} asChild>
+    <Collapsible.Root open={open} onOpenChange={updateOpen} asChild>
       <section {...props} className={cn("card", className)}>
         <div className="card-heading">
           <Collapsible.Trigger className="card-toggle">
@@ -79,9 +96,15 @@ export function Card({
                 className="card-title-text"
               />
             </span>
-            <span className="card-chevron" aria-hidden="true" />
           </Collapsible.Trigger>
           {action && <div className="card-action">{action}</div>}
+          <Collapsible.Trigger
+            className="card-collapse-toggle"
+            aria-label="折叠或展开卡片"
+            title={`折叠或展开${title}`}
+          >
+            <span className="card-chevron" aria-hidden="true" />
+          </Collapsible.Trigger>
         </div>
         <Collapsible.Content className="card-content">
           <div className="card-content-inner">{children}</div>
@@ -105,10 +128,12 @@ export function Field({
   return (
     <fieldset className="field">
       <legend>
-        <LocalizedLabel text={label} english={englishLabel} />
+        <span className="label-with-help">
+          <LocalizedLabel text={label} english={englishLabel} />
+          {hint && <HelpDot text={hint} />}
+        </span>
       </legend>
       {children}
-      {hint && <small>{hint}</small>}
     </fieldset>
   );
 }
@@ -178,20 +203,36 @@ export function KeyValue({
   label,
   englishLabel,
   value,
+  hint,
 }: {
   label: string;
   englishLabel?: string;
   value: ReactNode;
+  hint?: string;
 }) {
   return (
     <div className="key-value">
       <span>
-        <LocalizedLabel text={label} english={englishLabel} />
+        <span className="label-with-help">
+          <LocalizedLabel text={label} english={englishLabel} />
+          {hint && <HelpDot text={hint} />}
+        </span>
       </span>
       <strong>
         <LocalizedLabel text={value} />
       </strong>
     </div>
+  );
+}
+
+export function HelpDot({ text }: { text: string }) {
+  return (
+    <span
+      className="help-dot"
+      aria-label={`说明：${text}`}
+      title={text}
+      tabIndex={0}
+    />
   );
 }
 

@@ -332,11 +332,15 @@ assert.ok(
   ),
   "pick-place returns to the declared work target",
 );
-assert.deepEqual(
-  executionPickPlace.values.arm_state.actuators_rad,
-  executionModel.tool_actuators.map(
-    (actuator) => pickPlaceWorkTarget.actuator_positions_rad[actuator.key],
+assert.ok(
+  executionModel.tool_actuators.every(
+    (actuator, index) =>
+      Math.abs(
+        executionPickPlace.values.arm_state.actuators_rad[index] -
+          pickPlaceWorkTarget.actuator_positions_rad[actuator.key],
+      ) < 1e-9,
   ),
+  "pick-place returns tool actuators to the declared work target",
 );
 assert.equal(
   executionPickPlace.values.manipulation_state.object_id,

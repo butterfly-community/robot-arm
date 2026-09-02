@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import io
+from types import SimpleNamespace
 
+import numpy as np
 from PIL import Image
 
 from perception_compute.app import (
@@ -10,6 +12,7 @@ from perception_compute.app import (
     GraspResponse,
     Instance,
     SegmentRequest,
+    YoloeBackend,
     create_app,
 )
 
@@ -58,6 +61,40 @@ class FakeGraspBackend:
         )
 
 
+class FakeTensor:
+    def __init__(self, values: list | np.ndarray) -> None:
+        self.values = np.asarray(values)
+
+    def cpu(self) -> "FakeTensor":
+        return self
+
+    def numpy(self) -> np.ndarray:
+        return self.values
+
+
+class FakeYoloeModel:
+    def __init__(self) -> None:
+        self.classes: list[str] = []
+        self.predict_calls = 0
+
+    def set_classes(self, classes: list[str]) -> None:
+        self.classes = classes
+
+    def predict(self, image: Image.Image, **options):
+        assert isinstance(image, Image.Image)
+        assert image.mode == "RGB"
+        assert options["retina_masks"] is True
+        assert options["conf"] == 0.18
+        self.predict_calls += 1
+        boxes = SimpleNamespace(
+            xyxy=FakeTensor([[1.0, 1.0, 3.0, 3.0]]),
+            conf=FakeTensor([0.9]),
+            cls=FakeTensor([0]),
+        )
+        masks = SimpleNamespace(data=FakeTensor([np.ones((6, 8))]))
+        return [SimpleNamespace(boxes=boxes, masks=masks, names={0: self.classes[0]})]
+
+
 def encoded_image() -> str:
     image = Image.new("RGB", (8, 6), "red")
     output = io.BytesIO()
@@ -67,6 +104,24 @@ def encoded_image() -> str:
 
 def test_health_and_segmentation_contract() -> None:
     asyncio.run(exercise_contract())
+
+
+def test_yoloe_uses_official_image_and_native_mask_contract() -> None:
+    backend = YoloeBackend.__new__(YoloeBackend)
+    backend.model_name = "fixture-seg"
+    backend.device = "cpu"
+    backend._model = FakeYoloeModel()
+    backend._classes = ()
+    image = Image.new("RGB", (8, 6), "red")
+
+    assert backend.segment(image, []) == []
+    assert backend._model.predict_calls == 0
+
+    instances = backend.segment(image, ["red cube"])
+    assert backend._model.classes == ["red cube"]
+    assert instances[0].label == "red cube"
+    mask = Image.open(io.BytesIO(base64.b64decode(instances[0].mask_png_base64)))
+    assert mask.size == image.size
 
 
 async def exercise_contract() -> None:

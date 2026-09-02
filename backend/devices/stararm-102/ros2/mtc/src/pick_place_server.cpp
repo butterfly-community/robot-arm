@@ -1,5 +1,6 @@
 #include <Eigen/Geometry>
 
+#include <moveit/planning_scene/planning_scene.hpp>
 #include <moveit/planning_scene_interface/planning_scene_interface.hpp>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/joint_interpolation.h>
@@ -46,6 +47,7 @@ constexpr char kWorkPose[] = "work";
 constexpr char kGroundId[] = "ground";
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
+constexpr std::size_t kPlaceYawSamples = 12;
 
 moveit_msgs::msg::CollisionObject box(const std::string &frame_id,
                                       const std::string &id,
@@ -168,6 +170,8 @@ private:
       auto support = std::make_unique<mtc::stages::ModifyPlanningScene>(
           "allow object support contact");
       support->allowCollisions(goal.object_id, kGroundId, true);
+      support->allowCollisions(goal.object_id,
+                               planning_scene::PlanningScene::OCTOMAP_NS, true);
       task.add(std::move(support));
     }
 
@@ -254,10 +258,13 @@ private:
       lift->setDirection(direction(goal.frame_id, 1.0));
       pick->insert(std::move(lift));
 
-      auto restore_ground = std::make_unique<mtc::stages::ModifyPlanningScene>(
-          "restore ground collision after lift");
-      restore_ground->allowCollisions(goal.object_id, kGroundId, false);
-      pick->insert(std::move(restore_ground));
+      auto restore_environment =
+          std::make_unique<mtc::stages::ModifyPlanningScene>(
+              "restore environment collision after lift");
+      restore_environment->allowCollisions(goal.object_id, kGroundId, false);
+      restore_environment->allowCollisions(
+          goal.object_id, planning_scene::PlanningScene::OCTOMAP_NS, false);
+      pick->insert(std::move(restore_environment));
 
       pick_stage = pick.get();
       task.add(std::move(pick));
@@ -278,6 +285,12 @@ private:
       place->properties().configureInitFrom(
           mtc::Stage::PARENT, {"eef", "hand", "group", "ik_frame"});
 
+      auto allow_support = std::make_unique<mtc::stages::ModifyPlanningScene>(
+          "allow placement support contact");
+      allow_support->allowCollisions(
+          goal.object_id, planning_scene::PlanningScene::OCTOMAP_NS, true);
+      place->insert(std::move(allow_support));
+
       auto lower = std::make_unique<mtc::stages::MoveRelative>("lower object",
                                                                cartesian);
       lower->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
@@ -286,27 +299,46 @@ private:
       lower->setDirection(direction(goal.frame_id, -1.0));
       place->insert(std::move(lower));
 
-      auto generator = std::make_unique<mtc::stages::GeneratePlacePose>(
-          "generate place pose");
-      generator->properties().configureInitFrom(mtc::Stage::PARENT,
-                                                {"ik_frame"});
-      generator->setObject(goal.object_id);
-      geometry_msgs::msg::PoseStamped target;
-      target.header.frame_id = goal.frame_id;
-      target.pose = goal.placement_pose;
-      generator->setPose(target);
-      generator->setMonitoredStage(pick_stage);
-      auto place_ik = std::make_unique<mtc::stages::ComputeIK>(
-          "compute place IK", std::move(generator));
-      place_ik->setGroup(kArmGroup);
-      place_ik->setEndEffector(kEndEffector);
       geometry_msgs::msg::PoseStamped attached_object_frame;
       attached_object_frame.header.frame_id = goal.object_id;
       attached_object_frame.pose.orientation.w = 1.0;
-      place_ik->setIKFrame(attached_object_frame);
-      place_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
-                                               {"target_pose"});
-      place->insert(std::move(place_ik));
+
+      auto place_candidates =
+          std::make_unique<mtc::Alternatives>("compute place IK");
+      const Eigen::Quaterniond placement_orientation(
+          goal.placement_pose.orientation.w, goal.placement_pose.orientation.x,
+          goal.placement_pose.orientation.y, goal.placement_pose.orientation.z);
+      for (std::size_t index = 0; index < kPlaceYawSamples; ++index) {
+        const auto yaw = 2.0 * std::acos(-1.0) *
+                         static_cast<double>(index) /
+                         static_cast<double>(kPlaceYawSamples);
+        const Eigen::Quaterniond orientation =
+            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+            placement_orientation;
+        auto generator = std::make_unique<mtc::stages::GeneratePlacePose>(
+            "place heading " + std::to_string(index + 1));
+        generator->properties().configureInitFrom(mtc::Stage::PARENT,
+                                                  {"ik_frame"});
+        generator->setObject(goal.object_id);
+        geometry_msgs::msg::PoseStamped target;
+        target.header.frame_id = goal.frame_id;
+        target.pose = goal.placement_pose;
+        target.pose.orientation.x = orientation.x();
+        target.pose.orientation.y = orientation.y();
+        target.pose.orientation.z = orientation.z();
+        target.pose.orientation.w = orientation.w();
+        generator->setPose(target);
+        generator->setMonitoredStage(pick_stage);
+        auto place_ik = std::make_unique<mtc::stages::ComputeIK>(
+            "heading IK " + std::to_string(index + 1), std::move(generator));
+        place_ik->setGroup(kArmGroup);
+        place_ik->setEndEffector(kEndEffector);
+        place_ik->setIKFrame(attached_object_frame);
+        place_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
+                                                 {"target_pose"});
+        place_candidates->add(std::move(place_ik));
+      }
+      place->insert(std::move(place_candidates));
 
       auto open = std::make_unique<mtc::stages::MoveTo>("open gripper",
                                                         joint_interpolation);

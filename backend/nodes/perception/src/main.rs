@@ -2,7 +2,7 @@ mod ros;
 mod simulation;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -47,9 +47,8 @@ struct PerceptionConfig {
     enabled: bool,
     source_id: Option<String>,
     compute_service_url: String,
-    model: String,
     classes: Vec<String>,
-    #[serde(default = "default_placement_labels")]
+    #[serde(default)]
     placement_labels: Vec<String>,
     #[serde(default)]
     cameras: BTreeMap<String, CameraConfig>,
@@ -81,9 +80,8 @@ impl Default for PerceptionConfig {
             enabled: false,
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
-            model: "yoloe-26s-seg.pt".into(),
-            classes: vec!["red cube".into(), "gray storage bin".into()],
-            placement_labels: default_placement_labels(),
+            classes: Vec::new(),
+            placement_labels: Vec::new(),
             cameras: BTreeMap::new(),
             calibration_session: default_calibration_session(),
         }
@@ -92,10 +90,6 @@ impl Default for PerceptionConfig {
 
 fn default_depth_scale_m() -> f64 {
     0.001
-}
-
-fn default_placement_labels() -> Vec<String> {
-    vec!["gray storage bin".into()]
 }
 
 #[derive(Default)]
@@ -112,6 +106,7 @@ struct PerceptionNode {
     ros: RosInterface,
     ros_events: Receiver<RosEvent>,
     http: reqwest::blocking::Client,
+    model: String,
     frames: CameraFrames,
     sequence: u64,
     last_frame_time_ns: Option<i64>,
@@ -122,9 +117,10 @@ struct PerceptionNode {
     camera_calibration: Option<DepthCameraCalibration>,
     instances: Vec<PerceptionInstanceSummary>,
     point_count: Option<u64>,
-    last_cloud: Option<DepthPointCloudFrame>,
+    pending_cloud: Option<DepthPointCloudFrame>,
     assets: BTreeMap<String, (String, Vec<u8>)>,
     last_error: Option<String>,
+    occupied_voxel_extent_m: f64,
     simulation_published: bool,
     calibration_color: Option<r2r::sensor_msgs::msg::Image>,
     latest_arm_state: Option<ArmState>,
@@ -148,6 +144,11 @@ struct SegmentRequest<'a> {
 #[derive(Deserialize)]
 struct SegmentResponse {
     instances: Vec<SegmentInstance>,
+}
+
+#[derive(Deserialize)]
+struct ModelResponse {
+    model: String,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +216,25 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/config/perception.json"));
     let config = load_config(&config_path)?;
+    let octomap_resolution_m = std::env::var("OCTOMAP_RESOLUTION_M")
+        .context("OCTOMAP_RESOLUTION_M is not configured")?
+        .parse::<f64>()
+        .context("OCTOMAP_RESOLUTION_M must be a number")?;
+    if octomap_resolution_m <= 0.0 {
+        bail!("OCTOMAP_RESOLUTION_M must be positive");
+    }
+    let http = reqwest::blocking::Client::new();
+    let model = http
+        .get(format!(
+            "{}/v1/model",
+            config.compute_service_url.trim_end_matches('/')
+        ))
+        .send()
+        .context("读取 perception-compute-service 模型")?
+        .error_for_status()
+        .context("perception-compute-service 模型接口返回错误")?
+        .json::<ModelResponse>()?
+        .model;
     let mut available_sources = simulation_sources()?;
     if let Some(source_id) = config.source_id.as_deref()
         && simulation_source(source_id)?.is_none()
@@ -229,7 +249,8 @@ fn run() -> Result<()> {
         config,
         ros,
         ros_events: ros_receiver,
-        http: reqwest::blocking::Client::new(),
+        http,
+        model,
         frames: CameraFrames::default(),
         sequence: 0,
         last_frame_time_ns: None,
@@ -240,9 +261,10 @@ fn run() -> Result<()> {
         camera_calibration: None,
         instances: vec![],
         point_count: None,
-        last_cloud: None,
+        pending_cloud: None,
         assets: BTreeMap::new(),
         last_error: None,
+        occupied_voxel_extent_m: octomap_resolution_m,
         simulation_published: false,
         calibration_color: None,
         latest_arm_state: None,
@@ -367,7 +389,7 @@ impl PerceptionNode {
         self.camera_calibration = None;
         self.instances.clear();
         self.point_count = None;
-        self.last_cloud = None;
+        self.pending_cloud = None;
         self.last_frame_time_ns = None;
         self.assets.clear();
         self.calibration_color = None;
@@ -407,6 +429,11 @@ impl PerceptionNode {
                 self.last_error = Some(error.to_string());
             }
         }
+        if self.ros.cloud_subscription_count()? > 0
+            && let Some(cloud) = self.pending_cloud.take()
+        {
+            self.ros.publish_cloud(cloud)?;
+        }
         if self.config.enabled && !self.simulation_published {
             let source_id = self.config.source_id.clone().unwrap_or_default();
             match simulation_frame(
@@ -442,15 +469,6 @@ impl PerceptionNode {
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error.to_string()),
             }
-        }
-        if self.simulation_published
-            && let Some(source_id) = self.config.source_id.as_deref()
-            && simulation_source(source_id)?.is_some()
-            && let Some(cloud) = &self.last_cloud
-        {
-            let mut cloud = cloud.clone();
-            cloud.source_time_ns = now_ns();
-            self.ros.publish_cloud(cloud)?;
         }
         self.publish_state(node)
     }
@@ -516,11 +534,6 @@ impl PerceptionNode {
         let instances = self.segment(&color)?;
         let overlay = segmentation_debug_image(&color, &instances)?;
         self.ros.publish_segmentation(overlay.clone())?;
-        let cloud =
-            aligned_obstacle_point_cloud(self.sequence, &aligned_depth, &calibration, &instances)?;
-        self.point_count = Some(cloud.points_xyz_m.len() as u64);
-        self.ros.publish_cloud(cloud.clone())?;
-        self.last_cloud = Some(cloud);
         let (mut scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
             self.sequence,
             &aligned_depth,
@@ -528,6 +541,30 @@ impl PerceptionNode {
             &instances,
             &self.config.placement_labels,
         )?;
+        let placement_source_ids = scene
+            .placement_regions
+            .iter()
+            .filter_map(|region| region.source_object_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let structured_collision_instances = instances
+            .iter()
+            .filter(|instance| !placement_source_ids.contains(instance.instance_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let cloud = aligned_obstacle_point_cloud(
+            self.sequence,
+            &aligned_depth,
+            &calibration,
+            &structured_collision_instances,
+            self.occupied_voxel_extent_m,
+        )?;
+        self.point_count = Some(cloud.points_xyz_m.len() as u64);
+        if self.ros.cloud_subscription_count()? == 0 {
+            self.pending_cloud = Some(cloud);
+        } else {
+            self.pending_cloud = None;
+            self.ros.publish_cloud(cloud)?;
+        }
         self.attach_grasp_candidates(&mut scene, &instance_clouds)?;
         self.store_frame_details(
             &color,
@@ -985,7 +1022,7 @@ impl PerceptionNode {
             enabled: self.config.enabled,
             source_id: self.config.source_id.clone(),
             compute_service_url: self.config.compute_service_url.clone(),
-            model: self.config.model.clone(),
+            model: self.model.clone(),
             classes: self.config.classes.clone(),
             placement_labels: self.config.placement_labels.clone(),
             available_sources: self.available_sources.clone(),
@@ -1387,8 +1424,8 @@ mod tests {
             )]),
             ..Default::default()
         };
-        assert_eq!(config.classes, ["red cube", "gray storage bin"]);
-        assert_eq!(config.placement_labels, ["gray storage bin"]);
+        assert!(config.classes.is_empty());
+        assert!(config.placement_labels.is_empty());
         save(&path, &config).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.source_id, config.source_id);

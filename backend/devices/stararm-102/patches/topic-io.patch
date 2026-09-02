@@ -70,7 +70,7 @@ diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/stararm102_descript
       <command_interface name="position">
          <param name="min">0</param>
 -        <param name="max">1.57</param>
-+        <param name="max">1.5707963267948966</param>
++        <param name="max">1.570796327</param>
       </command_interface>
 -      <state_interface name="position"/>
 -      <state_interface name="velocity"/>

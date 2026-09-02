@@ -16,7 +16,7 @@ ROS 深度相机 / 确定性 RGB-D 测试源
   → perception-node
   → perception-compute-service（RGB 实例分割、实例点云抓取姿态）
   → perception-node（深度几何、标定、抓取候选、WorldScene、ROS 感知话题）
-  → stararm-102-motion-node（抓放目标与 MoveIt 规划）
+  → MoveIt PointCloudOctomapUpdater / stararm-102-motion-node（环境占据、抓放目标与规划）
   → 同一 ArmCommand / execution 链路
 ```
 
@@ -44,9 +44,10 @@ ROS 深度相机 / 确定性 RGB-D 测试源
 `perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
 远程部署，但外部只和 `perception-node` 交互。
 
-StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂自身碰撞检查；感知点云、
-原始点云和分割掩码不写入 PlanningScene；抓放只把选中物体和结构化障碍的紧凑盒几何交给
-MTC 的任务场景。
+StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂自身碰撞检查；感知节点将
+对齐后的未结构化障碍点云发布给官方 Occupancy Map Monitor，抓放任务同时把选中物体和其他
+结构化障碍的紧凑盒几何交给 MTC。已结构化任务物体从点云中剔除，不会在 PlanningScene 中
+重复表达。
 
 ## 感知与抓放
 
@@ -72,15 +73,16 @@ MTC 的任务场景。
 - `simulation:pick-place-scene`：固定 RGB 与确定性深度经真实 YOLOE 分割，生成
   红色立方体、灰色置物筐和筐内放置区；实例点云继续送入真实 GraspGenX 生成抓取候选，
   用于完整抓放验收。
-- `simulation:depth-grid`：标准 RGB-D 帧内的 497 个有效深度像素，用于 RViz 点云输入验收，不进入 MoveIt
-  规划场景。
+- `simulation:depth-grid`：标准 RGB-D 帧内的 497 个有效深度像素，用于 RViz 与 MoveIt
+  OctoMap 输入验收。
 
 感知服务按 `source_id` 在自己的 JSON 中保存深度比例和外参。网页不保存相机配置。重置只删除
 当前来源的保存项：`simulation` 随即恢复仓库预设，真实来源回到未标定状态，其他相机不受影响。
 
 抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`，不读取类别名称。Rust motion 从放置区域的
-`source_object_id` 和物体几何推导放置高度；被抓物体及放置区域来源对象不重复作为实心 AABB，
-其余结构化对象与显式障碍按 ID 去重后进入任务场景。Rust motion 只做场景映射、唯一 FIFO 和
+`source_object_id` 和物体几何推导放置高度；被抓物体不在点云中重复表达，放置区域来源对象
+保留为实际深度表面且不再加入实心 AABB，其余结构化对象与显式障碍按 ID 去重后进入任务场景。
+Rust motion 只做场景映射、唯一 FIFO 和
 Action 状态转发；型号 MTC 组件用标准 stage 一次构造并选择完整任务解，负责候选位姿、IK、
 接近、工具动作、attach/detach、搬运、回撤和返回。执行仍经 MoveIt、ros2_control 和唯一
 `ArmCommand`。网页与 RViz 显示任务状态、候选、失败 stage 和选中轨迹。

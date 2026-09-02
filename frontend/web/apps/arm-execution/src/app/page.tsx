@@ -26,6 +26,9 @@ import {
 import { useState } from "react";
 import { RobotViewer } from "./robot-viewer";
 
+type ExecutionAction =
+  "connect" | "disconnect" | "discover" | "refresh" | "save-config";
+
 function angle(value: number | undefined) {
   return Number.isFinite(value)
     ? ((Number(value) * 180) / Math.PI).toFixed(2)
@@ -53,6 +56,7 @@ export default function Page() {
   const [feedbackIntervalOverride, setFeedbackIntervalOverride] = useState<
     string | undefined
   >();
+  const [pendingAction, setPendingAction] = useState<ExecutionAction>();
   const feedbackIntervalMs =
     feedbackIntervalOverride ?? String(transport.feedback_interval_ms ?? "");
 
@@ -60,6 +64,7 @@ export default function Page() {
     action: "connect" | "disconnect" | "discover" | "refresh",
   ) {
     setError(undefined);
+    setPendingAction(action);
     try {
       const endpoint = {
         connect: "connect",
@@ -75,11 +80,14 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
   async function saveExecutionConfig() {
     setError(undefined);
+    setPendingAction("save-config");
     try {
       await post("/api/arm-execution/config", {
         schema_version: schemaVersion,
@@ -87,8 +95,11 @@ export default function Page() {
         action: "apply",
         fields: { feedback_interval_ms: feedbackIntervalMs },
       });
+      setFeedbackIntervalOverride(undefined);
     } catch (reason) {
       setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
     }
   }
 
@@ -310,26 +321,46 @@ export default function Page() {
             <div className="card-actions">
               <Button
                 variant={connected ? "danger" : "default"}
+                disabled={Boolean(pendingAction)}
                 onClick={() =>
                   requestExecution(connected ? "disconnect" : "connect")
                 }
               >
-                {connected ? "断开" : "连接真机"}
+                {pendingAction === "connect"
+                  ? "正在连接…"
+                  : pendingAction === "disconnect"
+                    ? "正在断开…"
+                    : connected
+                      ? "断开"
+                      : "连接真机"}
               </Button>
               <Button
                 variant="outline"
+                disabled={Boolean(pendingAction)}
                 onClick={() => requestExecution("discover")}
               >
-                刷新串口
+                {pendingAction === "discover" ? "正在刷新…" : "刷新串口"}
               </Button>
               <Button
                 variant="outline"
+                disabled={Boolean(pendingAction)}
                 onClick={() => requestExecution("refresh")}
               >
-                读取参数
+                {pendingAction === "refresh" ? "正在读取…" : "读取参数"}
               </Button>
-              <Button variant="outline" onClick={saveExecutionConfig}>
-                保存反馈周期
+              <Button
+                variant="outline"
+                disabled={
+                  Boolean(pendingAction) ||
+                  feedbackIntervalOverride === undefined
+                }
+                onClick={saveExecutionConfig}
+              >
+                {pendingAction === "save-config"
+                  ? "正在保存…"
+                  : feedbackIntervalOverride === undefined
+                    ? "反馈周期已保存"
+                    : "保存反馈周期"}
               </Button>
             </div>
             {transport.last_error != null && (

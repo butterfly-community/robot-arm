@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM ubuntu:26.04
 ARG NODE_VERSION=24.20.0
 ENV NEXT_TELEMETRY_DISABLED=1

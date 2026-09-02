@@ -7,13 +7,20 @@
       "source_base_link": "link6",
       "tcp_link": "tcp_link",
       "finger_joints": ["joint7_left", "joint7_right"],
-      "open": {
-        "joint7_left": 1.5707963267948966,
-        "joint7_right": -1.5707963267948966
+      "drive_joint_work_open_degrees": {
+        "joint7_left": 60.0,
+        "joint7_right": -60.0
       },
-      "close": {
+      "drive_joint_closed_degrees": {
         "joint7_left": 0.0,
         "joint7_right": 0.0
+      },
+      "closing_axis": 0,
+      "sweep_volume": {
+        "extents": [0.129, 0.015, 0.02],
+        "offset": [0.00133, 0.00015, 0.06],
+        "extents2": [0.071, 0.015, 0.02],
+        "offset2": [0.00134, 0.00015, 0.08]
       },
       "type": "revolute_2f",
       "symmetric": true

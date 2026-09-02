@@ -172,19 +172,35 @@ pub fn aligned_obstacle_point_cloud(
     sequence: u64,
     depth: &AlignedDepthFrame,
     calibration: &DepthCameraCalibration,
-    instances: &[DetectedInstance2D],
+    structured_collision_instances: &[DetectedInstance2D],
+    occupied_voxel_extent_m: f64,
 ) -> Result<DepthPointCloudFrame, PerceptionError> {
+    if depth.depth.len() != (depth.width as usize) * (depth.height as usize) {
+        return Err(PerceptionError::InvalidDepthDimensions);
+    }
+    let [fx, _, _, _, fy, _, _, _, _] = calibration.camera_matrix;
+    if fx == 0.0 || fy == 0.0 {
+        return Err(PerceptionError::InvalidIntrinsics);
+    }
     let mut filtered = depth.clone();
-    for instance in instances {
-        let mask =
-            image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?.into_luma8();
-        if mask.width() != depth.width || mask.height() != depth.height {
-            return Err(PerceptionError::MaskDimensionsMismatch);
+    for (index, raw_depth) in depth.depth.iter().copied().enumerate() {
+        if raw_depth == 0 {
+            continue;
         }
-        for (x, y, value) in mask.enumerate_pixels() {
-            if value[0] != 0 {
-                filtered.depth[(y * depth.width + x) as usize] = 0;
-            }
+        let x = (index as u32) % depth.width;
+        let y = (index as u32) / depth.width;
+        let z = f64::from(raw_depth) * depth.depth_scale_m;
+        if structured_collision_instances.iter().any(|instance| {
+            // A voxel may extend one resolution beyond its source point after
+            // grid quantization. Project that extent into this depth pixel's
+            // image plane so the visible object is not represented twice.
+            let margin_x = fx * occupied_voxel_extent_m / z;
+            let margin_y = fy * occupied_voxel_extent_m / z;
+            let [left, top, right, bottom] = instance.bounding_box_xyxy;
+            (left - margin_x..=right + margin_x).contains(&f64::from(x))
+                && (top - margin_y..=bottom + margin_y).contains(&f64::from(y))
+        }) {
+            filtered.depth[index] = 0;
         }
     }
     aligned_depth_point_cloud(sequence, &filtered, calibration)
@@ -357,8 +373,45 @@ mod tests {
     }
 
     #[test]
-    fn structured_instances_are_not_duplicated_in_the_obstacle_cloud() {
-        let calibration = calibration(2, 1);
+    fn only_structured_collision_objects_are_removed_from_the_obstacle_cloud() {
+        let calibration = calibration(3, 1);
+        let depth = AlignedDepthFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            source_time_ns: 2,
+            source_id: "test".into(),
+            frame_id: "camera".into(),
+            width: 3,
+            height: 1,
+            depth_scale_m: 0.001,
+            depth: vec![500, 600, 700],
+        };
+        let structured_collision_instances = [DetectedInstance2D {
+            instance_id: "target".into(),
+            label: "target".into(),
+            confidence: 1.0,
+            bounding_box_xyxy: [1.0, 0.0, 1.0, 0.0],
+            mask_width: 3,
+            mask_height: 1,
+            mask_png: vec![],
+        }];
+        let cloud = aligned_obstacle_point_cloud(
+            1,
+            &depth,
+            &calibration,
+            &structured_collision_instances,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(cloud.points_xyz_m.len(), 2);
+        assert_eq!(cloud.points_xyz_m[0][2], 0.5);
+        assert!((cloud.points_xyz_m[1][2] - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn structured_object_filter_accounts_for_the_occupied_voxel_extent() {
+        let mut calibration = calibration(2, 1);
+        calibration.camera_matrix = [1000.0, 0.0, 0.0, 0.0, 1000.0, 0.0, 0.0, 0.0, 1.0];
         let depth = AlignedDepthFrame {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
@@ -368,24 +421,37 @@ mod tests {
             width: 2,
             height: 1,
             depth_scale_m: 0.001,
-            depth: vec![500, 700],
+            depth: vec![500, 600],
         };
-        let mask = image::GrayImage::from_fn(2, 1, |x, _| image::Luma([u8::from(x == 0)]));
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageLuma8(mask)
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .unwrap();
-        let instance = DetectedInstance2D {
-            instance_id: "object".into(),
-            label: "object".into(),
+        let structured_collision_instances = [DetectedInstance2D {
+            instance_id: "target".into(),
+            label: "target".into(),
             confidence: 1.0,
             bounding_box_xyxy: [0.0, 0.0, 0.0, 0.0],
             mask_width: 2,
             mask_height: 1,
-            mask_png: encoded.into_inner(),
-        };
-        let cloud = aligned_obstacle_point_cloud(1, &depth, &calibration, &[instance]).unwrap();
-        assert_eq!(cloud.points_xyz_m.len(), 1);
-        assert!((cloud.points_xyz_m[0][2] - 0.7).abs() < f32::EPSILON);
+            mask_png: vec![],
+        }];
+
+        let exact = aligned_obstacle_point_cloud(
+            1,
+            &depth,
+            &calibration,
+            &structured_collision_instances,
+            0.0,
+        )
+        .unwrap();
+        let voxel_aware = aligned_obstacle_point_cloud(
+            1,
+            &depth,
+            &calibration,
+            &structured_collision_instances,
+            0.001,
+        )
+        .unwrap();
+
+        assert_eq!(exact.points_xyz_m.len(), 1);
+        assert!((exact.points_xyz_m[0][2] - 0.6).abs() < f32::EPSILON);
+        assert!(voxel_aware.points_xyz_m.is_empty());
     }
 }

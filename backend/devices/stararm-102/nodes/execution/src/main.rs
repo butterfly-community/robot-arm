@@ -18,7 +18,7 @@ use robot_arm_messages::{
 };
 use serde::{Deserialize, Serialize};
 use stararm_102_model::{
-    CLOSED_GRIPPER_RAD, DEFAULT_JOINTS_RAD, JOINTS, MODEL_REVISION, ModelCatalog,
+    DEFAULT_JOINTS_RAD, GRIPPER_DRIVE_JOINT_CLOSED_RAD, JOINTS, MODEL_REVISION, ModelCatalog,
 };
 
 const ADAPTER_REVISION: &str = "stararm-102-fashionstar-v1";
@@ -237,7 +237,7 @@ impl StarArmExecution {
                 sample_time_ns: now_ns(),
                 model_revision: MODEL_REVISION.into(),
                 joints_rad: DEFAULT_JOINTS_RAD.to_vec(),
-                actuators_rad: vec![CLOSED_GRIPPER_RAD],
+                actuators_rad: vec![GRIPPER_DRIVE_JOINT_CLOSED_RAD],
                 feedback_source: FeedbackSource::Software,
             },
             telemetry: ArmTelemetry {
@@ -905,7 +905,10 @@ mod tests {
     fn initial_state_matches_the_model_start_only_before_any_input() {
         let execution = StarArmExecution::new();
         assert_eq!(execution.state.joints_rad, DEFAULT_JOINTS_RAD);
-        assert_eq!(execution.state.actuators_rad, [CLOSED_GRIPPER_RAD]);
+        assert_eq!(
+            execution.state.actuators_rad,
+            [GRIPPER_DRIVE_JOINT_CLOSED_RAD]
+        );
     }
 
     #[test]

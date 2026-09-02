@@ -200,6 +200,12 @@ impl RosInterface {
         Ok(())
     }
 
+    pub fn cloud_subscription_count(&self) -> Result<usize> {
+        Ok(self
+            .cloud_publisher
+            .get_inter_process_subscription_count()?)
+    }
+
     pub fn publish_calibration(&self, calibration: &DepthCameraCalibration) -> Result<()> {
         let stamp = ros_time(calibration.source_time_ns);
         let info = r2r::sensor_msgs::msg::CameraInfo {
