@@ -55,27 +55,37 @@ diff --git a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.
 index 7af5b15..23ff77f 100644
 --- a/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
 +++ b/ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf
+@@ -106,8 +106,8 @@
+     <axis
+       xyz="0 0 -1" />
+     <limit
+-      lower="-2.27"
+-      upper="2.27"
++      lower="-1.919862177"
++      upper="1.919862177"
+       effort="100"
+       velocity="1" />
+   </joint>
 @@ -164,8 +164,8 @@
      <axis
        xyz="0 0 -1" />
      <limit
 -      lower="0"
 -      upper="3.14"
-+      lower="-1.57"
-+      upper="1.57"
++      lower="0"
++      upper="3.141592654"
        effort="100"
        velocity="1" />
    </joint>
 @@ -221,9 +221,9 @@
        link="link3" />
      <axis
--      xyz="0 0 -1" />
-+      xyz="0 0 1" />
+       xyz="0 0 -1" />
     <limit
 -      lower="-3.14"
 -      upper="0"
-+      lower="-1.57"
-+      upper="1.57"
++      lower="-4.712388980"
++      upper="0"
        effort="100"
        velocity="1" />
    </joint>
@@ -83,9 +93,10 @@ index 7af5b15..23ff77f 100644
      <axis
        xyz="0 0 -1" />
      <limit
-       lower="-1.57"
+-      lower="-1.57"
 -      upper="2.2"
-+      upper="1.57"
++      lower="-1.570796327"
++      upper="1.570796327"
        effort="100"
        velocity="1" />
    </joint>
@@ -95,8 +106,8 @@ index 7af5b15..23ff77f 100644
      <limit
 -      lower="-1.2"
 -      upper="1.2"
-+      lower="-2.27"
-+      upper="2.27"
++      lower="-1.134464014"
++      upper="1.134464014"
        effort="100"
        velocity="1" />
    </joint>
@@ -106,8 +117,8 @@ index 7af5b15..23ff77f 100644
      <limit
 -      lower="-3.14"
 -      upper="3.14"
-+      lower="-2.27"
-+      upper="2.27"
++      lower="-2.617993878"
++      upper="2.617993878"
        effort="100"
        velocity="1" />
    </joint>

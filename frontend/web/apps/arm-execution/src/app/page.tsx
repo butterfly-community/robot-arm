@@ -27,7 +27,13 @@ import { useState } from "react";
 import { RobotViewer } from "./robot-viewer";
 
 type ExecutionAction =
-  "connect" | "disconnect" | "discover" | "refresh" | "save-config";
+  | "connect"
+  | "disconnect"
+  | "discover"
+  | "refresh"
+  | "save-config"
+  | "torque-release"
+  | "torque-hold";
 
 function angle(value: number | undefined) {
   return Number.isFinite(value)
@@ -96,6 +102,23 @@ export default function Page() {
         fields: { feedback_interval_ms: feedbackIntervalMs },
       });
       setFeedbackIntervalOverride(undefined);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setPendingAction(undefined);
+    }
+  }
+
+  async function requestTorque(mode: "release" | "hold") {
+    setError(undefined);
+    setPendingAction(mode === "release" ? "torque-release" : "torque-hold");
+    try {
+      await post("/api/arm-execution/parameters", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        action: "apply",
+        fields: { torque_mode: mode },
+      });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -317,6 +340,28 @@ export default function Page() {
                   setFeedbackIntervalOverride(event.currentTarget.value)
                 }
               />
+            </Field>
+            <Field label="全部电机力矩">
+              <div className="card-actions">
+                <Button
+                  variant="outline"
+                  disabled={!connected || Boolean(pendingAction)}
+                  title="停止所有电机并释放锁力"
+                  onClick={() => requestTorque("release")}
+                >
+                  {pendingAction === "torque-release"
+                    ? "正在卸力…"
+                    : "全部卸力"}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={!connected || Boolean(pendingAction)}
+                  title="让所有电机在当前位置重新建立锁力"
+                  onClick={() => requestTorque("hold")}
+                >
+                  {pendingAction === "torque-hold" ? "正在上力…" : "全部上力"}
+                </Button>
+              </div>
             </Field>
             <div className="card-actions">
               <Button

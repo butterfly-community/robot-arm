@@ -170,8 +170,6 @@ private:
       auto support = std::make_unique<mtc::stages::ModifyPlanningScene>(
           "allow object support contact");
       support->allowCollisions(goal.object_id, kGroundId, true);
-      support->allowCollisions(goal.object_id,
-                               planning_scene::PlanningScene::OCTOMAP_NS, true);
       task.add(std::move(support));
     }
 
@@ -258,13 +256,10 @@ private:
       lift->setDirection(direction(goal.frame_id, 1.0));
       pick->insert(std::move(lift));
 
-      auto restore_environment =
-          std::make_unique<mtc::stages::ModifyPlanningScene>(
-              "restore environment collision after lift");
-      restore_environment->allowCollisions(goal.object_id, kGroundId, false);
-      restore_environment->allowCollisions(
-          goal.object_id, planning_scene::PlanningScene::OCTOMAP_NS, false);
-      pick->insert(std::move(restore_environment));
+      auto restore_support = std::make_unique<mtc::stages::ModifyPlanningScene>(
+          "restore support collision after lift");
+      restore_support->allowCollisions(goal.object_id, kGroundId, false);
+      pick->insert(std::move(restore_support));
 
       pick_stage = pick.get();
       task.add(std::move(pick));
@@ -284,12 +279,6 @@ private:
                                  {"eef", "hand", "group", "ik_frame"});
       place->properties().configureInitFrom(
           mtc::Stage::PARENT, {"eef", "hand", "group", "ik_frame"});
-
-      auto allow_support = std::make_unique<mtc::stages::ModifyPlanningScene>(
-          "allow placement support contact");
-      allow_support->allowCollisions(
-          goal.object_id, planning_scene::PlanningScene::OCTOMAP_NS, true);
-      place->insert(std::move(allow_support));
 
       auto lower = std::make_unique<mtc::stages::MoveRelative>("lower object",
                                                                cartesian);

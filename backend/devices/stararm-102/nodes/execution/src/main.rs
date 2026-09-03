@@ -19,10 +19,12 @@ use robot_arm_messages::{
 use serde::{Deserialize, Serialize};
 use stararm_102_model::{
     DEFAULT_JOINTS_RAD, GRIPPER_DRIVE_JOINT_CLOSED_RAD, JOINTS, MODEL_REVISION, ModelCatalog,
+    validate_command,
 };
 
 const ADAPTER_REVISION: &str = "stararm-102-fashionstar-v1";
 const SERVO_IDS: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
+const ALL_SERVOS_ID: u8 = 0xff;
 const MOTION_TIME_MS: u32 = 100;
 const ACCELERATION_TIME_MS: u16 = 50;
 const DECELERATION_TIME_MS: u16 = 50;
@@ -147,6 +149,18 @@ impl StarArmBus {
                 actual.kp, actual.hold_kp
             ));
         }
+        self.last_commands = None;
+        Ok(())
+    }
+
+    fn set_torque(&mut self, hold: bool) -> Result<(), String> {
+        let result = if hold {
+            self.bus.hold_torque(ALL_SERVOS_ID)
+        } else {
+            self.bus.release_torque(ALL_SERVOS_ID)
+        };
+        result.map_err(|error| error.to_string())?;
+        self.last_commands = None;
         Ok(())
     }
 
@@ -327,7 +341,9 @@ impl StarArmExecution {
                 None
             }
             RequestAction::Apply => {
-                if request.fields.contains_key("feedback_interval_ms") {
+                if request.fields.contains_key("torque_mode") {
+                    self.apply_torque(&request.fields).err()
+                } else if request.fields.contains_key("feedback_interval_ms") {
                     self.apply_execution_config(&request.fields).err()
                 } else {
                     self.apply_parameters(&request.fields).err()
@@ -342,6 +358,19 @@ impl StarArmExecution {
             value: Some(self.transport.clone()),
             original_error: error,
         }
+    }
+
+    fn apply_torque(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
+        let hold = match fields.get("torque_mode").map(String::as_str) {
+            Some("hold") => true,
+            Some("release") => false,
+            Some(value) => return Err(format!("未知力矩模式 {value}")),
+            None => return Err("力矩请求缺少 torque_mode".into()),
+        };
+        self.bus
+            .as_mut()
+            .ok_or_else(|| "真机串口未连接".to_owned())?
+            .set_torque(hold)
     }
 
     fn apply_parameters(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
@@ -443,16 +472,8 @@ impl StarArmExecution {
     }
 
     fn apply_command(&mut self, command: ArmCommand) {
-        if command.model_revision != MODEL_REVISION
-            || command.joints_rad.len() != 6
-            || command.actuators_rad.len() != 1
-        {
-            self.transport.last_error = Some(format!(
-                "ArmCommand 与执行模型不一致：revision={} joints={} actuators={}",
-                command.model_revision,
-                command.joints_rad.len(),
-                command.actuators_rad.len()
-            ));
+        if let Err(error) = validate_command(&command) {
+            self.transport.last_error = Some(error);
             return;
         }
         if let Some(bus) = self.bus.as_mut() {
@@ -801,18 +822,36 @@ mod tests {
     #[test]
     fn software_and_hardware_share_one_state_type() {
         let mut execution = StarArmExecution::new();
-        execution.apply_command(command(vec![0.1; 6], 0.2));
+        let joints = vec![0.1, 0.1, -0.1, 0.1, 0.1, 0.1];
+        execution.apply_command(command(joints.clone(), 0.2));
         assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
-        assert_eq!(execution.state.joints_rad, vec![0.1; 6]);
+        assert_eq!(execution.state.joints_rad, joints);
     }
     #[test]
     fn selected_but_disconnected_hardware_freezes_the_visible_state() {
         let mut execution = StarArmExecution::new();
         execution.transport.selected_endpoint = Some("/dev/disconnected".into());
         let before = execution.state.clone();
-        execution.apply_command(command(vec![0.2; 6], 0.4));
+        execution.apply_command(command(vec![0.2, 0.2, -0.2, 0.2, 0.2, 0.2], 0.4));
         assert_eq!(execution.state, before);
         assert!(execution.transport.last_command.is_none());
+    }
+
+    #[test]
+    fn execution_rejects_a_command_outside_the_model_motor_limits() {
+        let mut execution = StarArmExecution::new();
+        execution.apply_command(command(
+            vec![0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+            GRIPPER_DRIVE_JOINT_CLOSED_RAD,
+        ));
+        assert!(execution.transport.last_command.is_none());
+        assert!(
+            execution
+                .transport
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("joint3"))
+        );
     }
     #[test]
     fn all_model_angles_keep_their_sign_at_the_uart_boundary() {

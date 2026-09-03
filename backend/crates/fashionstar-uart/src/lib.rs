@@ -13,6 +13,8 @@ pub const CODE_SET_MTURN_BY_INTERVAL: u8 = 14;
 pub const CODE_QUERY_MONITOR: u8 = 22;
 pub const CODE_SYNC_COMMAND: u8 = 25;
 const CODE_STOP_CONTROL: u8 = 0x18;
+const STOP_RELEASE_TORQUE: u8 = 0x10;
+const STOP_HOLD_TORQUE: u8 = 0x11;
 
 const REQUEST_HEADER: [u8; 2] = [0x12, 0x4c];
 const RESPONSE_HEADER: [u8; 2] = [0x05, 0x1c];
@@ -385,6 +387,15 @@ impl FashionStarBus {
         }
         self.send(CODE_SYNC_COMMAND, &params)
     }
+    pub fn release_torque(&mut self, id: u8) -> Result<(), Error> {
+        self.stop_control(id, STOP_RELEASE_TORQUE)
+    }
+    pub fn hold_torque(&mut self, id: u8) -> Result<(), Error> {
+        self.stop_control(id, STOP_HOLD_TORQUE)
+    }
+    fn stop_control(&mut self, id: u8, method: u8) -> Result<(), Error> {
+        self.send(CODE_STOP_CONTROL, &[id, method, 0, 0])
+    }
     pub fn read_internal_parameters(&mut self, id: u8) -> Result<InternalParameters, Error> {
         self.port.clear(ClearBuffer::Input)?;
         self.decoder = PacketDecoder::responses();
@@ -411,7 +422,7 @@ impl FashionStarBus {
         self.port.clear(ClearBuffer::Input)?;
         self.decoder = PacketDecoder::responses();
         let result = (|| {
-            self.send(CODE_STOP_CONTROL, &[parameters.id, 0x10, 0, 0])?;
+            self.release_torque(parameters.id)?;
             thread::sleep(INTERNAL_PARAMETERS_WRITE_DELAY);
             self.port.write_all(&parameters.write_request())?;
             let response = loop {
@@ -428,11 +439,12 @@ impl FashionStarBus {
             }
             Ok(())
         })();
+        let restore = self.hold_torque(parameters.id);
         self.decoder = PacketDecoder::responses();
         if result.is_err() {
             let _ = self.port.clear(ClearBuffer::Input);
         }
-        result
+        result.and(restore)
     }
     fn send(&mut self, code: u8, params: &[u8]) -> Result<(), Error> {
         self.port.write_all(&request_packet(code, params)?)?;
@@ -565,10 +577,14 @@ mod tests {
         assert_eq!(parameters.dead_zone, 3);
     }
     #[test]
-    fn parameter_write_releases_torque_with_vendor_packet() {
+    fn torque_control_packets_match_the_vendor_protocol() {
         assert_eq!(
-            request_packet(CODE_STOP_CONTROL, &[2, 0x10, 0, 0]).unwrap(),
+            request_packet(CODE_STOP_CONTROL, &[2, STOP_RELEASE_TORQUE, 0, 0]).unwrap(),
             [0x12, 0x4c, 0x18, 4, 2, 0x10, 0, 0, 0x8c]
+        );
+        assert_eq!(
+            request_packet(CODE_STOP_CONTROL, &[0xff, STOP_HOLD_TORQUE, 0, 0]).unwrap(),
+            [0x12, 0x4c, 0x18, 4, 0xff, 0x11, 0, 0, 0x8a]
         );
     }
 }

@@ -24,8 +24,8 @@ use robot_arm_messages::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use stararm_102_model::{
-    DEFAULT_JOINTS_RAD, GRIPPER_DRIVE_JOINT_CLOSED_RAD, GRIPPER_JOINT, GRIPPER_KEY, JOINTS,
-    MODEL_REVISION,
+    DEFAULT_JOINTS_RAD, GRIPPER_DRIVE_JOINT_CLOSED_RAD, GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD,
+    GRIPPER_JOINT, GRIPPER_KEY, JOINTS, MODEL_REVISION, joint_limits_rad,
 };
 
 use crate::{
@@ -85,9 +85,26 @@ struct MotionNode {
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
     latest_scene: Option<WorldScene>,
-    perception_config_version: Option<u64>,
     active_manipulation: Option<String>,
     manipulation_state: ManipulationTaskState,
+}
+
+fn planning_state(state: &ArmState) -> (Vec<f64>, f64) {
+    let joints = state
+        .joints_rad
+        .iter()
+        .zip(joint_limits_rad())
+        .map(|(value, (minimum, maximum))| value.clamp(minimum, maximum))
+        .collect();
+    let actuator = state.actuators_rad[0].clamp(
+        GRIPPER_DRIVE_JOINT_CLOSED_RAD,
+        GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD,
+    );
+    (joints, actuator)
+}
+
+fn controller_sync_needed(previous: Option<FeedbackSource>, next: FeedbackSource) -> bool {
+    next == FeedbackSource::Hardware && previous != Some(FeedbackSource::Hardware)
 }
 
 fn main() {
@@ -132,7 +149,6 @@ fn run() -> Result<()> {
         actuator_status: None,
         last_error: None,
         latest_scene: None,
-        perception_config_version: None,
         active_manipulation: None,
         manipulation_state: idle_manipulation_state(),
     };
@@ -150,7 +166,7 @@ fn run() -> Result<()> {
                     "transformed_control" => {
                         motion.apply_transformed_control(from_arrow(data.as_array())?)?
                     }
-                    "set_control_mode" => {
+                    "set_control_mode" | "calibration_control_mode" => {
                         motion.set_control_mode(&mut node, from_arrow(data.as_array())?)?
                     }
                     "prepare_relative" => {
@@ -163,7 +179,7 @@ fn run() -> Result<()> {
                                 .to_owned(),
                         )?;
                     }
-                    "motion_request" => {
+                    "motion_request" | "calibration_motion_request" => {
                         let request: Value = from_arrow(data.as_array())?;
                         if request["action"] == "cancel" {
                             motion.cancel_motion(
@@ -189,12 +205,6 @@ fn run() -> Result<()> {
                     }
                     "perception_state" => {
                         let state: PerceptionState = from_arrow(data.as_array())?;
-                        if let Some(config_version) = motion.perception_config_version
-                            && config_version != state.service.config_version
-                        {
-                            motion.ros.clear_octomap()?;
-                        }
-                        motion.perception_config_version = Some(state.service.config_version);
                         if !state.enabled {
                             motion.latest_scene = None;
                         }
@@ -228,9 +238,7 @@ impl MotionNode {
         {
             eyre::bail!("ArmState does not match StarArm-102 model revision and shape");
         }
-        let requires_sync = self.feedback_source.is_none()
-            || (self.feedback_source != Some(state.feedback_source)
-                && state.feedback_source == FeedbackSource::Hardware);
+        let requires_sync = controller_sync_needed(self.feedback_source, state.feedback_source);
         self.feedback_source = Some(state.feedback_source);
         if requires_sync {
             self.controller_sync_required = true;
@@ -239,11 +247,12 @@ impl MotionNode {
         if !self.controller_output_armed {
             self.last_controller_command = Some((state.joints_rad.clone(), state.actuators_rad[0]));
         }
+        let (planning_joints, planning_actuator) = planning_state(&state);
         self.ros
-            .publish_state(&state.joints_rad, state.actuators_rad[0])?;
+            .publish_state(&planning_joints, planning_actuator)?;
         if !self.fk_pending {
             self.fk_pending = true;
-            self.ros.request_current_pose(state.joints_rad.clone());
+            self.ros.request_current_pose(planning_joints);
         }
         self.latest_arm_state = Some(state);
         self.start_controller_sync();
@@ -326,9 +335,10 @@ impl MotionNode {
                 RequestAction::Apply,
             );
         };
+        let (current, _) = planning_state(state);
         let job = MotionJob {
             request_id,
-            current: state.joints_rad.clone(),
+            current,
             target: DEFAULT_JOINTS_RAD.to_vec(),
             actuator: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
             options: BTreeMap::new(),
@@ -387,10 +397,11 @@ impl MotionNode {
                 RequestAction::Apply,
             );
         }
+        let (current, mut actuator) = planning_state(state);
         let mut target = JOINTS
             .iter()
             .copied()
-            .zip(&state.joints_rad)
+            .zip(&current)
             .map(|(key, value)| (key, *value))
             .collect::<BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
@@ -410,7 +421,6 @@ impl MotionNode {
                 .get_mut(joint.joint_key.as_str())
                 .expect("joint checked above") = joint.position_rad;
         }
-        let mut actuator = state.actuators_rad[0];
         seen.clear();
         for item in request.actuators {
             if item.actuator_key != GRIPPER_KEY
@@ -428,7 +438,7 @@ impl MotionNode {
         }
         let job = MotionJob {
             request_id: request.request_id,
-            current: state.joints_rad.clone(),
+            current,
             target: JOINTS.map(|name| target[name]).to_vec(),
             actuator,
             options: request.options,
@@ -458,7 +468,7 @@ impl MotionNode {
             return Ok(());
         };
         if let (WorkItem::Motion(pending), Some(state)) = (next, &self.latest_arm_state) {
-            pending.job.current.clone_from(&state.joints_rad);
+            pending.job.current = planning_state(state).0;
         }
         if self.controller_sync_required || self.controller_sync_running {
             self.start_controller_sync();
@@ -1138,6 +1148,56 @@ fn now_ns() -> i64 {
 mod tests {
     use super::*;
     use robot_arm_messages::{PlacementRegion, Pose3, SceneObject};
+
+    #[test]
+    fn controller_sync_is_only_needed_when_entering_hardware_feedback() {
+        assert!(!controller_sync_needed(None, FeedbackSource::Software));
+        assert!(!controller_sync_needed(
+            Some(FeedbackSource::Software),
+            FeedbackSource::Software,
+        ));
+        assert!(controller_sync_needed(None, FeedbackSource::Hardware));
+        assert!(controller_sync_needed(
+            Some(FeedbackSource::Software),
+            FeedbackSource::Hardware,
+        ));
+        assert!(!controller_sync_needed(
+            Some(FeedbackSource::Hardware),
+            FeedbackSource::Hardware,
+        ));
+    }
+
+    #[test]
+    fn planning_state_projects_feedback_to_the_model_without_changing_raw_feedback() {
+        let state = ArmState {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            sample_time_ns: 2,
+            model_revision: MODEL_REVISION.into(),
+            joints_rad: vec![2.0, -0.005, 0.005, 2.0, 2.0, 3.0],
+            actuators_rad: vec![-0.003],
+            feedback_source: FeedbackSource::Hardware,
+        };
+        let raw_joints = state.joints_rad.clone();
+        let limits = joint_limits_rad();
+
+        let (joints, actuator) = planning_state(&state);
+
+        assert_eq!(
+            joints,
+            vec![
+                limits[0].1,
+                limits[1].0,
+                limits[2].1,
+                limits[3].1,
+                limits[4].1,
+                limits[5].1,
+            ]
+        );
+        assert_eq!(actuator, GRIPPER_DRIVE_JOINT_CLOSED_RAD);
+        assert_eq!(state.joints_rad, raw_joints);
+        assert_eq!(state.actuators_rad, vec![-0.003]);
+    }
 
     #[test]
     fn collision_pairs_have_a_stable_human_readable_form() {

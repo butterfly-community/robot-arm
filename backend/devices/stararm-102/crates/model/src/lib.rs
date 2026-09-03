@@ -5,31 +5,35 @@ use std::{
 };
 
 use robot_arm_messages::{
-    ActuatorMetadata, JointMetadata, LinkMaterial, ModelAssetRequest, ModelAssetResponse,
-    NamedMotionTarget, NumericFieldSchema, RobotModelInfo, SCHEMA_VERSION, VisualizationManifest,
+    ActuatorMetadata, ArmCommand, JointMetadata, LinkMaterial, ModelAssetRequest,
+    ModelAssetResponse, NamedMotionTarget, NumericFieldSchema, RobotModelInfo, SCHEMA_VERSION,
+    VisualizationManifest,
 };
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 pub const MODEL_ID: &str = "stararm-102-fl";
-pub const MODEL_REVISION: &str = "stararm-102-fl-v1";
+pub const MODEL_REVISION: &str = "stararm-102-fl-v2";
 pub const BASE_FRAME: &str = "base_link";
 pub const TCP_FRAME: &str = "tcp_link";
 pub const GRIPPER_ASSET_ID: &str = "stararm-102-fl";
 pub const JOINTS: [&str; 6] = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"];
 pub const GRIPPER_KEY: &str = "gripper";
 pub const GRIPPER_JOINT: &str = "joint7_left";
-pub const DEFAULT_JOINTS_RAD: [f64; 6] = [0.0; 6];
-pub const WORK_JOINT_ANGLE_DEGREES: f64 = 60.0;
-pub const WORK_JOINT_ANGLE_RAD: f64 = WORK_JOINT_ANGLE_DEGREES.to_radians();
-pub const WORK_JOINTS_RAD: [f64; 6] = [
-    0.0,
-    0.0,
-    WORK_JOINT_ANGLE_RAD,
-    WORK_JOINT_ANGLE_RAD,
-    0.0,
-    0.0,
+pub const JOINT_LIMITS_DEGREES: [(f64, f64); 6] = [
+    (-110.0, 110.0),
+    (0.0, 180.0),
+    (-270.0, 0.0),
+    (-90.0, 90.0),
+    (-65.0, 65.0),
+    (-150.0, 150.0),
 ];
+pub const DEFAULT_JOINTS_RAD: [f64; 6] = [0.0; 6];
+pub const WORK_JOINT3_DEGREES: f64 = -60.0;
+pub const WORK_JOINT4_DEGREES: f64 = 60.0;
+pub const WORK_JOINT3_RAD: f64 = WORK_JOINT3_DEGREES.to_radians();
+pub const WORK_JOINT4_RAD: f64 = WORK_JOINT4_DEGREES.to_radians();
+pub const WORK_JOINTS_RAD: [f64; 6] = [0.0, 0.0, WORK_JOINT3_RAD, WORK_JOINT4_RAD, 0.0, 0.0];
 pub const GRIPPER_DRIVE_JOINT_CLOSED_DEGREES: f64 = 0.0;
 pub const GRIPPER_DRIVE_JOINT_CLOSED_RAD: f64 = GRIPPER_DRIVE_JOINT_CLOSED_DEGREES.to_radians();
 pub const GRIPPER_DRIVE_JOINT_WORK_OPEN_DEGREES: f64 = 60.0;
@@ -89,6 +93,20 @@ impl ModelCatalog {
         if !missing.is_empty() {
             return Err(format!("URDF 缺少主动关节范围：{missing:?}"));
         }
+        for ((name, expected), index) in JOINTS.iter().zip(joint_limits_rad()).zip(0..) {
+            let actual = joint_bounds[*name];
+            if (actual.0 - expected.0).abs() > 1e-9 || (actual.1 - expected.1).abs() > 1e-9 {
+                return Err(format!(
+                    "URDF {} 范围与型号定义不一致：期望 {:.9}..{:.9} rad，实际 {:.9}..{:.9} rad（J{}）",
+                    name,
+                    expected.0,
+                    expected.1,
+                    actual.0,
+                    actual.1,
+                    index + 1
+                ));
+            }
+        }
         let mut digest = Sha256::new();
         for relative in &files {
             digest.update(relative.as_bytes());
@@ -131,6 +149,7 @@ impl ModelCatalog {
                 named_target("default", "默认位", DEFAULT_JOINTS_RAD),
                 named_target("work", "工作位", WORK_JOINTS_RAD),
             ],
+            calibration_targets: calibration_targets(),
             motion_options: [
                 ("velocity_scaling", "速度倍率"),
                 ("acceleration_scaling", "加速度倍率"),
@@ -196,6 +215,48 @@ impl ModelCatalog {
     }
 }
 
+pub fn joint_limits_rad() -> [(f64, f64); 6] {
+    JOINT_LIMITS_DEGREES.map(|(minimum, maximum)| (minimum.to_radians(), maximum.to_radians()))
+}
+
+pub fn validate_command(command: &ArmCommand) -> Result<(), String> {
+    if command.model_revision != MODEL_REVISION
+        || command.joints_rad.len() != JOINTS.len()
+        || command.actuators_rad.len() != 1
+    {
+        return Err(format!(
+            "ArmCommand 与执行模型不一致：revision={} joints={} actuators={}",
+            command.model_revision,
+            command.joints_rad.len(),
+            command.actuators_rad.len()
+        ));
+    }
+    for (((name, value), (minimum_deg, maximum_deg)), (minimum, maximum)) in JOINTS
+        .iter()
+        .zip(&command.joints_rad)
+        .zip(JOINT_LIMITS_DEGREES)
+        .zip(joint_limits_rad())
+    {
+        if !value.is_finite() || *value < minimum || *value > maximum {
+            return Err(format!(
+                "{name} 电机角 {:.3}° 超出范围 {minimum_deg:.0}°..{maximum_deg:.0}°",
+                value.to_degrees()
+            ));
+        }
+    }
+    let gripper = command.actuators_rad[0];
+    if !gripper.is_finite()
+        || !(GRIPPER_DRIVE_JOINT_CLOSED_RAD..=GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD)
+            .contains(&gripper)
+    {
+        return Err(format!(
+            "夹爪驱动关节角 {:.3}° 超出范围 0°..{GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_DEGREES:.0}°",
+            gripper.to_degrees()
+        ));
+    }
+    Ok(())
+}
+
 fn named_target(key: &str, label: &str, joints: [f64; 6]) -> NamedMotionTarget {
     NamedMotionTarget {
         key: key.into(),
@@ -211,13 +272,37 @@ fn named_target(key: &str, label: &str, joints: [f64; 6]) -> NamedMotionTarget {
     }
 }
 
+fn calibration_targets() -> Vec<NamedMotionTarget> {
+    [
+        [0.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [0.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [0.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, degrees)| {
+        named_target(
+            &format!("calibration-{}", index + 1),
+            &format!("标定姿态 {}", index + 1),
+            degrees.map(f64::to_radians),
+        )
+    })
+    .collect()
+}
+
 fn tool_actuators() -> Vec<ActuatorMetadata> {
     vec![ActuatorMetadata {
         key: GRIPPER_KEY.into(),
         label: "夹爪驱动关节角".into(),
         unit: "rad".into(),
         minimum: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
-        maximum: GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD,
+        maximum: GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD,
         visualization_joint_key: Some(GRIPPER_JOINT.into()),
     }]
 }
@@ -329,15 +414,96 @@ mod tests {
     #[test]
     fn work_target_uses_the_declared_software_coordinates() {
         let target = named_target("work", "工作位", WORK_JOINTS_RAD);
-        assert_eq!(target.joint_positions_rad["joint3"], WORK_JOINT_ANGLE_RAD);
-        assert_eq!(target.joint_positions_rad["joint4"], WORK_JOINT_ANGLE_RAD);
+        assert_eq!(target.joint_positions_rad["joint3"], WORK_JOINT3_RAD);
+        assert_eq!(target.joint_positions_rad["joint4"], WORK_JOINT4_RAD);
     }
 
     #[test]
-    fn public_actuator_range_uses_the_working_open_pose() {
+    fn calibration_targets_are_complete_and_use_declared_coordinates() {
+        let targets = calibration_targets();
+        let expected_degrees: [[f64; 6]; 9] = [
+            [0.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [0.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [0.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+        ];
+        assert_eq!(targets.len(), expected_degrees.len());
+        for (target, expected) in targets.iter().zip(expected_degrees) {
+            for (joint, expected_degrees) in JOINTS.iter().zip(expected) {
+                assert_eq!(
+                    target.joint_positions_rad[*joint],
+                    expected_degrees.to_radians()
+                );
+            }
+        }
+        assert!(targets.iter().all(|target| {
+            target.joint_positions_rad.len() == JOINTS.len()
+                && JOINTS
+                    .iter()
+                    .all(|joint| target.joint_positions_rad.contains_key(*joint))
+        }));
+        assert!(
+            targets
+                .iter()
+                .all(|target| { target.joint_positions_rad["joint3"] <= (-10.0_f64).to_radians() })
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.joint_positions_rad["joint2"] >= 0.0)
+        );
+    }
+
+    #[test]
+    fn public_actuator_range_uses_the_mechanical_limit() {
         let actuator = &tool_actuators()[0];
         assert_eq!(actuator.minimum, GRIPPER_DRIVE_JOINT_CLOSED_RAD);
-        assert_eq!(actuator.maximum, GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD);
+        assert_eq!(actuator.maximum, GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD);
+    }
+
+    #[test]
+    fn command_limits_cover_every_motor_and_gripper() {
+        let joint_limits_rad = joint_limits_rad();
+        let command = ArmCommand {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            controller_time_ns: 2,
+            model_revision: MODEL_REVISION.into(),
+            joints_rad: joint_limits_rad
+                .iter()
+                .map(|(_, maximum)| *maximum)
+                .collect(),
+            actuators_rad: vec![GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD],
+        };
+        validate_command(&command).unwrap();
+
+        for index in 0..JOINTS.len() {
+            for invalid_value in [
+                joint_limits_rad[index].0 - 0.001,
+                joint_limits_rad[index].1 + 0.001,
+            ] {
+                let mut invalid = command.clone();
+                invalid.joints_rad[index] = invalid_value;
+                assert!(
+                    validate_command(&invalid)
+                        .unwrap_err()
+                        .contains(JOINTS[index])
+                );
+            }
+        }
+
+        let mut invalid_gripper = command;
+        invalid_gripper.actuators_rad[0] = GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD + 0.001;
+        assert!(
+            validate_command(&invalid_gripper)
+                .unwrap_err()
+                .contains("夹爪")
+        );
     }
 
     #[test]
@@ -361,14 +527,8 @@ mod tests {
             GRIPPER_DRIVE_JOINT_CLOSED_DEGREES
         );
 
-        assert_serialized_rad(
-            srdf_group_state_joint("work", "joint3"),
-            WORK_JOINT_ANGLE_RAD,
-        );
-        assert_serialized_rad(
-            srdf_group_state_joint("work", "joint4"),
-            WORK_JOINT_ANGLE_RAD,
-        );
+        assert_serialized_rad(srdf_group_state_joint("work", "joint3"), WORK_JOINT3_RAD);
+        assert_serialized_rad(srdf_group_state_joint("work", "joint4"), WORK_JOINT4_RAD);
         assert_serialized_rad(
             srdf_group_state_joint("open", GRIPPER_JOINT),
             GRIPPER_DRIVE_JOINT_WORK_OPEN_RAD,

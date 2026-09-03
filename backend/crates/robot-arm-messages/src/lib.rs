@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use arrow::{
-    array::{Array, ArrayRef, StringArray, StructArray, UInt32Array},
+    array::{Array, ArrayRef, BinaryArray, StringArray, StructArray, UInt32Array},
     datatypes::{DataType, Field, Fields},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -21,7 +21,13 @@ pub enum ArrowCodecError {
     UnsupportedVersion { actual: u32, expected: u32 },
     #[error("JSON encode failed: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("camera frame payload is invalid: {0}")]
+    InvalidCameraFrame(String),
 }
+
+const CAMERA_FRAME_METADATA_FIELD: &str = "metadata_json";
+const CAMERA_COLOR_DATA_FIELD: &str = "color_data";
+const CAMERA_DEPTH_DATA_FIELD: &str = "depth_data";
 
 pub fn to_arrow<T: Serialize>(value: &T) -> Result<ArrayRef, ArrowCodecError> {
     let json = serde_json::to_string(value)?;
@@ -66,6 +72,302 @@ pub fn from_arrow<T: DeserializeOwned>(array: &dyn Array) -> Result<T, ArrowCode
         });
     }
     Ok(serde_json::from_str(strings.value(0))?)
+}
+
+/// A device-independent stream profile reported by a camera driver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraStreamProfile {
+    pub key: String,
+    pub stream: CameraStreamKind,
+    pub width: u32,
+    pub height: u32,
+    pub frames_per_second: u32,
+    pub pixel_format: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default = "default_true")]
+    pub available: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraStreamKind {
+    Color,
+    Depth,
+}
+
+/// A driver-owned setting exposed without leaking the vendor SDK into downstream nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraDriverParameterKind {
+    Boolean,
+    Integer,
+    Number,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraDriverParameterInfo {
+    pub key: String,
+    pub display_name: String,
+    pub sensor_name: String,
+    pub kind: CameraDriverParameterKind,
+    pub current_value: f64,
+    pub default_value: f64,
+    pub minimum: f64,
+    pub maximum: f64,
+    pub step: f64,
+    pub read_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraDriverExtensionInfo {
+    pub namespace: String,
+    pub display_name: String,
+    pub parameters: Vec<CameraDriverParameterInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraDriverParameterValue {
+    pub namespace: String,
+    pub key: String,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraSourceConfiguration {
+    pub source_id: String,
+    pub color_profile_key: String,
+    pub depth_profile_key: String,
+    pub output_frames_per_second: f64,
+    pub driver_parameters: Vec<CameraDriverParameterValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraIntrinsics {
+    pub width: u32,
+    pub height: u32,
+    pub focal_length_px: [f64; 2],
+    pub principal_point_px: [f64; 2],
+    pub distortion_model: String,
+    pub distortion: Vec<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraImagePlane {
+    pub width: u32,
+    pub height: u32,
+    pub stride_bytes: u32,
+    pub pixel_format: String,
+    pub frame_id: String,
+    pub data: Vec<u8>,
+}
+
+impl CameraImagePlane {
+    fn metadata(&self) -> CameraImagePlaneMetadata {
+        CameraImagePlaneMetadata {
+            width: self.width,
+            height: self.height,
+            stride_bytes: self.stride_bytes,
+            pixel_format: self.pixel_format.clone(),
+            frame_id: self.frame_id.clone(),
+        }
+    }
+
+    fn validate(&self, label: &str) -> Result<(), ArrowCodecError> {
+        if self.width == 0 || self.height == 0 || self.stride_bytes == 0 {
+            return Err(ArrowCodecError::InvalidCameraFrame(format!(
+                "{label} dimensions and stride must be positive"
+            )));
+        }
+        let expected = usize::try_from(self.stride_bytes)
+            .ok()
+            .and_then(|stride| stride.checked_mul(self.height as usize))
+            .ok_or_else(|| {
+                ArrowCodecError::InvalidCameraFrame(format!(
+                    "{label} dimensions overflow the host address space"
+                ))
+            })?;
+        if self.data.len() != expected {
+            return Err(ArrowCodecError::InvalidCameraFrame(format!(
+                "{label} payload has {} bytes, expected {expected}",
+                self.data.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraFrameBundle {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub source_id: String,
+    pub device_time_ns: i64,
+    pub device_time_domain: String,
+    pub received_time_ns: i64,
+    pub color: CameraImagePlane,
+    pub depth: CameraImagePlane,
+    pub color_intrinsics: CameraIntrinsics,
+    pub depth_intrinsics: CameraIntrinsics,
+    /// Rigid transform from the depth optical frame to the color optical frame.
+    pub depth_to_color: Pose3,
+    pub depth_scale_m: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CameraImagePlaneMetadata {
+    width: u32,
+    height: u32,
+    stride_bytes: u32,
+    pixel_format: String,
+    frame_id: String,
+}
+
+impl CameraImagePlaneMetadata {
+    fn with_data(self, data: Vec<u8>) -> CameraImagePlane {
+        CameraImagePlane {
+            width: self.width,
+            height: self.height,
+            stride_bytes: self.stride_bytes,
+            pixel_format: self.pixel_format,
+            frame_id: self.frame_id,
+            data,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CameraFrameBundleMetadata {
+    schema_version: u32,
+    sequence: u64,
+    source_id: String,
+    device_time_ns: i64,
+    device_time_domain: String,
+    received_time_ns: i64,
+    color: CameraImagePlaneMetadata,
+    depth: CameraImagePlaneMetadata,
+    color_intrinsics: CameraIntrinsics,
+    depth_intrinsics: CameraIntrinsics,
+    depth_to_color: Pose3,
+    depth_scale_m: f64,
+}
+
+impl CameraFrameBundleMetadata {
+    fn from_bundle(bundle: &CameraFrameBundle) -> Self {
+        Self {
+            schema_version: bundle.schema_version,
+            sequence: bundle.sequence,
+            source_id: bundle.source_id.clone(),
+            device_time_ns: bundle.device_time_ns,
+            device_time_domain: bundle.device_time_domain.clone(),
+            received_time_ns: bundle.received_time_ns,
+            color: bundle.color.metadata(),
+            depth: bundle.depth.metadata(),
+            color_intrinsics: bundle.color_intrinsics.clone(),
+            depth_intrinsics: bundle.depth_intrinsics.clone(),
+            depth_to_color: bundle.depth_to_color.clone(),
+            depth_scale_m: bundle.depth_scale_m,
+        }
+    }
+
+    fn with_data(self, color_data: Vec<u8>, depth_data: Vec<u8>) -> CameraFrameBundle {
+        CameraFrameBundle {
+            schema_version: self.schema_version,
+            sequence: self.sequence,
+            source_id: self.source_id,
+            device_time_ns: self.device_time_ns,
+            device_time_domain: self.device_time_domain,
+            received_time_ns: self.received_time_ns,
+            color: self.color.with_data(color_data),
+            depth: self.depth.with_data(depth_data),
+            color_intrinsics: self.color_intrinsics,
+            depth_intrinsics: self.depth_intrinsics,
+            depth_to_color: self.depth_to_color,
+            depth_scale_m: self.depth_scale_m,
+        }
+    }
+}
+
+/// Encode RGB-D data without serializing the image buffers through JSON/Base64.
+pub fn camera_frame_to_arrow(bundle: &CameraFrameBundle) -> Result<ArrayRef, ArrowCodecError> {
+    if bundle.schema_version != SCHEMA_VERSION {
+        return Err(ArrowCodecError::UnsupportedVersion {
+            actual: bundle.schema_version,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    bundle.color.validate("color")?;
+    bundle.depth.validate("depth")?;
+    let metadata = serde_json::to_string(&CameraFrameBundleMetadata::from_bundle(bundle))?;
+    let fields = Fields::from(vec![
+        Field::new("schema_version", DataType::UInt32, false),
+        Field::new(CAMERA_FRAME_METADATA_FIELD, DataType::Utf8, false),
+        Field::new(CAMERA_COLOR_DATA_FIELD, DataType::Binary, false),
+        Field::new(CAMERA_DEPTH_DATA_FIELD, DataType::Binary, false),
+    ]);
+    Ok(Arc::new(StructArray::new(
+        fields,
+        vec![
+            Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])) as ArrayRef,
+            Arc::new(StringArray::from(vec![metadata])) as ArrayRef,
+            Arc::new(BinaryArray::from_vec(vec![bundle.color.data.as_slice()])) as ArrayRef,
+            Arc::new(BinaryArray::from_vec(vec![bundle.depth.data.as_slice()])) as ArrayRef,
+        ],
+        None,
+    )))
+}
+
+pub fn camera_frame_from_arrow(array: &dyn Array) -> Result<CameraFrameBundle, ArrowCodecError> {
+    let structure = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if structure.len() != 1 || structure.is_null(0) {
+        return Err(ArrowCodecError::InvalidShape);
+    }
+    let versions = structure
+        .column_by_name("schema_version")
+        .and_then(|value| value.as_any().downcast_ref::<UInt32Array>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    let metadata = structure
+        .column_by_name(CAMERA_FRAME_METADATA_FIELD)
+        .and_then(|value| value.as_any().downcast_ref::<StringArray>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    let colors = structure
+        .column_by_name(CAMERA_COLOR_DATA_FIELD)
+        .and_then(|value| value.as_any().downcast_ref::<BinaryArray>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    let depths = structure
+        .column_by_name(CAMERA_DEPTH_DATA_FIELD)
+        .and_then(|value| value.as_any().downcast_ref::<BinaryArray>())
+        .ok_or(ArrowCodecError::InvalidArrowType)?;
+    if versions.is_null(0) || metadata.is_null(0) || colors.is_null(0) || depths.is_null(0) {
+        return Err(ArrowCodecError::InvalidShape);
+    }
+    let actual = versions.value(0);
+    if actual != SCHEMA_VERSION {
+        return Err(ArrowCodecError::UnsupportedVersion {
+            actual,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    let metadata: CameraFrameBundleMetadata = serde_json::from_str(metadata.value(0))?;
+    if metadata.schema_version != actual {
+        return Err(ArrowCodecError::UnsupportedVersion {
+            actual: metadata.schema_version,
+            expected: actual,
+        });
+    }
+    let bundle = metadata.with_data(colors.value(0).to_vec(), depths.value(0).to_vec());
+    bundle.color.validate("color")?;
+    bundle.depth.validate("depth")?;
+    Ok(bundle)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,7 +691,7 @@ pub struct DepthCameraCalibration {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct DepthCameraSourceInfo {
+pub struct CameraSourceInfo {
     pub source_id: String,
     pub driver_id: String,
     pub display_name: String,
@@ -399,11 +701,44 @@ pub struct DepthCameraSourceInfo {
     pub connection_type: Option<String>,
     pub physical_port: Option<String>,
     pub sensors: Vec<String>,
-    pub color_stream: String,
-    pub depth_stream: String,
-    pub camera_info_stream: String,
-    pub depth_scale_m: f64,
-    pub calibrated: bool,
+    pub profiles: Vec<CameraStreamProfile>,
+    #[serde(default)]
+    pub driver_extensions: Vec<CameraDriverExtensionInfo>,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub action: RequestAction,
+    pub source_id: Option<String>,
+    pub color_profile_key: Option<String>,
+    pub depth_profile_key: Option<String>,
+    #[serde(default)]
+    pub output_frames_per_second: Option<f64>,
+    #[serde(default)]
+    pub driver_parameters: Option<Vec<CameraDriverParameterValue>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraCaptureState {
+    pub schema_version: u32,
+    pub available_sources: Vec<CameraSourceInfo>,
+    pub selected_source_id: Option<String>,
+    pub selected_color_profile_key: Option<String>,
+    pub selected_depth_profile_key: Option<String>,
+    pub output_frames_per_second: Option<f64>,
+    pub configurations: Vec<CameraSourceConfiguration>,
+    pub streaming: bool,
+    pub last_sequence: Option<u64>,
+    pub last_frame_time_ns: Option<i64>,
+    pub measured_frames_per_second: Option<f64>,
+    pub measured_output_frames_per_second: Option<f64>,
+    pub dropped_frame_count: u64,
+    pub skipped_output_frame_count: u64,
+    pub original_error: Option<String>,
+    pub service: ServiceState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -435,12 +770,10 @@ pub struct PerceptionState {
     pub classes: Vec<String>,
     #[serde(default)]
     pub placement_labels: Vec<String>,
-    #[serde(default)]
-    pub available_sources: Vec<DepthCameraSourceInfo>,
     pub color_frame: Option<ImageFrameInfo>,
     pub depth_frame: Option<ImageFrameInfo>,
     pub camera_calibration: Option<DepthCameraCalibration>,
-    pub depth_scale_m: f64,
+    pub depth_scale_m: Option<f64>,
     #[serde(default)]
     pub instances: Vec<PerceptionInstanceSummary>,
     pub point_count: Option<u64>,
@@ -474,7 +807,6 @@ pub struct PerceptionRequest {
     pub request_id: String,
     pub action: RequestAction,
     pub source_id: Option<String>,
-    pub depth_scale_m: Option<f64>,
     pub classes: Option<Vec<String>>,
     #[serde(default)]
     pub placement_labels: Option<Vec<String>>,
@@ -589,10 +921,22 @@ pub struct CalibrationResult {
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationAction {
     Start,
-    Capture,
-    Solve,
     Apply,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationPhase {
+    #[default]
+    Idle,
+    Preparing,
+    Moving,
+    Detecting,
+    Solving,
+    AwaitingConfirmation,
+    Applied,
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -610,6 +954,20 @@ pub struct CalibrationRequest {
 pub struct CalibrationSessionState {
     pub schema_version: u32,
     pub active: bool,
+    #[serde(default)]
+    pub phase: CalibrationPhase,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub current_target_index: Option<u32>,
+    #[serde(default)]
+    pub target_count: u32,
+    #[serde(default)]
+    pub current_target_key: Option<String>,
+    #[serde(default)]
+    pub motion_request_id: Option<String>,
+    #[serde(default)]
+    pub stage_message: Option<String>,
     pub board: Option<CalibrationBoard>,
     pub camera_source_id: Option<String>,
     pub robot_model_revision: Option<String>,
@@ -1006,6 +1364,8 @@ pub struct RobotModelInfo {
     pub joints: Vec<JointMetadata>,
     pub tool_actuators: Vec<ActuatorMetadata>,
     pub named_targets: Vec<NamedMotionTarget>,
+    #[serde(default)]
+    pub calibration_targets: Vec<NamedMotionTarget>,
     pub motion_options: Vec<NumericFieldSchema>,
     pub diagnostics: Vec<NumericFieldSchema>,
     pub visualization: VisualizationManifest,
@@ -1437,6 +1797,7 @@ mod tests {
                 joint_positions_rad: BTreeMap::from([("axis-0".into(), 0.25)]),
                 actuator_positions_rad: BTreeMap::from([("tool-a".into(), 0.0)]),
             }],
+            calibration_targets: vec![],
             motion_options: vec![],
             diagnostics: vec![],
             visualization: VisualizationManifest {
@@ -1531,7 +1892,6 @@ mod tests {
             request_id: "reset-camera-1".into(),
             action: RequestAction::Reset,
             source_id: Some("simulation:pick-place-scene".into()),
-            depth_scale_m: None,
             classes: None,
             placement_labels: None,
         };
@@ -1547,5 +1907,129 @@ mod tests {
         };
         let decoded: PickPlaceRequest = from_arrow(to_arrow(&request).unwrap().as_ref()).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    fn camera_frame_fixture() -> CameraFrameBundle {
+        CameraFrameBundle {
+            schema_version: SCHEMA_VERSION,
+            sequence: 7,
+            source_id: "simulation:camera".into(),
+            device_time_ns: 11,
+            device_time_domain: "simulation".into(),
+            received_time_ns: 12,
+            color: CameraImagePlane {
+                width: 2,
+                height: 2,
+                stride_bytes: 6,
+                pixel_format: "rgb8".into(),
+                frame_id: "camera_color_optical_frame".into(),
+                data: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            },
+            depth: CameraImagePlane {
+                width: 2,
+                height: 2,
+                stride_bytes: 4,
+                pixel_format: "z16le".into(),
+                frame_id: "camera_depth_optical_frame".into(),
+                data: vec![1, 0, 2, 0, 3, 0, 4, 0],
+            },
+            color_intrinsics: CameraIntrinsics {
+                width: 2,
+                height: 2,
+                focal_length_px: [2.0, 2.0],
+                principal_point_px: [0.5, 0.5],
+                distortion_model: "none".into(),
+                distortion: vec![0.0; 5],
+            },
+            depth_intrinsics: CameraIntrinsics {
+                width: 2,
+                height: 2,
+                focal_length_px: [2.0, 2.0],
+                principal_point_px: [0.5, 0.5],
+                distortion_model: "none".into(),
+                distortion: vec![0.0; 5],
+            },
+            depth_to_color: Pose3 {
+                position_m: [0.0; 3],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+            depth_scale_m: 0.001,
+        }
+    }
+
+    #[test]
+    fn camera_frame_uses_binary_buffers_and_round_trips() {
+        let expected = camera_frame_fixture();
+        let encoded = camera_frame_to_arrow(&expected).unwrap();
+        let structure = encoded
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("camera frame is an Arrow struct");
+        assert_eq!(
+            structure
+                .column_by_name(CAMERA_COLOR_DATA_FIELD)
+                .unwrap()
+                .data_type(),
+            &DataType::Binary
+        );
+        let metadata = structure
+            .column_by_name(CAMERA_FRAME_METADATA_FIELD)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert!(!metadata.contains("\"data\""));
+        assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), expected);
+    }
+
+    #[test]
+    fn camera_frame_rejects_payload_length_mismatch() {
+        let mut frame = camera_frame_fixture();
+        frame.depth.data.pop();
+        assert!(matches!(
+            camera_frame_to_arrow(&frame),
+            Err(ArrowCodecError::InvalidCameraFrame(_))
+        ));
+    }
+
+    #[test]
+    fn camera_frame_rejects_a_different_schema_before_transport() {
+        let mut frame = camera_frame_fixture();
+        frame.schema_version = SCHEMA_VERSION + 1;
+        assert!(matches!(
+            camera_frame_to_arrow(&frame),
+            Err(ArrowCodecError::UnsupportedVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn camera_frame_preserves_row_padding() {
+        let mut frame = camera_frame_fixture();
+        frame.color.stride_bytes = 8;
+        frame.color.data = (0..16).collect();
+        frame.depth.stride_bytes = 6;
+        frame.depth.data = (0..12).collect();
+        let encoded = camera_frame_to_arrow(&frame).unwrap();
+        assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
+    }
+
+    #[test]
+    fn camera_frame_round_trips_a_full_resolution_payload() {
+        let mut frame = camera_frame_fixture();
+        frame.color.width = 1_280;
+        frame.color.height = 720;
+        frame.color.stride_bytes = 1_280 * 3;
+        frame.color.data = vec![17; (frame.color.stride_bytes * frame.color.height) as usize];
+        frame.depth.width = 1_280;
+        frame.depth.height = 720;
+        frame.depth.stride_bytes = 1_280 * 2;
+        frame.depth.data = vec![23; (frame.depth.stride_bytes * frame.depth.height) as usize];
+        frame.color_intrinsics.width = 1_280;
+        frame.color_intrinsics.height = 720;
+        frame.depth_intrinsics.width = 1_280;
+        frame.depth_intrinsics.height = 720;
+        let encoded = camera_frame_to_arrow(&frame).unwrap();
+        assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
     }
 }

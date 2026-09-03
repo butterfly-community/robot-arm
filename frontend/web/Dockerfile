@@ -1,4 +1,4 @@
-FROM base
+FROM robot-arm-services-frontend-base:2026.09.03-r1
 WORKDIR /workspace
 COPY . .
 RUN pnpm install --frozen-lockfile

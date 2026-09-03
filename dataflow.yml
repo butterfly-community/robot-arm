@@ -3,6 +3,30 @@ debug:
   enable_debug_inspection: true
 
 nodes:
+  - id: camera-capture-node
+    path: /src/target/release/camera-capture-node
+    restart_policy: on-failure
+    deploy:
+      machine: perception
+    inputs:
+      tick:
+        # Polling is deliberately faster than any reported camera profile; the
+        # driver remains the sole source of the actual output frame rate.
+        source: dora/timer/millis/1
+        queue_size: 1
+        queue_policy: drop_oldest
+      request: web-gateway-node/camera_request
+      snapshot: web-gateway-node/camera_snapshot
+      motion_state:
+        source: stararm-102-motion-node/motion_state
+        queue_size: 1
+        queue_policy: drop_oldest
+    outputs:
+      - camera_state
+      - frame
+      - request_result
+      - service_state
+
   - id: controller-input-node
     path: /src/target/release/controller-input-node
     restart_policy: on-failure
@@ -38,6 +62,11 @@ nodes:
     deploy:
       machine: perception
     inputs:
+      camera_frame:
+        source: camera-capture-node/frame
+        queue_size: 1
+        queue_policy: drop_oldest
+      camera_state: camera-capture-node/camera_state
       tick:
         source: dora/timer/hz/10
         queue_size: 1
@@ -61,6 +90,8 @@ nodes:
       - request_result
       - calibration_state
       - calibration_request_result
+      - calibration_control_mode
+      - calibration_motion_request
       - asset_response
       - service_state
 
@@ -109,8 +140,10 @@ nodes:
         queue_policy: drop_oldest
       robot_model_info: stararm-102-execution-node/robot_model_info
       set_control_mode: web-gateway-node/set_control_mode_request
+      calibration_control_mode: perception-node/calibration_control_mode
       prepare_relative: web-gateway-node/prepare_relative_request
       motion_request: web-gateway-node/motion_request
+      calibration_motion_request: perception-node/calibration_motion_request
       tool_actuator_request: web-gateway-node/tool_actuator_request
       pick_place_request: web-gateway-node/pick_place_request
       snapshot: web-gateway-node/motion_snapshot
@@ -160,6 +193,7 @@ nodes:
     deploy:
       machine: service-status
     inputs:
+      camera-capture: camera-capture-node/service_state
       controller-input: controller-input-node/service_state
       perception: perception-node/service_state
       spatial-transform: spatial-transform-node/service_state
@@ -187,6 +221,8 @@ nodes:
       source_name_request_result: controller-input-node/source_name_request_result
       simulation_request_result: controller-input-node/simulation_request_result
       perception_state: perception-node/perception_state
+      camera_state: camera-capture-node/camera_state
+      camera_request_result: camera-capture-node/request_result
       world_scene: perception-node/world_scene
       perception_request_result: perception-node/request_result
       calibration_state: perception-node/calibration_state
@@ -231,6 +267,8 @@ nodes:
       - rename_input_source_request
       - set_simulation_request
       - perception_snapshot
+      - camera_snapshot
+      - camera_request
       - perception_request
       - calibration_request
       - perception_asset_request

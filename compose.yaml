@@ -1,12 +1,11 @@
 name: robot-arm-services
 
-x-octomap-resolution: &octomap-resolution "0.005"
-
 x-dora-environment: &dora-environment
   DORA_COORDINATOR_HOST: dora-coordinator
   DORA_ZENOH_ENDPOINT_EXCHANGE_TIMEOUT_MS: "0"
 
 x-dora-daemon: &dora-daemon
+  init: true
   command:
     [
       "bash",
@@ -30,29 +29,11 @@ x-web-app: &web-app
   networks: [robot-services]
 
 services:
-  backend-base:
-    scale: 0
-    image: robot-arm-services-backend-base
-    networks: [robot-services]
-    build:
-      context: .
-      dockerfile: backend/docker/base/Dockerfile
-
-  frontend-base:
-    scale: 0
-    image: robot-arm-services-frontend-base
-    networks: [robot-services]
-    build:
-      context: ./frontend
-      dockerfile: docker/base/Dockerfile
-
   dora-coordinator:
     image: robot-arm-services-backend
     build:
       context: ./backend
       dockerfile: Dockerfile
-      additional_contexts:
-        base: service:backend-base
     command: ["dora", "coordinator", "--interface", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6013"]
@@ -86,8 +67,6 @@ services:
     build:
       context: ./backend/services/perception-compute
       dockerfile: Dockerfile
-      additional_contexts:
-        base: service:backend-base
     networks: [robot-services]
     environment:
       GRASPGENX_SEED: ${GRASPGENX_SEED:-0}
@@ -95,15 +74,12 @@ services:
       test: ["CMD", "/opt/compute-venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
 
   perception:
-    <<: *dora-daemon
-    image: robot-arm-services-backend
-    entrypoint: ["/src/nodes/perception/entrypoint.sh"]
+    <<: *backend-daemon
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: perception
+      CAMERA_CAPTURE_CONFIG: /config/camera-capture.json
       PERCEPTION_CONFIG: /config/perception.json
-      OCTOMAP_RESOLUTION_M: *octomap-resolution
-      ROS_DOMAIN_ID: "42"
     depends_on:
       dora-coordinator: { condition: service_started }
       perception-compute: { condition: service_healthy }
@@ -154,7 +130,6 @@ services:
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: stararm-102-motion
-      OCTOMAP_RESOLUTION_M: *octomap-resolution
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     ports: ["192.168.100.10:6080:6080"]
@@ -190,8 +165,6 @@ services:
     build:
       context: ./frontend
       dockerfile: web/Dockerfile
-      additional_contexts:
-        base: service:frontend-base
     environment: { WEB_APP: tracking }
   web-spatial:
     <<: *web-app

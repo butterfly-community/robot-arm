@@ -101,7 +101,6 @@ pub struct RosInterface {
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
-    clear_octomap: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
@@ -155,11 +154,6 @@ impl RosInterface {
             "std_srvs/srv/SetBool",
             QosProfile::default(),
         )?;
-        let clear_octomap = node.create_client_untyped(
-            "/clear_octomap",
-            "std_srvs/srv/Empty",
-            QosProfile::default(),
-        )?;
         let forward_kinematics = node.create_client_untyped(
             "/compute_fk",
             "moveit_msgs/srv/GetPositionFK",
@@ -206,7 +200,6 @@ impl RosInterface {
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
-            clear_octomap: Arc::new(clear_octomap),
             forward_kinematics: Arc::new(forward_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
@@ -295,11 +288,6 @@ impl RosInterface {
             let result = block_on(interface.synchronize()).map_err(|error| error.to_string());
             let _ = interface.event_sender.send(RosEvent::SyncFinished(result));
         });
-    }
-
-    pub fn clear_octomap(&self) -> EyreResult<()> {
-        block_on(call(&self.clear_octomap, json!({})))?;
-        Ok(())
     }
 
     pub fn run_motion(&self, job: MotionJob) {
@@ -460,20 +448,16 @@ impl RosInterface {
             self.apply_ground().await?;
             *ground_applied = true;
         }
-        let mut collision_pairs = vec![];
-        let mut result = self.request_plan(job, None, actions)?;
-        let mut code = result["error_code"]["val"].as_i64().unwrap_or_default();
+        let collision_pairs = self.collision_pairs(&job.current).await?;
+        let matrix = if collision_pairs.is_empty() {
+            None
+        } else {
+            Some(self.allowed_collision_matrix(&collision_pairs).await?)
+        };
+        let result = self.request_plan(job, matrix, actions)?;
+        let code = result["error_code"]["val"].as_i64().unwrap_or_default();
         if code != MOVEIT_SUCCESS {
-            collision_pairs = self.collision_pairs(&job.current).await?;
-            if collision_pairs.is_empty() {
-                bail!("MoveIt 规划失败，错误码 {code}");
-            }
-            let matrix = self.allowed_collision_matrix(&collision_pairs).await?;
-            result = self.request_plan(job, Some(matrix), actions)?;
-            code = result["error_code"]["val"].as_i64().unwrap_or_default();
-            if code != MOVEIT_SUCCESS {
-                bail!("MoveIt 规划失败，错误码 {code}");
-            }
+            bail!("MoveIt 规划失败，错误码 {code}");
         }
         let trajectory = result["planned_trajectory"].clone();
         let points = trajectory["joint_trajectory"]["points"]

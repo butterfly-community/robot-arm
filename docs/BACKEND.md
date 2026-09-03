@@ -1,215 +1,140 @@
 # 后端方法与依赖
 
-本文记录最终实现。系统总览见 [当前系统设计](SUMMARY.md)，型号参数与 TCP 约束见
-[StarArm-102 型号适配](STARARM-102.md)。
+本文只记录实现边界和关键方法。全局数据流见 [当前系统设计](SUMMARY.md)，StarArm-102 的数值
+和补丁见 [型号适配](STARARM-102.md)。
 
 ## `controller-input-node`
 
-`ControllerInput::load()` 使用公共 `json-config-store` 读取 Action 绑定、反馈绑定与设备名称；
-`commit_config()` 写盘成功后才替换运行配置。`drain()` 合并驱动事件，`tick()` 只把新的
-设备样本转成统一绝对位姿和 Action。`combined_pose_frame()` 允许空间和姿态来自不同设备；
-`evaluate_actions()`、`binding_value()` 把按钮、连续轴或正负按钮对转为设备无关 Action。
+`ControllerInput::load()` 通过 `json-config-store` 读取设备名称、Action 与反馈绑定；
+`commit_config()` 先写盘再替换内存配置。`drain()` 合并驱动事件，`tick()` 只把新样本转成统一
+绝对位姿和 Action。`combined_pose_frame()` 允许位置和姿态来自不同设备；
+`evaluate_actions()` 将按钮、连续轴或正负按钮对转成设备无关动作。
 
-生产适配层只有 NOLO CV1 HID 与 SDL3：
-
-- NOLO 加解密和报告解析位于 `nolo-cv1` crate；协议中已确认的按键、触摸板、扳机和位置
-  映射到通用组件名。
-- SDL3 使用运行时 `has_axis()`、`has_button()`、sensor 与 haptic 能力，只发布硬件真实
-  声明的组件。
-- 两类 IMU 都进入 `fusion-ahrs`；NOLO 位置和通用连续轴使用 `one_euro_filter`。
-- 模拟源只声明同一业务 Action，经同一绑定、空间转换、MoveIt 和 execution 链路。
-
-`live_component_values` 只供输入测试显示，不参与第二次 Action 计算。反馈由
-`apply_feedback()` 按用户选择的目标路由；网页虚拟反馈和物理 haptic 使用同一
-`ActionFeedback`。本节点不含相机、机械臂参数或运动学。
-
-手写边界：NOLO 协议适配、组件命名、绑定求值、Dora I/O。库：
-`hidapi`、SDL3、`fusion-ahrs`、`one_euro_filter`、`nalgebra`、`serde`、
-`json-config-store`。
+NOLO 协议解析在 `nolo-cv1` crate，SDL3 依据运行时 `has_axis()`、`has_button()`、sensor 与
+haptic 能力发布组件，两者的 IMU 都使用 `fusion-ahrs`。位置和连续轴过滤复用
+`one_euro_filter`。模拟输入声明同一 Action，不另建下游测试路径。
 
 ## `spatial-transform-node`
 
-节点外壳只负责配置和 Dora I/O，数学集中在 `spatial-core::SpatialTransform`。
-`update_pose()` 接收组合绝对位姿；`handle_control()` 接收 Action。`current_output()` 以
-本次接管的设备位置和姿态为原点，按配置完成换基、相对位姿与无绝对来源分量的速度积分。
+节点只处理配置和 Dora I/O，数学集中在 `spatial-core::SpatialTransform`。
+`update_pose()` 接收组合绝对位姿，`handle_control()` 接收 Action，`current_output()` 按当前接管
+原点完成换基、相对位姿和缺少绝对来源分量的积分。矩阵与四元数使用 `nalgebra`；夹爪和控制
+Action 只透明传递。
 
-TCP 三轴平移、三轴定点旋转、两种枢轴圆弧、工具轴向平移和螺旋都有独立语义。夹爪和控制
-Action 只透明传递，不在此解释型号。矩阵与四元数使用 `nalgebra`；可清除 JSON 字段使用
-`serde_with`，没有自写解析器。
+## `realsense-camera` crate
 
-## `perception-compute-service`
+该 crate 是 RealSense 硬件驱动边界。`RealSenseDriver::discover()` 从 librealsense context 读取
+设备、传感器、所有可用彩色/深度 profile，以及各 sensor 实际支持的 option。option 以
+`librealsense2` 命名空间包装为设备扩展，报告当前值、默认值、范围、步长和只读性；公共契约与
+网页不依赖 `Rs2Option`。`open()` 先应用用户修改的可写 option，再只启用请求中的驱动已报告
+profile 并创建 pipeline。`RealSenseStream::next_frameset()` 从同一 frameset 取得两帧，读取实际
+stride、格式、设备时间、两路内参、畸变、深度到彩色外参和 `depth_units()`。
 
-`create_app()` 创建 FastAPI；lifespan 只加载一次 `YoloeBackend` 和 `GraspGenXBackend`。`/health` 和
-`/v1/model` 报告实际模型、设备与许可；`/v1/segment` 解码 RGB，调用
-`YOLOE-26s-seg`，返回类别、置信度、边界框和 PNG 实例掩码。
+来源键使用 RealSense 序列号；持久 profile 键只包含 stream、宽高、格式和 FPS；option 键使用
+sensor 名称与 option 编号。三者都不含 SDK 枚举索引、USB 端口或进程内句柄。驱动仍导出当前
+Rust 路径不能打开的 profile，并通过 `available` 与原因让上层置灰，而不是悄悄过滤能力。
 
-`/v1/grasps` 接收单个实例点云和 `gripper_asset_id`，调用 GraspGenX，返回该资产声明的工具
-中心在输入点云坐标系中的候选 SE(3)、置信度与分支。`GraspGenXBackend.infer()` 用上游
-`run_planner_on_object()` 和上游夹爪扫描体；推理锁只保护 PyTorch/采样器的共享模型状态，
-固定种子使相同点云可重复，不过滤或手写候选姿态。
+librealsense/realsense-rust 类型、C 数据指针和唯一 `unsafe` 均封闭在这里。帧数据在句柄有效期内
+复制到设备无关 `CameraFrameBundle`；pipeline 由 Rust 所有权在 stream drop 时释放。节点、感知、
+网关和前端都不依赖厂商类型。`docs-only` feature 只供无 SDK 的编译检查，运行镜像启用
+`runtime`。
 
-类别在请求中提供，修改类别时调用 Ultralytics `set_classes()`；CPU/CUDA 只改变
-`PERCEPTION_DEVICE`，接口与后续链路不变。服务不读取深度、不连接 ROS/Dora/MoveIt，也不
-编排抓放动作。
+## `camera-capture-node`
 
-后端基础镜像从设备清单和已应用型号补丁的最终 URDF 自动生成全部夹爪资产；工程镜像直接
-继承 `/grippers/<asset-id>`，不再次下载、生成或搬运。清单可声明多套资产，请求 ID 决定
-sampler，计算服务不判断机械臂型号、厂家或夹爪关节名。
+节点的本地 `CameraDriver`/`CameraStream` trait 只定义发现、打开、取完整 frameset 和可选重置。
+硬件适配文件只是委托 `realsense-camera` crate；simulation 适配器实现同一 trait。
 
-手写边界：HTTP DTO、Ultralytics 结果归一化、GraspGenX TCP 变换。库：FastAPI、Pydantic、
-Ultralytics、GraspGenX、PyTorch、NumPy、Pillow、Uvicorn。许可分别遵循 Ultralytics 与
-GraspGenX 仓库声明。
+- `refresh()` 只在明确请求时聚合驱动发现结果，不在 tick 扫描 USB；保存过但当前离线的来源与
+  暂时消失的 profile 通过最后一次能力快照保留为不可用项。
+- `select()` 校验来源、profile、上送频率和驱动扩展均属于最近一次发现结果，并按来源保存。
+- `start()` 创建 stream，重置运行统计；disconnect/unselect/drop 直接释放 stream。
+- `tick()` 始终非阻塞排空设备产生的完整 frameset，只按配置的上送频率发布最新 Arrow bundle；
+  设备序号缺口与主动略过中间帧分别计数。
+- `state()` 报告来源、每来源保存配置、运行选择、streaming、最后 sequence/时间、采集/上送实测
+  FPS、设备缺帧、主动略过和原始错误。
+
+配置行为参考输入采集节点：以驱动提供的稳定来源身份为键，由后端保存并原子替换；运行时枚举
+索引不进入文件。与手柄不同，相机保存的是两路 profile、上送 FPS 和用户实际修改的厂商参数，
+当前选中来源和 streaming 不保存。重启后仍默认未选择，重新选择同一设备时恢复该设备的配置。
+
+节点不执行图像变换。设备采集 FPS 来自所选 profile；上送 FPS 可配置为不高于彩色/深度两路
+共同采集频率。例如设备以 60 FPS 采集而上层只需 1 FPS 时，capture 仍持续取帧以避免设备队列
+反压，但只发送每个周期最新的完整 RGB-D 帧束。该节流不触发 YOLOE/GraspGenX；两个模型仍只
+响应网页“运行一次感知”。
+
+## `robot-arm-messages`
+
+普通小消息使用共享 JSON Arrow codec。`CameraFrameBundle` 使用专用
+`camera_frame_to_arrow()`/`camera_frame_from_arrow()`：元数据保留结构化 schema，彩色和深度数据
+各用一个 Binary buffer。解码先核对 schema、宽高、stride、格式最小字节数和 buffer 长度；损坏
+或截断数据返回明确错误。
+
+相机时间分为设备时间及其时钟域、主机接收时间。`camera_in_base` 不属于 bundle：这是标定结果；
+`depth_to_color` 属于设备内在参数，二者不会混用。
 
 ## `perception-node`
 
-`PerceptionNode::apply_request()` 持久化启用状态、来源、模型类别及按 `source_id` 隔离的相机配置。每次应用
-配置或停止时先清除旧 Marker，再由当前来源发布新场景，避免切换来源后遗留占据数据。
-`apply_request()` 的 `Refresh` 分支只响应网页主动刷新；它从 ROS topic/type 图枚举成组的彩色
-图、对齐深度和对齐后的 CameraInfo，并与 `simulation` 驱动声明的相机合并。`Reset` 只删除
-当前来源的深度比例与标定保存项；模拟相机恢复编译期配置，真实相机回到无保存标定的状态。
+节点只接受 `CameraFrameBundle` 与 camera state。相机 streaming 变化决定当前来源；取消选择会
+清除缓存图像和旧 `WorldScene`，不会发布伪造空帧。
 
-### 相机和测试输入
+`handle_camera_frame()` 拒绝非当前来源和回退 sequence，只保存最新原始帧与快照，不调用模型。
+用户点击“运行一次感知”后，`process_latest_scene()` 对当时最新的一份原子 RGB-D 帧依次执行：
 
-感知容器内的首个设备适配器启动 ROS `realsense2_camera`；它只负责把 RealSense 系列相机
-发布为标准 ROS 接口。`RosInterface::discover_cameras()` 不依赖相机型号，而是从 ROS 图发现
-任意符合 RGB-D 组合契约的来源；`select_camera()` 切换动态订阅，来源切换后旧帧会按来源 ID
-丢弃。主动刷新时，RealSense 适配器用随 SDK 提供的 `rs-enumerate-devices` 补充型号、序列号、
-固件、USB 类型和物理端口；这些字段以通用相机元数据发布，不进入下游计算。分辨率、帧率和
-编码不设设备默认值，运行状态始终取自驱动实际发布的 Image 消息。
+1. `align_depth_to_color()` 使用 bundle 的两路内参、畸变和外参对齐深度；
+2. `segment()` 调用唯一计算服务获取提示词实例分割；
+3. `perception-core` 反投影实例深度并转换到 `base_link`；
+4. `attach_grasp_candidates()` 只把实例点云与夹爪资产 ID 发给 GraspGenX；
+5. 发布一份 `WorldScene`，保存按需 Web 调试资源。
 
-所选真实相机的首个彩色帧和深度帧在没有外参时也会生成网页预览并重发布到标准感知 topic，
-便于完成标定；网页的“刷新图像”从同一输入缓存显式生成一组新预览，不引入视频或第二条采集
-路径。只有三维场景、点云、识别与抓取候选等待外参。真实场景在彩色、对齐深度、
-内参和已应用外参同时存在时进入
-`process_camera_scene()`。`simulation` 适配器也只生成这三种标准帧与预设外参，然后进入同一个
-`handle_ros_event()` 和 `process_camera_scene()`：
+保存提示词只更新配置；相机持续来帧也不会自动运行 YOLOE 或 GraspGenX。这样模型调用次数完全
+由显式请求决定，刷新图像也只更新预览。
 
-- `simulation:pick-place-scene` 把固定 RGB 与确定性深度送入真实计算服务；
-- `simulation:depth-grid` 在标准深度帧中提供 497 个有效像素。
+对齐实现覆盖 librealsense 的 Brown-Conrady、Modified/Inverse Brown-Conrady、F-Theta 与
+Kannala-Brandt 语义；零畸变的 `plumb_bob` 用于通用模拟/ROS 兼容元数据。未知且非零的畸变模型
+直接报错，不悄悄当针孔模型。公式与命名按 librealsense 官方 projection/deprojection 实现核对。
 
-`segment()` 和 `attach_grasp_candidates()` 是计算服务的两个能力调用，共用一个 HTTP 服务边界。抓取
-资产 ID 来自通用 `RobotModelInfo.gripper_asset_id`，感知配置不保存机械臂型号或夹爪几何；
-模型没有声明该能力时仍发布识别和结构化场景，只不请求抓取候选。
-`decode_depth()` 接受统一 `16UC1`；`camera_calibration()` 把设备内参与当前来源持久化外参组合成
-唯一标定事实。参数与标定只由后端 `json-config-store` 读写，网页没有配置副本。
+`start_automatic_calibration()` 校验当前相机、机械臂版本、标定板和型号姿态，然后通过正式
+control-mode 与 `MotionRequest` 输出开始流程。`advance_automatic_calibration()` 等待每个运动的
+正式状态，成功后稳定等待 10 秒；`try_automatic_calibration_capture()` 只在新帧中检测成功后
+记录同期 `ArmState`、FK TCP 和板位姿。`solve_calibration()` 调用 Rust/OpenCV 5 helper；
+`apply_solved_calibration()` 才持久化结果。
 
-### 三维场景
+配置保存模型启用状态、提示词、放置区标签和按相机来源隔离的已应用外参。运行中的标定会话不
+持久化；重启不会恢复半个工作流。simulation 的预置外参来自数据资产，重置后恢复该真值；真实
+来源重置后回到未标定。
 
-`perception-core::world_scene_and_instance_clouds_from_aligned_depth()` 解码实例掩码、按内参反投影、应用
-`camera → base_link` 变换，并生成 `SceneObject`、`PlacementRegion` 与
-`SceneObstacle`，同时保留每个实例在 `base_link` 中的点云供 GraspGenX 使用。
-`aligned_obstacle_point_cloud()` 按实例二维范围排除已经作为结构化碰撞物体表达的区域，并按
-共享 OctoMap 体素尺寸覆盖量化后仍会重复占据的边缘。放置区域的来源对象不在排除集合中，
-因此容器由真实深度表面表达，而不是由实心外包围盒表达；代码不读取类别名称。
+## `perception-compute`
 
-`publish_scene()` 只发布一份 Dora `WorldScene` 和解释性 Marker。`RosInterface` 发布
-标准 Image、CameraInfo、PointCloud2、MarkerArray 和 TF。`PointCloud2` 经 MoveIt 官方
-`occupancy_map_monitor/PointCloudOctomapUpdater` 进入唯一 PlanningScene；感知节点不手写
-OctoMap、碰撞检测或第二套 ROS 转换。
+FastAPI lifespan 只加载一次 `YoloeBackend` 与 `GraspGenXBackend`。`/v1/segment` 解码彩色图，
+按请求调用 YOLOE 提示词识别/分割并返回类别、置信度、二维框和 PNG mask；`/v1/grasps` 接收一个
+实例点云和 `gripper_asset_id`，返回该资产 TCP 的 SE(3) 候选、分数与分支。
 
-### 标定
-
-`update_calibration()` 提供 start/capture/solve/apply/cancel 的线性会话。
-`capture_calibration_observation()` 同时记录 ChArUco 观测、真机关节反馈和 FK TCP 位姿。
-Rust `perception-calibration` 工具通过 `opencv` crate 调用 OpenCV 5 的 ChArUco、PnP 和
-`calibrateRobotWorldHandEye`。该工具负责图像解码、角点检测、位姿求解、标定和调试图；
-`perception-node` 只负责会话、DTO、样本持久化和 ROS 发布。没有 Python/C++ 标定桥、自制
-标定求解器或残差通过门限。
-
-### 模拟与测试代码边界
-
-生产几何只在 `perception-core`，其中不导出测试源 API。确定性 RGB-D、497 点深度帧和测试相机
-参数集中在 `perception-node/src/simulation.rs`；输入动作回放集中在
-`controller-input-node/src/simulation.rs`；编译进测试源的固定图片位于同节点 `test-assets/`。输入模拟
-仍经过 spatial、motion 和 execution，RGB-D 测试输入仍经过 perception、motion 和 execution；
-两者都不实现测试专用的下游业务流程。
+CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora、ROS 或 MoveIt，不读取类别名称
+推断抓放规则。夹爪资产在基础镜像中从设备清单与最终补丁 URDF 自动生成，请求 ID 决定使用哪套
+资产。
 
 ## `stararm-102-motion-node`
 
-`core::target_pose()` 把空间节点的设备无关增量组合成 StarArm-102 的 TCP 目标；旋转和
-四元数使用 `nalgebra`。`tool_position_rad()` 在型号边界把通用 `primary_tool` 映射到模型声明的
-夹爪行程，具体定义见 [StarArm-102 型号适配](STARARM-102.md)。
+relative、manual、calibration 和 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
+依次同步控制器、暂停 Servo、规划/执行并恢复 Servo。普通运动使用 MoveGroup，抓放使用型号 MTC
+组件。motion 只把 `WorldScene` 的结构化对象、放置区域和显式障碍映射到 PlanningScene，不订阅
+相机、图像、PointCloud2 或 OctoMap。
 
-普通关节运动和抓放请求进入同一个 `WorkItem` FIFO。唯一 ROS worker 顺序执行“同步控制器、
-暂停 Servo、规划/执行、恢复 Servo”；前一个动作未结束时后一个只等待，没有通用状态机框架、
-并行规划器、固定队列上限或模拟/真机分支。
-
-`ros.rs` 通过 `r2r` 使用标准 Servo、MoveGroup、ExecuteTrajectory、FK、状态有效性、
-PlanningScene 和型号 MTC Action。普通关节请求仍由 MoveGroup 执行；抓放只把选中的结构化
-几何映射到强类型 MTC goal，不含手写 IK 或 stage 推进。被抓对象和放置区域的来源对象按
-契约 ID 排除，其他结构化对象及显式障碍按 ID 去重后映射为紧凑 AABB；代码不读取类别名称。
-`stararm_102_mtc` 使用标准
-`GeneratePose`、`GeneratePlacePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect`
-和 `ModifyPlanningScene`，整条方案规划成功后通过官方 `ExecuteTaskSolution` capability 执行。
-障碍点云由同一 `move_group` 的官方 Occupancy Map Monitor 消费；抓放临时允许已附着对象与
-支撑表面接触，离开支撑后恢复碰撞。厂家网格未替换；底座 visual/collision 最低点与 Z=0
-刚性地面重合。Servo 订阅同一 `/monitored_planning_scene`，不维护独立场景来源。
-
-ROS 绑定固定到官方 `r2r 0.9.6` 标签提交；该版本已声明支持 ROS 2 Lyrical，但尚未发布到
-crates.io，因此 workspace 只在一处声明官方 Git 提交，perception 与 motion 共用同一依赖。
-
-起点自碰撞恢复只在普通规划失败且 MoveIt 实测起点碰撞时，对同一次重试临时允许该 link 对；
-不写全局 ACM，不保留解锁状态，也没有 MoveIt 源码补丁。型号坐标约束只在
-[StarArm-102 型号适配](STARARM-102.md) 维护。
+所有 FK、IK、抓放、attach 和可视化统一使用模型声明的 `tcp_link`。MTC 采用标准
+`GeneratePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect` 与
+`ModifyPlanningScene` stages；Rust 层不手写 IK 或 stage 状态机。
 
 ## `stararm-102-execution-node`
 
-`StarArmExecution::load()` 加载串口选择与反馈周期；`configure_endpoint()` 先保存用户
-选择再连接/断开。未选串口时同一 `ArmCommand` 产生软件反馈；选中串口但连接失败时冻结最后
-状态，不隐式切换软件模式。
+`configure_endpoint()` 保存用户串口选择并显式连接/断开；未选串口时同一 `ArmCommand` 产生软件
+反馈，选择串口但连接失败时不会回退。`StarArmBus::encode_command()` 按模型映射总线指令；
+Monitor 读取失败先在同一串口重试一次，仍失败才进入重连逻辑。
 
-`StarArmBus::encode_command()` 把模型关节与夹爪驱动关节绝对角编码成 FashionStar 命令。
-`read_sorted_monitors()` 按模型舵机顺序读取；`state_from_monitors()` 与
-`telemetry_from_monitors()` 产生位置及遥测。Monitor 失败在同一串口重试一次，仍失败才
-重连。串口只在网页主动 discover 时枚举。
+`primary_tool_feedback()` 只在设备边界把实际功率映射为 0–100 通用反馈。稳定 0 是有效样本，
+不代表“没有反馈”；软件模式不伪造真机力度。
 
-`primary_tool_feedback()` 在设备边界把夹爪 Monitor 功率映射成 0–100 通用反馈。稳定 0 是
-有效样本，不代表没有反馈；软件模式不伪造真机力度。厂家帧由 `fashionstar-uart` crate，
-串口由 `serialport` 库处理。
+## `web-gateway-node`
 
-`stararm-102-model` 从最终 URDF 生成模型信息和资源 manifest；execution 是唯一模型资源
-发布者。motion 和 Web 不维护第二份机械臂参数。
-
-## 网关、状态与网页
-
-`service-status-node` 从 JSON 读取服务和依赖，只聚合主动 `ServiceState`。没有业务节点
-硬编码、超时门限或恢复分支。`web-gateway-node` 使用 Axum 转发 HTTP/WebSocket 与 Dora
-消息，不解释轴数、设备或感知语义。WebSocket 每次发送最新快照后等待客户端确认已消费，再从
-`watch` channel 取得当时最新值；高频反馈不会在代理和浏览器之间累积旧快照，也没有固定刷新
-频率或丢弃业务消息的数值门限。
-
-共享网页客户端按浏览器动画帧合并实时快照。只有控制绑定页“采集频率”文字每秒重算一次；后端
-采样、输入测试、位姿、关节反馈和感知不受这个显示节拍限制。
-
-网页按职责拆为控制绑定、空间转换、场景感知、机械臂运动和机械臂执行五个 Next.js 服务。
-感知页使用独立 `/api/perception/*` 与 `/ws/perception`，图片资源按需读取，不塞入实时状态；
-运动页只保留相对、手动和感知三种模式及型号运动接口。
-
-## ROS 与 RViz 接口
-
-| 用途 | ROS 接口 |
-| --- | --- |
-| 真实相机输入 | `{所选来源}/color/*`、`{所选来源}/aligned_depth_to_color/*` |
-| 标准感知输出 | `/perception/color/*`、`/perception/depth/*` |
-| 分割/标定调试 | `/perception/debug/segmentation`、`/perception/debug/calibration` |
-| 场景说明 | `/perception/debug/markers` |
-| MoveIt 自身碰撞状态 | `/get_planning_scene` |
-| 世界与坐标 | `/monitored_planning_scene`、`/tf`、`/tf_static` |
-
-RViz2、Openbox、TigerVNC 和 noVNC 位于 motion 容器，通过 `192.168.100.10:6080` 暴露一个
-浏览器入口。项目直接使用 Ubuntu 26.04 官方包，不维护远程桌面协议或第二套网页规划器。
-
-## 方法级依赖结论
-
-| 能力 | 采用库 | 保留手写内容 |
-| --- | --- | --- |
-| 消息与配置 | Dora、Arrow、Serde、json-config-store | 业务 DTO 和请求关联 |
-| 设备输入 | SDL3、hidapi、fusion-ahrs、one_euro_filter | NOLO 报告适配、Action 绑定 |
-| 几何 | nalgebra、image | 场景语义与型号工具几何 |
-| 识别与抓取候选 | Ultralytics YOLOE、GraspGenX、PyTorch | HTTP DTO 与 TCP 结果归一化 |
-| 标定 | `opencv` crate、OpenCV 5 | 会话、样本和持久化 |
-| ROS/规划 | r2r、MoveIt、Servo、ros2_control | ROS JSON 边界与业务步骤 |
-| 串口 | serialport、fashionstar-uart | 舵机 ID 与型号命令映射 |
-| Web | Axum、Next.js 16、React、Three.js、Radix | 页面业务组合 |
-
-项目没有自制 IK、碰撞检测、轨迹插值、标定数学、实例分割、VNC、状态机框架或数据库。
+Gateway 只保存最近一份小状态和按 request ID 配对的结果。相机请求直接转给 capture，感知与标定
+请求转给 perception；按需图像资源使用二进制 HTTP 响应。原始持续 RGB-D frame 不进入 Gateway，
+Gateway 也不解析或保存任何服务配置。

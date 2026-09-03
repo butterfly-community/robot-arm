@@ -1,76 +1,82 @@
 # Robot Arm Services
 
-本目录是前后端分离的 Dora 服务化实现：
+本仓库是一套前后端分离的 Dora 机械臂系统。设备适配、空间变换、相机采集、感知、运动、
+执行与 Web 网关各自只有一个明确边界；真实设备和 `simulation` 在适配层之后使用同一消息契约。
 
-- `backend/`：Rust/Dora 节点、FashionStar UART、ROS 2/MoveIt 型号节点和后端镜像。
-- `frontend/`：五个 Next.js 应用、共享 UI/契约/客户端和单一前端镜像。
-- 根目录：Compose、Dora dataflow、跨端验收、记录工具和当前设计文档。
+- `backend/`：Rust/Dora 节点、公共 crate、感知计算服务，以及 ROS 2/MoveIt 型号适配。
+- `frontend/`：五个 Next.js 应用与共享 UI、契约和可视化包。
+- `compose.yaml`、`dataflow.yml`：统一部署和唯一数据流。
+- `docs/`：最终架构、后端边界、镜像维护、型号事实与验收记录。
 
 ## 启停
 
-全部命令都在本目录执行：
+在仓库根目录统一启停，不维护单个节点的独立运行状态：
 
 ```bash
 docker compose up -d
 docker compose down
 ```
 
-重启就是依次执行上面的 `down` 和 `up -d`。项目不提供管理脚本，也不维护单服务重启状态。
-Compose 停止 dataflow 时会向 Dora attach 会话发送 `SIGINT`，由 Dora 自己停止全部节点，避免下次启动重复部署。
-需要重新构建时使用：
+应用代码变化时：
 
 ```bash
-docker compose up -d --build
-```
-
-Compose 只维护两个工程基础镜像：`frontend-base` 与 `backend-base`。两者都基于 Ubuntu
-26.04 LTS；后端基础镜像统一提供 ROS 2 Lyrical、MoveIt、RealSense SDK/ROS 驱动、
-OpenCV 5 源码构建、Rust、Python、Dora、GraspGenX、模型权重和已应用补丁的 StarArm-102
-ROS 软件包。ROS 图像桥从与 Lyrical 对齐的 `cv_bridge 4.1.0` 源码链接同一套 OpenCV 5，
-不会再引入发行版 OpenCV 4。通用第三方仓库只在后端基础镜像构建中按固定提交处理；StarArm-102 的厂家源码、
-补丁、ROS 包和夹爪资产由 `backend/devices/stararm-102/docker/install-base.sh` 作为一个连续
-设备模块安装，主机不需要第三方源码目录。模型权重从
-`backend/services/perception-compute/models/` 复制进基础镜像，避免每次构建重新下载。各工程
-镜像只复制并构建本工程源码，不重复声明系统、厂商或模型依赖，也不拆分构建/运行层或逐个
-搬运产物。
-
-页面入口为 `http://192.168.100.10:8765/`，业务路径是 `/tracking/`、`/spatial/`、
-`/perception/`、`/motion/` 和 `/arm-execution/`。只有入口服务暴露主机端口。
-
-## 配置
-
-可修改的服务配置保存在宿主 `backend/config/runtime/`，Compose 将这个目录挂载为容器内
-`/config`。目录中的 JSON 被 Git 忽略，但 `.gitignore` 本身受版本控制，因此 `down`、重新构建和
-`up -d` 都不会丢失配置。控制绑定、空间、感知、motion 和执行节点各自只读写自己的文件；文件不存在时使用
-默认值，已有文件损坏时服务直接报告启动错误。后端统一通过 `json-config-store` 加载和保存，网页只提交
-配置请求，不把服务参数保存在浏览器中。
-
-`backend/config/service-status.json` 是受版本控制的静态依赖配置。实时姿态、控制会话、模拟状态、
-关节反馈、串口连接状态和错误不会写入配置文件。
-
-## 开发检查
-
-```bash
-cd backend
-cargo fmt --all -- --check
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-
-cd ../frontend
-pnpm format:check
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm test:e2e
-
-cd ..
-docker compose config --quiet
 docker compose build
-docker compose --profile test run --rm integration-test
+docker compose down
+docker compose up -d
 ```
 
-架构与行为见 [docs/SUMMARY.md](docs/SUMMARY.md)，后端逐服务、逐方法和依赖边界见
-[docs/BACKEND.md](docs/BACKEND.md)，最终审查与验收见 [docs/REVIEW.md](docs/REVIEW.md)，
-当前机械臂型号事实见 [docs/STARARM-102.md](docs/STARARM-102.md)，测试用记录/回放工具见
-[tools/replay/README.md](tools/replay/README.md)。
+Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
+`http://192.168.100.10:6080/`。
+
+## 镜像
+
+应用镜像固定继承已经验证的基础镜像：
+
+- 后端：`robot-arm-services-backend-base:2026.09.03-r2`
+- 前端：`robot-arm-services-frontend-base:2026.09.03-r1`
+
+Compose 只构建应用层。只有系统依赖、ROS/MoveIt、OpenCV、相机 SDK、AI 环境、厂家包或设备
+补丁变化时才重新构建相应基础镜像并发布新标签。具体规则见
+[Docker 与服务镜像](docs/DOCKER.md)。
+
+## 相机与感知
+
+深度相机默认未选择，只在网页点击刷新后枚举。RealSense 和内置模拟相机都进入：
+
+`驱动 crate/模拟适配器 → camera-capture-node → CameraFrameBundle → perception-node → WorldScene`
+
+`CameraFrameBundle` 原子携带同步 RGB-D、两路内参、畸变、深度到彩色外参、设备深度比例和
+时间信息。原始相机数据不经过 ROS；`perception-node` 负责对齐、标定、识别、分割、三维实例和
+抓取候选，MoveIt 只接收结构化目标、放置区和显式障碍。相机 profile 与已确认标定由后端文件
+保存，当前选择不持久化，因此重启仍回到未选择状态。配置以设备序列号等稳定身份关联，不使用
+枚举索引或 USB 口；离线设备及暂时缺失的 profile 仍保留在配置中，并在网页置灰说明。网页可
+选择驱动实际报告的分辨率、格式和采集 FPS，并独立设置不高于采集频率的上送 FPS；厂商专属
+底层参数通过驱动命名空间扩展展示，不会形成第二条感知链路。YOLOE 和 GraspGenX 只在用户点击
+“运行一次感知”时调用。
+
+## 常用验收
+
+```bash
+cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path backend/Cargo.toml --workspace
+cargo machete --manifest-path backend/Cargo.toml
+pnpm --dir frontend format:check
+pnpm --dir frontend lint
+pnpm --dir frontend typecheck
+pnpm --dir frontend test
+pnpm --dir frontend build
+docker compose config --quiet
+node tests/integration/software-flow.mjs
+```
+
+测试脚本和诊断工具位于 `tests/`、`tools/` 与各节点自己的测试目录。项目中间资源只能放仓库
+`temp/`；运行配置位于 `backend/config/runtime/`，网页不保存服务配置副本。
+
+## 文档入口
+
+- [当前系统设计](docs/SUMMARY.md)
+- [后端方法与依赖](docs/BACKEND.md)
+- [Docker 与服务镜像](docs/DOCKER.md)
+- [StarArm-102 型号适配](docs/STARARM-102.md)
+- [最终审查与验收](docs/REVIEW.md)

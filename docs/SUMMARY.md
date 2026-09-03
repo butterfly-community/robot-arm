@@ -1,155 +1,103 @@
 # 当前系统设计
 
-## 唯一运行链路
-
-```text
-输入设备 / 模拟输入
-  → controller-input-node
-  → spatial-transform-node
-  → stararm-102-motion-node
-  → MoveIt / Servo / ros2_control
-  → ArmCommand
-  → stararm-102-execution-node
-  → ArmState / ActionFeedback
-
-ROS 深度相机 / 确定性 RGB-D 测试源
-  → perception-node
-  → perception-compute-service（RGB 实例分割、实例点云抓取姿态）
-  → perception-node（深度几何、标定、抓取候选、WorldScene、ROS 感知话题）
-  → MoveIt PointCloudOctomapUpdater / stararm-102-motion-node（环境占据、抓放目标与规划）
-  → 同一 ArmCommand / execution 链路
-```
-
-模拟和真机、测试 RGB-D 和真实相机都只在各自节点的输入或驱动适配层不同。空间转换、感知
-结构化、运动学、规划和执行均没有备用业务路径。
-
-模拟和测试实现也与生产核心物理分开：输入回放在
-`backend/nodes/controller-input/src/simulation.rs`，感知测试源和它编译期使用的固定验证图片在
-`backend/nodes/perception/src/simulation.rs` 与同节点的 `test-assets/`。
-`perception-core`、空间核心、运动学和执行节点不包含测试数据生成逻辑。
-
 ## 服务边界
 
-| 服务 | 负责 | 不负责 |
+| 服务或节点 | 拥有的职责 | 明确不负责 |
 | --- | --- | --- |
-| `controller-input-node` | NOLO HID、SDL3、模拟输入，能力发现，输入/反馈绑定，IMU 融合 | 空间积分、相机、运动学、机械臂参数 |
-| `spatial-transform-node` | 绝对位姿换基、Action 积分、设备无关 TCP 增量 | 设备驱动、IK、串口 |
-| `perception-node` | ROS 相机接入、RGB-D 对齐消费、深度反投影、标定、场景结构化、ROS 点云/图像/Marker/TF | 模型推理、机械臂轨迹 |
-| `perception-compute-service` | YOLOE-26s-seg 开放词汇实例分割、按请求资产 ID 生成 GraspGenX 点云抓取候选；CPU/CUDA 使用同一 HTTP 契约 | 设备型号、深度、标定、MoveIt、Dora |
-| `stararm-102-motion-node` | StarArm-102 TCP 数学、MoveIt/Servo、MTC 抓放桥接 | 相机采集、设备输入、串口 |
-| `stararm-102-execution-node` | 软件反馈与 FashionStar UART 的同一执行契约、模型资源、真机遥测 | IK、目标位姿解释 |
-| `service-status-node` | 根据配置聚合节点主动状态与依赖 | 业务探活特例、恢复策略 |
-| `web-gateway-node` | HTTP/WebSocket 与 Dora 消息转发 | 设备或机械臂语义 |
+| `controller-input-node` | NOLO、SDL3、模拟输入的能力发现、绑定、命名和反馈路由 | 空间积分、机械臂运动学 |
+| `spatial-transform-node` | 输入换基、接管原点、相对位姿与无绝对来源分量的积分 | 设备枚举、MoveIt |
+| `camera-capture-node` | 相机刷新、能力与厂商扩展、profile/上送频率保存、打开/关闭、同步 RGB-D 帧发布 | 对齐、点云、标定、AI、ROS |
+| `perception-node` | 深度对齐、外参标定、计算服务编排、结构化三维场景与抓取候选 | 相机 SDK、轨迹规划、硬件执行 |
+| `perception-compute` | YOLOE 提示词识别/分割与 GraspGenX 抓取姿态推理 | 相机、Dora、ROS、动作编排 |
+| `stararm-102-motion-node` | 控制模式、普通规划、Servo、MTC 抓放与结构化场景到 MoveIt 的映射 | 串口协议、相机原始数据 |
+| `stararm-102-execution-node` | FashionStar 总线、执行反馈、模拟执行和型号元数据 | IK、感知、目标语义 |
+| `service-status-node` | 按依赖图聚合服务就绪状态 | 业务恢复策略 |
+| `web-gateway-node` | HTTP/WebSocket 与 Dora 请求、状态、按需资源转发 | 设备逻辑、图像计算、配置持久化 |
 
-`perception-core`、`spatial-core` 是纯库，不是额外服务。计算服务可以
-远程部署，但外部只和 `perception-node` 交互。
+`perception-core`、`spatial-core`、`realsense-camera` 等是库而不是额外服务。capture 与
+perception 部署在同一个 `perception` Dora machine/Compose 容器中，既保持进程边界，也不增加
+部署服务。计算服务可部署到远端，但只和 `perception-node` 交互。
 
-StarArm 的 visual 与 collision 均使用厂家模型。MoveIt 保留机械臂自身碰撞检查；感知节点将
-对齐后的未结构化障碍点云发布给官方 Occupancy Map Monitor，抓放任务同时把选中物体和其他
-结构化障碍的紧凑盒几何交给 MTC。已结构化任务物体从点云中剔除，不会在 PlanningScene 中
-重复表达。
+## 唯一数据流
 
-## 感知与抓放
+控制链路：
 
-感知容器内的相机适配层负责启动首个 RealSense ROS 驱动；感知核心只使用 ROS 主线已经发布的
-彩色图、对齐到彩色的深度图和 CameraInfo。网页主动刷新时，节点从 ROS topic/type 图发现所有
-满足以下组合契约的来源，连接多个已发布来源时可按来源 ID 选择：
+`设备适配器 → controller-input → spatial-transform → motion/MoveIt → ArmCommand → execution`
 
-相机驱动是 `perception-node` 的内部设备适配层，不另设相机采集服务；型号差异止于该适配层，
-结构化感知、远程计算和运动节点只接收统一契约。RealSense 适配器在主动刷新时补充型号、
-序列号、固件、USB 类型和物理端口；分辨率、帧率和编码完全采用驱动实际消息，不写成设备或
-业务默认值。
+感知链路：
 
-| 输入 | ROS topic |
-| --- | --- |
-| 彩色图 | `{source}/color/image_raw` |
-| 对齐深度 / 对齐后的内参 | `{source}/aligned_depth_to_color/image_raw`、`{source}/aligned_depth_to_color/camera_info` |
+`相机适配器 → camera-capture → CameraFrameBundle → perception → WorldScene → motion/MoveIt`
 
-所选来源的原始彩色和深度帧不依赖外参，可直接用于网页预览与标定；`perception-node` 只在
-具备相机外参后把三维结果转换到 `base_link`。网页按需刷新的是同一输入缓存中的最新帧，
-不是独立的视频或采集路径。未启用感知时不发布
-占位场景；每次应用感知配置时会清除上一来源的 Marker，再发布当前来源；计算
-服务失败时保留原始错误，不切换模型或伪造结果。
+真实设备和模拟只在第一层适配器不同。下游没有模拟专用消息、备用 topic、双写或失败时自动
+回退。没有选择相机是合法状态：capture 不发布假空帧，perception 清除旧场景有效性，手动和
+相对控制仍可使用。
 
-仓库提供两个由 `simulation` 驱动声明的确定性相机。它们和 ROS 相机一样枚举为
-`DepthCameraSourceInfo`，发布同一组 RGB、对齐深度、CameraInfo 和标定输入，后续不再分流：
+## 深度相机
 
-- `simulation:pick-place-scene`：固定 RGB 与确定性深度经真实 YOLOE 分割，生成
-  红色立方体、灰色置物筐和筐内放置区；实例点云继续送入真实 GraspGenX 生成抓取候选，
-  用于完整抓放验收。
-- `simulation:depth-grid`：标准 RGB-D 帧内的 497 个有效深度像素，用于 RViz 与 MoveIt
-  OctoMap 输入验收。
+相机硬件 SDK 不属于节点业务代码。`realsense-camera` crate 封装 librealsense context、设备与
+profile 枚举、pipeline、frameset、厂商元数据和 FFI；`camera-capture-node` 内的 RealSense 文件
+只是把 crate 接到统一 `CameraDriver`/`CameraStream` 接口。资源通过 Rust 所有权和 `Drop`
+释放，不额外维护一套显式关闭状态机。
 
-感知服务按 `source_id` 在自己的 JSON 中保存深度比例和外参。网页不保存相机配置。重置只删除
-当前来源的保存项：`simulation` 随即恢复仓库预设，真实来源回到未标定状态，其他相机不受影响。
+枚举只响应网页“刷新相机”。来源描述包含稳定 ID、驱动、型号、序列号、固件、USB/物理端口、
+传感器和驱动实际报告的 profile。RealSense 稳定 ID 使用序列号，profile 和驱动参数键不含运行时
+枚举索引。选择只允许当前可用能力；profile、上送频率和用户修改的驱动扩展参数按来源保存，
+当前来源与 streaming 状态不保存。保存过的离线来源和暂时缺失的 profile 仍由后端导出，网页
+置灰并说明原因，不会因一次枚举变化丢失配置。相机型号、分辨率、格式和 FPS 均不写死。
+通用分辨率、格式与采集 FPS 直接进入统一契约；Intel 独有 sensor option 由 `librealsense2`
+命名空间包装，simulation 不伪造该扩展，厂商字段不进入 perception、ROS 或 motion。
 
-抓放按 ID 选择 `SceneObject` 和 `PlacementRegion`，不读取类别名称。Rust motion 从放置区域的
-`source_object_id` 和物体几何推导放置高度；被抓物体不在点云中重复表达，放置区域来源对象
-保留为实际深度表面且不再加入实心 AABB，其余结构化对象与显式障碍按 ID 去重后进入任务场景。
-Rust motion 只做场景映射、唯一 FIFO 和
-Action 状态转发；型号 MTC 组件用标准 stage 一次构造并选择完整任务解，负责候选位姿、IK、
-接近、工具动作、attach/detach、搬运、回撤和返回。执行仍经 MoveIt、ros2_control 和唯一
-`ArmCommand`。网页与 RViz 显示任务状态、候选、失败 stage 和选中轨迹。
+一次 frameset 只发布一个专用 Arrow `CameraFrameBundle`：元数据使用 JSON 字段，彩色与深度平面
+是 Arrow Binary buffer，不使用 Base64 或数值 JSON 数组。bundle 同时包含宽高、stride、格式、
+光学 frame、设备/主机时间、内参、畸变、深度到彩色外参和设备读取的深度比例。队列使用
+`queue_size: 1` 和 `drop_oldest`。采集节点持续排空设备帧；可配置的上送频率只控制最新完整帧束
+进入 Dora 的速率，不改变设备采集 profile。设备缺帧和主动略过分别报告。
 
-每个机械臂适配器提供自己的规划组、TCP、工具关节、命名位与 GraspGenX 资产清单；构建时从
-最终 URDF 自动生成资产，运行请求只携带通用资产 ID。感知计算和抓放契约不读取型号参数。
-当前适配见 [StarArm-102 型号适配](STARARM-102.md)。
+`simulation:pick-place-scene` 与 `simulation:depth-grid` 是正式相机适配器，声明自己的 RGB-D
+profile、标定元数据和确定性资产。前者还根据正式模拟执行反馈的 TCP 位姿渲染 ChArUco 板，
+自动标定因此经过和真机相同的帧与运动消息链路。
 
-## 标定
+## 感知、标定与规划
 
-标定由 `perception-node` 管理，使用 OpenCV 的 ChArUco 检测、PnP 与
-`calibrateRobotWorldHandEye`，由 Rust `opencv` crate 调用 OpenCV 5，不使用 Python/C++
-标定桥，也不手写标定数学。每个样本保存同期真机关节反馈对应的 TCP 位姿与板在相机中的
-观测。求解结果同时包含：
+`perception-node` 持续缓存最新原子 RGB-D 帧；只有用户点击“运行一次感知”时，才按 bundle 的
+两路内参、畸变与深度到彩色外参完成对齐并调用计算服务。保存提示词、刷新图像和相机持续来帧
+都不会运行 YOLOE 或 GraspGenX。实例掩码与深度生成设备无关的 `SceneObject`、`PlacementRegion` 和
+`SceneObstacle`；实例点云仅发送给 GraspGenX。计算服务按请求的夹爪资产 ID 工作，不读取机械臂
+型号，也不向场景硬编码方块、筐或抓取姿态。
 
-- 相机到 `base_link` 的外参；
-- 标定板到专用测试爪的固定变换；
-- 每个样本的平移和旋转残差。
+原始图像、点云和相机参数不进入 ROS。motion 只把 `WorldScene` 的结构化几何映射到唯一
+PlanningScene；不再运行 ROS 相机驱动、`cv_bridge`、`PointCloudOctomapUpdater`、OctoMap
+清理接口或感知 Marker 双写。MoveIt 继续负责机械臂自身、刚性地面及结构化场景的碰撞检查。
 
-应用结果后，真实相机帧、点云、`WorldScene` 与 TF 使用同一份外参。标定板变换只参与标定，
-不得作为正常抓放的 TCP 补偿。
+自动外参标定从 `RobotModelInfo.calibration_targets` 读取型号声明的姿态，通过现有手动关节
+`MotionRequest` FIFO 逐项执行。每项运动成功后稳定等待 10 秒，再使用新 RGB 帧检测 ChArUco，
+记录同一时刻的正式 `ArmState` 和 FK TCP 位姿。OpenCV 5 的 ChArUco、PnP 与
+Robot-World/Hand-Eye SHAH 求解由 Rust `opencv` crate 调用；结果只有经网页确认后才按来源保存。
 
-## 机械臂适配
+## 运动与执行
 
-机械臂独有的 URDF 补丁、TCP、关节方向、命名位、工具映射和规划参数都归属型号 model、
-motion、MTC 与 execution 边界，不进入输入、空间、感知或网页共享契约。当前实现集中记录于
-[StarArm-102 型号适配](STARARM-102.md)。
+motion 维护一个顺序工作 FIFO。普通关节运动、标定姿态与抓放不会并行；上一个动作未结束时
+下一个等待。抓放使用 MoveIt Task Constructor 标准 stages，输入只有通用对象、放置区域、抓取
+候选与型号适配器声明的规划组/TCP/工具信息。所有 FK、IK、attach、可视化与执行统一使用
+`tcp_link`。
 
-## 输入与空间语义
+execution 把唯一 `ArmCommand` 映射为真机总线或软件反馈。选择串口失败不会偷偷切到模拟；
+未选择串口才是明确的软件执行模式。StarArm-102 的角度方向、舵机限制、命名位、夹爪联动与
+厂家补丁集中在型号目录，见 [StarArm-102 型号适配](STARARM-102.md)。
 
-输入节点按设备运行时声明的能力发布组件，不按型号猜测。NOLO CV1 和 SDL3 IMU 共用
-`fusion-ahrs`；连续轴使用 `one_euro_filter`。位置来源、姿态来源、每个 Action 输入和每个
-反馈目标都可独立选择设备。模拟输入也先声明同一套 Action，再经过空间、motion 和 execution。
+## 配置与界面
 
-空间节点在每次接管时建立新原点。无绝对位置/姿态来源的分量可由按钮或轴积分；选定绝对来源
-的分量不再叠加对应 Action。满输入平移默认 1 cm/s，角向动作默认 0.10 rad/s；这些是用户已
-指定的动作比例，不是保护门限。
+需要持久化的节点复用 `json-config-store`，各自拥有一个 JSON 文件；不存在中央配置服务或前端
+配置副本。相机 profile 属于 capture，外参和 AI 提示词属于 perception，绑定属于 input，串口和
+反馈周期属于 execution。
 
-## 启动和入口
+感知页按“感知任务、相机来源与配置、相机外参标定、相机参数、采集数据、AI 模型与结果”组织。
+相机与模型是不同所有者，但在一个页面中协作。彩色、深度、标定和叠加图只在用户请求快照时
+通过网关返回；大 RGB-D 帧不会持续经过浏览器。Three.js 机械臂继续以 `ArmState` 显示真实/软件
+反馈，以最后命令显示半透明目标，不由相机链路替代。
 
-```bash
-docker compose up -d
-docker compose down
-```
+## 部署
 
-- Web：`http://192.168.100.10:8765`
-- RViz/noVNC：`http://192.168.100.10:6080`
-
-Compose 使用私有 bridge network，只映射这两个入口。配置持久化于
-`backend/config/runtime/*.json`。串口只在执行页点击“刷新串口”时枚举。
-
-## 常用验收
-
-```bash
-cargo test --manifest-path backend/Cargo.toml --workspace
-pnpm --dir frontend format:check
-pnpm --dir frontend lint
-pnpm --dir frontend typecheck
-pnpm --dir frontend test
-pnpm --dir frontend build
-docker compose config --quiet
-docker compose up -d
-node tests/integration/software-flow.mjs
-```
-
-诊断和记录工具位于 `tools/`；运行缓存和中间产物不提交。
+Compose 只映射 Web `8765` 与 RViz/noVNC `6080`，其余服务在私有网络中。统一 `down`/`up -d`
+重启全栈；Dora 容器启用最小 init 负责转发信号和回收子进程。镜像规则见
+[Docker 与服务镜像](DOCKER.md)，逐方法实现见 [后端方法与依赖](BACKEND.md)。

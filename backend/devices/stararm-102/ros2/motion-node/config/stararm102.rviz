@@ -55,46 +55,6 @@ Visualization Manager:
             Show Robot Visual: false
           Planned Path:
             Trajectory Topic: /display_planned_path
-    - Class: rviz_common/Group
-      Name: 深度感知
-      Enabled: true
-      Displays:
-        - Class: rviz_default_plugins/Image
-          Name: Color image
-          Enabled: false
-          Topic:
-            Value: /perception/color/image_raw
-        - Class: rviz_default_plugins/Image
-          Name: Depth image
-          Enabled: false
-          Topic:
-            Value: /perception/depth/image_raw
-        - Class: rviz_default_plugins/Image
-          Name: Instance segmentation
-          Enabled: false
-          Topic:
-            Value: /perception/debug/segmentation
-        - Class: rviz_default_plugins/Image
-          Name: ChArUco calibration
-          Enabled: false
-          Topic:
-            Value: /perception/debug/calibration
-        - Class: rviz_default_plugins/PointCloud2
-          Name: Raw depth cloud
-          Enabled: false
-          Topic:
-            Value: /perception/depth/points
-          Size (Pixels): 2
-          Style: Points
-    - Class: rviz_common/Group
-      Name: 目标与放置区
-      Enabled: true
-      Displays:
-        - Class: rviz_default_plugins/MarkerArray
-          Name: Perception debug markers
-          Enabled: false
-          Topic:
-            Value: /perception/debug/markers
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera

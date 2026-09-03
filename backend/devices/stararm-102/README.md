@@ -7,6 +7,8 @@
 - `ros2`：MoveIt、Servo 和 MTC 适配；
 - `patches`：只适用于厂家 StarArm-102 源码的补丁；
 - `graspgenx`：从最终型号模型生成夹爪资产所需的最小语义清单；
+- `tools/verify-model.py`：构建时分别验证固定厂商提交和补丁后成品的关节轴、范围、夹爪联动
+  与 TCP，防止角度定义再次漂移；
 - `docker/install-base.sh`：在后端基础镜像中一次安装本型号的厂家补丁、ROS 包和夹爪资产；
 - `docker/motion-entrypoint.sh`、`docker/rviz-index.html`：本型号运动入口和 RViz 页面。
 

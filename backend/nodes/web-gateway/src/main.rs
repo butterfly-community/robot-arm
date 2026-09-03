@@ -205,6 +205,8 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "actuator_status"
         | "mode_request_result" => Some("motion"),
         "perception_state"
+        | "camera_state"
+        | "camera_request_result"
         | "world_scene"
         | "perception_request_result"
         | "calibration_state"
@@ -243,6 +245,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/spatial/snapshot", post(request_spatial_snapshot))
         .route("/api/perception/state", get(snapshot_perception))
         .route("/api/perception/request", post(request_perception))
+        .route("/api/perception/camera", post(request_camera))
         .route("/api/perception/calibration", post(request_calibration))
         .route("/api/perception/pick-place", post(request_pick_place))
         .route(
@@ -352,6 +355,7 @@ request_handler!(request_bindings, "apply_bindings_request");
 request_handler!(request_source_name, "rename_input_source_request");
 request_handler!(request_simulation, "set_simulation_request");
 request_handler!(request_perception, "perception_request");
+request_handler!(request_camera, "camera_request");
 request_handler!(request_calibration, "calibration_request");
 request_handler!(request_spatial_config, "update_spatial_config_request");
 request_handler!(request_mode, "set_control_mode_request");

@@ -1119,31 +1119,6 @@ input[type="range"] {
   gap: 12px;
   margin: 18px 0 8px;
 }
-.point-cloud-summary {
-  display: grid;
-  aspect-ratio: 4 / 3;
-  place-content: center;
-  gap: 7px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background:
-    radial-gradient(circle, rgb(91 156 255 / 20%) 1px, transparent 1.5px) 0 0 /
-      18px 18px,
-    #070a0e;
-  text-align: center;
-}
-.point-cloud-summary strong {
-  font:
-    650 28px/1 ui-monospace,
-    monospace;
-  font-variant-numeric: tabular-nums;
-}
-.point-cloud-summary span {
-  color: var(--muted);
-  font:
-    var(--text-caption) / 1 ui-monospace,
-    monospace;
-}
 .perception-task-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1196,6 +1171,44 @@ input[type="range"] {
 .perception-camera-source {
   order: 1;
 }
+.camera-driver-extension > p {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  padding: 12px 16px 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+.camera-driver-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px;
+}
+.camera-driver-parameter-grid .field {
+  margin: 0;
+}
+.camera-profile-table {
+  max-height: 22rem;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+.camera-profile-table > div {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+.camera-profile-table > div:last-child {
+  border-bottom: 0;
+}
+.camera-profile-table strong {
+  color: var(--text);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
 .perception-task-card {
   order: 2;
 }
@@ -1204,6 +1217,12 @@ input[type="range"] {
 }
 .perception-camera-parameters {
   order: 4;
+}
+
+@media (max-width: 760px) {
+  .camera-driver-parameter-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .visual-empty {

@@ -8,10 +8,12 @@ ros_workspace="$device_root/ros_ws"
 
 git clone "$1" "$vendor_root"
 git -C "$vendor_root" checkout "$2"
+python3 "$project_root/tools/verify-model.py" "$vendor_root" vendor
 for patch in model dynamics topic-io; do
   git -C "$vendor_root" apply --ignore-space-change --ignore-whitespace \
     "$project_root/patches/$patch.patch"
 done
+python3 "$project_root/tools/verify-model.py" "$vendor_root" patched
 
 cp "$project_root/ros2/motion-node/config/stararm102_description.srdf" \
   "$vendor_root/ROS2_HUMBLE/src/stararm102_moveit_config/config/"

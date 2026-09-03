@@ -1,0 +1,18 @@
+[package]
+name = "realsense-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+runtime = ["dep:realsense-rust"]
+docs-only = ["runtime", "realsense-rust/docs-only"]
+
+[dependencies]
+eyre.workspace = true
+nalgebra.workspace = true
+num-traits.workspace = true
+realsense-rust = { workspace = true, optional = true }
+robot-arm-messages.workspace = true

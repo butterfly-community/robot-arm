@@ -112,6 +112,10 @@ fn detect(request: DetectRequest) -> Result<DetectResponse> {
     let mut object_points = Mat::default();
     let mut image_points = Mat::default();
     board.match_image_points(&corners, &ids, &mut object_points, &mut image_points)?;
+    let matched_corner_count = image_points.total();
+    if matched_corner_count < 4 {
+        bail!("ChArUco 只匹配到 {matched_corner_count} 个角点，求解位姿至少需要 4 个");
+    }
     let camera_matrix = matrix3(&request.camera_matrix)?;
     let distortion = Mat::from_slice(&request.distortion)?;
     let mut rotation_vector = Mat::default();
@@ -368,6 +372,7 @@ fn self_test() -> Result<()> {
         synthetic_pose([-0.05, -0.16, -0.07], [0.21, 0.01, 0.20]),
         synthetic_pose([0.09, 0.18, 0.05], [0.07, 0.09, 0.21]),
         synthetic_pose([-0.15, 0.08, 0.13], [0.17, -0.06, 0.16]),
+        synthetic_pose([0.06, -0.11, 0.18], [0.12, 0.07, 0.24]),
     ];
     let camera_inverse = inverse(&camera)?;
     let observations = tools

@@ -55,6 +55,12 @@ export interface RobotModelInfo {
     joint_positions_rad: Record<string, number>;
     actuator_positions_rad: Record<string, number>;
   }>;
+  calibration_targets: Array<{
+    key: string;
+    label: string;
+    joint_positions_rad: Record<string, number>;
+    actuator_positions_rad: Record<string, number>;
+  }>;
   motion_options: Array<FieldSchema>;
   diagnostics: Array<FieldSchema>;
   visualization: {
@@ -205,21 +211,98 @@ export type InputSimulationItem =
   | "tool_axis_translation"
   | "tool_helical_motion";
 
-export interface DepthCameraSourceInfo {
+export type CameraStreamKind = "color" | "depth";
+
+export interface ServiceState {
+  schema_version: number;
+  build_version: string;
+  config_version: number;
+  running: boolean;
+  has_input: boolean;
+  has_output: boolean;
+  last_error?: string | null;
+  updated_at_ns: number;
+}
+
+export interface CameraStreamProfile {
+  key: string;
+  stream: CameraStreamKind;
+  width: number;
+  height: number;
+  frames_per_second: number;
+  pixel_format: string;
+  is_default: boolean;
+  available: boolean;
+  unavailable_reason?: string | null;
+}
+
+export type CameraDriverParameterKind = "boolean" | "integer" | "number";
+
+export interface CameraDriverParameterInfo {
+  key: string;
+  display_name: string;
+  sensor_name: string;
+  kind: CameraDriverParameterKind;
+  current_value: number;
+  default_value: number;
+  minimum: number;
+  maximum: number;
+  step: number;
+  read_only: boolean;
+}
+
+export interface CameraDriverExtensionInfo {
+  namespace: string;
+  display_name: string;
+  parameters: CameraDriverParameterInfo[];
+}
+
+export interface CameraDriverParameterValue {
+  namespace: string;
+  key: string;
+  value: number;
+}
+
+export interface CameraSourceConfiguration {
+  source_id: string;
+  color_profile_key: string;
+  depth_profile_key: string;
+  output_frames_per_second: number;
+  driver_parameters: CameraDriverParameterValue[];
+}
+
+export interface CameraSourceInfo {
   source_id: string;
   driver_id: string;
   display_name: string;
-  device_model: string | null;
-  serial_number: string | null;
-  firmware_version: string | null;
-  connection_type: string | null;
-  physical_port: string | null;
+  device_model?: string | null;
+  serial_number?: string | null;
+  firmware_version?: string | null;
+  connection_type?: string | null;
+  physical_port?: string | null;
   sensors: string[];
-  color_stream: string;
-  depth_stream: string;
-  camera_info_stream: string;
-  depth_scale_m: number;
-  calibrated: boolean;
+  profiles: CameraStreamProfile[];
+  driver_extensions: CameraDriverExtensionInfo[];
+  available: boolean;
+}
+
+export interface CameraCaptureState {
+  schema_version: number;
+  available_sources: CameraSourceInfo[];
+  selected_source_id?: string | null;
+  selected_color_profile_key?: string | null;
+  selected_depth_profile_key?: string | null;
+  output_frames_per_second?: number | null;
+  configurations: CameraSourceConfiguration[];
+  streaming: boolean;
+  last_sequence?: number | null;
+  last_frame_time_ns?: number | null;
+  measured_frames_per_second?: number | null;
+  measured_output_frames_per_second?: number | null;
+  dropped_frame_count: number;
+  skipped_output_frame_count: number;
+  original_error?: string | null;
+  service: ServiceState;
 }
 
 export interface ImageFrameInfo {
@@ -287,11 +370,10 @@ export interface PerceptionState {
   model: string;
   classes: string[];
   placement_labels: string[];
-  available_sources: DepthCameraSourceInfo[];
   color_frame?: ImageFrameInfo | null;
   depth_frame?: ImageFrameInfo | null;
   camera_calibration?: DepthCameraCalibration | null;
-  depth_scale_m: number;
+  depth_scale_m?: number | null;
   instances: PerceptionInstanceSummary[];
   point_count?: number | null;
   last_frame_time_ns?: number | null;
@@ -380,6 +462,21 @@ export interface CalibrationResult {
 export interface CalibrationSessionState {
   schema_version: number;
   active: boolean;
+  phase:
+    | "idle"
+    | "preparing"
+    | "moving"
+    | "detecting"
+    | "solving"
+    | "awaiting_confirmation"
+    | "applied"
+    | "failed";
+  run_id?: string | null;
+  current_target_index?: number | null;
+  target_count: number;
+  current_target_key?: string | null;
+  motion_request_id?: string | null;
+  stage_message?: string | null;
   board?: CalibrationBoard | null;
   camera_source_id?: string | null;
   robot_model_revision?: string | null;

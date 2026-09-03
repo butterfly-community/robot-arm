@@ -14,7 +14,6 @@ setup(
             "share/" + package_name + "/config",
             [
                 "config/controllers.yaml",
-                "config/sensors_3d.yaml",
                 "config/servo.yaml",
                 "config/stararm102_description.srdf",
                 "config/stararm102.rviz",

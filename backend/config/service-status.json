@@ -1,5 +1,6 @@
 {
   "services": {
+    "camera-capture": [],
     "controller-input": [],
     "perception": [],
     "spatial-transform": ["controller-input"],

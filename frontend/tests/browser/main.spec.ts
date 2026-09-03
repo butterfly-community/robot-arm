@@ -56,11 +56,43 @@ for (const [path, title] of pages) {
     await expect(page.locator("main")).toBeVisible();
     await page.reload();
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
-    await diagnostics.click();
+    await expect(diagnostics).toHaveAttribute("aria-expanded", "true");
     await expect(page.locator("pre").first()).not.toHaveText("null");
     expect(errors).toEqual([]);
   });
 }
+
+test("motion controls use the model-declared motor limits", async ({
+  page,
+}) => {
+  await page.goto("/motion/");
+  const sliders = page.getByRole("slider");
+  await expect(sliders).toHaveCount(7);
+  const ranges = await sliders.evaluateAll((inputs) =>
+    inputs.slice(0, 7).map((input) => {
+      const range = input as HTMLInputElement;
+      return [Number(range.min), Number(range.max)];
+    }),
+  );
+  const degrees = ranges.map(([minimum, maximum]) => [
+    (minimum * 180) / Math.PI,
+    (maximum * 180) / Math.PI,
+  ]);
+  const expected = [
+    [-110, 110],
+    [0, 180],
+    [-270, 0],
+    [-90, 90],
+    [-65, 65],
+    [-150, 150],
+    [0, 90],
+  ];
+  expect(degrees).toHaveLength(expected.length);
+  for (const [index, limits] of expected.entries()) {
+    expect(degrees[index][0]).toBeCloseTo(limits[0], 6);
+    expect(degrees[index][1]).toBeCloseTo(limits[1], 6);
+  }
+});
 
 test("cross-service navigation does not report socket teardown as an error", async ({
   page,
@@ -448,6 +480,7 @@ test("perception page uses the simulation camera through the canonical path", as
 }) => {
   const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
+  const originalCamera = before.values.camera_state;
   try {
     await request.post("/api/perception/request", {
       data: {
@@ -455,17 +488,47 @@ test("perception page uses the simulation camera through the canonical path", as
         request_id: "browser-perception-prompts",
         action: "apply",
         source_id: null,
-        depth_scale_m: null,
         classes: ["red cube", "gray storage bin"],
         placement_labels: ["gray storage bin"],
       },
     });
     await page.goto("/perception/");
     const camera = page.getByLabel("相机来源");
+    await page.getByRole("button", { name: "刷新相机列表" }).click();
+    await expect(
+      camera.locator('option[value="simulation:depth-grid"]'),
+    ).toHaveCount(1);
     await camera.selectOption("simulation:depth-grid");
+    await expect(
+      page.getByText("驱动支持的流配置 · 2 项", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("spinbutton", { name: "上送频率" }).fill("1");
+    await page.getByRole("button", { name: "保存并启用" }).click();
+    await expect
+      .poll(async () => {
+        const state = await (await request.get("/api/perception/state")).json();
+        return state.values.camera_state?.output_frames_per_second;
+      })
+      .toBe(1);
+    await expect
+      .poll(
+        async () => {
+          const state = await (
+            await request.get("/api/perception/state")
+          ).json();
+          return state.values.camera_state?.skipped_output_frame_count ?? 0;
+        },
+        { timeout: 4_000 },
+      )
+      .toBeGreaterThan(0);
     const refreshImage = page.getByRole("button", { name: "刷新图像" });
     await expect(refreshImage).toBeEnabled();
     await refreshImage.click();
+    const runPerception = page.getByRole("button", {
+      name: "运行一次感知",
+    });
+    await expect(runPerception).toBeEnabled();
+    await runPerception.click();
     await expect
       .poll(async () => {
         const state = await (await request.get("/api/perception/state")).json();
@@ -477,11 +540,16 @@ test("perception page uses the simulation camera through the canonical path", as
       })
       .toEqual({
         sourceId: "simulation:depth-grid",
-        pointCount: 497,
+        pointCount: 0,
         objectCount: 0,
       });
     await camera.selectOption("simulation:pick-place-scene");
-    await expect(page.getByText("运行", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "保存并启用" }).click();
+    await expect(runPerception).toBeEnabled();
+    await runPerception.click();
+    await expect(
+      page.getByText("已配置", { exact: true }).first(),
+    ).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
     await camera.selectOption("");
     await expect(camera).toHaveValue("");
@@ -494,32 +562,62 @@ test("perception page uses the simulation camera through the canonical path", as
         };
       })
       .toEqual({ sourceId: null, objectCount: 0 });
-    await expect(page.getByText("停用", { exact: true })).toBeVisible();
+    await expect(page.getByText("未启用", { exact: true })).toBeVisible();
     await page.reload();
     await expect(camera).toHaveValue("");
-    await camera.selectOption("simulation:pick-place-scene");
-    await page.reload();
-    await expect(page.getByText("运行", { exact: true })).toBeVisible();
+    await camera.selectOption("simulation:depth-grid");
+    await expect(
+      page.getByRole("spinbutton", { name: "上送频率" }),
+    ).toHaveValue("1");
+    await camera.selectOption("");
   } finally {
-    await request.post("/api/perception/request", {
+    await request.post("/api/perception/camera", {
       data: {
         schema_version: 3,
-        request_id: "browser-perception-stop",
-        action: "disconnect",
+        request_id: "browser-perception-camera-stop",
+        action: "unselect",
         source_id: null,
-        depth_scale_m: null,
-        classes: null,
-        placement_labels: null,
+        color_profile_key: null,
+        depth_profile_key: null,
       },
     });
+    if (originalCamera?.selected_source_id) {
+      await request.post("/api/perception/camera", {
+        data: {
+          schema_version: 3,
+          request_id: "browser-perception-camera-restore-select",
+          action: "select",
+          source_id: originalCamera.selected_source_id,
+          color_profile_key: originalCamera.selected_color_profile_key,
+          depth_profile_key: originalCamera.selected_depth_profile_key,
+          output_frames_per_second:
+            originalCamera.output_frames_per_second ?? null,
+          driver_parameters:
+            originalCamera.configurations?.find(
+              (configuration: { source_id: string }) =>
+                configuration.source_id === originalCamera.selected_source_id,
+            )?.driver_parameters ?? null,
+        },
+      });
+      if (originalCamera.streaming)
+        await request.post("/api/perception/camera", {
+          data: {
+            schema_version: 3,
+            request_id: "browser-perception-camera-restore-connect",
+            action: "connect",
+            source_id: originalCamera.selected_source_id,
+            color_profile_key: null,
+            depth_profile_key: null,
+          },
+        });
+    }
     if (original?.enabled)
       await request.post("/api/perception/request", {
         data: {
           schema_version: 3,
           request_id: "browser-perception-restore",
           action: "apply",
-          source_id: original.source_id,
-          depth_scale_m: original.depth_scale_m,
+          source_id: null,
           classes: original.classes,
           placement_labels: original.placement_labels,
         },
@@ -600,6 +698,15 @@ test("perception layout groups camera workflow and structured results", async ({
   expect(Math.abs(camera!.y - task!.y)).toBeLessThan(2);
   expect(calibration!.x).toBeLessThan(parameters!.x);
   expect(Math.abs(calibration!.y - parameters!.y)).toBeLessThan(2);
+  await expect(
+    card("相机外参标定").getByRole("button", { name: "开始自动标定" }),
+  ).toBeVisible();
+  await expect(
+    card("相机外参标定").getByRole("button", { name: "记录当前姿态样本" }),
+  ).toHaveCount(0);
+  await expect(
+    card("相机外参标定").getByRole("button", { name: "用当前样本求解" }),
+  ).toHaveCount(0);
 
   await expect(card("识别与分割模型")).toHaveCount(0);
   const modelSelect = card("感知任务").locator(
@@ -610,15 +717,22 @@ test("perception layout groups camera workflow and structured results", async ({
   const savePromptButton = await card("感知任务")
     .getByRole("button", { name: "保存提示词配置" })
     .boundingBox();
+  const runPerceptionButton = await card("感知任务")
+    .getByRole("button", { name: "运行一次感知" })
+    .boundingBox();
   const executeButton = await card("感知任务")
     .getByRole("button", { name: "执行抓放" })
     .boundingBox();
   expect(savePromptButton).not.toBeNull();
+  expect(runPerceptionButton).not.toBeNull();
   expect(executeButton).not.toBeNull();
   expect(
+    runPerceptionButton!.x - (savePromptButton!.x + savePromptButton!.width),
+  ).toBeGreaterThanOrEqual(10);
+  expect(
     Math.abs(
-      savePromptButton!.x +
-        savePromptButton!.width -
+      runPerceptionButton!.x +
+        runPerceptionButton!.width -
         (executeButton!.x + executeButton!.width),
     ),
   ).toBeLessThan(2);
@@ -741,6 +855,8 @@ test("execution page renders colored feedback and command models", async ({
     },
   });
   await page.goto("/arm-execution/");
+  await expect(page.getByRole("button", { name: "全部卸力" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "全部上力" })).toBeDisabled();
   const viewer = page.getByLabel("机械臂三维反馈与目标预览");
   await expect(viewer).toHaveAttribute("data-models-loaded", "2");
   await expect(viewer).toHaveAttribute("data-feedback-ready", "true");
@@ -768,6 +884,7 @@ test("execution viewer shows the selected pick and placement points only during 
 }) => {
   const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
+  const originalCamera = before.values.camera_state;
   try {
     await request.post("/api/arm-execution/disconnect", {
       data: {
@@ -777,15 +894,60 @@ test("execution viewer shows the selected pick and placement points only during 
         fields: {},
       },
     });
+    await request.post("/api/perception/camera", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-camera-refresh",
+        action: "refresh",
+        source_id: null,
+        color_profile_key: null,
+        depth_profile_key: null,
+      },
+    });
+    await request.post("/api/perception/camera", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-camera-select",
+        action: "select",
+        source_id: "simulation:pick-place-scene",
+        color_profile_key: null,
+        depth_profile_key: null,
+      },
+    });
+    await request.post("/api/perception/camera", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-camera-connect",
+        action: "connect",
+        source_id: "simulation:pick-place-scene",
+        color_profile_key: null,
+        depth_profile_key: null,
+      },
+    });
     await request.post("/api/perception/request", {
       data: {
         schema_version: 3,
         request_id: "browser-pick-points-scene",
         action: "apply",
-        source_id: "simulation:pick-place-scene",
-        depth_scale_m: null,
+        source_id: null,
         classes: ["red cube", "gray storage bin"],
         placement_labels: ["gray storage bin"],
+      },
+    });
+    await expect
+      .poll(async () => {
+        const state = await (await request.get("/api/perception/state")).json();
+        return state.values.perception_state?.color_frame != null;
+      })
+      .toBe(true);
+    await request.post("/api/perception/request", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-run",
+        action: "refresh",
+        source_id: null,
+        classes: null,
+        placement_labels: null,
       },
     });
     await expect
@@ -871,14 +1033,63 @@ test("execution viewer shows the selected pick and placement points only during 
     });
     await expect(viewer).toHaveAttribute("data-place-point-visible", "false");
   } finally {
+    await request.post("/api/perception/camera", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-camera-unselect",
+        action: "unselect",
+        source_id: null,
+        color_profile_key: null,
+        depth_profile_key: null,
+      },
+    });
+    if (originalCamera?.selected_source_id) {
+      await request.post("/api/perception/camera", {
+        data: {
+          schema_version: 3,
+          request_id: "browser-pick-points-camera-restore-refresh",
+          action: "refresh",
+          source_id: null,
+          color_profile_key: null,
+          depth_profile_key: null,
+        },
+      });
+      await request.post("/api/perception/camera", {
+        data: {
+          schema_version: 3,
+          request_id: "browser-pick-points-camera-restore-select",
+          action: "select",
+          source_id: originalCamera.selected_source_id,
+          color_profile_key: originalCamera.selected_color_profile_key,
+          depth_profile_key: originalCamera.selected_depth_profile_key,
+          output_frames_per_second:
+            originalCamera.output_frames_per_second ?? null,
+          driver_parameters:
+            originalCamera.configurations?.find(
+              (configuration: { source_id: string }) =>
+                configuration.source_id === originalCamera.selected_source_id,
+            )?.driver_parameters ?? null,
+        },
+      });
+      if (originalCamera.streaming)
+        await request.post("/api/perception/camera", {
+          data: {
+            schema_version: 3,
+            request_id: "browser-pick-points-camera-restore-connect",
+            action: "connect",
+            source_id: originalCamera.selected_source_id,
+            color_profile_key: null,
+            depth_profile_key: null,
+          },
+        });
+    }
     await request.post("/api/perception/request", {
       data: original?.enabled
         ? {
             schema_version: 3,
             request_id: "browser-pick-points-restore",
             action: "apply",
-            source_id: original.source_id,
-            depth_scale_m: original.depth_scale_m,
+            source_id: null,
             classes: original.classes,
             placement_labels: original.placement_labels,
           }
@@ -887,7 +1098,6 @@ test("execution viewer shows the selected pick and placement points only during 
             request_id: "browser-pick-points-restore",
             action: "disconnect",
             source_id: null,
-            depth_scale_m: null,
             classes: null,
             placement_labels: null,
           },
