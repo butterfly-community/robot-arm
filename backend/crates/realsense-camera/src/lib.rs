@@ -1,9 +1,8 @@
 #![cfg(feature = "runtime")]
 
-use std::{collections::HashSet, convert::TryFrom, slice, task::Poll};
+use std::{collections::HashSet, convert::TryFrom, slice, task::Poll, time::Duration};
 
 use eyre::{Context as _, Result, bail};
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion};
 use num_traits::FromPrimitive;
 use realsense_rust::{
     config::Config,
@@ -12,12 +11,13 @@ use realsense_rust::{
     frame::{ColorFrame, DepthFrame, FrameEx},
     kind::{Rs2CameraInfo, Rs2DistortionModel, Rs2Format, Rs2Option, Rs2StreamKind},
     pipeline::{ActivePipeline, InactivePipeline},
+    processing_blocks::align::Align,
     stream_profile::StreamProfile,
 };
 use robot_arm_messages::{
     CameraDriverExtensionInfo, CameraDriverParameterInfo, CameraDriverParameterKind,
     CameraDriverParameterValue, CameraFrameBundle, CameraImagePlane, CameraIntrinsics,
-    CameraSourceInfo, CameraStreamKind, CameraStreamProfile, Pose3, SCHEMA_VERSION,
+    CameraRawVideoFrame, CameraSourceInfo, CameraStreamKind, CameraStreamProfile, SCHEMA_VERSION,
 };
 
 pub const DRIVER_NAMESPACE: &str = "librealsense2";
@@ -76,6 +76,7 @@ impl RealSenseDriver {
         Ok(RealSenseStream {
             source_id: source_id.into(),
             pipeline,
+            align: Align::new(Rs2StreamKind::Color, 1).context("创建 RealSense 深度对齐器")?,
         })
     }
 }
@@ -83,15 +84,61 @@ impl RealSenseDriver {
 pub struct RealSenseStream {
     source_id: String,
     pipeline: ActivePipeline,
+    align: Align,
+}
+
+pub enum FramePoll {
+    Pending,
+    Captured {
+        sequence: u64,
+        received_time_ns: i64,
+        video_frame: Box<CameraRawVideoFrame>,
+        frame: Option<Box<CameraFrameBundle>>,
+    },
 }
 
 impl RealSenseStream {
-    pub fn next_frameset(&mut self) -> Result<Option<CameraFrameBundle>> {
+    pub fn poll_frame(&mut self, materialize: bool) -> Result<FramePoll> {
         let Poll::Ready(frames) = self.pipeline.poll()? else {
-            return Ok(None);
+            return Ok(FramePoll::Pending);
         };
-        let mut colors = frames.frames_of_type::<ColorFrame>();
-        let mut depths = frames.frames_of_type::<DepthFrame>();
+        let depth = frames
+            .frames_of_type::<DepthFrame>()
+            .pop()
+            .ok_or_else(|| eyre::eyre!("frameset 缺少深度帧"))?;
+        let sequence = depth.frame_number();
+        let device_time_ns = (depth.timestamp() * 1_000_000.0).round() as i64;
+        let received_time_ns = now_ns();
+        let color = frames
+            .frames_of_type::<ColorFrame>()
+            .pop()
+            .ok_or_else(|| eyre::eyre!("frameset 缺少彩色帧"))?;
+        let video_frame = Box::new(CameraRawVideoFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence,
+            source_id: self.source_id.clone(),
+            received_time_ns,
+            color: image_plane(&color, "color_optical_frame")?,
+        });
+        if !materialize {
+            return Ok(FramePoll::Captured {
+                sequence,
+                received_time_ns,
+                video_frame,
+                frame: None,
+            });
+        }
+        drop(color);
+        drop(depth);
+        self.align
+            .queue(frames)
+            .map_err(|error| eyre::eyre!("提交 RealSense 对齐帧: {error:?}"))?;
+        let aligned = self
+            .align
+            .wait(Duration::from_millis(100))
+            .map_err(|error| eyre::eyre!("等待 RealSense 对齐帧: {error:?}"))?;
+        let mut colors = aligned.frames_of_type::<ColorFrame>();
+        let mut depths = aligned.frames_of_type::<DepthFrame>();
         let color = colors
             .pop()
             .ok_or_else(|| eyre::eyre!("frameset 缺少彩色帧"))?;
@@ -99,37 +146,29 @@ impl RealSenseStream {
             .pop()
             .ok_or_else(|| eyre::eyre!("frameset 缺少深度帧"))?;
         let color_profile = color.stream_profile();
-        let depth_profile = depth.stream_profile();
-        let color_intrinsics = intrinsics(color_profile)?;
-        let depth_intrinsics = intrinsics(depth_profile)?;
-        let extrinsics = depth_profile.extrinsics(color_profile)?;
-        let rotation = extrinsics.rotation();
-        let matrix = Matrix3::from_column_slice(&rotation.map(f64::from));
-        let orientation =
-            UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(matrix));
-        let q = orientation.quaternion();
-        let received_time_ns = now_ns();
-        Ok(Some(CameraFrameBundle {
-            schema_version: SCHEMA_VERSION,
-            sequence: depth.frame_number(),
-            source_id: self.source_id.clone(),
-            device_time_ns: (depth.timestamp() * 1_000_000.0).round() as i64,
-            device_time_domain: depth.timestamp_domain().to_string(),
+        let camera_intrinsics = intrinsics(color_profile)?;
+        Ok(FramePoll::Captured {
+            sequence,
             received_time_ns,
-            color: image_plane(&color, "color_optical_frame")?,
-            depth: image_plane(&depth, "depth_optical_frame")?,
-            color_intrinsics,
-            depth_intrinsics,
-            depth_to_color: Pose3 {
-                position_m: extrinsics.translation().map(f64::from),
-                orientation_xyzw: [q.i, q.j, q.k, q.w],
-            },
-            depth_scale_m: f64::from(
-                depth
-                    .depth_units()
-                    .map_err(|error| eyre::eyre!("读取深度单位: {error:?}"))?,
-            ),
-        }))
+            video_frame,
+            frame: Some(Box::new(CameraFrameBundle {
+                schema_version: SCHEMA_VERSION,
+                sequence,
+                source_id: self.source_id.clone(),
+                device_time_ns,
+                device_time_domain: depth.timestamp_domain().to_string(),
+                received_time_ns,
+                color: image_plane(&color, "color_optical_frame")?,
+                aligned_depth: image_plane(&depth, "color_optical_frame")?,
+                intrinsics: camera_intrinsics,
+                depth_scale_m: f64::from(
+                    depth
+                        .depth_units()
+                        .map_err(|error| eyre::eyre!("读取深度单位: {error:?}"))?,
+                ),
+                calibration: None,
+            })),
+        })
     }
 }
 

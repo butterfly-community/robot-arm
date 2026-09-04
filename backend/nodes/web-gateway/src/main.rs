@@ -91,6 +91,7 @@ fn main() -> Result<()> {
                 let input = id.as_str();
                 if (input.ends_with("request_result")
                     || input == "model_asset_response"
+                    || input == "camera_asset_response"
                     || input == "perception_asset_response"
                     || input == "actuator_status")
                     && let Some(request_id) = value.get("request_id").and_then(Value::as_str)
@@ -467,9 +468,14 @@ async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>
         "perception-asset-{}-{key}",
         state.request_sequence.fetch_add(1, Ordering::Relaxed)
     );
+    let output = if key == "calibration.png" {
+        "camera_asset_request"
+    } else {
+        "perception_asset_request"
+    };
     let response = forward_value(
         state,
-        "perception_asset_request",
+        output,
         json!({
             "schema_version": SCHEMA_VERSION,
             "request_id": request_id,

@@ -184,11 +184,11 @@ const selectedCamera = await request("/api/perception/camera", {
   source_id: simulationCamera.source_id,
   color_profile_key: null,
   depth_profile_key: null,
-  output_frames_per_second: 10,
+  output_frames_per_second: 1,
   driver_parameters: null,
 });
 assert.equal(selectedCamera.original_error, null);
-assert.equal(selectedCamera.value.output_frames_per_second, 10);
+assert.equal(selectedCamera.value.output_frames_per_second, 1);
 assert.deepEqual(
   selectedCamera.value.configurations.find(
     (configuration) => configuration.source_id === simulationCamera.source_id,
@@ -204,6 +204,33 @@ const startedCamera = await request("/api/perception/camera", {
   depth_profile_key: null,
 });
 assert.equal(startedCamera.original_error, null);
+const videoFrames = await new Promise((resolve, reject) => {
+  const timer = setTimeout(
+    () => reject(new Error("camera video frame timeout")),
+    2_500,
+  );
+  const socket = new WebSocket(
+    `${base.replace(/^http/, "ws")}/ws/camera-video`,
+  );
+  socket.binaryType = "arraybuffer";
+  let frames = 0;
+  socket.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) frames += 1;
+    if (frames >= 5) {
+      clearTimeout(timer);
+      socket.close();
+      resolve(frames);
+    }
+  };
+  socket.onerror = () => {
+    clearTimeout(timer);
+    reject(new Error("camera video websocket failed"));
+  };
+});
+assert.ok(
+  videoFrames >= 5,
+  "camera video remains at capture rate while perception output is 1 FPS",
+);
 const perceptionModelConfigured = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-model-config",
@@ -533,7 +560,7 @@ assert.deepEqual(
   executionPickPlace.values.manipulation_state.place_position_m,
   pickPlaceResult.place_position_m,
 );
-const resetPerceptionCamera = await request("/api/perception/request", {
+const resetPerceptionCamera = await request("/api/perception/camera", {
   schema_version: 3,
   request_id: "integration-reset-simulation-calibration",
   action: "reset",
@@ -542,6 +569,26 @@ const resetPerceptionCamera = await request("/api/perception/request", {
   placement_labels: null,
 });
 assert.equal(resetPerceptionCamera.original_error, null);
+const selectedResetCamera = await request("/api/perception/camera", {
+  schema_version: 3,
+  request_id: "integration-select-reset-simulation-camera",
+  action: "select",
+  source_id: "simulation:pick-place-scene",
+  color_profile_key: null,
+  depth_profile_key: null,
+  output_frames_per_second: 1,
+  driver_parameters: null,
+});
+assert.equal(selectedResetCamera.original_error, null);
+const startedResetCamera = await request("/api/perception/camera", {
+  schema_version: 3,
+  request_id: "integration-start-reset-simulation-camera",
+  action: "connect",
+  source_id: "simulation:pick-place-scene",
+  color_profile_key: null,
+  depth_profile_key: null,
+});
+assert.equal(startedResetCamera.original_error, null);
 await waitFor(
   () => snapshot("perception"),
   (state) =>

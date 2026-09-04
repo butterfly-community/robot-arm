@@ -1,5 +1,5 @@
 [package]
-name = "camera-capture-node"
+name = "camera-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,10 @@ license.workspace = true
 default = []
 realsense-runtime = ["dep:realsense-camera", "realsense-camera/runtime"]
 realsense-doc-only = ["realsense-runtime", "realsense-camera/docs-only"]
+opencv-runtime = ["dep:camera-calibration"]
 
 [[bin]]
-name = "camera-capture-node"
+name = "camera-node"
 path = "src/main.rs"
 
 [[bin]]
@@ -20,6 +21,8 @@ path = "src/bin/realsense-smoke.rs"
 required-features = ["realsense-runtime"]
 
 [dependencies]
+axum.workspace = true
+camera-calibration = { workspace = true, optional = true }
 dora-node-api.workspace = true
 eyre.workspace = true
 image.workspace = true
@@ -29,6 +32,4 @@ realsense-camera = { workspace = true, optional = true }
 robot-arm-messages.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-approx.workspace = true
+tokio.workspace = true

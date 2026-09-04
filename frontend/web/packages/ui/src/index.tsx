@@ -114,6 +114,51 @@ export function Card({
   );
 }
 
+export function Disclosure({
+  title,
+  englishTitle,
+  defaultOpen = false,
+  children,
+  className,
+}: {
+  title: string;
+  englishTitle?: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem(
+      `robot-arm:disclosure:${window.location.pathname}:${title}`,
+    );
+    if (saved !== null) setOpen(saved === "open");
+  }, [title]);
+
+  function updateOpen(nextOpen: boolean) {
+    setOpen(nextOpen);
+    window.localStorage.setItem(
+      `robot-arm:disclosure:${window.location.pathname}:${title}`,
+      nextOpen ? "open" : "closed",
+    );
+  }
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={updateOpen} asChild>
+      <div className={cn("disclosure", className)}>
+        <Collapsible.Trigger className="disclosure-toggle">
+          <LocalizedLabel text={title} english={englishTitle} />
+          <span className="card-chevron" aria-hidden="true" />
+        </Collapsible.Trigger>
+        <Collapsible.Content className="disclosure-content">
+          <div className="disclosure-content-inner">{children}</div>
+        </Collapsible.Content>
+      </div>
+    </Collapsible.Root>
+  );
+}
+
 export function Field({
   label,
   englishLabel,

@@ -5,7 +5,8 @@ mod realsense;
 
 use eyre::Result;
 use robot_arm_messages::{
-    CameraDriverParameterValue, CameraFrameBundle, CameraSourceInfo, CameraStreamProfile, ToolPose,
+    CameraDriverParameterValue, CameraFrameBundle, CameraRawVideoFrame, CameraSourceInfo,
+    CameraStreamProfile, ToolPose,
 };
 
 pub(crate) use simulation::SimulationDriver;
@@ -14,7 +15,18 @@ pub(crate) use simulation::SimulationDriver;
 pub(crate) use realsense::RealSenseDriver;
 
 pub(crate) trait CameraStream {
-    fn next_frameset(&mut self) -> Result<Option<CameraFrameBundle>>;
+    fn poll_frame(&mut self, materialize: bool) -> Result<CameraPoll>;
+}
+
+#[derive(Clone)]
+pub(crate) enum CameraPoll {
+    Pending,
+    Captured {
+        sequence: u64,
+        received_time_ns: i64,
+        video_frame: Box<CameraRawVideoFrame>,
+        frame: Option<Box<CameraFrameBundle>>,
+    },
 }
 
 pub(crate) trait CameraDriver {

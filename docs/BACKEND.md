@@ -23,85 +23,48 @@ Action 只透明传递。
 
 ## `realsense-camera` crate
 
-该 crate 是 RealSense 硬件驱动边界。`RealSenseDriver::discover()` 从 librealsense context 读取
-设备、传感器、所有可用彩色/深度 profile，以及各 sensor 实际支持的 option。option 以
-`librealsense2` 命名空间包装为设备扩展，报告当前值、默认值、范围、步长和只读性；公共契约与
-网页不依赖 `Rs2Option`。`open()` 先应用用户修改的可写 option，再只启用请求中的驱动已报告
-profile 并创建 pipeline。`RealSenseStream::next_frameset()` 从同一 frameset 取得两帧，读取实际
-stride、格式、设备时间、两路内参、畸变、深度到彩色外参和 `depth_units()`。
+该 crate 是 RealSense 硬件边界。`discover()` 读取设备、传感器、所有彩色/深度 profile 和 sensor
+option；`open()` 应用用户选择后建立 pipeline。`poll_frame(materialize)` 始终排空同步 frameset，
+但只有 `materialize=true` 时才调用 librealsense `Align` 并复制彩色和已对齐深度。输出尺寸、
+stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不假定型号、分辨率或 FPS。
 
-来源键使用 RealSense 序列号；持久 profile 键只包含 stream、宽高、格式和 FPS；option 键使用
-sensor 名称与 option 编号。三者都不含 SDK 枚举索引、USB 端口或进程内句柄。驱动仍导出当前
-Rust 路径不能打开的 profile，并通过 `available` 与原因让上层置灰，而不是悄悄过滤能力。
-
-librealsense/realsense-rust 类型、C 数据指针和唯一 `unsafe` 均封闭在这里。帧数据在句柄有效期内
-复制到设备无关 `CameraFrameBundle`；pipeline 由 Rust 所有权在 stream drop 时释放。节点、感知、
-网关和前端都不依赖厂商类型。`docs-only` feature 只供无 SDK 的编译检查，运行镜像启用
+来源键使用序列号；profile 键只含 stream、宽高、格式和 FPS；option 键使用 sensor 名称与 option
+编号。SDK 类型与指针只存在于该 crate。`docs-only` feature 供无 SDK 环境检查，运行镜像启用
 `runtime`。
 
-## `camera-capture-node`
+## `camera-node`
 
-节点的本地 `CameraDriver`/`CameraStream` trait 只定义发现、打开、取完整 frameset 和可选重置。
-硬件适配文件只是委托 `realsense-camera` crate；simulation 适配器实现同一 trait。
+节点统一管理硬件与 simulation 适配器、持久配置、采集和标定。Dora 循环只处理请求、状态和
+发布；Tokio `spawn_blocking` 长期任务拥有驱动、pipeline 与非 `Send` 的 Align，通过有界命令通道
+和 latest-value 通道通信。设备 60 FPS、上层 1 FPS 时仍排空 60 FPS，但约每秒只 Align、复制并
+发布一次。
 
-- `refresh()` 只在明确请求时聚合驱动发现结果，不在 tick 扫描 USB；保存过但当前离线的来源与
-  暂时消失的 profile 通过最后一次能力快照保留为不可用项。
-- `select()` 校验来源、profile、上送频率和驱动扩展均属于最近一次发现结果，并按来源保存。
-- `start()` 创建 stream，重置运行统计；disconnect/unselect/drop 直接释放 stream。
-- `tick()` 始终非阻塞排空设备产生的完整 frameset，只按配置的上送频率发布最新 Arrow bundle；
-  设备序号缺口与主动略过中间帧分别计数。
-- `state()` 报告来源、每来源保存配置、运行选择、streaming、最后 sequence/时间、采集/上送实测
-  FPS、设备缺帧、主动略过和原始错误。
+- `refresh()` 只在按钮请求时发现设备，并把已保存但暂时离线的来源/profile 标成不可用。
+- `select()` 校验驱动刚报告的 profile、上送 FPS 与厂商扩展参数，再按稳定来源身份保存。
+- `start()`、`stop_capture()` 与 `reset()` 都在同一采集任务内操作驱动，不维护第二套硬件状态。
+- `tick()` 读取最新采集结果、绑定该帧的外参快照并发布专用 Arrow Binary bundle。
+- 标定状态机消费机械臂反馈和型号声明的姿态，进程内调用 `camera-calibration` 对 OpenCV 5 的
+  `CharucoDetector`、`solvePnP` 与 `calibrateRobotWorldHandEye` 包装。不存在标定子进程或
+  JSON/Base64 IPC。
 
-配置行为参考输入采集节点：以驱动提供的稳定来源身份为键，由后端保存并原子替换；运行时枚举
-索引不进入文件。与手柄不同，相机保存的是两路 profile、上送 FPS 和用户实际修改的厂商参数，
-当前选中来源和 streaming 不保存。重启后仍默认未选择，重新选择同一设备时恢复该设备的配置。
-
-节点不执行图像变换。设备采集 FPS 来自所选 profile；上送 FPS 可配置为不高于彩色/深度两路
-共同采集频率。例如设备以 60 FPS 采集而上层只需 1 FPS 时，capture 仍持续取帧以避免设备队列
-反压，但只发送每个周期最新的完整 RGB-D 帧束。该节流不触发 YOLOE/GraspGenX；两个模型仍只
-响应网页“运行一次感知”。
+配置保存每台相机的 profile、上送 FPS、实际修改的驱动参数和已确认外参；运行选择与 streaming
+不保存。simulation 的预置外参使用相同查询与逐帧发布逻辑，重置恢复预置；真实来源重置后未标定。
 
 ## `robot-arm-messages`
 
-普通小消息使用共享 JSON Arrow codec。`CameraFrameBundle` 使用专用
-`camera_frame_to_arrow()`/`camera_frame_from_arrow()`：元数据保留结构化 schema，彩色和深度数据
-各用一个 Binary buffer。解码先核对 schema、宽高、stride、格式最小字节数和 buffer 长度；损坏
-或截断数据返回明确错误。
+小消息使用共享 JSON Arrow codec。`CameraFrameBundle` 用专用 codec，把元数据与两个 Arrow Binary
+图像 buffer 分开。彩色和深度必须同尺寸、同 frame id，且共享内参尺寸一致。bundle 原子携带已
+对齐 RGB-D、深度比例、两个时钟和本帧外参快照；未标定时快照为 `None`。
 
-相机时间分为设备时间及其时钟域、主机接收时间。`camera_in_base` 不属于 bundle：这是标定结果；
-`depth_to_color` 属于设备内在参数，二者不会混用。
+## `scene-node`
 
-## `perception-node`
+节点缓存 `camera-node` 发布的最新原子帧，只在用户点击时启动一次感知任务。`reqwest::Client`
+异步调用 YOLOE/GraspGenX；深度解码、掩码融合、场景重建和预览编码在 Tokio `spawn_blocking`
+中执行，因此 Dora 循环仍可响应快照和状态。公开 `task_state` 驱动网页按钮锁定，同类任务不排队。
 
-节点只接受 `CameraFrameBundle` 与 camera state。相机 streaming 变化决定当前来源；取消选择会
-清除缓存图像和旧 `WorldScene`，不会发布伪造空帧。
-
-`handle_camera_frame()` 拒绝非当前来源和回退 sequence，只保存最新原始帧与快照，不调用模型。
-用户点击“运行一次感知”后，`process_latest_scene()` 对当时最新的一份原子 RGB-D 帧依次执行：
-
-1. `align_depth_to_color()` 使用 bundle 的两路内参、畸变和外参对齐深度；
-2. `segment()` 调用唯一计算服务获取提示词实例分割；
-3. `perception-core` 反投影实例深度并转换到 `base_link`；
-4. `attach_grasp_candidates()` 只把实例点云与夹爪资产 ID 发给 GraspGenX；
-5. 发布一份 `WorldScene`，保存按需 Web 调试资源。
-
-保存提示词只更新配置；相机持续来帧也不会自动运行 YOLOE 或 GraspGenX。这样模型调用次数完全
-由显式请求决定，刷新图像也只更新预览。
-
-对齐实现覆盖 librealsense 的 Brown-Conrady、Modified/Inverse Brown-Conrady、F-Theta 与
-Kannala-Brandt 语义；零畸变的 `plumb_bob` 用于通用模拟/ROS 兼容元数据。未知且非零的畸变模型
-直接报错，不悄悄当针孔模型。公式与命名按 librealsense 官方 projection/deprojection 实现核对。
-
-`start_automatic_calibration()` 校验当前相机、机械臂版本、标定板和型号姿态，然后通过正式
-control-mode 与 `MotionRequest` 输出开始流程。`advance_automatic_calibration()` 等待每个运动的
-正式状态，成功后稳定等待 10 秒；`try_automatic_calibration_capture()` 只在新帧中检测成功后
-记录同期 `ArmState`、FK TCP 和板位姿。`solve_calibration()` 调用 Rust/OpenCV 5 helper；
-`apply_solved_calibration()` 才持久化结果。
-
-配置保存模型启用状态、提示词、放置区标签和按相机来源隔离的已应用外参。运行中的标定会话不
-持久化；重启不会恢复半个工作流。simulation 的预置外参来自数据资产，重置后恢复该真值；真实
-来源重置后回到未标定。
+`scene-core` 负责已对齐深度与实例掩码的领域融合、坐标变换及 `WorldScene` 组织。scene 不发现
+相机、不保存内外参、不驱动机械臂，也没有畸变/深度注册算法。提示词与放置区域角色由用户配置，
+不写死测试类别。新帧不会自动触发模型，刷新静态预览也不会触发模型。
 
 ## `perception-compute`
 
@@ -135,6 +98,17 @@ Monitor 读取失败先在同一串口重试一次，仍失败才进入重连逻
 
 ## `web-gateway-node`
 
-Gateway 只保存最近一份小状态和按 request ID 配对的结果。相机请求直接转给 capture，感知与标定
-请求转给 perception；按需图像资源使用二进制 HTTP 响应。原始持续 RGB-D frame 不进入 Gateway，
-Gateway 也不解析或保存任何服务配置。
+Gateway 只保存最近一份小状态和按 request ID 配对的结果。相机及标定请求直接转给
+`camera-node`，感知请求转给 `scene-node`；按需图像资源使用二进制 HTTP 响应。实时彩色视频由
+`camera-node` 内置的 latest-value WebSocket 直接提供，反向代理只转发连接，不缓存帧。原始 RGB-D
+frame 不进入 Gateway，Gateway 也不解析或保存任何服务配置。
+
+## Next.js 抓放场景编排
+
+`web-perception` 的服务端 Route Handler 使用 AI SDK 将自然语言先约束为开放词汇提示词和放置
+角色，运行既有 `perception/request` 后，再根据实际 `WorldScene` 约束选择对象与放置区域 ID。
+任务解析为每个用户指代生成从具体描述到常见视觉类别的少量英文同义提示词，避免把单一语言
+翻译误当成模型固定词表；这些词仍全部由当前指令产生，不包含场景硬编码。
+本地校验实例、抓取候选和区域都存在后，才调用既有 `motion/mode` 与 `perception/pick-place`。
+它不是 Dora 节点，不新增消息，也不复制 scene、MTC、碰撞或执行逻辑；浏览器只收到编排结果，
+接触不到 API 密钥。

@@ -1,104 +1,46 @@
-use std::io;
-
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use eyre::{Result, bail, eyre};
-use nalgebra::{Matrix4, UnitQuaternion, Vector3};
+use nalgebra::{
+    Isometry3, Matrix3, Matrix4, Quaternion, Rotation3, Translation3, UnitQuaternion, Vector3,
+};
 use opencv::{
     calib,
     core::{self, Mat, Scalar, Size, Vector},
     geometry, imgcodecs, imgproc, objdetect,
     prelude::*,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use robot_arm_messages::{CalibrationBoard, Pose3};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct MatrixPose {
-    rotation_matrix: [f64; 9],
-    translation_m: [f64; 3],
+#[derive(Clone, Debug)]
+pub struct Detection {
+    pub board_in_camera: Pose3,
+    pub visualization_png: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct BoardConfig {
-    dictionary: String,
-    squares_x: i32,
-    squares_y: i32,
-    square_size_m: f32,
-    marker_size_m: f32,
+#[derive(Clone, Debug)]
+pub struct Solution {
+    pub camera_in_base: Pose3,
+    pub board_in_calibration_tool: Pose3,
+    pub translation_residuals_m: Vec<f64>,
+    pub rotation_residuals_rad: Vec<f64>,
+    pub solver: String,
 }
 
-#[derive(Deserialize)]
-struct DetectRequest {
-    image_png_base64: String,
-    camera_matrix: [f64; 9],
-    distortion: Vec<f64>,
-    board: BoardConfig,
-}
-
-#[derive(Serialize)]
-struct DetectResponse {
-    #[serde(flatten)]
-    pose: MatrixPose,
-    visualization_png_base64: String,
-}
-
-#[derive(Deserialize)]
-struct SolveRequest {
-    tcp_in_base: Vec<MatrixPose>,
-    board_in_camera: Vec<MatrixPose>,
-}
-
-#[derive(Serialize)]
-struct SolveResponse {
-    camera_in_base: MatrixPose,
-    board_in_calibration_tool: MatrixPose,
-    translation_residuals_m: Vec<f64>,
-    rotation_residuals_rad: Vec<f64>,
-    solver: String,
-}
-
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("{error:?}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("--self-test") {
-        return self_test();
-    }
-    let mut request: Value = serde_json::from_reader(io::stdin())?;
-    let operation = request
-        .get("operation")
-        .and_then(Value::as_str)
-        .ok_or_else(|| eyre!("calibration operation is required"))?
-        .to_owned();
-    request
-        .as_object_mut()
-        .expect("calibration request is an object")
-        .remove("operation");
-    let response = match operation.as_str() {
-        "detect" => serde_json::to_value(detect(serde_json::from_value(request)?)?)?,
-        "solve" => serde_json::to_value(solve(serde_json::from_value(request)?)?)?,
-        _ => bail!("unsupported calibration operation {operation}"),
-    };
-    serde_json::to_writer(io::stdout(), &response)?;
-    Ok(())
-}
-
-fn detect(request: DetectRequest) -> Result<DetectResponse> {
-    let encoded = BASE64.decode(request.image_png_base64)?;
-    let mut image = imgcodecs::imdecode(&Vector::from_slice(&encoded), imgcodecs::IMREAD_COLOR)?;
+pub fn detect(
+    image_png: &[u8],
+    camera_matrix_values: &[f64; 9],
+    distortion_values: &[f64],
+    board_config: &CalibrationBoard,
+) -> Result<Detection> {
+    let mut image = imgcodecs::imdecode(&Vector::from_slice(image_png), imgcodecs::IMREAD_COLOR)?;
     if image.empty() {
         bail!("cannot decode calibration image");
     }
     let dictionary =
-        objdetect::get_predefined_dictionary_i32(dictionary_id(&request.board.dictionary)?)?;
+        objdetect::get_predefined_dictionary_i32(dictionary_id(&board_config.dictionary)?)?;
     let board = objdetect::CharucoBoard::new_def(
-        Size::new(request.board.squares_x, request.board.squares_y),
-        request.board.square_size_m,
-        request.board.marker_size_m,
+        Size::new(board_config.squares_x as i32, board_config.squares_y as i32),
+        board_config.square_size_m as f32,
+        board_config.marker_size_m as f32,
         &dictionary,
     )?;
     let detector = objdetect::CharucoDetector::new_def(&board)?;
@@ -116,8 +58,8 @@ fn detect(request: DetectRequest) -> Result<DetectResponse> {
     if matched_corner_count < 4 {
         bail!("ChArUco 只匹配到 {matched_corner_count} 个角点，求解位姿至少需要 4 个");
     }
-    let camera_matrix = matrix3(&request.camera_matrix)?;
-    let distortion = Mat::from_slice(&request.distortion)?;
+    let camera_matrix = matrix3(camera_matrix_values)?;
+    let distortion = Mat::from_slice(distortion_values)?;
     let mut rotation_vector = Mat::default();
     let mut translation = Mat::default();
     if !geometry::solve_pnp(
@@ -146,29 +88,24 @@ fn detect(request: DetectRequest) -> Result<DetectResponse> {
         &distortion,
         &rotation_vector,
         &translation,
-        request.board.square_size_m * 2.0,
+        board_config.square_size_m as f32 * 2.0,
     )?;
     let mut visualization = Vector::<u8>::new();
     if !imgcodecs::imencode_def(".png", &image, &mut visualization)? {
         bail!("cannot encode calibration visualization");
     }
-    Ok(DetectResponse {
-        pose: matrix_pose(&rotation, &translation)?,
-        visualization_png_base64: BASE64.encode(visualization.as_slice()),
+    Ok(Detection {
+        board_in_camera: matrix_pose(&rotation, &translation)?,
+        visualization_png: visualization.to_vec(),
     })
 }
 
-fn solve(request: SolveRequest) -> Result<SolveResponse> {
-    if request.tcp_in_base.len() != request.board_in_camera.len() {
+pub fn solve(tcp_in_base_poses: &[Pose3], board_in_camera_poses: &[Pose3]) -> Result<Solution> {
+    if tcp_in_base_poses.len() != board_in_camera_poses.len() {
         bail!("calibration pose arrays have different lengths");
     }
-    let tcp_in_base = request
-        .tcp_in_base
-        .iter()
-        .map(transform)
-        .collect::<Vec<_>>();
-    let board_in_camera = request
-        .board_in_camera
+    let tcp_in_base = tcp_in_base_poses.iter().map(transform).collect::<Vec<_>>();
+    let board_in_camera = board_in_camera_poses
         .iter()
         .map(transform)
         .collect::<Vec<_>>();
@@ -216,7 +153,7 @@ fn solve(request: SolveRequest) -> Result<SolveResponse> {
             predicted.fixed_view::<3, 3>(0, 0) * observed.fixed_view::<3, 3>(0, 0).transpose();
         rotation_residuals_rad.push(((delta.trace() - 1.0) / 2.0).clamp(-1.0, 1.0).acos());
     }
-    Ok(SolveResponse {
+    Ok(Solution {
         camera_in_base: camera_in_base_pose,
         board_in_calibration_tool: board_in_tool_pose,
         translation_residuals_m,
@@ -265,25 +202,13 @@ fn matrix3(values: &[f64; 9]) -> Result<Mat> {
     .map_err(Into::into)
 }
 
-fn transform(value: &MatrixPose) -> Matrix4<f64> {
-    Matrix4::new(
-        value.rotation_matrix[0],
-        value.rotation_matrix[1],
-        value.rotation_matrix[2],
-        value.translation_m[0],
-        value.rotation_matrix[3],
-        value.rotation_matrix[4],
-        value.rotation_matrix[5],
-        value.translation_m[1],
-        value.rotation_matrix[6],
-        value.rotation_matrix[7],
-        value.rotation_matrix[8],
-        value.translation_m[2],
-        0.0,
-        0.0,
-        0.0,
-        1.0,
+fn transform(value: &Pose3) -> Matrix4<f64> {
+    let [x, y, z, w] = value.orientation_xyzw;
+    Isometry3::from_parts(
+        Translation3::from(Vector3::from(value.position_m)),
+        UnitQuaternion::new_normalize(Quaternion::new(w, x, y, z)),
     )
+    .to_homogeneous()
 }
 
 fn inverse(value: &Matrix4<f64>) -> Result<Matrix4<f64>> {
@@ -310,24 +235,28 @@ fn opencv_poses(values: &[Matrix4<f64>]) -> Result<(Vector<Mat>, Vector<Mat>)> {
     Ok((rotations, translations))
 }
 
-fn matrix_pose(rotation: &Mat, translation: &Mat) -> Result<MatrixPose> {
-    Ok(MatrixPose {
-        rotation_matrix: [
-            *rotation.at_2d::<f64>(0, 0)?,
-            *rotation.at_2d::<f64>(0, 1)?,
-            *rotation.at_2d::<f64>(0, 2)?,
-            *rotation.at_2d::<f64>(1, 0)?,
-            *rotation.at_2d::<f64>(1, 1)?,
-            *rotation.at_2d::<f64>(1, 2)?,
-            *rotation.at_2d::<f64>(2, 0)?,
-            *rotation.at_2d::<f64>(2, 1)?,
-            *rotation.at_2d::<f64>(2, 2)?,
-        ],
-        translation_m: [
+fn matrix_pose(rotation: &Mat, translation: &Mat) -> Result<Pose3> {
+    let rotation = Matrix3::from_row_slice(&[
+        *rotation.at_2d::<f64>(0, 0)?,
+        *rotation.at_2d::<f64>(0, 1)?,
+        *rotation.at_2d::<f64>(0, 2)?,
+        *rotation.at_2d::<f64>(1, 0)?,
+        *rotation.at_2d::<f64>(1, 1)?,
+        *rotation.at_2d::<f64>(1, 2)?,
+        *rotation.at_2d::<f64>(2, 0)?,
+        *rotation.at_2d::<f64>(2, 1)?,
+        *rotation.at_2d::<f64>(2, 2)?,
+    ]);
+    let orientation =
+        UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rotation));
+    let quaternion = orientation.quaternion();
+    Ok(Pose3 {
+        position_m: [
             *translation.at_2d::<f64>(0, 0)?,
             *translation.at_2d::<f64>(1, 0)?,
             *translation.at_2d::<f64>(2, 0)?,
         ],
+        orientation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
     })
 }
 
@@ -343,24 +272,28 @@ fn synthetic_pose(rotation_vector: [f64; 3], translation: [f64; 3]) -> Matrix4<f
     value
 }
 
-fn matrix_pose_from_transform(value: &Matrix4<f64>) -> MatrixPose {
-    MatrixPose {
-        rotation_matrix: [
-            value[(0, 0)],
-            value[(0, 1)],
-            value[(0, 2)],
-            value[(1, 0)],
-            value[(1, 1)],
-            value[(1, 2)],
-            value[(2, 0)],
-            value[(2, 1)],
-            value[(2, 2)],
-        ],
-        translation_m: [value[(0, 3)], value[(1, 3)], value[(2, 3)]],
+fn pose_from_transform(value: &Matrix4<f64>) -> Pose3 {
+    let rotation = Matrix3::new(
+        value[(0, 0)],
+        value[(0, 1)],
+        value[(0, 2)],
+        value[(1, 0)],
+        value[(1, 1)],
+        value[(1, 2)],
+        value[(2, 0)],
+        value[(2, 1)],
+        value[(2, 2)],
+    );
+    let orientation =
+        UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rotation));
+    let quaternion = orientation.quaternion();
+    Pose3 {
+        position_m: [value[(0, 3)], value[(1, 3)], value[(2, 3)]],
+        orientation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
     }
 }
 
-fn self_test() -> Result<()> {
+pub fn self_test() -> Result<()> {
     let camera = synthetic_pose([0.08, -0.12, 0.05], [0.24, -0.18, 0.42]);
     let board = synthetic_pose([-0.04, 0.03, 0.09], [0.02, 0.01, 0.06]);
     let tools = [
@@ -379,13 +312,12 @@ fn self_test() -> Result<()> {
         .iter()
         .map(|tool| camera_inverse * tool * board)
         .collect::<Vec<_>>();
-    let solved = solve(SolveRequest {
-        tcp_in_base: tools.iter().map(matrix_pose_from_transform).collect(),
-        board_in_camera: observations
-            .iter()
-            .map(matrix_pose_from_transform)
-            .collect(),
-    })?;
+    let tool_poses = tools.iter().map(pose_from_transform).collect::<Vec<_>>();
+    let observation_poses = observations
+        .iter()
+        .map(pose_from_transform)
+        .collect::<Vec<_>>();
+    let solved = solve(&tool_poses, &observation_poses)?;
     if (transform(&solved.camera_in_base) - camera).amax() > 1e-7
         || (transform(&solved.board_in_calibration_tool) - board).amax() > 1e-7
     {
@@ -401,24 +333,37 @@ fn self_test() -> Result<()> {
     if !imgcodecs::imencode_def(".png", &board_image, &mut encoded)? {
         bail!("synthetic ChArUco board was not encoded");
     }
-    let detection = detect(DetectRequest {
-        image_png_base64: BASE64.encode(encoded.as_slice()),
-        camera_matrix: [800.0, 0.0, 300.0, 0.0, 800.0, 300.0, 0.0, 0.0, 1.0],
-        distortion: vec![0.0; 5],
-        board: BoardConfig {
+    let detection = detect(
+        encoded.as_slice(),
+        &[800.0, 0.0, 300.0, 0.0, 800.0, 300.0, 0.0, 0.0, 1.0],
+        &[0.0; 5],
+        &CalibrationBoard {
+            pattern: "charuco".into(),
             dictionary: "DICT_4X4_50".into(),
             squares_x: 5,
             squares_y: 5,
             square_size_m: 0.015,
             marker_size_m: 0.011,
+            measured_width_m: 0.075,
+            measured_height_m: 0.075,
         },
-    })?;
-    if detection.visualization_png_base64.is_empty() {
+    )?;
+    if detection.visualization_png.is_empty() {
         bail!("calibration visualization was not produced");
     }
-    println!(
-        "{}",
-        json!({"opencv": core::get_version_string()?, "self_test": "passed"})
-    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn opencv_rust_uses_opencv_5() {
+        assert_eq!(opencv::core::CV_VERSION_MAJOR, 5);
+        assert_eq!(opencv::core::get_version_major(), 5);
+    }
+
+    #[test]
+    fn opencv_recovers_synthetic_hand_eye_transforms() {
+        super::self_test().unwrap();
+    }
 }

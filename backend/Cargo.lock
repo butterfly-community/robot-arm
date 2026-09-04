@@ -591,10 +591,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "camera-capture-node"
+name = "camera-calibration"
 version = "0.1.0"
 dependencies = [
- "approx",
+ "eyre",
+ "nalgebra",
+ "opencv",
+ "robot-arm-messages",
+]
+
+[[package]]
+name = "camera-node"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "camera-calibration",
  "dora-node-api",
  "eyre",
  "image",
@@ -604,6 +615,7 @@ dependencies = [
  "robot-arm-messages",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2931,36 +2943,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "perception-core"
-version = "0.1.0"
-dependencies = [
- "approx",
- "image",
- "nalgebra",
- "robot-arm-messages",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "perception-node"
-version = "0.1.0"
-dependencies = [
- "approx",
- "base64 0.23.1",
- "dora-node-api",
- "eyre",
- "image",
- "json-config-store",
- "nalgebra",
- "opencv",
- "perception-core",
- "reqwest",
- "robot-arm-messages",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "pest"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3591,7 +3573,6 @@ name = "realsense-camera"
 version = "0.1.0"
 dependencies = [
  "eyre",
- "nalgebra",
  "num-traits",
  "realsense-rust",
  "robot-arm-messages",
@@ -3707,9 +3688,7 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -3931,6 +3910,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scene-core"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "image",
+ "nalgebra",
+ "robot-arm-messages",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "scene-node"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "dora-node-api",
+ "eyre",
+ "image",
+ "json-config-store",
+ "nalgebra",
+ "reqwest",
+ "robot-arm-messages",
+ "scene-core",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -6,17 +6,17 @@
 | --- | --- | --- |
 | `controller-input-node` | NOLO、SDL3、模拟输入的能力发现、绑定、命名和反馈路由 | 空间积分、机械臂运动学 |
 | `spatial-transform-node` | 输入换基、接管原点、相对位姿与无绝对来源分量的积分 | 设备枚举、MoveIt |
-| `camera-capture-node` | 相机刷新、能力与厂商扩展、profile/上送频率保存、打开/关闭、同步 RGB-D 帧发布 | 对齐、点云、标定、AI、ROS |
-| `perception-node` | 深度对齐、外参标定、计算服务编排、结构化三维场景与抓取候选 | 相机 SDK、轨迹规划、硬件执行 |
+| `camera-node` | 相机能力与配置、采集、SDK 深度对齐、外参标定、原子 RGB-D 发布 | 点云、AI、ROS |
+| `scene-node` | 异步计算服务编排、结构化三维场景与抓取候选 | 相机 SDK/配置、轨迹规划、硬件执行 |
 | `perception-compute` | YOLOE 提示词识别/分割与 GraspGenX 抓取姿态推理 | 相机、Dora、ROS、动作编排 |
 | `stararm-102-motion-node` | 控制模式、普通规划、Servo、MTC 抓放与结构化场景到 MoveIt 的映射 | 串口协议、相机原始数据 |
 | `stararm-102-execution-node` | FashionStar 总线、执行反馈、模拟执行和型号元数据 | IK、感知、目标语义 |
 | `service-status-node` | 按依赖图聚合服务就绪状态 | 业务恢复策略 |
 | `web-gateway-node` | HTTP/WebSocket 与 Dora 请求、状态、按需资源转发 | 设备逻辑、图像计算、配置持久化 |
 
-`perception-core`、`spatial-core`、`realsense-camera` 等是库而不是额外服务。capture 与
-perception 部署在同一个 `perception` Dora machine/Compose 容器中，既保持进程边界，也不增加
-部署服务。计算服务可部署到远端，但只和 `perception-node` 交互。
+`scene-core`、`camera-calibration`、`spatial-core`、`realsense-camera` 等是库而不是额外服务。
+camera 与 scene 部署在同一个 `perception` Dora machine/Compose 容器中。计算服务可远程部署，
+但只和 `scene-node` 交互。
 
 ## 唯一数据流
 
@@ -26,16 +26,23 @@ perception 部署在同一个 `perception` Dora machine/Compose 容器中，既�
 
 感知链路：
 
-`相机适配器 → camera-capture → CameraFrameBundle → perception → WorldScene → motion/MoveIt`
+`相机适配器 → camera-node → CameraFrameBundle → scene-node → WorldScene → motion/MoveIt`
+
+抓放场景的自然语言入口位于 Next.js 服务端：
+
+`自然语言 → 结构化任务 → 既有感知请求 → 实际 WorldScene 实例选择 → 既有 MTC 抓放请求`
+
+AI 不生成坐标、姿态或轨迹；它只编排网页已有的手动接口。选中的对象和放置区域必须存在于本次
+`WorldScene`，且抓取对象必须含计算服务实际返回的抓取候选，否则请求不会进入 motion。
 
 真实设备和模拟只在第一层适配器不同。下游没有模拟专用消息、备用 topic、双写或失败时自动
-回退。没有选择相机是合法状态：capture 不发布假空帧，perception 清除旧场景有效性，手动和
+回退。没有选择相机是合法状态：camera 不发布假空帧，scene 清除旧场景有效性，手动和
 相对控制仍可使用。
 
 ## 深度相机
 
 相机硬件 SDK 不属于节点业务代码。`realsense-camera` crate 封装 librealsense context、设备与
-profile 枚举、pipeline、frameset、厂商元数据和 FFI；`camera-capture-node` 内的 RealSense 文件
+profile 枚举、pipeline、frameset、SDK Align、厂商元数据和 FFI；`camera-node` 内的 RealSense 文件
 只是把 crate 接到统一 `CameraDriver`/`CameraStream` 接口。资源通过 Rust 所有权和 `Drop`
 释放，不额外维护一套显式关闭状态机。
 
@@ -49,9 +56,9 @@ profile 枚举、pipeline、frameset、厂商元数据和 FFI；`camera-capture-
 
 一次 frameset 只发布一个专用 Arrow `CameraFrameBundle`：元数据使用 JSON 字段，彩色与深度平面
 是 Arrow Binary buffer，不使用 Base64 或数值 JSON 数组。bundle 同时包含宽高、stride、格式、
-光学 frame、设备/主机时间、内参、畸变、深度到彩色外参和设备读取的深度比例。队列使用
-`queue_size: 1` 和 `drop_oldest`。采集节点持续排空设备帧；可配置的上送频率只控制最新完整帧束
-进入 Dora 的速率，不改变设备采集 profile。设备缺帧和主动略过分别报告。
+光学 frame、设备/主机时间、共享像素平面内参、设备读取的深度比例和本帧外参快照。彩色与深度
+同尺寸、同 frame id。采集任务持续排空设备帧，但只对到达上送周期的 frameset 执行 Align 和
+载荷复制；可配置上送频率不改变设备 profile。
 
 `simulation:pick-place-scene` 与 `simulation:depth-grid` 是正式相机适配器，声明自己的 RGB-D
 profile、标定元数据和确定性资产。前者还根据正式模拟执行反馈的 TCP 位姿渲染 ChArUco 板，
@@ -59,8 +66,7 @@ profile、标定元数据和确定性资产。前者还根据正式模拟执行�
 
 ## 感知、标定与规划
 
-`perception-node` 持续缓存最新原子 RGB-D 帧；只有用户点击“运行一次感知”时，才按 bundle 的
-两路内参、畸变与深度到彩色外参完成对齐并调用计算服务。保存提示词、刷新图像和相机持续来帧
+`scene-node` 持续缓存最新原子 RGB-D 帧；只有用户点击“运行一次感知”时才调用计算服务。保存提示词、刷新图像和相机持续来帧
 都不会运行 YOLOE 或 GraspGenX。实例掩码与深度生成设备无关的 `SceneObject`、`PlacementRegion` 和
 `SceneObstacle`；实例点云仅发送给 GraspGenX。计算服务按请求的夹爪资产 ID 工作，不读取机械臂
 型号，也不向场景硬编码方块、筐或抓取姿态。
@@ -69,10 +75,12 @@ profile、标定元数据和确定性资产。前者还根据正式模拟执行�
 PlanningScene；不再运行 ROS 相机驱动、`cv_bridge`、`PointCloudOctomapUpdater`、OctoMap
 清理接口或感知 Marker 双写。MoveIt 继续负责机械臂自身、刚性地面及结构化场景的碰撞检查。
 
-自动外参标定从 `RobotModelInfo.calibration_targets` 读取型号声明的姿态，通过现有手动关节
+`camera-node` 的自动外参标定从 `RobotModelInfo.calibration_targets` 读取型号声明的姿态，通过现有手动关节
 `MotionRequest` FIFO 逐项执行。每项运动成功后稳定等待 10 秒，再使用新 RGB 帧检测 ChArUco，
 记录同一时刻的正式 `ArmState` 和 FK TCP 位姿。OpenCV 5 的 ChArUco、PnP 与
 Robot-World/Hand-Eye SHAH 求解由 Rust `opencv` crate 调用；结果只有经网页确认后才按来源保存。
+基础镜像通过 CMake package 将该 crate 固定到 `/opt/opencv5`，并在测试中同时检查编译期和运行期
+OpenCV 主版本。
 
 ## 运动与执行
 
@@ -88,13 +96,21 @@ execution 把唯一 `ArmCommand` 映射为真机总线或软件反馈。选择�
 ## 配置与界面
 
 需要持久化的节点复用 `json-config-store`，各自拥有一个 JSON 文件；不存在中央配置服务或前端
-配置副本。相机 profile 属于 capture，外参和 AI 提示词属于 perception，绑定属于 input，串口和
+配置副本。相机 profile 与外参属于 camera，AI 提示词属于 scene，绑定属于 input，串口和
 反馈周期属于 execution。
 
-感知页按“感知任务、相机来源与配置、相机外参标定、相机参数、采集数据、AI 模型与结果”组织。
-相机与模型是不同所有者，但在一个页面中协作。彩色、深度、标定和叠加图只在用户请求快照时
-通过网关返回；大 RGB-D 帧不会持续经过浏览器。Three.js 机械臂继续以 `ArmState` 显示真实/软件
-反馈，以最后命令显示半透明目标，不由相机链路替代。
+感知页按“相机与应用场景、相机外参标定、相机参数、采集数据、AI 模型与结果”组织。抓放作为
+一个可折叠应用栏目存在：自然语言 AI 是主入口，提示词模型、手动感知、目标选择和 MTC 详情在
+同一栏目的“抓放详细配置”中默认收起；它不代表感知服务的全部能力。相机与模型是不同所有者，但在一个页面中协作。深度、标定和叠加图按请求通过网关返回；实时
+彩色视频由 `camera-node` 从同一 pipeline 分流，经节点内 WebSocket 直接交给 Canvas，独立于
+感知 RGB-D 上送频率。大 RGB-D 帧和深度不会持续经过浏览器。Three.js 机械臂继续以 `ArmState`
+显示真实/软件反馈，以最后命令显示半透明目标，不由相机链路替代。
+
+自然语言抓放使用 Next.js Route Handler 和 Vercel AI SDK 的 OpenAI-compatible provider。API
+密钥只从容器运行环境读取，不进入浏览器 bundle、Dora 消息或后端应用镜像；Compose 从根目录
+未跟踪的 `.env` 注入配置。任务解析为每个指代生成从具体描述到常见视觉类别的少量同义提示词，
+再以本次实际场景 ID 完成选择；长推理的代理等待只对该 Route Handler 生效，不改变其他 API 的
+时序。
 
 ## 部署
 

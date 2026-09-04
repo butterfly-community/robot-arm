@@ -1,10 +1,10 @@
 {
   "services": {
-    "camera-capture": [],
+    "camera": [],
     "controller-input": [],
-    "perception": [],
+    "scene": [],
     "spatial-transform": ["controller-input"],
     "stararm-102-execution": [],
-    "stararm-102-motion": ["spatial-transform", "perception", "stararm-102-execution"]
+    "stararm-102-motion": ["spatial-transform", "scene", "stararm-102-execution"]
   }
 }

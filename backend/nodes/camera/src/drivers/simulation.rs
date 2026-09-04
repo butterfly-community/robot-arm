@@ -11,11 +11,12 @@ use nalgebra::{
 };
 use robot_arm_messages::{
     CameraDriverParameterValue, CameraFrameBundle, CameraImagePlane, CameraIntrinsics,
-    CameraSourceInfo, CameraStreamKind, CameraStreamProfile, Pose3, SCHEMA_VERSION, ToolPose,
+    CameraRawVideoFrame, CameraSourceInfo, CameraStreamKind, CameraStreamProfile,
+    DepthCameraCalibration, Pose3, SCHEMA_VERSION, ToolPose,
 };
 use serde::Deserialize;
 
-use super::{CameraDriver, CameraStream};
+use super::{CameraDriver, CameraPoll, CameraStream};
 
 const CONFIG: &str = include_str!("../../assets/simulation-cameras.json");
 const PICK_PLACE_RGB: &[u8] = include_bytes!("../../assets/pick-place-scene.png");
@@ -133,10 +134,10 @@ struct SimulationStream {
 }
 
 impl CameraStream for SimulationStream {
-    fn next_frameset(&mut self) -> Result<Option<CameraFrameBundle>> {
+    fn poll_frame(&mut self, materialize: bool) -> Result<CameraPoll> {
         let now = Instant::now();
         if self.next_frame_at.is_some_and(|deadline| now < deadline) {
-            return Ok(None);
+            return Ok(CameraPoll::Pending);
         }
         let deadline = now + self.frame_period;
         self.next_frame_at = Some(deadline);
@@ -160,37 +161,95 @@ impl CameraStream for SimulationStream {
             self.next_frame_at = Some(Instant::now() + self.frame_period);
         }
         let intrinsics = intrinsics(&self.config.calibration);
-        Ok(Some(CameraFrameBundle {
+        let color = CameraImagePlane {
+            width,
+            height,
+            stride_bytes: width * 3,
+            pixel_format: "rgb8".into(),
+            frame_id: self.config.calibration.frame_id.clone(),
+            data: color,
+        };
+        let video_frame = Box::new(CameraRawVideoFrame {
             schema_version: SCHEMA_VERSION,
             sequence: self.sequence,
             source_id: self.config.source_id.clone(),
-            device_time_ns: now_ns,
-            device_time_domain: "simulation_clock".into(),
             received_time_ns: now_ns,
-            color: CameraImagePlane {
-                width,
-                height,
-                stride_bytes: width * 3,
-                pixel_format: "rgb8".into(),
-                frame_id: self.config.calibration.frame_id.clone(),
-                data: color,
-            },
-            depth: CameraImagePlane {
-                width,
-                height,
-                stride_bytes: width * 2,
-                pixel_format: "z16le".into(),
-                frame_id: self.config.calibration.frame_id.clone(),
-                data: depth.iter().flat_map(|value| value.to_le_bytes()).collect(),
-            },
-            color_intrinsics: intrinsics.clone(),
-            depth_intrinsics: intrinsics,
-            depth_to_color: Pose3 {
-                position_m: [0.0; 3],
-                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            },
-            depth_scale_m: self.config.depth_scale_m,
-        }))
+            color: color.clone(),
+        });
+        if !materialize {
+            return Ok(CameraPoll::Captured {
+                sequence: self.sequence,
+                received_time_ns: now_ns,
+                video_frame,
+                frame: None,
+            });
+        }
+        Ok(CameraPoll::Captured {
+            sequence: self.sequence,
+            received_time_ns: now_ns,
+            video_frame,
+            frame: Some(Box::new(CameraFrameBundle {
+                schema_version: SCHEMA_VERSION,
+                sequence: self.sequence,
+                source_id: self.config.source_id.clone(),
+                device_time_ns: now_ns,
+                device_time_domain: "simulation_clock".into(),
+                received_time_ns: now_ns,
+                color,
+                aligned_depth: CameraImagePlane {
+                    width,
+                    height,
+                    stride_bytes: width * 2,
+                    pixel_format: "z16le".into(),
+                    frame_id: self.config.calibration.frame_id.clone(),
+                    data: depth.iter().flat_map(|value| value.to_le_bytes()).collect(),
+                },
+                intrinsics,
+                depth_scale_m: self.config.depth_scale_m,
+                calibration: Some(depth_camera_calibration(
+                    &self.config,
+                    self.sequence,
+                    now_ns,
+                )),
+            })),
+        })
+    }
+}
+
+fn depth_camera_calibration(
+    config: &SimulationConfig,
+    sequence: u64,
+    source_time_ns: i64,
+) -> DepthCameraCalibration {
+    let camera_matrix = config.calibration.camera_matrix;
+    DepthCameraCalibration {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        source_time_ns,
+        source_id: config.source_id.clone(),
+        parent_frame_id: "base_link".into(),
+        frame_id: config.calibration.frame_id.clone(),
+        translation_m: config.camera_in_base.position_m,
+        orientation_xyzw: config.camera_in_base.orientation_xyzw,
+        width: config.calibration.width,
+        height: config.calibration.height,
+        distortion_model: config.calibration.distortion_model.clone(),
+        distortion: config.calibration.distortion.clone(),
+        camera_matrix,
+        projection_matrix: [
+            camera_matrix[0],
+            camera_matrix[1],
+            camera_matrix[2],
+            0.0,
+            camera_matrix[3],
+            camera_matrix[4],
+            camera_matrix[5],
+            0.0,
+            camera_matrix[6],
+            camera_matrix[7],
+            camera_matrix[8],
+            0.0,
+        ],
     }
 }
 
@@ -473,6 +532,15 @@ fn now_ns() -> i64 {
 mod tests {
     use super::*;
 
+    fn materialized(stream: &mut dyn CameraStream) -> CameraFrameBundle {
+        match stream.poll_frame(true).unwrap() {
+            CameraPoll::Captured {
+                frame: Some(frame), ..
+            } => *frame,
+            _ => panic!("expected a materialized simulation frame"),
+        }
+    }
+
     #[test]
     fn replay_is_declared_and_deterministic() {
         let mut driver = SimulationDriver::new().unwrap();
@@ -490,12 +558,37 @@ mod tests {
             .find(|profile| profile.stream == CameraStreamKind::Depth)
             .unwrap();
         let mut stream = driver.open(&source.source_id, color, depth, &[]).unwrap();
-        let first = stream.next_frameset().unwrap().unwrap();
+        let first = materialized(stream.as_mut());
         std::thread::sleep(Duration::from_millis(110));
-        let second = stream.next_frameset().unwrap().unwrap();
+        let second = materialized(stream.as_mut());
         assert_eq!(second.sequence, first.sequence + 1);
         assert_eq!(first.color.data, second.color.data);
-        assert_eq!(first.depth.data, second.depth.data);
+        assert_eq!(first.aligned_depth.data, second.aligned_depth.data);
+        assert_eq!(
+            first.calibration.as_ref().unwrap().source_id,
+            source.source_id
+        );
+    }
+
+    #[test]
+    fn skipped_frame_is_not_materialized() {
+        let mut driver = SimulationDriver::new().unwrap();
+        let source = driver.discover().unwrap().remove(0);
+        let color = source
+            .profiles
+            .iter()
+            .find(|profile| profile.stream == CameraStreamKind::Color)
+            .unwrap();
+        let depth = source
+            .profiles
+            .iter()
+            .find(|profile| profile.stream == CameraStreamKind::Depth)
+            .unwrap();
+        let mut stream = driver.open(&source.source_id, color, depth, &[]).unwrap();
+        assert!(matches!(
+            stream.poll_frame(false).unwrap(),
+            CameraPoll::Captured { frame: None, .. }
+        ));
     }
 
     #[test]
@@ -515,7 +608,7 @@ mod tests {
             .unwrap()
             .clone();
         let mut baseline = driver.open(&source.source_id, &color, &depth, &[]).unwrap();
-        let without_tool = baseline.next_frameset().unwrap().unwrap();
+        let without_tool = materialized(baseline.as_mut());
         drop(baseline);
 
         // Put the board 50 cm along the selected camera's optical axis. This is
@@ -530,10 +623,13 @@ mod tests {
             orientation_xyzw: [q.i, q.j, q.k, q.w],
         });
         let mut rendered = driver.open(&source.source_id, &color, &depth, &[]).unwrap();
-        let with_tool = rendered.next_frameset().unwrap().unwrap();
+        let with_tool = materialized(rendered.as_mut());
 
         assert_ne!(without_tool.color.data, with_tool.color.data);
-        assert_ne!(without_tool.depth.data, with_tool.depth.data);
+        assert_ne!(
+            without_tool.aligned_depth.data,
+            with_tool.aligned_depth.data
+        );
     }
 
     #[test]

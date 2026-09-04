@@ -201,6 +201,35 @@ impl CameraImagePlane {
         }
         Ok(())
     }
+
+    fn validate_format(
+        &self,
+        label: &str,
+        formats: &[(&str, usize)],
+    ) -> Result<(), ArrowCodecError> {
+        let bytes_per_pixel = formats
+            .iter()
+            .find_map(|(format, bytes)| (self.pixel_format == *format).then_some(*bytes))
+            .ok_or_else(|| {
+                ArrowCodecError::InvalidCameraFrame(format!(
+                    "{label} pixel format {} is not supported",
+                    self.pixel_format
+                ))
+            })?;
+        let packed_stride = (self.width as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or_else(|| {
+                ArrowCodecError::InvalidCameraFrame(format!(
+                    "{label} packed row size overflows the host address space"
+                ))
+            })?;
+        if (self.stride_bytes as usize) < packed_stride {
+            return Err(ArrowCodecError::InvalidCameraFrame(format!(
+                "{label} stride is smaller than its packed pixel row"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,12 +241,23 @@ pub struct CameraFrameBundle {
     pub device_time_domain: String,
     pub received_time_ns: i64,
     pub color: CameraImagePlane,
-    pub depth: CameraImagePlane,
-    pub color_intrinsics: CameraIntrinsics,
-    pub depth_intrinsics: CameraIntrinsics,
-    /// Rigid transform from the depth optical frame to the color optical frame.
-    pub depth_to_color: Pose3,
+    /// Depth registered to the color image plane by the camera driver adapter.
+    pub aligned_depth: CameraImagePlane,
+    /// Intrinsics of the shared color/aligned-depth image plane.
+    pub intrinsics: CameraIntrinsics,
     pub depth_scale_m: f64,
+    /// Camera pose calibration snapshot used with this exact RGB-D frame.
+    pub calibration: Option<DepthCameraCalibration>,
+}
+
+/// Latest color frame for live Web display, independent of RGB-D output throttling.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraRawVideoFrame {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub source_id: String,
+    pub received_time_ns: i64,
+    pub color: CameraImagePlane,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -251,11 +291,10 @@ struct CameraFrameBundleMetadata {
     device_time_domain: String,
     received_time_ns: i64,
     color: CameraImagePlaneMetadata,
-    depth: CameraImagePlaneMetadata,
-    color_intrinsics: CameraIntrinsics,
-    depth_intrinsics: CameraIntrinsics,
-    depth_to_color: Pose3,
+    aligned_depth: CameraImagePlaneMetadata,
+    intrinsics: CameraIntrinsics,
     depth_scale_m: f64,
+    calibration: Option<DepthCameraCalibration>,
 }
 
 impl CameraFrameBundleMetadata {
@@ -268,11 +307,10 @@ impl CameraFrameBundleMetadata {
             device_time_domain: bundle.device_time_domain.clone(),
             received_time_ns: bundle.received_time_ns,
             color: bundle.color.metadata(),
-            depth: bundle.depth.metadata(),
-            color_intrinsics: bundle.color_intrinsics.clone(),
-            depth_intrinsics: bundle.depth_intrinsics.clone(),
-            depth_to_color: bundle.depth_to_color.clone(),
+            aligned_depth: bundle.aligned_depth.metadata(),
+            intrinsics: bundle.intrinsics.clone(),
             depth_scale_m: bundle.depth_scale_m,
+            calibration: bundle.calibration.clone(),
         }
     }
 
@@ -285,11 +323,10 @@ impl CameraFrameBundleMetadata {
             device_time_domain: self.device_time_domain,
             received_time_ns: self.received_time_ns,
             color: self.color.with_data(color_data),
-            depth: self.depth.with_data(depth_data),
-            color_intrinsics: self.color_intrinsics,
-            depth_intrinsics: self.depth_intrinsics,
-            depth_to_color: self.depth_to_color,
+            aligned_depth: self.aligned_depth.with_data(depth_data),
+            intrinsics: self.intrinsics,
             depth_scale_m: self.depth_scale_m,
+            calibration: self.calibration,
         }
     }
 }
@@ -302,8 +339,7 @@ pub fn camera_frame_to_arrow(bundle: &CameraFrameBundle) -> Result<ArrayRef, Arr
             expected: SCHEMA_VERSION,
         });
     }
-    bundle.color.validate("color")?;
-    bundle.depth.validate("depth")?;
+    validate_camera_frame(bundle)?;
     let metadata = serde_json::to_string(&CameraFrameBundleMetadata::from_bundle(bundle))?;
     let fields = Fields::from(vec![
         Field::new("schema_version", DataType::UInt32, false),
@@ -317,7 +353,9 @@ pub fn camera_frame_to_arrow(bundle: &CameraFrameBundle) -> Result<ArrayRef, Arr
             Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])) as ArrayRef,
             Arc::new(StringArray::from(vec![metadata])) as ArrayRef,
             Arc::new(BinaryArray::from_vec(vec![bundle.color.data.as_slice()])) as ArrayRef,
-            Arc::new(BinaryArray::from_vec(vec![bundle.depth.data.as_slice()])) as ArrayRef,
+            Arc::new(BinaryArray::from_vec(vec![
+                bundle.aligned_depth.data.as_slice(),
+            ])) as ArrayRef,
         ],
         None,
     )))
@@ -365,9 +403,40 @@ pub fn camera_frame_from_arrow(array: &dyn Array) -> Result<CameraFrameBundle, A
         });
     }
     let bundle = metadata.with_data(colors.value(0).to_vec(), depths.value(0).to_vec());
-    bundle.color.validate("color")?;
-    bundle.depth.validate("depth")?;
+    validate_camera_frame(&bundle)?;
     Ok(bundle)
+}
+
+fn validate_camera_frame(bundle: &CameraFrameBundle) -> Result<(), ArrowCodecError> {
+    bundle.color.validate("color")?;
+    bundle.color.validate_format(
+        "color",
+        &[
+            ("rgb8", 3),
+            ("bgr8", 3),
+            ("rgba8", 4),
+            ("bgra8", 4),
+            ("y8", 1),
+        ],
+    )?;
+    bundle.aligned_depth.validate("aligned_depth")?;
+    bundle
+        .aligned_depth
+        .validate_format("aligned_depth", &[("z16le", 2), ("z16be", 2)])?;
+    if bundle.color.width != bundle.aligned_depth.width
+        || bundle.color.height != bundle.aligned_depth.height
+        || bundle.color.frame_id != bundle.aligned_depth.frame_id
+        || bundle.intrinsics.width != bundle.color.width
+        || bundle.intrinsics.height != bundle.color.height
+    {
+        return Err(ArrowCodecError::InvalidShape);
+    }
+    if !bundle.depth_scale_m.is_finite() || bundle.depth_scale_m <= 0.0 {
+        return Err(ArrowCodecError::InvalidCameraFrame(
+            "depth scale must be finite and positive".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,19 +728,6 @@ pub struct InputDiscoveryState {
     pub service: ServiceState,
 }
 
-/// Device-independent XYZ point cloud. Coordinates are metres in `frame_id`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DepthPointCloudFrame {
-    pub schema_version: u32,
-    pub sequence: u64,
-    pub source_time_ns: i64,
-    pub source_id: String,
-    pub frame_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub points_xyz_m: Vec<[f32; 3]>,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DepthCameraCalibration {
     pub schema_version: u32,
@@ -779,6 +835,8 @@ pub struct PerceptionState {
     pub point_count: Option<u64>,
     pub last_frame_time_ns: Option<i64>,
     pub last_scene_sequence: Option<u64>,
+    pub task_request_id: Option<String>,
+    pub task_state: RequestState,
     pub calibrated: bool,
     pub original_error: Option<String>,
     pub service: ServiceState,
@@ -1925,35 +1983,24 @@ mod tests {
                 frame_id: "camera_color_optical_frame".into(),
                 data: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             },
-            depth: CameraImagePlane {
+            aligned_depth: CameraImagePlane {
                 width: 2,
                 height: 2,
                 stride_bytes: 4,
                 pixel_format: "z16le".into(),
-                frame_id: "camera_depth_optical_frame".into(),
+                frame_id: "camera_color_optical_frame".into(),
                 data: vec![1, 0, 2, 0, 3, 0, 4, 0],
             },
-            color_intrinsics: CameraIntrinsics {
+            intrinsics: CameraIntrinsics {
                 width: 2,
                 height: 2,
                 focal_length_px: [2.0, 2.0],
                 principal_point_px: [0.5, 0.5],
                 distortion_model: "none".into(),
                 distortion: vec![0.0; 5],
-            },
-            depth_intrinsics: CameraIntrinsics {
-                width: 2,
-                height: 2,
-                focal_length_px: [2.0, 2.0],
-                principal_point_px: [0.5, 0.5],
-                distortion_model: "none".into(),
-                distortion: vec![0.0; 5],
-            },
-            depth_to_color: Pose3 {
-                position_m: [0.0; 3],
-                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
             },
             depth_scale_m: 0.001,
+            calibration: None,
         }
     }
 
@@ -1986,7 +2033,32 @@ mod tests {
     #[test]
     fn camera_frame_rejects_payload_length_mismatch() {
         let mut frame = camera_frame_fixture();
-        frame.depth.data.pop();
+        frame.aligned_depth.data.pop();
+        assert!(matches!(
+            camera_frame_to_arrow(&frame),
+            Err(ArrowCodecError::InvalidCameraFrame(_))
+        ));
+    }
+
+    #[test]
+    fn camera_frame_rejects_inconsistent_pixel_metadata() {
+        let mut frame = camera_frame_fixture();
+        frame.color.pixel_format = "unknown".into();
+        assert!(matches!(
+            camera_frame_to_arrow(&frame),
+            Err(ArrowCodecError::InvalidCameraFrame(_))
+        ));
+
+        let mut frame = camera_frame_fixture();
+        frame.color.stride_bytes = frame.color.width * 2;
+        frame.color.data = vec![0; (frame.color.stride_bytes * frame.color.height) as usize];
+        assert!(matches!(
+            camera_frame_to_arrow(&frame),
+            Err(ArrowCodecError::InvalidCameraFrame(_))
+        ));
+
+        let mut frame = camera_frame_fixture();
+        frame.depth_scale_m = 0.0;
         assert!(matches!(
             camera_frame_to_arrow(&frame),
             Err(ArrowCodecError::InvalidCameraFrame(_))
@@ -2008,8 +2080,8 @@ mod tests {
         let mut frame = camera_frame_fixture();
         frame.color.stride_bytes = 8;
         frame.color.data = (0..16).collect();
-        frame.depth.stride_bytes = 6;
-        frame.depth.data = (0..12).collect();
+        frame.aligned_depth.stride_bytes = 6;
+        frame.aligned_depth.data = (0..12).collect();
         let encoded = camera_frame_to_arrow(&frame).unwrap();
         assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
     }
@@ -2021,14 +2093,13 @@ mod tests {
         frame.color.height = 720;
         frame.color.stride_bytes = 1_280 * 3;
         frame.color.data = vec![17; (frame.color.stride_bytes * frame.color.height) as usize];
-        frame.depth.width = 1_280;
-        frame.depth.height = 720;
-        frame.depth.stride_bytes = 1_280 * 2;
-        frame.depth.data = vec![23; (frame.depth.stride_bytes * frame.depth.height) as usize];
-        frame.color_intrinsics.width = 1_280;
-        frame.color_intrinsics.height = 720;
-        frame.depth_intrinsics.width = 1_280;
-        frame.depth_intrinsics.height = 720;
+        frame.aligned_depth.width = 1_280;
+        frame.aligned_depth.height = 720;
+        frame.aligned_depth.stride_bytes = 1_280 * 2;
+        frame.aligned_depth.data =
+            vec![23; (frame.aligned_depth.stride_bytes * frame.aligned_depth.height) as usize];
+        frame.intrinsics.width = 1_280;
+        frame.intrinsics.height = 720;
         let encoded = camera_frame_to_arrow(&frame).unwrap();
         assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
     }

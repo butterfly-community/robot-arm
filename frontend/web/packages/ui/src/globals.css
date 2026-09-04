@@ -984,6 +984,30 @@ input[type="range"] {
   border-radius: var(--radius-control);
   background: #070a0e;
 }
+.camera-video {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #070a0e;
+}
+.camera-video canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.camera-video-error {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  left: 12px;
+  color: var(--danger);
+  font-size: var(--text-caption);
+  text-align: center;
+}
 
 .perception-section {
   min-width: 0;
@@ -1127,6 +1151,78 @@ input[type="range"] {
 .perception-task-actions {
   justify-content: flex-end;
   margin-bottom: 24px;
+}
+
+.instruction-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.instruction-task .button {
+  white-space: nowrap;
+}
+.ai-task-panel {
+  display: grid;
+  gap: 18px;
+  margin-bottom: 20px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 55%, var(--line));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--cyan) 5%, #0b0e12);
+}
+.ai-task-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.ai-task-heading h3 {
+  margin: 0 0 6px;
+  font-size: var(--text-section);
+}
+.ai-task-heading p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-control);
+  line-height: 1.6;
+}
+.disclosure {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #0b0e12;
+  overflow: hidden;
+}
+.disclosure-toggle {
+  width: 100%;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 0;
+  padding: 12px 16px;
+  color: var(--muted-strong);
+  background: transparent;
+  font-size: var(--text-label);
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+.disclosure[data-state="open"] > .disclosure-toggle {
+  border-bottom: 1px solid var(--line);
+}
+.disclosure[data-state="open"] .card-chevron {
+  margin-top: 5px;
+  transform: rotate(225deg);
+}
+.disclosure-content {
+  overflow: hidden;
+}
+.disclosure-content-inner {
+  padding: 20px;
 }
 .perception-task-summary {
   display: grid;
@@ -1752,8 +1848,13 @@ input[type="range"] {
   .calibration-parameter-grid,
   .perception-task-summary,
   .perception-task-grid,
-  .perception-model-settings {
+  .perception-model-settings,
+  .instruction-task {
     grid-template-columns: 1fr;
+  }
+  .ai-task-heading {
+    flex-direction: column;
+    gap: 10px;
   }
   .calibration-step-heading {
     flex-direction: column;

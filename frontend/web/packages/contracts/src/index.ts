@@ -362,6 +362,9 @@ export interface PerceptionInstanceSummary {
   grasp_candidate_count: number;
 }
 
+export type RequestState =
+  "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
+
 export interface PerceptionState {
   schema_version: number;
   enabled: boolean;
@@ -378,6 +381,8 @@ export interface PerceptionState {
   point_count?: number | null;
   last_frame_time_ns?: number | null;
   last_scene_sequence?: number | null;
+  task_request_id?: string | null;
+  task_state: RequestState;
   calibrated: boolean;
   original_error?: string | null;
 }
@@ -425,8 +430,7 @@ export interface ManipulationTaskState {
   placement_region_id?: string | null;
   pick_position_m?: [number, number, number] | null;
   place_position_m?: [number, number, number] | null;
-  state:
-    "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
+  state: RequestState;
   stage?: string | null;
   solution_count?: number | null;
   selected_cost?: number | null;

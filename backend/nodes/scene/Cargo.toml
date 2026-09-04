@@ -1,22 +1,13 @@
 [package]
-name = "perception-node"
+name = "scene-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-opencv-runtime = ["dep:opencv"]
-
 [[bin]]
-name = "perception-node"
+name = "scene-node"
 path = "src/main.rs"
-
-[[bin]]
-name = "perception-calibration"
-path = "src/bin/perception-calibration.rs"
-required-features = ["opencv-runtime"]
 
 [dependencies]
 base64.workspace = true
@@ -25,12 +16,8 @@ eyre.workspace = true
 image.workspace = true
 json-config-store.workspace = true
 nalgebra.workspace = true
-opencv = { workspace = true, optional = true }
-perception-core.workspace = true
+scene-core.workspace = true
 reqwest.workspace = true
 robot-arm-messages.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-
-[dev-dependencies]
-approx.workspace = true
+tokio.workspace = true

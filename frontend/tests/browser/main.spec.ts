@@ -478,6 +478,7 @@ test("perception page uses the simulation camera through the canonical path", as
   page,
   request,
 }) => {
+  test.setTimeout(90_000);
   const before = await (await request.get("/api/perception/state")).json();
   const original = before.values.perception_state;
   const originalCamera = before.values.camera_state;
@@ -493,6 +494,16 @@ test("perception page uses the simulation camera through the canonical path", as
       },
     });
     await page.goto("/perception/");
+    const manualSettings = page
+      .getByText("抓放详细配置", { exact: true })
+      .locator(
+        "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' disclosure ')][1]",
+      );
+    await expect(manualSettings.locator(".disclosure-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await manualSettings.locator(".disclosure-toggle").click();
     const camera = page.getByLabel("相机来源");
     await page.getByRole("button", { name: "刷新相机列表" }).click();
     await expect(
@@ -551,6 +562,36 @@ test("perception page uses the simulation camera through the canonical path", as
       page.getByText("已配置", { exact: true }).first(),
     ).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
+    await page.route("**/perception/api/instruction/", async (route) => {
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          action: "pick_place",
+          reason: "",
+          perception_prompts: ["red cube", "gray storage bin"],
+          placement_labels: ["gray storage bin"],
+          object_id: "red-cube-0",
+          placement_region_id: "gray-bin-0-interior",
+          request_id: "browser-natural-language-task",
+          accepted: true,
+        }),
+      });
+    });
+    await page.getByLabel("自然语言任务").fill("把红色方块放进灰色置物筐");
+    await page.getByRole("button", { name: "用 AI 执行抓放" }).click();
+    await expect(
+      page.getByText("最近一次 AI 编排", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("red-cube-0 → gray-bin-0-interior"),
+    ).toBeVisible();
+    await expect(page.getByLabel("识别与分割提示词")).toHaveValue(
+      "red cube, gray storage bin",
+    );
+    await expect(page.getByLabel("放置区域角色")).toHaveValue(
+      "gray storage bin",
+    );
     await camera.selectOption("");
     await expect(camera).toHaveValue("");
     await expect
@@ -687,7 +728,7 @@ test("perception layout groups camera workflow and structured results", async ({
       has: page.getByText(title, { exact: true }),
     });
   const camera = await card("相机来源与配置").boundingBox();
-  const task = await card("感知任务").boundingBox();
+  const task = await card("抓放场景").boundingBox();
   const calibration = await card("相机外参标定").boundingBox();
   const parameters = await card("相机内参与外参").boundingBox();
   expect(camera).not.toBeNull();
@@ -709,19 +750,29 @@ test("perception layout groups camera workflow and structured results", async ({
   ).toHaveCount(0);
 
   await expect(card("识别与分割模型")).toHaveCount(0);
-  const modelSelect = card("感知任务").locator(
+  const manualSettings = page
+    .getByText("抓放详细配置", { exact: true })
+    .locator(
+      "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' disclosure ')][1]",
+    );
+  await expect(manualSettings.locator(".disclosure-toggle")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await manualSettings.locator(".disclosure-toggle").click();
+  const modelSelect = card("抓放场景").locator(
     'select[aria-label="提示词模型"]',
   );
   await expect(modelSelect).toHaveValue(/.+/);
   await expect(modelSelect.locator("option")).toHaveCount(1);
-  const savePromptButton = await card("感知任务")
+  const savePromptButton = await card("抓放场景")
     .getByRole("button", { name: "保存提示词配置" })
     .boundingBox();
-  const runPerceptionButton = await card("感知任务")
+  const runPerceptionButton = await card("抓放场景")
     .getByRole("button", { name: "运行一次感知" })
     .boundingBox();
-  const executeButton = await card("感知任务")
-    .getByRole("button", { name: "执行抓放" })
+  const executeButton = await card("抓放场景")
+    .getByRole("button", { name: "执行抓放", exact: true })
     .boundingBox();
   expect(savePromptButton).not.toBeNull();
   expect(runPerceptionButton).not.toBeNull();

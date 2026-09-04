@@ -49,7 +49,10 @@ fn main() -> Result<()> {
     let mut stream = driver.open(&source_id, &color, &depth, &[])?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Some(frame) = stream.next_frameset()? {
+        if let realsense_camera::FramePoll::Captured {
+            frame: Some(frame), ..
+        } = stream.poll_frame(true)?
+        {
             println!(
                 "frameset source={} sequence={} color={}x{} {} depth={}x{} {} scale={}",
                 frame.source_id,
@@ -57,18 +60,14 @@ fn main() -> Result<()> {
                 frame.color.width,
                 frame.color.height,
                 frame.color.pixel_format,
-                frame.depth.width,
-                frame.depth.height,
-                frame.depth.pixel_format,
+                frame.aligned_depth.width,
+                frame.aligned_depth.height,
+                frame.aligned_depth.pixel_format,
                 frame.depth_scale_m
             );
             println!(
-                "intrinsics color={} {:?} depth={} {:?} depth_to_color={:?}",
-                frame.color_intrinsics.distortion_model,
-                frame.color_intrinsics.distortion,
-                frame.depth_intrinsics.distortion_model,
-                frame.depth_intrinsics.distortion,
-                frame.depth_to_color
+                "aligned intrinsics={} {:?}",
+                frame.intrinsics.distortion_model, frame.intrinsics.distortion
             );
             drop(stream);
             let refreshed = driver.discover()?;
@@ -78,7 +77,11 @@ fn main() -> Result<()> {
             let mut reopened = driver.open(&source_id, &color, &depth, &[])?;
             let reopen_deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < reopen_deadline {
-                if let Some(reopened_frame) = reopened.next_frameset()? {
+                if let realsense_camera::FramePoll::Captured {
+                    frame: Some(reopened_frame),
+                    ..
+                } = reopened.poll_frame(true)?
+                {
                     println!(
                         "reopened source={} sequence={}",
                         reopened_frame.source_id, reopened_frame.sequence

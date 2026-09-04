@@ -4,13 +4,17 @@
 
 项目只维护两个 Ubuntu 26.04 基础镜像：
 
-- `robot-arm-services-backend-base:2026.09.03-r2`：原生构建依赖、ROS 2 Lyrical、MoveIt/MTC、
+- `robot-arm-services-backend-base:2026.09.04-r1`：原生构建依赖、ROS 2 Lyrical、MoveIt/MTC、
   noVNC/TigerVNC、librealsense、OpenCV 5、Python/uv、PyTorch、YOLOE、GraspGenX、Rust、Dora，
   以及打过项目补丁的 StarArm-102 厂家包和构建期生成的夹爪资产。
 - `robot-arm-services-frontend-base:2026.09.03-r1`：Node.js 与 pnpm。
 
-后端基础镜像不包含 ROS RealSense 驱动、`cv_bridge` 或 MoveIt 3D sensor updater；相机采集直接
-使用 librealsense，原始数据不进入 ROS。模型权重从仓库
+后端基础镜像不安装 MoveIt 元包，也不安装 ROS RealSense 驱动或 `cv_bridge`；只保留当前实际
+使用的 OMPL、Servo、MTC、RViz 和运动执行组件。`move_group` 自身仍依赖 occupancy-map-monitor
+库，但项目不配置 3D sensor updater，也不向 ROS 发布相机原始数据。相机采集直接使用
+librealsense。OpenCV 5 在 ROS 前安装到 `/opt/opencv5`；`opencv-rust` 禁用 `pkg_config` 探测并
+通过 `OpenCV_DIR` 选择这份 CMake package，避免误用 ROS 的 OpenCV。Python 模型环境使用
+`opencv-python` 5。模型权重从仓库
 `backend/services/perception-compute/models` 复制进镜像，避免每次联网下载；GraspGenX 源码按
 固定提交在镜像内取得，不污染主机。
 
@@ -25,6 +29,9 @@
 
 应用 Dockerfile 不安装系统环境、不下载厂家包、不生成夹爪资产，也不拆构建/运行阶段或逐个搬运
 二进制。不同 Dora 服务共享同一个后端应用镜像，不按服务复制 Dockerfile。
+
+自然语言抓放的 OpenAI-compatible 地址、模型和密钥属于 `web-perception` 运行配置。Compose 从
+仓库根目录 `.env` 读取并注入容器，镜像构建不读取密钥；`.env.example` 只保留无密钥模板。
 
 ## 日常构建与启停
 
@@ -47,9 +54,9 @@ Compose `init`，保证停止信号转发和子进程回收。
 - 系统、语言工具链、ROS/MoveIt、OpenCV、相机 SDK、AI 运行环境或权重；
 - 厂家源码版本、项目补丁、设备 ROS 包或构建期夹爪资产。
 
-后端基础镜像按注释分组处理：通用工具、原生/USB、ROS、MoveIt、VNC、RealSense、OpenCV、
+后端基础镜像按注释分组处理：通用工具、原生/USB、OpenCV、ROS、MoveIt、VNC、RealSense、
 Python/模型、Rust/Dora、StarArm-102。厂家包只在最后一个连续设备模块中 clone、校验、patch、
-编译和生成资产一次。
+编译和生成资产一次。OpenCV 的选择环境变量位于 Rust 工具链和所有 Cargo 构建之前。
 
 升级使用新的不可复用标签：
 

@@ -1,10 +1,8 @@
 use eyre::Result;
 use realsense_camera::RealSenseStream;
-use robot_arm_messages::{
-    CameraDriverParameterValue, CameraFrameBundle, CameraSourceInfo, CameraStreamProfile,
-};
+use robot_arm_messages::{CameraDriverParameterValue, CameraSourceInfo, CameraStreamProfile};
 
-use super::{CameraDriver, CameraStream};
+use super::{CameraDriver, CameraPoll, CameraStream};
 
 pub(crate) use realsense_camera::RealSenseDriver;
 
@@ -31,7 +29,20 @@ impl CameraDriver for RealSenseDriver {
 }
 
 impl CameraStream for RealSenseStream {
-    fn next_frameset(&mut self) -> Result<Option<CameraFrameBundle>> {
-        RealSenseStream::next_frameset(self)
+    fn poll_frame(&mut self, materialize: bool) -> Result<CameraPoll> {
+        RealSenseStream::poll_frame(self, materialize).map(|poll| match poll {
+            realsense_camera::FramePoll::Pending => CameraPoll::Pending,
+            realsense_camera::FramePoll::Captured {
+                sequence,
+                received_time_ns,
+                video_frame,
+                frame,
+            } => CameraPoll::Captured {
+                sequence,
+                received_time_ns,
+                video_frame,
+                frame,
+            },
+        })
     }
 }

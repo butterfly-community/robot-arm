@@ -32,7 +32,7 @@ Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
 
 应用镜像固定继承已经验证的基础镜像：
 
-- 后端：`robot-arm-services-backend-base:2026.09.03-r2`
+- 后端：`robot-arm-services-backend-base:2026.09.04-r1`
 - 前端：`robot-arm-services-frontend-base:2026.09.03-r1`
 
 Compose 只构建应用层。只有系统依赖、ROS/MoveIt、OpenCV、相机 SDK、AI 环境、厂家包或设备
@@ -43,16 +43,25 @@ Compose 只构建应用层。只有系统依赖、ROS/MoveIt、OpenCV、相机 S
 
 深度相机默认未选择，只在网页点击刷新后枚举。RealSense 和内置模拟相机都进入：
 
-`驱动 crate/模拟适配器 → camera-capture-node → CameraFrameBundle → perception-node → WorldScene`
+`驱动 crate/模拟适配器 → camera-node → CameraFrameBundle → scene-node → WorldScene`
 
-`CameraFrameBundle` 原子携带同步 RGB-D、两路内参、畸变、深度到彩色外参、设备深度比例和
-时间信息。原始相机数据不经过 ROS；`perception-node` 负责对齐、标定、识别、分割、三维实例和
+`CameraFrameBundle` 原子携带已对齐到彩色平面的 RGB-D、共享平面内参、设备深度比例、时间信息
+和逐帧外参快照。原始相机数据不经过 ROS；`camera-node` 负责采集、对齐和标定，`scene-node` 负责编排识别、分割、三维实例和
 抓取候选，MoveIt 只接收结构化目标、放置区和显式障碍。相机 profile 与已确认标定由后端文件
 保存，当前选择不持久化，因此重启仍回到未选择状态。配置以设备序列号等稳定身份关联，不使用
 枚举索引或 USB 口；离线设备及暂时缺失的 profile 仍保留在配置中，并在网页置灰说明。网页可
 选择驱动实际报告的分辨率、格式和采集 FPS，并独立设置不高于采集频率的上送 FPS；厂商专属
-底层参数通过驱动命名空间扩展展示，不会形成第二条感知链路。YOLOE 和 GraspGenX 只在用户点击
+底层参数通过驱动命名空间扩展展示，不会形成第二条感知链路。采集和 SDK Align 在 Tokio 长期
+任务中执行，高采集、低上送时只物化待发布帧。YOLOE 和 GraspGenX 只在用户点击
 “运行一次感知”时调用。
+
+感知页顶部把抓放作为一个可折叠应用场景展示。自然语言入口由 Next.js 服务端使用 AI SDK 将
+指令转换为开放词汇提示词，并从本次真实 `WorldScene` 中选择对象和放置区域，再调用同一套手动
+感知与 MTC 抓放接口；AI 不生成机械臂坐标、姿态或轨迹。模型配置、手动执行与规划详情默认
+收起，抓放场景之外的相机、标定和通用场景结果仍保持独立。
+
+首次启用自然语言入口时复制 `.env.example` 为 `.env` 并填写密钥。Compose 只把这些变量注入
+`web-perception`，密钥不会进入浏览器或 Git。
 
 ## 常用验收
 

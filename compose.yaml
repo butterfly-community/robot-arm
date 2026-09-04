@@ -78,8 +78,8 @@ services:
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: perception
-      CAMERA_CAPTURE_CONFIG: /config/camera-capture.json
-      PERCEPTION_CONFIG: /config/perception.json
+      CAMERA_CONFIG: /config/camera.json
+      SCENE_CONFIG: /config/scene.json
     depends_on:
       dora-coordinator: { condition: service_started }
       perception-compute: { condition: service_healthy }
@@ -171,7 +171,13 @@ services:
     environment: { WEB_APP: spatial }
   web-perception:
     <<: *web-app
-    environment: { WEB_APP: perception }
+    environment:
+      WEB_APP: perception
+      GATEWAY_INTERNAL_URL: http://web-gateway:8080
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_API_AUTH_HEADER: ${AI_API_AUTH_HEADER:-Authorization}
   web-motion:
     <<: *web-app
     environment: { WEB_APP: motion }

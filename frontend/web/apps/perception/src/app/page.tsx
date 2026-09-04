@@ -14,6 +14,7 @@ import Image from "next/image";
 import {
   Button,
   Card,
+  Disclosure,
   Field,
   HelpDot,
   Input,
@@ -24,6 +25,9 @@ import {
   StatusBadge,
 } from "@robot/ui";
 import { useState } from "react";
+
+import { CameraVideo } from "./camera-video";
+import type { InstructionResult } from "./instruction-flow";
 
 const initialBoard = {
   squaresX: "5",
@@ -121,6 +125,10 @@ export default function Page() {
   const [board, setBoard] = useState(initialBoard);
   const [promptText, setPromptText] = useState("");
   const [placementLabels, setPlacementLabels] = useState("");
+  const [instruction, setInstruction] = useState("");
+  const [instructionPending, setInstructionPending] = useState(false);
+  const [instructionResult, setInstructionResult] =
+    useState<InstructionResult>();
   const [pending, setPending] = useState(false);
   const [pendingPerceptionAction, setPendingPerceptionAction] =
     useState<string>();
@@ -293,16 +301,6 @@ export default function Page() {
               : null,
         });
         if (!accepted) return;
-        if (action === "reset") {
-          await send("/api/perception/request", {
-            schema_version: schemaVersion,
-            request_id: requestId(),
-            action: "reset",
-            source_id: selectedSourceId,
-            classes: null,
-            placement_labels: null,
-          });
-        }
         if (action === "apply") {
           const connected = await send("/api/perception/camera", {
             schema_version: schemaVersion,
@@ -454,6 +452,41 @@ export default function Page() {
     }
   }
 
+  async function executeNaturalLanguageTask() {
+    if (!instruction.trim()) return;
+    setInstructionPending(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/perception/api/instruction/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ instruction }),
+      });
+      const value = (await response.json()) as
+        InstructionResult | { original_error?: string };
+      if (
+        !response.ok ||
+        ("original_error" in value && typeof value.original_error === "string")
+      ) {
+        throw new Error(
+          "original_error" in value && value.original_error
+            ? value.original_error
+            : `自然语言任务请求失败 (${response.status})`,
+        );
+      }
+      const result = value as InstructionResult;
+      setInstructionResult(result);
+      setPromptText(result.perception_prompts.join(", "));
+      setPlacementLabels(result.placement_labels.join(", "));
+      setObjectId(result.object_id);
+      setRegionId(result.placement_region_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstructionPending(false);
+    }
+  }
+
   async function calibrate(action: CalibrationAction) {
     setPendingCalibrationAction(action);
     try {
@@ -484,7 +517,6 @@ export default function Page() {
   }
 
   const capturedFrames = [
-    ["彩色图", "Color frame", "color.png", perception?.color_frame],
     ["深度图", "Depth frame", "depth.png", perception?.depth_frame],
   ] as const;
 
@@ -531,13 +563,13 @@ export default function Page() {
         <section className="perception-section">
           <PerceptionSectionHeading
             index="01"
-            title="感知任务与相机"
-            description="左侧选择相机并维护配置，右侧配置通用提示词模型并按需使用结构化结果；下方并排显示标定流程和相机参数。"
+            title="相机与应用场景"
+            description="左侧选择相机并维护配置，右侧按需展开具体应用场景；抓放只是结构化感知结果的一种使用方式。"
           />
           <Card
             className="span-6 aligned-row-card perception-task-card"
-            eyebrow="Prompt-driven perception"
-            title="感知任务"
+            eyebrow="Pick and place scenario"
+            title="抓放场景"
             action={
               <StatusBadge
                 tone={
@@ -552,146 +584,213 @@ export default function Page() {
               </StatusBadge>
             }
           >
-            <div className="perception-task-summary">
-              <div>
-                <span>当前相机</span>
-                <strong>{camera?.selected_source_id ?? "未选择"}</strong>
+            <div className="ai-task-panel">
+              <div className="ai-task-heading">
+                <div>
+                  <h3>AI 自然语言抓放</h3>
+                  <p>
+                    描述要抓取的物体和放置位置；AI
+                    会配置开放词汇感知、选择真实场景实例，再调用现有 MTC
+                    抓放流程。
+                  </p>
+                </div>
+                <StatusBadge tone="cyan">服务端 AI</StatusBadge>
               </div>
-              <div>
-                <span>二维实例</span>
-                <strong>{perception?.instances.length ?? 0}</strong>
-              </div>
-              <div>
-                <span>抓取候选</span>
-                <strong>{graspCandidateCount}</strong>
-              </div>
-              <div>
-                <span>放置区域</span>
-                <strong>{scene?.placement_regions.length ?? 0}</strong>
-              </div>
-              <div>
-                <span>场景序号</span>
-                <strong>{perception?.last_scene_sequence ?? "—"}</strong>
-              </div>
-            </div>
-            <div className="perception-model-settings">
-              <Field
-                label="提示词模型"
-                hint="来自感知计算服务实际加载的开放词汇模型；模型按提示词识别和分割画面，不预设抓放场景。"
-              >
-                <select
-                  key={perception?.model ?? "waiting"}
-                  aria-label="提示词模型"
-                  defaultValue={perception?.model ?? ""}
+              <div className="instruction-task">
+                <Field
+                  label="自然语言任务"
+                  hint="AI 只把文字转换为已有的提示词、场景实例和抓放请求；感知、MTC 规划、碰撞检查与执行仍走同一条手动链路。"
                 >
-                  {!perception?.model && <option value="">等待模型</option>}
-                  {perception?.model && (
-                    <option value={perception.model}>{perception.model}</option>
-                  )}
-                </select>
-              </Field>
-              <Field
-                label="识别与分割提示词"
-                hint="逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
-              >
-                <Input
-                  value={selectedPrompts}
-                  onChange={(event) => setPromptText(event.currentTarget.value)}
-                />
-              </Field>
-              <Field
-                label="放置区域角色"
-                hint="可选的下游场景角色。填写已识别实例的提示词后，这些实例可作为放置区域；它不参与模型推理，也不是模型类别。"
-              >
-                <Input
-                  value={selectedPlacementLabels}
-                  onChange={(event) =>
-                    setPlacementLabels(event.currentTarget.value)
+                  <Input
+                    aria-label="自然语言任务"
+                    value={instruction}
+                    placeholder="例如：把红色方块放进灰色置物筐"
+                    onChange={(event) =>
+                      setInstruction(event.currentTarget.value)
+                    }
+                  />
+                </Field>
+                <Button
+                  variant="outline"
+                  disabled={
+                    pending ||
+                    instructionPending ||
+                    !instruction.trim() ||
+                    !camera?.streaming ||
+                    !perception?.calibrated ||
+                    perception?.task_state === "executing" ||
+                    manipulation?.state === "planning" ||
+                    manipulation?.state === "executing"
                   }
-                />
-              </Field>
-            </div>
-            <div className="card-actions perception-task-actions">
-              <Button
-                variant="outline"
-                disabled={pending}
-                onClick={() => perceptionRequest("apply", "model")}
-              >
-                {pendingPerceptionAction === "model:apply"
-                  ? "正在保存…"
-                  : "保存提示词配置"}
-              </Button>
-              <Button
-                variant="outline"
-                disabled={
-                  pending ||
-                  !camera?.streaming ||
-                  !perception?.color_frame ||
-                  !perception?.depth_frame ||
-                  !perception?.calibrated
-                }
-                onClick={() => perceptionRequest("refresh", "model")}
-              >
-                {pendingPerceptionAction === "model:refresh"
-                  ? "正在运行…"
-                  : "运行一次感知"}
-              </Button>
-            </div>
-            <div className="perception-task-grid">
-              <Field label="抓取目标">
-                <select
-                  value={selectedObject}
-                  onChange={(event) => setObjectId(event.currentTarget.value)}
+                  onClick={executeNaturalLanguageTask}
                 >
-                  <option value="">选择有抓取候选的实例</option>
-                  {scene?.objects
-                    .filter((item) => item.grasp_candidates.length)
-                    .map((item) => (
-                      <option key={item.object_id} value={item.object_id}>
-                        {item.label} · {item.object_id}
+                  {instructionPending ? "AI 正在编排并执行…" : "用 AI 执行抓放"}
+                </Button>
+              </div>
+              {instructionResult && (
+                <KeyValue
+                  label="最近一次 AI 编排"
+                  value={`${instructionResult.object_id} → ${instructionResult.placement_region_id}`}
+                  hint={`已使用提示词 ${instructionResult.perception_prompts.join(", ")} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
+                />
+              )}
+            </div>
+            <Disclosure
+              className="scenario-details"
+              title="抓放详细配置"
+              englishTitle="Pick and place details"
+            >
+              <div className="perception-task-summary">
+                <div>
+                  <span>当前相机</span>
+                  <strong>{camera?.selected_source_id ?? "未选择"}</strong>
+                </div>
+                <div>
+                  <span>二维实例</span>
+                  <strong>{perception?.instances.length ?? 0}</strong>
+                </div>
+                <div>
+                  <span>抓取候选</span>
+                  <strong>{graspCandidateCount}</strong>
+                </div>
+                <div>
+                  <span>放置区域</span>
+                  <strong>{scene?.placement_regions.length ?? 0}</strong>
+                </div>
+                <div>
+                  <span>场景序号</span>
+                  <strong>{perception?.last_scene_sequence ?? "—"}</strong>
+                </div>
+              </div>
+              <div className="perception-model-settings">
+                <Field
+                  label="提示词模型"
+                  hint="来自感知计算服务实际加载的开放词汇模型；模型按提示词识别和分割画面，不预设抓放场景。"
+                >
+                  <select
+                    key={perception?.model ?? "waiting"}
+                    aria-label="提示词模型"
+                    defaultValue={perception?.model ?? ""}
+                  >
+                    {!perception?.model && <option value="">等待模型</option>}
+                    {perception?.model && (
+                      <option value={perception.model}>
+                        {perception.model}
+                      </option>
+                    )}
+                  </select>
+                </Field>
+                <Field
+                  label="识别与分割提示词"
+                  hint="逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
+                >
+                  <Input
+                    aria-label="识别与分割提示词"
+                    value={selectedPrompts}
+                    onChange={(event) =>
+                      setPromptText(event.currentTarget.value)
+                    }
+                  />
+                </Field>
+                <Field
+                  label="放置区域角色"
+                  hint="可选的下游场景角色。填写已识别实例的提示词后，这些实例可作为放置区域；它不参与模型推理，也不是模型类别。"
+                >
+                  <Input
+                    aria-label="放置区域角色"
+                    value={selectedPlacementLabels}
+                    onChange={(event) =>
+                      setPlacementLabels(event.currentTarget.value)
+                    }
+                  />
+                </Field>
+              </div>
+              <div className="card-actions perception-task-actions">
+                <Button
+                  variant="outline"
+                  disabled={pending}
+                  onClick={() => perceptionRequest("apply", "model")}
+                >
+                  {pendingPerceptionAction === "model:apply"
+                    ? "正在保存…"
+                    : "保存提示词配置"}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={
+                    pending ||
+                    perception?.task_state === "executing" ||
+                    !camera?.streaming ||
+                    !perception?.color_frame ||
+                    !perception?.depth_frame ||
+                    !perception?.calibrated
+                  }
+                  onClick={() => perceptionRequest("refresh", "model")}
+                >
+                  {pendingPerceptionAction === "model:refresh" ||
+                  perception?.task_state === "executing"
+                    ? "正在运行…"
+                    : "运行一次感知"}
+                </Button>
+              </div>
+              <div className="perception-task-grid">
+                <Field label="抓取目标">
+                  <select
+                    aria-label="抓取目标"
+                    value={selectedObject}
+                    onChange={(event) => setObjectId(event.currentTarget.value)}
+                  >
+                    <option value="">选择有抓取候选的实例</option>
+                    {scene?.objects
+                      .filter((item) => item.grasp_candidates.length)
+                      .map((item) => (
+                        <option key={item.object_id} value={item.object_id}>
+                          {item.label} · {item.object_id}
+                        </option>
+                      ))}
+                  </select>
+                </Field>
+                <Field label="放置区域">
+                  <select
+                    aria-label="放置区域"
+                    value={selectedRegion}
+                    onChange={(event) => setRegionId(event.currentTarget.value)}
+                  >
+                    <option value="">选择放置区域</option>
+                    {scene?.placement_regions.map((item) => (
+                      <option key={item.region_id} value={item.region_id}>
+                        {item.label} · {item.region_id}
                       </option>
                     ))}
-                </select>
-              </Field>
-              <Field label="放置区域">
-                <select
-                  value={selectedRegion}
-                  onChange={(event) => setRegionId(event.currentTarget.value)}
+                  </select>
+                </Field>
+              </div>
+              <div className="card-actions perception-task-actions">
+                <Button
+                  variant="outline"
+                  disabled={pending || !selectedObject || !selectedRegion}
+                  onClick={pickPlace}
                 >
-                  <option value="">选择放置区域</option>
-                  {scene?.placement_regions.map((item) => (
-                    <option key={item.region_id} value={item.region_id}>
-                      {item.label} · {item.region_id}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-            <div className="card-actions perception-task-actions">
-              <Button
-                variant="outline"
-                disabled={pending || !selectedObject || !selectedRegion}
-                onClick={pickPlace}
-              >
-                {pendingPerceptionAction === "pick-place"
-                  ? "正在提交…"
-                  : "执行抓放"}
-              </Button>
-            </div>
-            <KeyValue
-              label="阶段 / 方案 / 代价"
-              value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
-              hint="阶段来自运动节点当前进度；方案数和代价来自 MTC 规划结果，用于说明最终选择了哪一条方案。"
-            />
-            <KeyValue
-              label="抓取 / 放置位置"
-              value={`${numbers(manipulation?.pick_position_m ?? undefined)} / ${numbers(manipulation?.place_position_m ?? undefined)}`}
-              hint="来自当前选中物体和放置区域的结构化三维场景，单位为米，坐标系与场景坐标系一致。"
-            />
-            <KeyValue
-              label="错误"
-              value={manipulation?.original_error ?? "无"}
-            />
+                  {pendingPerceptionAction === "pick-place"
+                    ? "正在提交…"
+                    : "执行抓放"}
+                </Button>
+              </div>
+              <KeyValue
+                label="阶段 / 方案 / 代价"
+                value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
+                hint="阶段来自运动节点当前进度；方案数和代价来自 MTC 规划结果，用于说明最终选择了哪一条方案。"
+              />
+              <KeyValue
+                label="抓取 / 放置位置"
+                value={`${numbers(manipulation?.pick_position_m ?? undefined)} / ${numbers(manipulation?.place_position_m ?? undefined)}`}
+                hint="来自当前选中物体和放置区域的结构化三维场景，单位为米，坐标系与场景坐标系一致。"
+              />
+              <KeyValue
+                label="错误"
+                value={manipulation?.original_error ?? "无"}
+              />
+            </Disclosure>
           </Card>
           <Card
             className="span-6 aligned-row-card perception-camera-source"
@@ -1148,6 +1247,7 @@ export default function Page() {
                     <div className="calibration-parameter-grid">
                       <Field label="横向格数" hint="打印生成器的 Squares X。">
                         <Input
+                          aria-label="横向格数"
                           type="number"
                           disabled={calibration?.active}
                           value={board.squaresX}
@@ -1161,6 +1261,7 @@ export default function Page() {
                       </Field>
                       <Field label="纵向格数" hint="打印生成器的 Squares Y。">
                         <Input
+                          aria-label="纵向格数"
                           type="number"
                           disabled={calibration?.active}
                           value={board.squaresY}
@@ -1177,6 +1278,7 @@ export default function Page() {
                         hint="决定标定结果的米制尺度。"
                       >
                         <Input
+                          aria-label="单格边长 · mm"
                           type="number"
                           disabled={calibration?.active}
                           value={board.squareMm}
@@ -1193,6 +1295,7 @@ export default function Page() {
                         hint="黑色 ArUco Marker 的外边长。"
                       >
                         <Input
+                          aria-label="Marker 边长 · mm"
                           type="number"
                           disabled={calibration?.active}
                           value={board.markerMm}
@@ -1209,6 +1312,7 @@ export default function Page() {
                         hint="有效方格区域的实测总宽度。"
                       >
                         <Input
+                          aria-label="实测板宽 · mm"
                           type="number"
                           disabled={calibration?.active}
                           value={board.measuredWidthMm}
@@ -1225,6 +1329,7 @@ export default function Page() {
                         hint="有效方格区域的实测总高度。"
                       >
                         <Input
+                          aria-label="实测板高 · mm"
                           type="number"
                           disabled={calibration?.active}
                           value={board.measuredHeightMm}
@@ -1241,6 +1346,7 @@ export default function Page() {
                         hint="仅用于记录标定板安装夹具。"
                       >
                         <Input
+                          aria-label="标定夹具标识"
                           disabled={calibration?.active}
                           value={board.toolId}
                           onChange={(event) =>
@@ -1400,8 +1506,29 @@ export default function Page() {
           <PerceptionSectionHeading
             index="02"
             title="采集数据"
-            description="这里仅展示相机驱动直接产生的彩色帧和深度帧；对齐、识别、分割与三维实例属于下方 AI 结果。"
+            description="彩色视频按相机实际采集频率直接显示；深度与感知 RGB-D 按独立上送频率更新。对齐、识别、分割与三维实例属于下方 AI 结果。"
           />
+
+          <Card
+            className="span-6 aligned-row-card"
+            eyebrow="Live color stream"
+            title="彩色视频"
+          >
+            <CameraVideo streaming={camera?.streaming ?? false} />
+            <KeyValue
+              label="尺寸 / 编码"
+              value={
+                activeColorProfile
+                  ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
+                  : "—"
+              }
+            />
+            <KeyValue
+              label="设备采集 / 感知上送"
+              value={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
+              hint="彩色视频不受感知上送频率限制；两路来自同一个相机 pipeline，不会重复打开设备。"
+            />
+          </Card>
 
           {capturedFrames.map(([title, english, name, frame]) => (
             <Card

@@ -1,4 +1,4 @@
-FROM robot-arm-services-backend-base:2026.09.03-r2
+FROM robot-arm-services-backend-base:2026.09.04-r1
 WORKDIR /service
 COPY . .
 RUN uv pip install --python /opt/compute-venv/bin/python --no-deps .

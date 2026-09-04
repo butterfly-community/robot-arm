@@ -1,1 +1,1 @@
-"""Open-vocabulary segmentation service used by perception-node."""
+"""Open-vocabulary segmentation service used by scene-node."""

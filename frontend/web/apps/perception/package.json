@@ -8,17 +8,21 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.43",
     "@robot/contracts": "workspace:*",
     "@robot/gateway-client": "workspace:*",
     "@robot/ui": "workspace:*",
-    "next": "16.3.3",
+    "@thi.ng/pixel": "7.5.38",
+    "ai": "^7.0.91",
+    "next": "16.3.4",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
+    "@types/react-dom": "19.2.6",
     "eslint": "9.39.5",
     "typescript": "6.0.3"
   }
