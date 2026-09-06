@@ -1,14 +1,15 @@
 "use client";
 
+import { RGB888 } from "@thi.ng/pixel";
+import { Button } from "@robot/ui";
 import {
-  BGR888,
-  GRAY8,
-  Lane,
-  RGB888,
-  defIntFormat,
-  type IntFormat,
-} from "@thi.ng/pixel";
-import { useEffect, useRef, useState } from "react";
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 type RawFrame = {
   width: number;
@@ -18,47 +19,12 @@ type RawFrame = {
   bytes: Uint8Array;
 };
 
-const RGBA8888 = defIntFormat({
-  type: "u32",
-  size: 32,
-  alpha: 8,
-  channels: [
-    { size: 8, lane: Lane.RED },
-    { size: 8, lane: Lane.GREEN },
-    { size: 8, lane: Lane.BLUE },
-    { size: 8, lane: Lane.ALPHA },
-  ],
-});
-
-const BGRA8888 = defIntFormat({
-  type: "u32",
-  size: 32,
-  alpha: 8,
-  channels: [
-    { size: 8, lane: Lane.BLUE },
-    { size: 8, lane: Lane.GREEN },
-    { size: 8, lane: Lane.RED },
-    { size: 8, lane: Lane.ALPHA },
-  ],
-});
-
-const PIXEL_FORMATS: Record<
-  string,
-  { bytesPerPixel: number; format: IntFormat }
-> = {
-  rgb8: { bytesPerPixel: 3, format: RGB888 },
-  bgr8: { bytesPerPixel: 3, format: BGR888 },
-  rgba8: { bytesPerPixel: 4, format: RGBA8888 },
-  bgra8: { bytesPerPixel: 4, format: BGRA8888 },
-  y8: { bytesPerPixel: 1, format: GRAY8 },
-};
-
 export function rawFrameToRgba(
   frame: RawFrame,
 ): Uint8ClampedArray<ArrayBuffer> {
-  const sourceFormat = PIXEL_FORMATS[frame.format];
-  if (!sourceFormat) throw new Error(`不支持的彩色视频格式 ${frame.format}`);
-  const { bytesPerPixel, format } = sourceFormat;
+  if (frame.format !== "rgb8")
+    throw new Error(`不支持的彩色视频格式 ${frame.format}，相机应发布 rgb8`);
+  const bytesPerPixel = 3;
   if (
     frame.width <= 0 ||
     frame.height <= 0 ||
@@ -75,7 +41,7 @@ export function rawFrameToRgba(
       for (let channel = 0; channel < bytesPerPixel; channel += 1) {
         packed = (packed << 8) | frame.bytes[source + channel];
       }
-      pixels[y * frame.width + x] = format.toABGR(packed);
+      pixels[y * frame.width + x] = RGB888.toABGR(packed);
     }
   }
   // @thi.ng/pixel 的统一中间格式就是 Canvas 原生 ABGR32；在浏览器的
@@ -169,5 +135,177 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
       <canvas ref={canvas} aria-label="相机原始彩色视频" />
       {error && <span className="camera-video-error">{error}</span>}
     </div>
+  );
+}
+
+type FloatingCameraVideoProps = {
+  streaming: boolean;
+  profile: string;
+  rates: string;
+};
+
+type WindowPosition = {
+  left: number;
+  top: number;
+};
+
+const POSITION_STORAGE_KEY = "robot-arm:perception:color-video-position";
+const COLLAPSED_STORAGE_KEY = "robot-arm:perception:color-video-collapsed";
+const subscribeBrowser = () => () => undefined;
+const browserSnapshot = () => true;
+const serverSnapshot = () => false;
+
+function storedPosition(): WindowPosition | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const value = JSON.parse(
+      localStorage.getItem(POSITION_STORAGE_KEY) ?? "null",
+    ) as Partial<WindowPosition> | null;
+    if (
+      Number.isFinite(value?.left) &&
+      Number.isFinite(value?.top) &&
+      value!.left! >= 0 &&
+      value!.top! >= 0 &&
+      value!.left! < window.innerWidth - 48 &&
+      value!.top! < window.innerHeight - 48
+    ) {
+      return { left: value!.left!, top: value!.top! };
+    }
+  } catch {
+    // Ignore stale browser state and use the default corner.
+  }
+  return undefined;
+}
+
+function storedCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(COLLAPSED_STORAGE_KEY) === "true";
+}
+
+export function FloatingCameraVideo({
+  streaming,
+  profile,
+  rates,
+}: FloatingCameraVideoProps) {
+  const browserReady = useSyncExternalStore(
+    subscribeBrowser,
+    browserSnapshot,
+    serverSnapshot,
+  );
+  if (!browserReady) return null;
+  return (
+    <FloatingCameraVideoWindow
+      streaming={streaming}
+      profile={profile}
+      rates={rates}
+    />
+  );
+}
+
+function FloatingCameraVideoWindow({
+  streaming,
+  profile,
+  rates,
+}: FloatingCameraVideoProps) {
+  const panel = useRef<HTMLElement>(null);
+  const dragOffset = useRef<WindowPosition | undefined>(undefined);
+  const [position, setPosition] = useState<WindowPosition | undefined>(
+    storedPosition,
+  );
+  const positionRef = useRef<WindowPosition | undefined>(position);
+  const [collapsed, setCollapsed] = useState(storedCollapsed);
+
+  const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || !panel.current) return;
+    const bounds = panel.current.getBoundingClientRect();
+    dragOffset.current = {
+      left: event.clientX - bounds.left,
+      top: event.clientY - bounds.top,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const drag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!dragOffset.current || !panel.current) return;
+    const bounds = panel.current.getBoundingClientRect();
+    const nextPosition = {
+      left: Math.min(
+        Math.max(0, event.clientX - dragOffset.current.left),
+        Math.max(0, window.innerWidth - bounds.width),
+      ),
+      top: Math.min(
+        Math.max(0, event.clientY - dragOffset.current.top),
+        Math.max(0, window.innerHeight - bounds.height),
+      ),
+    };
+    positionRef.current = nextPosition;
+    setPosition(nextPosition);
+  };
+
+  const stopDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    dragOffset.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (positionRef.current) {
+      localStorage.setItem(
+        POSITION_STORAGE_KEY,
+        JSON.stringify(positionRef.current),
+      );
+    }
+  };
+
+  const style = position
+    ? ({
+        left: position.left,
+        top: position.top,
+        right: "auto",
+        bottom: "auto",
+      } satisfies CSSProperties)
+    : undefined;
+
+  return (
+    <aside
+      ref={panel}
+      className={`floating-camera-monitor${collapsed ? " is-collapsed" : ""}`}
+      style={style}
+      aria-label="彩色视频浮动窗口"
+    >
+      <header
+        className="floating-camera-header"
+        onPointerDown={startDrag}
+        onPointerMove={drag}
+        onPointerUp={stopDrag}
+        onPointerCancel={stopDrag}
+      >
+        <div>
+          <strong>彩色视频</strong>
+          <span>{streaming ? "实时" : "等待视频"}</span>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="floating-camera-toggle"
+          aria-expanded={!collapsed}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => {
+            const next = !collapsed;
+            setCollapsed(next);
+            localStorage.setItem(COLLAPSED_STORAGE_KEY, String(next));
+          }}
+        >
+          {collapsed ? "展开" : "收起"}
+        </Button>
+      </header>
+      {!collapsed && (
+        <div className="floating-camera-content">
+          <CameraVideo streaming={streaming} />
+          <div className="floating-camera-metadata">
+            <span title={profile}>{profile}</span>
+            <span title={rates}>{rates}</span>
+          </div>
+        </div>
+      )}
+    </aside>
   );
 }

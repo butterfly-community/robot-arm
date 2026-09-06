@@ -44,8 +44,13 @@ def assert_close(actual: float, expected: float, label: str) -> None:
 
 
 def verify(root: Path, mode: str) -> None:
-    urdf = root / "ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf"
-    joints = {joint.attrib["name"]: joint for joint in ET.parse(urdf).getroot().findall("joint")}
+    urdf = (
+        root / "ROS2_HUMBLE/src/stararm102_description/urdf/stararm102_description.urdf"
+    )
+    joints = {
+        joint.attrib["name"]: joint
+        for joint in ET.parse(urdf).getroot().findall("joint")
+    }
     limits = VENDOR_LIMITS if mode == "vendor" else PATCHED_LIMITS
     for name, (expected_lower, expected_upper) in limits.items():
         joint = joints.get(name)
@@ -58,12 +63,27 @@ def verify(root: Path, mode: str) -> None:
             raise ValueError(f"{name}: missing limit")
         assert_close(float(limit.attrib["lower"]), expected_lower, f"{name} lower")
         assert_close(float(limit.attrib["upper"]), expected_upper, f"{name} upper")
+        if mode == "patched":
+            assert_close(
+                float(limit.attrib["velocity"]), math.tau * 34 / 60, f"{name} velocity"
+            )
 
     right = joints["joint7_right"].find("mimic")
     if right is None or right.attrib != {"joint": "joint7_left", "multiplier": "-1"}:
         raise ValueError("joint7_right: expected a -1 mimic of joint7_left")
 
     if mode == "patched":
+        # Planning inherits the URDF velocity; a second YAML value can let MTC
+        # advance while ros2_control is still limiting the physical command.
+        planning = (
+            root / "ROS2_HUMBLE/src/stararm102_moveit_config/config/joint_limits.yaml"
+        )
+        if any(
+            "velocity" in line
+            for line in planning.read_text().splitlines()
+            if not line.lstrip().startswith("#") and "scaling" not in line
+        ):
+            raise ValueError("MoveIt YAML must inherit velocity limits from URDF")
         control = root / (
             "ROS2_HUMBLE/src/stararm102_moveit_config/config/"
             "stararm102_description.ros2_control.xacro"
@@ -80,8 +100,13 @@ def verify(root: Path, mode: str) -> None:
                 raise ValueError(f"ros2_control: missing {name}")
             command = joint.find("command_interface[@name='position']")
             if command is None:
-                raise ValueError(f"ros2_control {name}: missing position command interface")
-            parameters = {item.attrib["name"]: float(item.text) for item in command.findall("param")}
+                raise ValueError(
+                    f"ros2_control {name}: missing position command interface"
+                )
+            parameters = {
+                item.attrib["name"]: float(item.text)
+                for item in command.findall("param")
+            }
             assert_close(parameters["min"], expected_lower, f"ros2_control {name} min")
             assert_close(parameters["max"], expected_upper, f"ros2_control {name} max")
 

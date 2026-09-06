@@ -64,7 +64,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-1.919862177"
 +      upper="1.919862177"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -164,8 +164,8 @@
      <axis
@@ -75,7 +76,8 @@ index 7af5b15..23ff77f 100644
 +      lower="0"
 +      upper="3.141592654"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -221,9 +221,9 @@
        link="link3" />
@@ -87,7 +89,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-4.712388980"
 +      upper="0"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -280,8 +280,8 @@
      <axis
@@ -98,7 +101,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-1.570796327"
 +      upper="1.570796327"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -338,8 +338,8 @@
      <axis
@@ -109,7 +113,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-1.134464014"
 +      upper="1.134464014"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -396,8 +396,8 @@
      <axis
@@ -120,7 +125,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-2.617993878"
 +      upper="2.617993878"
        effort="100"
-       velocity="1" />
+-      velocity="1" />
++      velocity="3.560471674" />
    </joint>
 @@ -453,9 +453,9 @@
        link="link7_left" />
@@ -133,7 +139,8 @@ index 7af5b15..23ff77f 100644
 +      lower="0"
 +      upper="1.570796327"
        effort="5"
-       velocity="3.14" />
+-      velocity="3.14" />
++      velocity="3.560471674" />
    </joint>
 @@ -511,11 +511,17 @@
        link="link7_right" />
@@ -145,7 +152,8 @@ index 7af5b15..23ff77f 100644
 +      lower="-1.570796327"
        upper="0"
        effort="5"
-       velocity="3.14" />
+-      velocity="3.14" />
++      velocity="3.560471674" />
 -    <mimic joint="joint7_left" multiplier="-1" />
 -  </joint>
 -</robot>

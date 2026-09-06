@@ -50,6 +50,37 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 配置保存每台相机的 profile、上送 FPS、实际修改的驱动参数和已确认外参；运行选择与 streaming
 不保存。simulation 的预置外参使用相同查询与逐帧发布逻辑，重置恢复预置；真实来源重置后未标定。
 
+### 彩色通道约定
+
+业务链路统一发布 **RGB8**，不是把原生 BGR buffer 改个名字。原生 profile 仍如实报告设备格式；
+采集 worker 在驱动输出边界用 OpenCV `cvtColor` 将 BGR/BGRA/RGBA/灰度转换为 RGB8，原生 RGB8
+直接通过。行填充按真实 stride 处理，深度仍为 Z16，不参与颜色转换。
+
+| 边界 | 约定与实现 |
+| --- | --- |
+| camera → Arrow → scene / 视频 | RGB8；`CameraImagePlane::packed_rgb` 只移除行填充，不交换通道 |
+| PNG、PIL、YOLOE API | RGB；传 PIL 图给官方 predictor，不另转 BGR NumPy |
+| OpenCV 标定 | PNG 用 `IMREAD_COLOR_BGR` 解码；`CharucoDetector` 与 PNG 编码按 BGR 使用，结果 PNG 回到普通图像链路 |
+| 浏览器 Canvas | RGB888 通过 `@thi.ng/pixel` 转 Canvas RGBA，不手写设备格式转换 |
+
+OpenCV 5 支持 `IMREAD_COLOR_RGB`，但没有“所有算法切换 RGB”的全局开关。
+三通道 ChArUco 检测内部按 BGR 转灰度，因此不能直接把 RGB Mat 当作 BGR 使用。
+检测沿用官方默认的 ArUco 标记角点设置；ChArUco 棋盘角点仍由库做亚像素精修。
+检测前的 OpenCV 高斯预滤波（σ=0.8 像素）由同图、同真值对照确定，用于减小像素采样相位
+对梯度定位的影响；不改变几何或深度，诊断叠加仍绘制在原图上，不是新增检测通过门限。
+需要直接处理 RGB 的新算法应明确使用 `COLOR_RGB2GRAY` 等对应参数；不要在全链路来回换色。
+YOLOE 的官方 PIL loader 内部转 BGR，predictor 再转 RGB tensor，这是库内部契约，不应在调用前补一次转换。
+原始相机分辨率不等于模型张量输入尺寸：不再强制 `imgsz=max(image.size)`，由模型默认预处理
+处理输入；`retina_masks=True` 保证输出掩码回到原图尺寸。相同提示词的实测中，强制 1920
+输入没有检测结果，模型默认输入则识别到两项；相机图像、内参和标定仍保留 1920×1080。
+见 [Ultralytics Predict 参数](https://docs.ultralytics.com/modes/predict/#inference-arguments)。
+GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的颜色张量为零，不把展示用点云颜色当作模型输入。
+
+回归测试包含红/绿/蓝/非对称颜色、非整通道行填充、五种原生格式、OpenCV PNG 往返、
+官方 Ultralytics loader/predictor 的最终 RGB tensor 和浏览器 RGB888 显示。
+依据：[OpenCV 5 图像编解码接口](https://github.com/opencv/opencv/blob/5.0.0/modules/imgcodecs/include/opencv2/imgcodecs.hpp)、
+[ChArUco 检测实现](https://github.com/opencv/opencv/blob/5.0.0/modules/objdetect/src/aruco/charuco_detector.cpp)。
+
 ## `robot-arm-messages`
 
 小消息使用共享 JSON Arrow codec。`CameraFrameBundle` 用专用 codec，把元数据与两个 Arrow Binary
@@ -80,8 +111,8 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 
 relative、manual、calibration 和 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
 依次同步控制器、暂停 Servo、规划/执行并恢复 Servo。普通运动使用 MoveGroup，抓放使用型号 MTC
-组件。motion 只把 `WorldScene` 的结构化对象、放置区域和显式障碍映射到 PlanningScene，不订阅
-相机、图像、PointCloud2 或 OctoMap。
+组件。motion 只从 `WorldScene` 提取目标中心、放置中心和抓取候选；MTC 场景只加入刚性地平面
+和可附着的目标中心参考点，不订阅或转换相机、图像、PointCloud2、OctoMap 和结构化包围体。
 
 所有 FK、IK、抓放、attach 和可视化统一使用模型声明的 `tcp_link`。MTC 采用标准
 `GeneratePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect` 与

@@ -8,12 +8,12 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SegmentRequest(BaseModel):
@@ -39,8 +39,10 @@ class SegmentResponse(BaseModel):
 
 class GraspRequest(BaseModel):
     points_xyz_m: list[tuple[float, float, float]]
+    scene_points_xyz_m: list[tuple[float, float, float]]
     gripper_asset_id: str
-    planner: str = "graspmoe"
+    collision_threshold_m: float = Field(ge=0, allow_inf_nan=False)
+    planner: Literal["graspmoe", "diffusion"] = "graspmoe"
 
 
 class GraspCandidate(BaseModel):
@@ -83,6 +85,7 @@ class GraspGenXBackend:
     model_name = "GraspGenX"
 
     def __post_init__(self) -> None:
+        import torch
         from graspgenx.grasp_server import GraspGenXSampler, load_grasp_gen_model
         from graspgenx.utils.checkpoint_io import load_model_cfg
 
@@ -94,15 +97,17 @@ class GraspGenXBackend:
         self._model = load_grasp_gen_model(self._config, device=self.device)
         self._samplers: dict[str, Any] = {}
         self._lock = threading.Lock()
+        # Seed the service's sampling sequence, not every request. Repeated
+        # explicit inference must explore new diffusion/environment samples.
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
 
     def infer(self, request: GraspRequest) -> GraspResponse:
-        import torch
-        from graspgenx.samplers import run_planner_on_object
+        from graspgenx.samplers import run_planner_on_batch
+        from graspgenx.utils.collision_filter import filter_colliding_grasps
 
         key = request.gripper_asset_id
         with self._lock:
-            np.random.seed(self.seed)
-            torch.manual_seed(self.seed)
             sampler = self._samplers.get(key)
             if sampler is None:
                 sampler = self._sampler_type(
@@ -113,13 +118,36 @@ class GraspGenXBackend:
                 )
                 self._samplers[key] = sampler
             started = time.perf_counter()
-            grasps, scores, branches, _ = run_planner_on_object(
-                np.asarray(request.points_xyz_m, dtype=np.float32),
+            [(grasps, scores, branches, _)] = run_planner_on_batch(
+                [np.asarray(request.points_xyz_m, dtype=np.float32)],
                 sampler,
                 planner=request.planner,
-                grasp_threshold=-1.0,
+                # Match demo_scene_pc.py, not the lower-level library's -1
+                # default (which also returns rejected, low-quality grasps).
+                grasp_threshold=0.7,
                 topk_num_grasps=-1,
+                moe_obb_density="dense-topandside",
+                # Retain the scene demo's inward/surface samples and include
+                # its supported outward sample. With a rotating-finger sweep
+                # reference, surface-only samples can put the closed TCP below
+                # the support plane. These are scored by GraspGenX as usual;
+                # no offset is added to the returned grasp or motion target.
+                moe_z_offsets_cm=(-2, 0, 2),
             )
+            # Official demo_scene_pc pipeline. The environment excludes this
+            # target, but retains the support surface and surrounding objects.
+            scene = np.asarray(request.scene_points_xyz_m, dtype=np.float32).reshape(-1, 3)
+            if len(scene) > 8192:  # Official demo's max_scene_points default.
+                scene = scene[np.random.choice(len(scene), 8192, replace=False)]
+            keep = filter_colliding_grasps(
+                scene_pc=scene,
+                grasp_poses=grasps,
+                gripper_collision_mesh=sampler.gripper.collision_mesh,
+                collision_threshold=request.collision_threshold_m,
+                device=self.device,
+            )
+            grasps, scores = grasps[keep], scores[keep]
+            branches = [branch for branch, valid in zip(branches, keep, strict=True) if valid]
             inference_ms = (time.perf_counter() - started) * 1000.0
         return GraspResponse(
             candidates=[
@@ -163,7 +191,6 @@ class YoloeBackend:
             image.convert("RGB"),
             device=self.device,
             retina_masks=True,
-            conf=0.18,
             verbose=False,
         )[0]
         if result.boxes is None or result.masks is None:
@@ -196,7 +223,7 @@ class YoloeBackend:
 
 def default_backend() -> ModelBackend:
     return YoloeBackend(
-        model_name=os.getenv("PERCEPTION_MODEL", "yoloe-26s-seg.pt"),
+        model_name=os.getenv("PERCEPTION_MODEL", "yoloe-26x-seg.pt"),
         device=os.getenv("PERCEPTION_DEVICE", "cpu"),
     )
 

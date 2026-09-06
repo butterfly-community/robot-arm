@@ -28,6 +28,7 @@ eyre.workspace = true
 image.workspace = true
 json-config-store.workspace = true
 nalgebra.workspace = true
+opencv.workspace = true
 realsense-camera = { workspace = true, optional = true }
 robot-arm-messages.workspace = true
 serde.workspace = true

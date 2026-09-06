@@ -127,6 +127,33 @@ index b86237f..3713b7c 100644
  
          return outputs
  
+diff --git a/graspgenx/x_grippers.py b/graspgenx/x_grippers.py
+--- a/graspgenx/x_grippers.py
++++ b/graspgenx/x_grippers.py
+@@ -161,7 +161,12 @@ def get_gripper_info(asset_path, name: str) -> XGripperInfo:
+     ctrl_pts = load_control_points(gripper_width, gripper_depth)
+     ctrl_vis_pts = load_control_points_for_visualization(ctrl_pts)
+ 
+-    fingertip_pose = tra.translation_matrix(config["fingertip"])
++    tool_tcp_transform = np.asarray(
++        config.get(
++            "tool_tcp_transform", tra.translation_matrix(config["fingertip"]).tolist()
++        ),
++        dtype=np.float64,
++    )
+     grasp_volume_extents = np.array(config["sweep_volume"]["extents"])
+     grasp_volume_center = np.array(config["sweep_volume"]["offset"])
+     grasp_volume_standoff = np.array(config["standoff"])
+@@ -201,7 +205,7 @@ def get_gripper_info(asset_path, name: str) -> XGripperInfo:
+         pointnet_vae=pointnet_vae_repr,
+         control_points=ctrl_pts,
+         control_points_visualization=ctrl_vis_pts,
+-        tool_tcp_transform=fingertip_pose,
++        tool_tcp_transform=tool_tcp_transform,
+         width=gripper_width,
+     )
+     return gripper_info
+
 diff --git a/pyproject.toml b/pyproject.toml
 index 5399cac..a37a6c5 100644
 --- a/pyproject.toml

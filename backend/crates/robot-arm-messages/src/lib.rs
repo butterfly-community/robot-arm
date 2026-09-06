@@ -179,7 +179,7 @@ impl CameraImagePlane {
         }
     }
 
-    fn validate(&self, label: &str) -> Result<(), ArrowCodecError> {
+    pub fn validate_layout(&self, label: &str) -> Result<(), ArrowCodecError> {
         if self.width == 0 || self.height == 0 || self.stride_bytes == 0 {
             return Err(ArrowCodecError::InvalidCameraFrame(format!(
                 "{label} dimensions and stride must be positive"
@@ -200,6 +200,18 @@ impl CameraImagePlane {
             )));
         }
         Ok(())
+    }
+
+    /// Published colour is RGB8. Remove row padding without changing channels.
+    pub fn packed_rgb(&self) -> Result<Vec<u8>, ArrowCodecError> {
+        self.validate_layout("color")?;
+        self.validate_format("color", &[("rgb8", 3)])?;
+        let packed = self.width as usize * 3;
+        Ok(self
+            .data
+            .chunks_exact(self.stride_bytes as usize)
+            .flat_map(|row| row[..packed].iter().copied())
+            .collect())
     }
 
     fn validate_format(
@@ -240,6 +252,7 @@ pub struct CameraFrameBundle {
     pub device_time_ns: i64,
     pub device_time_domain: String,
     pub received_time_ns: i64,
+    /// RGB8 at the service boundary; native driver formats stay in the adapter.
     pub color: CameraImagePlane,
     /// Depth registered to the color image plane by the camera driver adapter.
     pub aligned_depth: CameraImagePlane,
@@ -257,6 +270,7 @@ pub struct CameraRawVideoFrame {
     pub sequence: u64,
     pub source_id: String,
     pub received_time_ns: i64,
+    /// RGB8, with optional row padding declared by stride_bytes.
     pub color: CameraImagePlane,
 }
 
@@ -408,18 +422,9 @@ pub fn camera_frame_from_arrow(array: &dyn Array) -> Result<CameraFrameBundle, A
 }
 
 fn validate_camera_frame(bundle: &CameraFrameBundle) -> Result<(), ArrowCodecError> {
-    bundle.color.validate("color")?;
-    bundle.color.validate_format(
-        "color",
-        &[
-            ("rgb8", 3),
-            ("bgr8", 3),
-            ("rgba8", 4),
-            ("bgra8", 4),
-            ("y8", 1),
-        ],
-    )?;
-    bundle.aligned_depth.validate("aligned_depth")?;
+    bundle.color.validate_layout("color")?;
+    bundle.color.validate_format("color", &[("rgb8", 3)])?;
+    bundle.aligned_depth.validate_layout("aligned_depth")?;
     bundle
         .aligned_depth
         .validate_format("aligned_depth", &[("z16le", 2), ("z16be", 2)])?;
@@ -826,6 +831,7 @@ pub struct PerceptionState {
     pub classes: Vec<String>,
     #[serde(default)]
     pub placement_labels: Vec<String>,
+    pub grasp_collision_distance_m: f64,
     pub color_frame: Option<ImageFrameInfo>,
     pub depth_frame: Option<ImageFrameInfo>,
     pub camera_calibration: Option<DepthCameraCalibration>,
@@ -868,6 +874,7 @@ pub struct PerceptionRequest {
     pub classes: Option<Vec<String>>,
     #[serde(default)]
     pub placement_labels: Option<Vec<String>>,
+    pub grasp_collision_distance_m: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1952,6 +1959,7 @@ mod tests {
             source_id: Some("simulation:pick-place-scene".into()),
             classes: None,
             placement_labels: None,
+            grasp_collision_distance_m: None,
         };
         let decoded: PerceptionRequest =
             from_arrow(to_arrow(&camera_request).unwrap().as_ref()).unwrap();
@@ -2084,23 +2092,39 @@ mod tests {
         frame.aligned_depth.data = (0..12).collect();
         let encoded = camera_frame_to_arrow(&frame).unwrap();
         assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
+        assert_eq!(
+            frame.color.packed_rgb().unwrap(),
+            [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13]
+        );
     }
 
     #[test]
-    fn camera_frame_round_trips_a_full_resolution_payload() {
-        let mut frame = camera_frame_fixture();
-        frame.color.width = 1_280;
-        frame.color.height = 720;
-        frame.color.stride_bytes = 1_280 * 3;
-        frame.color.data = vec![17; (frame.color.stride_bytes * frame.color.height) as usize];
-        frame.aligned_depth.width = 1_280;
-        frame.aligned_depth.height = 720;
-        frame.aligned_depth.stride_bytes = 1_280 * 2;
-        frame.aligned_depth.data =
-            vec![23; (frame.aligned_depth.stride_bytes * frame.aligned_depth.height) as usize];
-        frame.intrinsics.width = 1_280;
-        frame.intrinsics.height = 720;
-        let encoded = camera_frame_to_arrow(&frame).unwrap();
-        assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
+    fn camera_colour_contract_is_rgb_not_native_driver_formats() {
+        for format in ["bgr8", "rgba8", "bgra8", "y8"] {
+            let mut frame = camera_frame_fixture();
+            frame.color.pixel_format = format.into();
+            assert!(camera_frame_to_arrow(&frame).is_err());
+            assert!(frame.color.packed_rgb().is_err());
+        }
+    }
+
+    #[test]
+    fn camera_frame_round_trips_common_resolution_payloads() {
+        for (width, height) in [(1_280, 720), (1_920, 1_080)] {
+            let mut frame = camera_frame_fixture();
+            frame.color.width = width;
+            frame.color.height = height;
+            frame.color.stride_bytes = width * 3;
+            frame.color.data = vec![17; (frame.color.stride_bytes * frame.color.height) as usize];
+            frame.aligned_depth.width = width;
+            frame.aligned_depth.height = height;
+            frame.aligned_depth.stride_bytes = width * 2;
+            frame.aligned_depth.data =
+                vec![23; (frame.aligned_depth.stride_bytes * frame.aligned_depth.height) as usize];
+            frame.intrinsics.width = width;
+            frame.intrinsics.height = height;
+            let encoded = camera_frame_to_arrow(&frame).unwrap();
+            assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
+        }
     }
 }

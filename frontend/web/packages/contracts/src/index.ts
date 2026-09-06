@@ -373,6 +373,7 @@ export interface PerceptionState {
   model: string;
   classes: string[];
   placement_labels: string[];
+  grasp_collision_distance_m: number;
   color_frame?: ImageFrameInfo | null;
   depth_frame?: ImageFrameInfo | null;
   camera_calibration?: DepthCameraCalibration | null;

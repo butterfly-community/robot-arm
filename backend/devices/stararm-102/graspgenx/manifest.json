@@ -6,6 +6,10 @@
       "source_package_root": "ROS2_HUMBLE/src/stararm102_description",
       "source_base_link": "link6",
       "tcp_link": "tcp_link",
+      "canonical_base_to_source_base": {
+        "xyz_m": [0.0, 0.0, 0.09338],
+        "rpy_degrees": [0.0, 0.0, 0.0]
+      },
       "finger_joints": ["joint7_left", "joint7_right"],
       "drive_joint_work_open_degrees": {
         "joint7_left": 60.0,

@@ -15,7 +15,7 @@
 | `web-gateway-node` | HTTP/WebSocket 与 Dora 请求、状态、按需资源转发 | 设备逻辑、图像计算、配置持久化 |
 
 `scene-core`、`camera-calibration`、`spatial-core`、`realsense-camera` 等是库而不是额外服务。
-camera 与 scene 部署在同一个 `perception` Dora machine/Compose 容器中。计算服务可远程部署，
+camera 与 scene 分别部署在 `camera` 和 `perception` Dora machine/Compose 容器中。计算服务可远程部署，
 但只和 `scene-node` 交互。
 
 ## 唯一数据流
@@ -61,26 +61,31 @@ profile 枚举、pipeline、frameset、SDK Align、厂商元数据和 FFI；`cam
 载荷复制；可配置上送频率不改变设备 profile。
 
 `simulation:pick-place-scene` 与 `simulation:depth-grid` 是正式相机适配器，声明自己的 RGB-D
-profile、标定元数据和确定性资产。前者还根据正式模拟执行反馈的 TCP 位姿渲染 ChArUco 板，
-自动标定因此经过和真机相同的帧与运动消息链路。
+profile、标定元数据和确定性资产。前者只在自动标定会话有效时，根据正式模拟执行反馈的 TCP
+位姿渲染 ChArUco 板；普通感知不出现标定板，自动标定仍经过和真机相同的帧与运动消息链路。
+RGB、米制深度和实例真值由同一相机和参数化网格生成，尺寸、姿态、壁、底板和沿均有明确真值。
+分割得到的可见表面包围体与材料实体积分别报告，不混用。详细数值和图像见 [最终审查与验收](REVIEW.md)。
 
 ## 感知、标定与规划
 
 `scene-node` 持续缓存最新原子 RGB-D 帧；只有用户点击“运行一次感知”时才调用计算服务。保存提示词、刷新图像和相机持续来帧
 都不会运行 YOLOE 或 GraspGenX。实例掩码与深度生成设备无关的 `SceneObject`、`PlacementRegion` 和
-`SceneObstacle`；实例点云仅发送给 GraspGenX。计算服务按请求的夹爪资产 ID 工作，不读取机械臂
+`SceneObstacle`；目标及排除目标后的环境点云仅发送给 GraspGenX，后者保留地面供官方场景筛选。
+计算服务按请求的夹爪资产 ID 工作，不读取机械臂
 型号，也不向场景硬编码方块、筐或抓取姿态。
 
-原始图像、点云和相机参数不进入 ROS。motion 只把 `WorldScene` 的结构化几何映射到唯一
-PlanningScene；不再运行 ROS 相机驱动、`cv_bridge`、`PointCloudOctomapUpdater`、OctoMap
-清理接口或感知 Marker 双写。MoveIt 继续负责机械臂自身、刚性地面及结构化场景的碰撞检查。
+原始图像、点云、相机参数和结构化包围体不进入 ROS。motion 从 `WorldScene` 选择任务目标与
+放置位姿，MTC 的 PlanningScene 只加入刚性地平面和可附着的目标中心参考点；不再运行 ROS 相机
+驱动、`cv_bridge`、`PointCloudOctomapUpdater`、OctoMap 清理接口或感知 Marker 双写。
+MoveIt 继续负责机械臂自身和刚性地面的碰撞检查。
 
 `camera-node` 的自动外参标定从 `RobotModelInfo.calibration_targets` 读取型号声明的姿态，通过现有手动关节
 `MotionRequest` FIFO 逐项执行。每项运动成功后稳定等待 10 秒，再使用新 RGB 帧检测 ChArUco，
 记录同一时刻的正式 `ArmState` 和 FK TCP 位姿。OpenCV 5 的 ChArUco、PnP 与
 Robot-World/Hand-Eye SHAH 求解由 Rust `opencv` crate 调用；结果只有经网页确认后才按来源保存。
-基础镜像通过 CMake package 将该 crate 固定到 `/opt/opencv5`，并在测试中同时检查编译期和运行期
-OpenCV 主版本。
+camera 与 scene 的服务 Dockerfile 各自通过同一 CMake package 步骤把 `opencv-rust` 固定到
+`/opt/opencv5`，并在测试中同时检查编译期和运行期 OpenCV 主版本；全局后端基础镜像不含
+OpenCV。
 
 ## 运动与执行
 

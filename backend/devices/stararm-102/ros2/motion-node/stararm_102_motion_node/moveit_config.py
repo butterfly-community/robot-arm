@@ -4,7 +4,7 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 
 def build_moveit_configs():
-    return (
+    config = (
         MoveItConfigsBuilder(
             "stararm102_description", package_name="stararm102_moveit_config"
         )
@@ -16,3 +16,7 @@ def build_moveit_configs():
         .planning_pipelines(pipelines=["ompl"])
         .to_moveit_configs()
     )
+    # The camera/scene path ends at structured grasp data. Do not inherit the
+    # vendor package's Kinect occupancy updaters into MoveIt.
+    config.sensors_3d = {}
+    return config

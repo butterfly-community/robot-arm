@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 image.workspace = true
 nalgebra.workspace = true
+opencv.workspace = true
 robot-arm-messages.workspace = true
 thiserror.workspace = true
 

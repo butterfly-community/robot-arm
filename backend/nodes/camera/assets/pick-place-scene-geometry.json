@@ -1,0 +1,29 @@
+{
+  "support": {
+    "center_xy_m": [0.106, 0.097],
+    "size_m": [4.0, 4.0, 0.01],
+    "top_z_m": 0.0
+  },
+  "cube": {
+    "label": "red cube",
+    "recognition_prompt": "red cube",
+    "center_xy_m": [0.15, -0.05],
+    "size_m": [0.03, 0.03, 0.03],
+    "yaw_degrees": -25.0
+  },
+  "perception": {
+    "grasp_collision_distance_m": 0.01
+  },
+  "bin": {
+    "label": "gray storage bin",
+    "placement_region_prompt": "tv",
+    "center_xy_m": [0.1, 0.25],
+    "outer_size_m": [0.3, 0.4, 0.08],
+    "wall_thickness_m": 0.005,
+    "base_thickness_m": 0.005,
+    "corner_radius_m": 0.01,
+    "rim_overhang_m": 0.015,
+    "rim_thickness_m": 0.005,
+    "yaw_degrees": -29.0
+  }
+}

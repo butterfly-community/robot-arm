@@ -1,0 +1,59 @@
+FROM robot-arm-services-stararm-102-base:2026.09.05-r2 AS stararm-102
+
+FROM robot-arm-services-backend-base:2026.09.05-r9
+
+SHELL ["/bin/bash", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
+RUN mkdir -p /opt/build/downloads /opt/build/patches /opt/build/perception-compute
+
+# Python 3.11 and uv are private to perception-compute.
+RUN curl -fsSL -o /opt/build/downloads/uv.tar.gz \
+       https://github.com/astral-sh/uv/releases/download/0.12.8/uv-x86_64-unknown-linux-gnu.tar.gz \
+    && echo "2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff  /opt/build/downloads/uv.tar.gz" \
+       | sha256sum --check --strict \
+    && tar -xzf /opt/build/downloads/uv.tar.gz -C /opt/build/downloads \
+    && install /opt/build/downloads/uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv \
+    && UV_PYTHON_INSTALL_DIR=/opt/python uv python install 3.11 \
+    && UV_PYTHON_INSTALL_DIR=/opt/python uv venv --python 3.11 /opt/compute-venv
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# GraspGenX source and CPU-compatible device selection.
+ARG GRASPGENX_REPOSITORY=https://github.com/NVlabs/GraspGenX.git
+ARG GRASPGENX_REF=b9429097728cb1c430dd78b92edf17ba318aad03
+COPY backend/patches/graspgenx-device.patch /opt/build/patches/graspgenx-device.patch
+RUN git clone "$GRASPGENX_REPOSITORY" /opt/graspgenx \
+    && git -C /opt/graspgenx checkout "$GRASPGENX_REF" \
+    && git -C /opt/graspgenx apply /opt/build/patches/graspgenx-device.patch
+
+# Model dependencies and repository-owned weights.
+ENV UV_TORCH_BACKEND=cpu \
+    YOLO_CONFIG_DIR=/var/lib/robot-arm/ultralytics \
+    PERCEPTION_MODEL=/models/yoloe-26x-seg.pt \
+    GRASPGENX_CHECKPOINT_DIR=/models/graspgenx \
+    GRASPGENX_CHECKPOINT_ROOT=/models/graspgenx/release \
+    GRASPGENX_GRIPPER_CFG_DIR=/grippers \
+    GRASPGENX_GRIPPER_ASSETS=/grippers
+COPY backend/services/perception-compute/pyproject.toml /opt/build/perception-compute/pyproject.toml
+RUN mkdir -p /var/lib/robot-arm/ultralytics \
+    && uv pip compile \
+       /opt/build/perception-compute/pyproject.toml /opt/graspgenx/pyproject.toml \
+       --python /opt/compute-venv/bin/python \
+       --no-emit-package perception-compute-service --no-emit-package graspgenx \
+       --output-file /opt/build/perception-compute/model-requirements.txt \
+    && uv pip install --python /opt/compute-venv/bin/python \
+       --requirements /opt/build/perception-compute/model-requirements.txt \
+    && uv pip install --python /opt/compute-venv/bin/python --no-deps /opt/graspgenx
+COPY backend/services/perception-compute/models /models
+RUN mkdir -p /service \
+    && ln -s /models/mobileclip2_b.ts /service/mobileclip2_b.ts
+
+# Generate the selected device's GraspGenX description from the patched model.
+COPY --from=stararm-102 /opt/devices/stararm-102/vendor /opt/devices/stararm-102/vendor
+COPY backend/devices/stararm-102/graspgenx /opt/devices/stararm-102/project/graspgenx
+COPY tools/graspgenx/build-description.py /opt/tools/graspgenx/build-description.py
+RUN mkdir -p /grippers/x_grippers \
+    && /opt/compute-venv/bin/python /opt/tools/graspgenx/build-description.py \
+       /opt/devices/stararm-102/project/graspgenx/manifest.json \
+       /opt/devices/stararm-102/vendor /grippers/x_grippers \
+       --graspgenx-root /opt/graspgenx

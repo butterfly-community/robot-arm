@@ -5,11 +5,9 @@ geometry_msgs/Pose object_pose
 geometry_msgs/Vector3 object_size
 geometry_msgs/Pose[] grasp_poses
 string placement_region_id
+# TCP release pose, not the attached object's pose.
 geometry_msgs/Pose placement_pose
 geometry_msgs/Vector3 placement_size
-string[] obstacle_ids
-geometry_msgs/Pose[] obstacle_poses
-geometry_msgs/Vector3[] obstacle_sizes
 ---
 int32 error_code
 string message

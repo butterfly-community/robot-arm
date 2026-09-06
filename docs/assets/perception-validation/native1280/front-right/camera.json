@@ -1,0 +1,68 @@
+{
+  "camera_in_base": {
+    "position_m": [
+      0.72,
+      -0.62,
+      0.78
+    ],
+    "orientation_xyzw": [
+      0.8385197528624991,
+      0.34732625395338307,
+      -0.16065827934294677,
+      -0.3878633968972674
+    ]
+  },
+  "calibration": {
+    "frame_id": "depth_sim_frame",
+    "width": 1280,
+    "height": 720,
+    "distortion_model": "plumb_bob",
+    "distortion": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "camera_matrix": [
+      700.0,
+      0.0,
+      639.5,
+      0.0,
+      700.0,
+      359.5,
+      0.0,
+      0.0,
+      1.0
+    ]
+  },
+  "sha256": {
+    "rgb": "b554630288cbe12f7b574402fb24e3eea09190dc57a26c88d401a5f1854ef147",
+    "depth": "33462298c158113f8e2f9920f3ef7d804001fae4a1d8d3bb06ebbb352151ead3",
+    "truth": "2ea377c40cd0a29c7ebe0200406525fef0600956d82e49941769a1cf7d2affed"
+  },
+  "depth_range_mm": [
+    751,
+    2000
+  ],
+  "metric_depth_pixel_ratio": 0.8290125868055556,
+  "objects": {
+    "red cube": {
+      "visible_pixels": 573,
+      "all_truth_pixels_have_depth": true
+    },
+    "gray storage bin": {
+      "visible_pixels": 32312,
+      "all_truth_pixels_have_depth": true
+    }
+  },
+  "ground_depth": {
+    "pixels": 731133,
+    "maximum_absolute_error_mm": 0.5057210173164961,
+    "mean_error_mm": 0.029998180335495356,
+    "p99_absolute_error_mm": 0.4966167195228355,
+    "maximum_unquantized_render_error_mm": 0.013205624748158229,
+    "maximum_z16_quantization_error_mm": 0.49971866607667614,
+    "pixels_outside_quantization_and_render_precision": 0
+  }
+}

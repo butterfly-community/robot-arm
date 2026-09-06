@@ -25,6 +25,7 @@ CODE_SYNC_COMMAND = 25
 MOTION_TIME_MS = 350
 ACCELERATION_TIME_MS = 50
 DECELERATION_TIME_MS = 50
+PROJECT_TEMP = pathlib.Path(__file__).resolve().parents[4] / "temp"
 
 
 class PtySerial:
@@ -247,7 +248,10 @@ def stop(process):
 
 
 def run_rust_client(binary, rounds, Packet):
-    with tempfile.TemporaryDirectory(prefix="fashionstar-rust-client-") as directory:
+    PROJECT_TEMP.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="fashionstar-rust-client-", dir=PROJECT_TEMP
+    ) as directory:
         socat, left, right = socat_pair(directory)
         failure = []
         peer = threading.Thread(
@@ -264,7 +268,10 @@ def run_rust_client(binary, rounds, Packet):
 
 
 def run_python_client(binary, rounds, PortHandler, SyncPositionControlOptions):
-    with tempfile.TemporaryDirectory(prefix="fashionstar-python-client-") as directory:
+    PROJECT_TEMP.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="fashionstar-python-client-", dir=PROJECT_TEMP
+    ) as directory:
         socat, left, right = socat_pair(directory)
         rust = subprocess.Popen([binary, "server", str(right), str(rounds)])
         try:

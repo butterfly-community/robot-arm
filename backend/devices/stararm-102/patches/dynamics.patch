@@ -1,62 +1,59 @@
 diff --git a/ROS2_HUMBLE/src/stararm102_moveit_config/config/joint_limits.yaml b/ROS2_HUMBLE/src/stararm102_moveit_config/config/joint_limits.yaml
 --- a/ROS2_HUMBLE/src/stararm102_moveit_config/config/joint_limits.yaml
 +++ b/ROS2_HUMBLE/src/stararm102_moveit_config/config/joint_limits.yaml
-@@ -11,40 +11,40 @@ joint_limits:
+@@ -11,40 +11,24 @@ joint_limits:
    joint1:
-     has_velocity_limits: true
-     max_velocity: 3.14
+-    has_velocity_limits: true
+-    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
    joint2:
-     has_velocity_limits: true
-     max_velocity: 3.14
+-    has_velocity_limits: true
+-    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
    joint3:
-     has_velocity_limits: true
-     max_velocity: 3.14
+-    has_velocity_limits: true
+-    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
    joint4:
-     has_velocity_limits: true
-     max_velocity: 3.14
+-    has_velocity_limits: true
+-    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
    joint5:
-     has_velocity_limits: true
-     max_velocity: 3.14
+-    has_velocity_limits: true
+-    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
    joint6:
-     has_velocity_limits: true
+-    has_velocity_limits: true
 -    max_velocity: 13.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
-+    max_velocity: 3.14
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
   joint7_left:
-    has_velocity_limits: true
+-   has_velocity_limits: true
 -    max_velocity: 3.1400000000000001
-+    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true
 +    max_acceleration: 30.0
   joint7_right:
-    has_velocity_limits: true
+-   has_velocity_limits: true
 -    max_velocity: 3.1400000000000001
-+    max_velocity: 3.14
 -    has_acceleration_limits: false
 -    max_acceleration: 0
 +    has_acceleration_limits: true

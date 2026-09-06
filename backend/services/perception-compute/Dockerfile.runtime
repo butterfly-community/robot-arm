@@ -1,0 +1,24 @@
+FROM robot-arm-services-perception-compute-base:2026.09.06-r5 AS compute-base
+
+RUN mkdir -p /runtime-root/opt /runtime-root/service \
+    && cp -a /opt/python /runtime-root/opt/python \
+    && cp -a /opt/compute-venv /runtime-root/opt/compute-venv \
+    && cp -a /models /runtime-root/models \
+    && cp -a /grippers /runtime-root/grippers \
+    && cp -a /service/mobileclip2_b.ts /runtime-root/service/mobileclip2_b.ts
+
+FROM robot-arm-services-backend-runtime:2026.09.05-r3
+RUN apt-get update \
+    && apt-get install --yes \
+       libgl1 libglib2.0-0 libstdc++6
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    YOLO_CONFIG_DIR=/var/lib/robot-arm/ultralytics \
+    PERCEPTION_MODEL=/models/yoloe-26x-seg.pt \
+    GRASPGENX_CHECKPOINT_DIR=/models/graspgenx \
+    GRASPGENX_CHECKPOINT_ROOT=/models/graspgenx/release \
+    GRASPGENX_GRIPPER_CFG_DIR=/grippers \
+    GRASPGENX_GRIPPER_ASSETS=/grippers
+RUN mkdir -p /var/lib/robot-arm/ultralytics
+COPY --from=compute-base /runtime-root /

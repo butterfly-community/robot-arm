@@ -255,6 +255,10 @@ export function KeyValue({
   value: ReactNode;
   hint?: string;
 }) {
+  const title =
+    typeof value === "string" || typeof value === "number"
+      ? String(value)
+      : undefined;
   return (
     <div className="key-value">
       <span>
@@ -263,7 +267,7 @@ export function KeyValue({
           {hint && <HelpDot text={hint} />}
         </span>
       </span>
-      <strong>
+      <strong title={title}>
         <LocalizedLabel text={value} />
       </strong>
     </div>

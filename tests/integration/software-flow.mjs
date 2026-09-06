@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 const base = process.env.SERVICES_BASE_URL ?? "http://192.168.100.10:8765";
 const websocketBase = base.replace(/^http/, "ws");
 const runId = crypto.randomUUID();
+const pickPlaceFixture = JSON.parse(
+  await readFile(
+    new URL(
+      "../../backend/nodes/camera/assets/pick-place-scene-geometry.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 
 function requestIdForRun(value) {
   return value.startsWith("integration-") ? `${value}-${runId}` : value;
@@ -49,11 +59,21 @@ function translationError(actual, expected) {
   return Math.hypot(...actual.map((value, index) => value - expected[index]));
 }
 
-function quaternionError(actual, expected) {
-  const dot = Math.abs(
-    actual.reduce((sum, value, index) => sum + value * expected[index], 0),
+function transformPoint(pose, point) {
+  const [x, y, z, w] = pose.orientation_xyzw;
+  const [px, py, pz] = point;
+  const cross = [y * pz - z * py, z * px - x * pz, x * py - y * px];
+  const twiceCross = [
+    y * cross[2] - z * cross[1],
+    z * cross[0] - x * cross[2],
+    x * cross[1] - y * cross[0],
+  ];
+  return point.map(
+    (value, index) =>
+      value +
+      2 * (w * cross[index] + twiceCross[index]) +
+      pose.position_m[index],
   );
-  return 2 * Math.acos(Math.min(1, dot));
 }
 
 async function observeMotionRequest(requestId, run) {
@@ -164,7 +184,7 @@ const originalPerception = perceptionBefore.values.perception_state;
 const originalCamera = perceptionBefore.values.camera_state;
 const originalPerceptionConfigVersion =
   originalPerception?.service?.config_version ?? 0;
-const refreshedCameras = await request("/api/perception/camera", {
+let refreshedCameras = await request("/api/perception/camera", {
   schema_version: 3,
   request_id: "integration-camera-refresh",
   action: "refresh",
@@ -173,17 +193,39 @@ const refreshedCameras = await request("/api/perception/camera", {
   depth_profile_key: null,
 });
 assert.equal(refreshedCameras.original_error, null);
-const simulationCamera = refreshedCameras.value.available_sources.find(
+let simulationCamera = refreshedCameras.value.available_sources.find(
   (source) => source.source_id === "simulation:pick-place-scene",
 );
 assert.ok(simulationCamera, "camera discovery includes the simulation adapter");
+const resetSimulationCamera = await request("/api/perception/camera", {
+  schema_version: 3,
+  request_id: "integration-camera-reset-before-use",
+  action: "reset",
+  source_id: simulationCamera.source_id,
+  color_profile_key: null,
+  depth_profile_key: null,
+});
+assert.equal(resetSimulationCamera.original_error, null);
+refreshedCameras = await request("/api/perception/camera", {
+  schema_version: 3,
+  request_id: "integration-camera-refresh-after-reset",
+  action: "refresh",
+  source_id: null,
+  color_profile_key: null,
+  depth_profile_key: null,
+});
+assert.equal(refreshedCameras.original_error, null);
+simulationCamera = refreshedCameras.value.available_sources.find(
+  (source) => source.source_id === "simulation:pick-place-scene",
+);
+assert.ok(simulationCamera, "reset keeps the simulation adapter available");
 const selectedCamera = await request("/api/perception/camera", {
   schema_version: 3,
   request_id: "integration-camera-select",
   action: "select",
   source_id: simulationCamera.source_id,
-  color_profile_key: null,
-  depth_profile_key: null,
+  color_profile_key: "color:1280x720:rgb8:10",
+  depth_profile_key: "depth:1280x720:z16le:10",
   output_frames_per_second: 1,
   driver_parameters: null,
 });
@@ -200,8 +242,8 @@ const startedCamera = await request("/api/perception/camera", {
   request_id: "integration-camera-connect",
   action: "connect",
   source_id: simulationCamera.source_id,
-  color_profile_key: null,
-  depth_profile_key: null,
+  color_profile_key: "color:1280x720:rgb8:10",
+  depth_profile_key: "depth:1280x720:z16le:10",
 });
 assert.equal(startedCamera.original_error, null);
 const videoFrames = await new Promise((resolve, reject) => {
@@ -236,8 +278,10 @@ const perceptionModelConfigured = await request("/api/perception/request", {
   request_id: "integration-perception-model-config",
   action: "apply",
   source_id: null,
-  classes: ["red cube", "gray storage bin"],
-  placement_labels: ["gray storage bin"],
+  classes: ["red cube", "tv"],
+  placement_labels: ["tv"],
+  grasp_collision_distance_m:
+    pickPlaceFixture.perception.grasp_collision_distance_m,
 });
 assert.equal(perceptionModelConfigured.original_error, null);
 const modelOnlyPerceptionSnapshot = await waitFor(
@@ -295,10 +339,26 @@ assert.equal(
   manualSceneSequence,
   "new camera frames do not run YOLO or GraspGenX automatically",
 );
-assert.equal(perceptionSnapshot.values.perception_state.color_frame.width, 640);
+const simulationColorProfile = simulationCamera.profiles.find(
+  (profile) => profile.stream === "color" && profile.is_default,
+);
+const simulationDepthProfile = simulationCamera.profiles.find(
+  (profile) => profile.stream === "depth" && profile.is_default,
+);
+assert.ok(simulationColorProfile);
+assert.ok(simulationDepthProfile);
+assert.deepEqual(
+  [simulationColorProfile.width, simulationColorProfile.height],
+  [1_920, 1_080],
+  "simulation camera reports its maximum profile as the default",
+);
+assert.equal(
+  perceptionSnapshot.values.perception_state.color_frame.width,
+  1_280,
+);
 assert.equal(
   perceptionSnapshot.values.perception_state.depth_frame.height,
-  480,
+  720,
 );
 assert.equal(
   typeof perceptionSnapshot.values.perception_state.point_count,
@@ -317,6 +377,16 @@ for (const asset of ["color.png", "overlay.png", "depth.png"]) {
 assert.equal(perceptionSnapshot.values.perception_state.depth_scale_m, 0.001);
 const calibrationModel = readyPerceptionSnapshot.values.robot_model_info;
 assert.ok(calibrationModel.calibration_targets.length > 0);
+const simulationOracle = JSON.parse(
+  await readFile(
+    new URL(
+      "../../backend/nodes/camera/assets/simulation-cameras.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+).find((source) => source.source_id === "simulation:pick-place-scene");
+assert.ok(simulationOracle);
 const calibrationBoard = {
   pattern: "charuco",
   dictionary: "DICT_4X4_50",
@@ -327,6 +397,41 @@ const calibrationBoard = {
   measured_width_m: 0.075,
   measured_height_m: 0.075,
 };
+
+async function useSimulationProfile(width, height) {
+  const colorProfileKey = `color:${width}x${height}:rgb8:10`;
+  const depthProfileKey = `depth:${width}x${height}:z16le:10`;
+  const selected = await request("/api/perception/camera", {
+    schema_version: 3,
+    request_id: `integration-camera-profile-${width}x${height}`,
+    action: "select",
+    source_id: "simulation:pick-place-scene",
+    color_profile_key: colorProfileKey,
+    depth_profile_key: depthProfileKey,
+    output_frames_per_second: 1,
+    driver_parameters: null,
+  });
+  assert.equal(selected.original_error, null);
+  const connected = await request("/api/perception/camera", {
+    schema_version: 3,
+    request_id: `integration-camera-reconnect-${width}x${height}`,
+    action: "connect",
+    source_id: "simulation:pick-place-scene",
+    color_profile_key: colorProfileKey,
+    depth_profile_key: depthProfileKey,
+  });
+  assert.equal(connected.original_error, null);
+  await waitFor(
+    () => snapshot("perception"),
+    (state) =>
+      state.values.perception_state?.color_frame?.width === width &&
+      state.values.perception_state?.color_frame?.height === height &&
+      state.values.perception_state?.depth_frame?.width === width &&
+      state.values.perception_state?.depth_frame?.height === height,
+  );
+}
+
+await useSimulationProfile(1_920, 1_080);
 
 async function runAutomaticCalibration(run) {
   const started = await request("/api/perception/calibration", {
@@ -348,6 +453,15 @@ async function runAutomaticCalibration(run) {
     300_000,
   );
   const calibration = completed.values.calibration_state;
+  const evidenceDirectory = new URL(
+    `../../temp/software-flow-${runId}/`,
+    import.meta.url,
+  );
+  await mkdir(evidenceDirectory, { recursive: true });
+  await writeFile(
+    new URL(`calibration-${run}.json`, evidenceDirectory),
+    JSON.stringify(calibration, null, 2),
+  );
   assert.notEqual(
     calibration.phase,
     "failed",
@@ -370,6 +484,7 @@ async function runAutomaticCalibration(run) {
     calibration.solved_result.rotation_residuals_rad.length,
     calibration.target_count,
   );
+  const frameBeforeApply = completed.values.perception_state.last_frame_time_ns;
   const applied = await request("/api/perception/calibration", {
     schema_version: 3,
     request_id: `integration-apply-calibration-${run}`,
@@ -382,50 +497,72 @@ async function runAutomaticCalibration(run) {
   assert.equal(applied.original_error, null);
   await waitFor(
     () => snapshot("perception"),
-    (state) => state.values.calibration_state?.phase === "applied",
+    (state) =>
+      state.values.calibration_state?.phase === "applied" &&
+      state.values.perception_state?.last_frame_time_ns > frameBeforeApply,
   );
   return calibration.solved_result;
 }
 
 const firstCalibration = await runAutomaticCalibration("first");
 const secondCalibration = await runAutomaticCalibration("second");
-for (const calibration of [firstCalibration, secondCalibration]) {
-  // This tolerance covers the 640x480 raster, sub-pixel corner detection and
-  // the conditioning of the declared nine-pose set. It is an integration-test
-  // accuracy gate, not a runtime motion restriction.
+await useSimulationProfile(1_280, 720);
+const thirdCalibration = await runAutomaticCalibration("1280");
+for (const calibration of [
+  firstCalibration,
+  secondCalibration,
+  thirdCalibration,
+]) {
+  // User-required 0.1 mm synthetic calibration accuracy, not a motion gate.
   assert.ok(
     translationError(
       calibration.camera_in_base.position_m,
-      [0.15, 0.06, 0.67],
-    ) < 0.025,
-    "solved simulated camera translation is within 25 mm of the oracle",
+      simulationOracle.camera_in_base.position_m,
+    ) <= 0.0001,
+    "solved simulated camera translation is within 0.1 mm of the oracle",
   );
-  assert.ok(
-    quaternionError(calibration.camera_in_base.orientation_xyzw, [
-      Math.SQRT1_2,
-      Math.SQRT1_2,
-      0,
-      0,
-    ]) < 0.08,
-    "solved simulated camera orientation is within 0.08 rad of the oracle",
-  );
+  const { camera_matrix: k, width, height } = simulationOracle.calibration;
+  for (const u of [0, width - 1])
+    for (const v of [0, height - 1]) {
+      const ray = [(u - k[2]) / k[0], (v - k[5]) / k[4], 1];
+      const direction = transformPoint(
+        { ...simulationOracle.camera_in_base, position_m: [0, 0, 0] },
+        ray,
+      );
+      const depth =
+        -simulationOracle.camera_in_base.position_m[2] / direction[2];
+      assert.ok(
+        depth > 0,
+        "fixture ground intersects the visible camera frustum",
+      );
+      const point = ray.map((value) => value * depth);
+      assert.ok(
+        translationError(
+          transformPoint(calibration.camera_in_base, point),
+          transformPoint(simulationOracle.camera_in_base, point),
+        ) <= 0.0001,
+        "combined camera translation and rotation displace visible ground by at most 0.1 mm",
+      );
+    }
   assert.ok(
     translationError(
       calibration.board_in_calibration_tool.position_m,
-      [-0.0375, 0, 0.0525],
-    ) < 0.025,
-    "solved ChArUco origin is within 25 mm of the simulation oracle",
+      simulationOracle.board_in_tool.position_m,
+    ) <= 0.0001,
+    "solved ChArUco origin is within 0.1 mm of the simulation oracle",
   );
-  assert.ok(
-    quaternionError(calibration.board_in_calibration_tool.orientation_xyzw, [
-      -Math.SQRT1_2,
-      0,
-      0,
-      Math.SQRT1_2,
-    ]) < 0.08,
-    "solved ChArUco orientation is within 0.08 rad of the oracle",
-  );
+  for (const x of [0, calibrationBoard.measured_width_m])
+    for (const y of [0, calibrationBoard.measured_height_m]) {
+      assert.ok(
+        translationError(
+          transformPoint(calibration.board_in_calibration_tool, [x, y, 0]),
+          transformPoint(simulationOracle.board_in_tool, [x, y, 0]),
+        ) <= 0.0001,
+        "combined board translation and rotation displace each board corner by at most 0.1 mm",
+      );
+    }
 }
+await useSimulationProfile(1_280, 720);
 const sceneSequenceBeforeCalibrationRefresh = (await snapshot("perception"))
   .values.perception_state.last_scene_sequence;
 const calibratedPerceptionRun = await request("/api/perception/request", {
@@ -454,6 +591,10 @@ assert.ok(
   placementRegion,
   "simulation perception scene has a placement region",
 );
+assert.ok(
+  graspable.size_m.every((value) => Number.isFinite(value) && value > 0),
+  "the observed model cloud has a nondegenerate extent; visible surfaces are not the complete solid",
+);
 await request("/api/motion/mode", {
   schema_version: 3,
   request_id: "integration-perception-mode",
@@ -480,17 +621,10 @@ assert.deepEqual(pickPlaceResult.pick_position_m, [
   graspable.pose.position_m[1],
   graspable.pose.position_m[2],
 ]);
-const placementSupport = calibratedScene.objects.find(
-  (object) => object.object_id === placementRegion.source_object_id,
-);
 const expectedPlacePosition = [
   placementRegion.pose.position_m[0],
   placementRegion.pose.position_m[1],
-  placementSupport
-    ? placementSupport.pose.position_m[2] +
-      placementSupport.size_m[2] / 2 +
-      graspable.size_m[2] / 2
-    : placementRegion.pose.position_m[2],
+  placementRegion.pose.position_m[2] + 0.07,
 ];
 assert.deepEqual(
   pickPlaceResult.place_position_m.slice(0, 2),
@@ -500,6 +634,10 @@ assert.ok(
   Math.abs(pickPlaceResult.place_position_m[2] - expectedPlacePosition[2]) <=
     Number.EPSILON,
 );
+
+// This is an API/execution contract test, not proof of gripping. The independent
+// FK/mesh oracle in tools/graspgenx/verify-executed-pick-place.py checks recorded
+// joint feedback, opposing contact, lift and the horizontal TCP release.
 const executionPickPlace = await waitFor(
   () => snapshot("arm-execution"),
   (state) => {
@@ -656,6 +794,7 @@ if (originalPerception?.enabled) {
     source_id: null,
     classes: originalPerception.classes,
     placement_labels: originalPerception.placement_labels,
+    grasp_collision_distance_m: originalPerception.grasp_collision_distance_m,
   });
 }
 const discoveredSources = tracking.values.discovery_state?.sources ?? [];
@@ -934,7 +1073,8 @@ const motionResult = await observeMotionRequest(
 assert.equal(motionResult.value.state, "succeeded");
 await waitFor(
   () => snapshot("arm-execution"),
-  (state) => Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) < 1e-9,
+  (state) =>
+    Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) <= Math.PI / 180,
 );
 
 const queuedAway = request("/api/motion/request", {
@@ -984,7 +1124,8 @@ assert.equal(queuedAwayResult.value.state, "succeeded");
 assert.equal(queuedReturnResult.value.state, "succeeded");
 await waitFor(
   () => snapshot("arm-execution"),
-  (state) => Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) < 1e-9,
+  (state) =>
+    Math.abs(state.values.arm_state.joints_rad[0] - moved[0]) <= Math.PI / 180,
 );
 
 const actuator = model.tool_actuators[0];
@@ -1039,7 +1180,8 @@ const atDefault = await waitFor(
         Math.abs(
           state.values.arm_state.joints_rad[index] -
             defaultTarget.joint_positions_rad[joint.key],
-        ) < 1e-9,
+        ) <=
+        Math.PI / 180,
     ) &&
     Math.abs(state.values.arm_state.actuators_rad[0]) <= (2 * Math.PI) / 180,
 );

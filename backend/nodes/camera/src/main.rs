@@ -11,7 +11,7 @@ use std::{
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result, bail, eyre};
 #[cfg(feature = "opencv-runtime")]
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+use image::{DynamicImage, ImageFormat, RgbImage};
 use json_config_store::{load_or_default, save};
 #[cfg(feature = "opencv-runtime")]
 use robot_arm_messages::Pose3;
@@ -33,7 +33,6 @@ use crate::capture_worker::{Completion as CaptureCompletion, Output as CaptureOu
 
 const CONFIG_SCHEMA_VERSION: u32 = 2;
 const CALIBRATION_CAPTURE_DELAY: Duration = Duration::from_secs(10);
-const CALIBRATION_JOINT_SETTLE_TOLERANCE_RAD: f64 = 2.0_f64.to_radians();
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SavedProfiles {
@@ -179,6 +178,7 @@ fn run() -> Result<()> {
         last_calibration_attempt_ns: None,
         calibration_preview: None,
     };
+    camera.set_simulation_calibration_active(camera.config.calibration_session.active);
     // Persisted sources remain visible before the first explicit hardware
     // refresh. They are unavailable until a driver confirms them.
     merge_saved_sources(&mut camera.sources, &camera.config);
@@ -789,6 +789,7 @@ impl CameraNode {
         } else {
             self.config.calibration_session.original_error = None;
         }
+        self.set_simulation_calibration_active(self.config.calibration_session.active);
         if let Err(error) = self.persist_config() {
             self.config.calibration_session.original_error = Some(error.to_string());
         }
@@ -848,7 +849,7 @@ impl CameraNode {
             active: true,
             phase: CalibrationPhase::Preparing,
             run_id: Some(run_id.clone()),
-            current_target_index: Some(0),
+            current_target_index: None,
             target_count: model.calibration_targets.len() as u32,
             current_target_key: None,
             motion_request_id: None,
@@ -902,10 +903,14 @@ impl CameraNode {
                 }
                 match latest.map(|status| status.state) {
                     Some(RequestState::Succeeded) => {
-                        if !self.calibration_target_reached()? {
-                            self.calibration_capture_at = None;
-                            self.config.calibration_session.stage_message =
-                                Some("轨迹已结束，等待关节反馈稳定在标定姿态".into());
+                        if self
+                            .config
+                            .calibration_session
+                            .current_target_index
+                            .is_none()
+                        {
+                            self.config.calibration_session.current_target_index = Some(0);
+                            self.send_current_calibration_target(node)?;
                             return Ok(());
                         }
                         let capture_at = *self
@@ -946,50 +951,21 @@ impl CameraNode {
         Ok(())
     }
 
-    fn calibration_target_reached(&self) -> Result<bool> {
-        let session = &self.config.calibration_session;
-        let index = session
-            .current_target_index
-            .ok_or_else(|| eyre!("标定姿态序号缺失"))? as usize;
-        let model = self
-            .robot_model
-            .as_ref()
-            .ok_or_else(|| eyre!("机械臂型号信息缺失"))?;
-        let target = model
-            .calibration_targets
-            .get(index)
-            .ok_or_else(|| eyre!("标定姿态 {index} 不存在"))?;
-        let Some(feedback) = self.latest_arm_state.as_ref() else {
-            return Ok(false);
-        };
-        Ok(model
-            .joints
-            .iter()
-            .zip(&feedback.joints_rad)
-            .all(|(joint, actual)| {
-                target
-                    .joint_positions_rad
-                    .get(&joint.key)
-                    .is_some_and(|expected| {
-                        (actual - expected).abs() <= CALIBRATION_JOINT_SETTLE_TOLERANCE_RAD
-                    })
-            }))
-    }
-
     fn send_current_calibration_target(&mut self, node: &mut DoraNode) -> Result<()> {
         self.calibration_capture_at = None;
         let session = &self.config.calibration_session;
-        let index = session
-            .current_target_index
-            .ok_or_else(|| eyre!("标定姿态序号缺失"))? as usize;
         let model = self
             .robot_model
             .as_ref()
             .ok_or_else(|| eyre!("机械臂型号信息缺失"))?;
-        let target = model
-            .calibration_targets
-            .get(index)
-            .ok_or_else(|| eyre!("标定姿态 {index} 不存在"))?;
+        let target = match session.current_target_index {
+            Some(index) => model.calibration_targets.get(index as usize),
+            None => model
+                .named_targets
+                .iter()
+                .find(|target| target.key == "work"),
+        }
+        .ok_or_else(|| eyre!("当前型号缺少工作位或标定姿态"))?;
         let run_id = session
             .run_id
             .as_deref()
@@ -1092,6 +1068,13 @@ impl CameraNode {
         session.phase = CalibrationPhase::Failed;
         session.stage_message = Some(message.clone());
         session.original_error = Some(message);
+        self.set_simulation_calibration_active(false);
+    }
+
+    fn set_simulation_calibration_active(&self, active: bool) {
+        let _ = self
+            .capture_commands
+            .blocking_send(CaptureCommand::SetCalibrationActive(active));
     }
 
     #[cfg(feature = "opencv-runtime")]
@@ -1306,57 +1289,11 @@ fn intrinsics_matrix(value: &robot_arm_messages::CameraIntrinsics) -> [f64; 9] {
 
 #[cfg(feature = "opencv-runtime")]
 fn color_png(message: &robot_arm_messages::CameraImagePlane) -> Result<Vec<u8>> {
-    let mut rgb = RgbImage::new(message.width, message.height);
-    match message.pixel_format.as_str() {
-        "rgb8" | "bgr8" => {
-            for (pixel, source) in rgb
-                .pixels_mut()
-                .zip(packed_rows(message, 3)?.flat_map(|row| row.chunks_exact(3)))
-            {
-                *pixel = if message.pixel_format == "rgb8" {
-                    Rgb([source[0], source[1], source[2]])
-                } else {
-                    Rgb([source[2], source[1], source[0]])
-                };
-            }
-        }
-        "rgba8" | "bgra8" => {
-            for (pixel, source) in rgb
-                .pixels_mut()
-                .zip(packed_rows(message, 4)?.flat_map(|row| row.chunks_exact(4)))
-            {
-                *pixel = if message.pixel_format == "rgba8" {
-                    Rgb([source[0], source[1], source[2]])
-                } else {
-                    Rgb([source[2], source[1], source[0]])
-                };
-            }
-        }
-        "y8" => {
-            for (pixel, value) in rgb.pixels_mut().zip(packed_rows(message, 1)?.flatten()) {
-                *pixel = Rgb([*value; 3]);
-            }
-        }
-        other => bail!("不支持的彩色图编码 {other}"),
-    }
+    let rgb = RgbImage::from_raw(message.width, message.height, message.packed_rgb()?)
+        .expect("validated packed RGB dimensions");
     let mut output = Cursor::new(Vec::new());
     DynamicImage::ImageRgb8(rgb).write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
-}
-
-#[cfg(feature = "opencv-runtime")]
-fn packed_rows(
-    message: &robot_arm_messages::CameraImagePlane,
-    bytes_per_pixel: usize,
-) -> Result<impl Iterator<Item = &[u8]>> {
-    let packed = message.width as usize * bytes_per_pixel;
-    if (message.stride_bytes as usize) < packed {
-        bail!("图像 stride 小于像素行宽");
-    }
-    Ok(message
-        .data
-        .chunks_exact(message.stride_bytes as usize)
-        .map(move |row| &row[..packed]))
 }
 
 fn calibration_motion_request(

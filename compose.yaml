@@ -6,6 +6,7 @@ x-dora-environment: &dora-environment
 
 x-dora-daemon: &dora-daemon
   init: true
+  entrypoint: ["/usr/local/bin/dora-entrypoint.sh"]
   command:
     [
       "bash",
@@ -19,28 +20,24 @@ x-dora-daemon: &dora-daemon
   healthcheck:
     test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
 
-x-backend-daemon: &backend-daemon
-  <<: *dora-daemon
-  image: robot-arm-services-backend
-  entrypoint: ["/src/docker/dora-entrypoint.sh"]
-
 x-web-app: &web-app
   image: robot-arm-services-frontend
   networks: [robot-services]
 
 services:
   dora-coordinator:
-    image: robot-arm-services-backend
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: robot-arm-services-backend-runtime:2026.09.05-r3
     command: ["dora", "coordinator", "--interface", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6013"]
     networks: [robot-services]
 
   controller-input:
-    <<: *backend-daemon
+    <<: *dora-daemon
+    image: robot-arm-services-controller-input
+    build:
+      context: .
+      dockerfile: backend/nodes/controller-input/Dockerfile
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: controller-input
@@ -55,7 +52,11 @@ services:
       - "c 189:* rwm"
 
   spatial-transform:
-    <<: *backend-daemon
+    <<: *dora-daemon
+    image: robot-arm-services-spatial-transform
+    build:
+      context: .
+      dockerfile: backend/nodes/spatial-transform/Dockerfile
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: spatial-transform
@@ -73,16 +74,16 @@ services:
     healthcheck:
       test: ["CMD", "/opt/compute-venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
 
-  perception:
-    <<: *backend-daemon
+  camera:
+    <<: *dora-daemon
+    image: robot-arm-services-camera
+    build:
+      context: .
+      dockerfile: backend/nodes/camera/Dockerfile
     environment:
       <<: *dora-environment
-      DORA_MACHINE_ID: perception
+      DORA_MACHINE_ID: camera
       CAMERA_CONFIG: /config/camera.json
-      SCENE_CONFIG: /config/scene.json
-    depends_on:
-      dora-coordinator: { condition: service_started }
-      perception-compute: { condition: service_healthy }
     volumes:
       - ./backend/config/runtime:/config
       - /dev:/dev
@@ -92,11 +93,28 @@ services:
       - "c 81:* rwm"
       - "c 189:* rwm"
       - "c 235:* rwm"
-    healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291"]
+
+  perception:
+    <<: *dora-daemon
+    image: robot-arm-services-perception
+    build:
+      context: .
+      dockerfile: backend/nodes/scene/Dockerfile
+    environment:
+      <<: *dora-environment
+      DORA_MACHINE_ID: perception
+      SCENE_CONFIG: /config/scene.json
+    depends_on:
+      dora-coordinator: { condition: service_started }
+      perception-compute: { condition: service_healthy }
+    volumes: ["./backend/config/runtime:/config"]
 
   service-status:
-    <<: *backend-daemon
+    <<: *dora-daemon
+    image: robot-arm-services-service-status
+    build:
+      context: .
+      dockerfile: backend/nodes/service-status/Dockerfile
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: service-status
@@ -104,7 +122,11 @@ services:
     volumes: ["./backend/config/service-status.json:/config/service-status.json:ro"]
 
   stararm-102-execution:
-    <<: *backend-daemon
+    <<: *dora-daemon
+    image: robot-arm-services-stararm-102-execution
+    build:
+      context: .
+      dockerfile: backend/devices/stararm-102/nodes/execution/Dockerfile
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: stararm-102-execution
@@ -118,15 +140,22 @@ services:
       - "c 188:* rwm"
 
   web-gateway:
-    <<: *backend-daemon
+    <<: *dora-daemon
+    image: robot-arm-services-web-gateway
+    build:
+      context: .
+      dockerfile: backend/nodes/web-gateway/Dockerfile
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: web-gateway
 
   stararm-102-motion:
     <<: *dora-daemon
-    image: robot-arm-services-backend
-    entrypoint: ["/src/devices/stararm-102/docker/motion-entrypoint.sh"]
+    image: robot-arm-services-stararm-102-motion
+    build:
+      context: .
+      dockerfile: backend/devices/stararm-102/nodes/motion/Dockerfile
+    entrypoint: ["/usr/local/bin/motion-entrypoint.sh"]
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: stararm-102-motion
@@ -140,8 +169,8 @@ services:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291 && exec 4<>/dev/tcp/127.0.0.1/6080"]
 
   dataflow:
-    image: robot-arm-services-backend
-    entrypoint: ["/src/docker/dora-entrypoint.sh"]
+    image: robot-arm-services-backend-runtime:2026.09.05-r3
+    entrypoint: ["/usr/local/bin/dora-entrypoint.sh"]
     command: ["dora", "start", "--name", "robot-arm-services", "--attach", "/config/dataflow.yml"]
     environment:
       <<: *dora-environment
@@ -156,6 +185,7 @@ services:
       perception: { condition: service_healthy }
       service-status: { condition: service_healthy }
       spatial-transform: { condition: service_healthy }
+      camera: { condition: service_healthy }
       stararm-102-motion: { condition: service_healthy }
       stararm-102-execution: { condition: service_healthy }
       web-gateway: { condition: service_healthy }
@@ -198,7 +228,9 @@ services:
     command: ["node", "/tests/integration/software-flow.mjs"]
     environment:
       SERVICES_BASE_URL: http://web-entry:8765
-    volumes: ["./tests:/tests:ro"]
+    volumes:
+      - "./tests:/tests:ro"
+      - "./backend/nodes/camera/assets/pick-place-scene-geometry.json:/backend/nodes/camera/assets/pick-place-scene-geometry.json:ro"
     networks: [robot-services]
 
 networks:

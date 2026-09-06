@@ -1,41 +1,74 @@
 # Docker 与服务镜像
 
-## 两个基础镜像
+## 原则
 
-项目只维护两个 Ubuntu 26.04 基础镜像：
+每个服务在自己的目录维护 Dockerfile、专属构建依赖和专属运行依赖。只有三个以上后端服务共同
+使用的 Rust/Dora 构建环境与最小运行库进入全局基础镜像。相机、OpenCV、RealSense、ROS、
+MoveIt、RViz、Python、AI 模型和设备厂商包都不属于全局基础层。
 
-- `robot-arm-services-backend-base:2026.09.04-r1`：原生构建依赖、ROS 2 Lyrical、MoveIt/MTC、
-  noVNC/TigerVNC、librealsense、OpenCV 5、Python/uv、PyTorch、YOLOE、GraspGenX、Rust、Dora，
-  以及打过项目补丁的 StarArm-102 厂家包和构建期生成的夹爪资产。
-- `robot-arm-services-frontend-base:2026.09.03-r1`：Node.js 与 pnpm。
+构建阶段与运行阶段分开；运行镜像只复制成品和实际动态库。Compose 只聚合服务，不维护第二份
+依赖安装逻辑，也不存在能够运行所有节点的总后端应用镜像。
 
-后端基础镜像不安装 MoveIt 元包，也不安装 ROS RealSense 驱动或 `cv_bridge`；只保留当前实际
-使用的 OMPL、Servo、MTC、RViz 和运动执行组件。`move_group` 自身仍依赖 occupancy-map-monitor
-库，但项目不配置 3D sensor updater，也不向 ROS 发布相机原始数据。相机采集直接使用
-librealsense。OpenCV 5 在 ROS 前安装到 `/opt/opencv5`；`opencv-rust` 禁用 `pkg_config` 探测并
-通过 `OpenCV_DIR` 选择这份 CMake package，避免误用 ROS 的 OpenCV。Python 模型环境使用
-`opencv-python` 5。模型权重从仓库
-`backend/services/perception-compute/models` 复制进镜像，避免每次联网下载；GraspGenX 源码按
-固定提交在镜像内取得，不污染主机。
+## 固定基础标签
 
-## 应用镜像
-
-| 镜像 | 内容 |
+| 标签 | 唯一职责 |
 | --- | --- |
-| `robot-arm-services-backend` | 一次复制并编译完整 Rust workspace；运行所有 Dora 后端节点 |
-| `robot-arm-services-perception-compute` | 在基础镜像已有虚拟环境中安装本工程计算服务 |
-| `robot-arm-services-frontend` | 一次复制、安装并构建五个 Next.js 应用 |
-| `nginx:stable-alpine` | 唯一 Web 入口 |
+| `robot-arm-services-backend-base:2026.09.05-r9` | Ubuntu 26.04、Rust 1.97、Dora 和多个 Rust 服务共同使用的原生构建工具 |
+| `robot-arm-services-backend-runtime:2026.09.05-r3` | Ubuntu 26.04、Dora 可执行文件、入口脚本和最小 Rust 运行库 |
+| `robot-arm-services-stararm-102-base:2026.09.05-r2` | 固定厂商提交、校验、StarArm-102 型号补丁与验证后的厂商资产 |
+| `robot-arm-services-perception-compute-base:2026.09.06-r5` | Python 3.11、PyTorch、YOLOE、GraspGenX、仓库模型和构建期夹爪资产 |
+| `robot-arm-services-perception-compute-runtime:2026.09.06-r5` | 上述计算环境的运行文件，不含其构建工具 |
+| `robot-arm-services-frontend-base:2026.09.03-r1` | Ubuntu 26.04、Node.js 24 与 pnpm 11 |
 
-应用 Dockerfile 不安装系统环境、不下载厂家包、不生成夹爪资产，也不拆构建/运行阶段或逐个搬运
-二进制。不同 Dora 服务共享同一个后端应用镜像，不按服务复制 Dockerfile。
+StarArm-102 基础不是全局后端基础。运动和执行镜像读取同一份已打补丁的型号资产，计算基础镜像
+读取它来生成对应 GraspGenX 夹爪描述。该资产层不含 ROS；当前工程 ROS 源码由 motion 自己构建，
+因此修改应用代码不需要重建厂商资产层。
 
-自然语言抓放的 OpenAI-compatible 地址、模型和密钥属于 `web-perception` 运行配置。Compose 从
-仓库根目录 `.env` 读取并注入容器，镜像构建不读取密钥；`.env.example` 只保留无密钥模板。
+## 服务所有权
 
-## 日常构建与启停
+| 服务 | Dockerfile | 服务独占的环境 |
+| --- | --- | --- |
+| controller-input | `backend/nodes/controller-input/Dockerfile` | SDL/HID 所需 USB 构建与运行库 |
+| camera | `backend/nodes/camera/Dockerfile` | OpenCV 5、librealsense SDK/运行库和相机 USB 权限 |
+| perception | `backend/nodes/scene/Dockerfile` | OpenCV 5；不含相机驱动、ROS 或 AI 权重 |
+| perception-compute | `backend/services/perception-compute/Dockerfile` | Python 计算运行环境、YOLOE、GraspGenX、模型和夹爪资产 |
+| stararm-102-motion | `backend/devices/stararm-102/nodes/motion/Dockerfile` | ROS 2 Lyrical、MoveIt/Servo/MTC、RViz/noVNC、设备 ROS 模型 |
+| stararm-102-execution | `backend/devices/stararm-102/nodes/execution/Dockerfile` | StarArm 串口运行库、同源 URDF/网格；不含 ROS |
+| spatial-transform | `backend/nodes/spatial-transform/Dockerfile` | 无额外系统环境 |
+| service-status | `backend/nodes/service-status/Dockerfile` | 无额外系统环境 |
+| web-gateway | `backend/nodes/web-gateway/Dockerfile` | 无额外系统环境 |
+| 五个 Next.js 应用 | `frontend/web/Dockerfile` | 同一个前端镜像，由 `WEB_APP` 选择入口 |
 
-应用代码变化只执行：
+相机与场景服务各自声明 OpenCV 5，因为它们是独立服务所有者；两份完全相同的源码构建步骤可由
+Docker 内容缓存复用，不因此增加共享基础镜像或隐藏依赖。OpenCV 的
+`OpenCV_DIR`、`LD_LIBRARY_PATH`、`PKG_CONFIG_PATH` 和
+`OPENCV_DISABLE_PROBES=pkg_config` 都在 Cargo 构建前声明，确保 `opencv-rust` 选择
+`/opt/opencv5` 而不是 ROS 的 OpenCV 4。RealSense 仅存在于 camera 镜像；ROS/MoveIt 仅存在于
+motion 镜像；AI 环境与模型仅存在于 perception-compute 镜像。
+
+## 构建顺序
+
+基础依赖变化时只重建受影响的标签：
+
+```bash
+docker build --progress=plain -f backend/docker/base/Dockerfile \
+  -t robot-arm-services-backend-base:2026.09.05-r9 .
+
+docker build --progress=plain -f backend/docker/runtime/Dockerfile \
+  -t robot-arm-services-backend-runtime:2026.09.05-r3 .
+
+docker build --progress=plain -f backend/devices/stararm-102/Dockerfile.base \
+  -t robot-arm-services-stararm-102-base:2026.09.05-r2 .
+
+docker build --progress=plain -f backend/services/perception-compute/Dockerfile.base \
+  -t robot-arm-services-perception-compute-base:2026.09.06-r5 .
+
+docker build --progress=plain -f backend/services/perception-compute/Dockerfile.runtime \
+  -t robot-arm-services-perception-compute-runtime:2026.09.06-r5 .
+```
+
+前端基础镜像仅在 Node 或 pnpm 变化时重建。基础标签更新后，应一次性修改直接引用它的
+Dockerfile；不得用 `latest` 隐式漂移。应用代码的日常构建仍只有：
 
 ```bash
 docker compose build
@@ -43,36 +76,15 @@ docker compose down
 docker compose up -d
 ```
 
-只改挂载配置时可以省略 build。系统统一启停，不维护单服务生命周期；Dora daemon 统一启用
-Compose `init`，保证停止信号转发和子进程回收。
+系统统一启停，不维护单节点生命周期。需要保留容器定义并整体恢复时使用
+`docker compose up -d --force-recreate`。自然语言 API 的地址、模型和密钥只通过根目录
+`.env` 注入 `web-perception`；它们不进入镜像层或浏览器 bundle。
 
-## 基础镜像升级
+## 设备与存储
 
-只有下列内容变化才允许全量构建基础镜像：
+controller-input、camera 和 execution 只挂载各自需要的 `/dev`、udev/sysfs 和 cgroup 规则。
+相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D
+不经过 ROS。
 
-- `backend/docker/base/Dockerfile` 或 `frontend/docker/base/Dockerfile`；
-- 系统、语言工具链、ROS/MoveIt、OpenCV、相机 SDK、AI 运行环境或权重；
-- 厂家源码版本、项目补丁、设备 ROS 包或构建期夹爪资产。
-
-后端基础镜像按注释分组处理：通用工具、原生/USB、OpenCV、ROS、MoveIt、VNC、RealSense、
-Python/模型、Rust/Dora、StarArm-102。厂家包只在最后一个连续设备模块中 clone、校验、patch、
-编译和生成资产一次。OpenCV 的选择环境变量位于 Rust 工具链和所有 Cargo 构建之前。
-
-升级使用新的不可复用标签：
-
-```bash
-docker build --progress=plain -f backend/docker/base/Dockerfile \
-  -t robot-arm-services-backend-base:<新标签> .
-```
-
-验证完成后再一次性修改应用 Dockerfile 的 `FROM`。普通 Compose 构建不引用基础 Dockerfile，
-因此上层服务变化不会重复构建基础环境。旧标签用于复现；应用不依赖 `latest`。
-
-## 设备权限与存储
-
-input、camera 和 execution 容器只挂载各自需要的 `/dev`、udev/sysfs 和 cgroup 规则。
-RealSense 真机由 `perception` 容器内的 capture 节点直接打开；默认未选择，不会在容器启动时
-扫描或占用设备。
-
-Docker 数据根目录属于主机配置，不由本仓库脚本修改。迁移后应使用 `docker info` 核对
-`Docker Root Dir`，清理历史镜像前先用只读命令确认引用关系，避免把镜像清理混入应用部署。
+Docker 数据根目录属于主机配置，不由仓库脚本修改。清理历史镜像前先检查 Compose 引用和共享
+层；已迁移的数据层不应再次复制回系统盘。

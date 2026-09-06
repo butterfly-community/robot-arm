@@ -1,0 +1,15 @@
+{
+  "pattern": "charuco",
+  "dictionary": "DICT_4X4_50",
+  "squares_x": 5,
+  "squares_y": 5,
+  "square_size_m": 0.015,
+  "marker_size_m": 0.011,
+  "measured_width_m": 0.075,
+  "measured_height_m": 0.075,
+  "image_width_px": 1880,
+  "image_height_px": 1880,
+  "print_margin_px": 40,
+  "marker_border_bits": 1,
+  "asset": "charuco-5x5-sq15-mk11.png"
+}

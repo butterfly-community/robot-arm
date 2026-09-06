@@ -30,6 +30,7 @@ pub(crate) enum Command {
         source_id: String,
     },
     UpdateToolPose(ToolPose),
+    SetCalibrationActive(bool),
     Shutdown,
 }
 
@@ -188,6 +189,11 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                             drivers.update_tool_pose(pose);
                         }
                     }
+                    Command::SetCalibrationActive(active) => {
+                        if let Ok(drivers) = drivers.as_mut() {
+                            drivers.set_calibration_active(active);
+                        }
+                    }
                     Command::Shutdown => return,
                 }
             }
@@ -202,7 +208,10 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                 output_frames_per_second,
                 capture_frames_per_second,
             );
-            match active_stream.poll_frame(materialize) {
+            match active_stream
+                .poll_frame(materialize)
+                .and_then(CameraPoll::into_rgb)
+            {
                 Ok(CameraPoll::Pending) => std::thread::sleep(Duration::from_millis(1)),
                 Ok(CameraPoll::Captured {
                     sequence,

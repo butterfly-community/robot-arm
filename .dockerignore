@@ -1,4 +1,5 @@
 .git
+temp
 **/target
 **/.venv
 **/node_modules
@@ -6,3 +7,4 @@
 **/__pycache__
 **/.ruff_cache
 **/.pytest_cache
+backend/services/perception-compute/models

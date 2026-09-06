@@ -22,6 +22,9 @@ use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligne
 use serde::{Deserialize, Serialize};
 
 const CONFIG_SCHEMA_VERSION: u32 = 2;
+fn default_grasp_collision_distance_m() -> f64 {
+    0.02 // GraspGenX demo_scene_pc default; a proximity distance, not mesh inflation.
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SceneConfig {
     schema_version: u32,
@@ -33,6 +36,8 @@ struct SceneConfig {
     classes: Vec<String>,
     #[serde(default)]
     placement_labels: Vec<String>,
+    #[serde(default = "default_grasp_collision_distance_m")]
+    grasp_collision_distance_m: f64,
 }
 
 impl Default for SceneConfig {
@@ -45,6 +50,7 @@ impl Default for SceneConfig {
             compute_service_url: "http://perception-compute:8000".into(),
             classes: Vec::new(),
             placement_labels: Vec::new(),
+            grasp_collision_distance_m: default_grasp_collision_distance_m(),
         }
     }
 }
@@ -121,7 +127,9 @@ struct SegmentInstance {
 #[derive(Serialize)]
 struct GraspRequest<'a> {
     points_xyz_m: &'a [[f32; 3]],
+    scene_points_xyz_m: &'a [[f32; 3]],
     gripper_asset_id: &'a str,
+    collision_threshold_m: f64,
 }
 
 #[derive(Deserialize)]
@@ -327,9 +335,7 @@ impl SceneNode {
             bail!("当前相机尚未配置外参");
         }
         let http = self.http.clone();
-        let compute_service_url = self.config.compute_service_url.clone();
-        let classes = self.config.classes.clone();
-        let placement_labels = self.config.placement_labels.clone();
+        let config = self.config.clone();
         let gripper_asset_id = self
             .robot_model
             .as_ref()
@@ -340,17 +346,9 @@ impl SceneNode {
         let completed_source_id = frame.source_id.clone();
         let completed_config_version = self.config.config_version;
         runtime.spawn(async move {
-            let result = process_scene(
-                http,
-                compute_service_url,
-                classes,
-                placement_labels,
-                gripper_asset_id,
-                frame,
-                sequence,
-            )
-            .await
-            .map_err(|error| format!("{error:#}"));
+            let result = process_scene(http, config, gripper_asset_id, frame, sequence)
+                .await
+                .map_err(|error| format!("{error:#}"));
             let _ = sender
                 .send(SceneTaskResult {
                     request_id: completed_request_id,
@@ -515,13 +513,19 @@ impl SceneNode {
             return self.publish_state(node);
         }
         let mut next = self.config.clone();
-        let result = match request.action {
+        let result = (|| match request.action {
             RequestAction::Apply => {
                 if let Some(classes) = request.classes {
                     next.classes = classes;
                 }
                 if let Some(labels) = request.placement_labels {
                     next.placement_labels = labels;
+                }
+                if let Some(distance) = request.grasp_collision_distance_m {
+                    if !distance.is_finite() || distance < 0.0 {
+                        return Err(eyre!("点云碰撞邻近距离必须是非负有限数值"));
+                    }
+                    next.grasp_collision_distance_m = distance;
                 }
                 next.enabled = true;
                 Ok(())
@@ -532,7 +536,7 @@ impl SceneNode {
                 Ok(())
             }
             action => Err(eyre!("感知请求不支持动作 {action:?}")),
-        };
+        })();
         let persist = request.action != RequestAction::Snapshot;
         let error = result
             .and_then(|()| {
@@ -596,6 +600,7 @@ impl SceneNode {
             model: self.model.clone(),
             classes: self.config.classes.clone(),
             placement_labels: self.config.placement_labels.clone(),
+            grasp_collision_distance_m: self.config.grasp_collision_distance_m,
             color_frame: self.color_frame.clone(),
             depth_frame: self.depth_frame.clone(),
             camera_calibration: self.camera_calibration.clone(),
@@ -641,9 +646,7 @@ impl SceneNode {
 
 async fn process_scene(
     http: reqwest::Client,
-    compute_service_url: String,
-    classes: Vec<String>,
-    placement_labels: Vec<String>,
+    config: SceneConfig,
     gripper_asset_id: Option<String>,
     frame: CameraFrameBundle,
     sequence: u64,
@@ -651,7 +654,7 @@ async fn process_scene(
     let model = http
         .get(format!(
             "{}/v1/model",
-            compute_service_url.trim_end_matches('/')
+            config.compute_service_url.trim_end_matches('/')
         ))
         .send()
         .await
@@ -662,10 +665,10 @@ async fn process_scene(
         .await?
         .model;
     let color = frame.color.clone();
-    let instances = segment(&http, &compute_service_url, &classes, &color).await?;
+    let instances = segment(&http, &config.compute_service_url, &config.classes, &color).await?;
     let processing_color = color.clone();
     let processing_instances = instances.clone();
-    let processing_placement_labels = placement_labels.clone();
+    let processing_placement_labels = config.placement_labels.clone();
     let (aligned_depth, calibration, overlay, mut scene, instance_clouds) =
         tokio::task::spawn_blocking(move || {
             let mut aligned_depth = decode_depth(&frame)?;
@@ -693,8 +696,9 @@ async fn process_scene(
         .sum();
     attach_grasp_candidates(
         &http,
-        &compute_service_url,
+        &config.compute_service_url,
         gripper_asset_id.as_deref(),
+        config.grasp_collision_distance_m,
         &mut scene,
         &instance_clouds,
     )
@@ -759,6 +763,7 @@ async fn attach_grasp_candidates(
     http: &reqwest::Client,
     compute_service_url: &str,
     gripper_asset_id: Option<&str>,
+    collision_threshold_m: f64,
     scene: &mut WorldScene,
     instance_clouds: &[InstancePointCloud],
 ) -> Result<()> {
@@ -785,7 +790,9 @@ async fn attach_grasp_candidates(
             ))
             .json(&GraspRequest {
                 points_xyz_m: &cloud.points_xyz_m,
+                scene_points_xyz_m: &cloud.scene_points_xyz_m,
                 gripper_asset_id,
+                collision_threshold_m,
             })
             .send()
             .await
@@ -863,54 +870,10 @@ fn decode_depth(frame: &CameraFrameBundle) -> Result<AlignedDepthFrame> {
 }
 
 fn color_rgb(message: &CameraImagePlane) -> Result<RgbImage> {
-    let mut rgb = RgbImage::new(message.width, message.height);
-    match message.pixel_format.as_str() {
-        "rgb8" | "bgr8" => {
-            for (pixel, source) in rgb
-                .pixels_mut()
-                .zip(packed_rows(message, 3)?.flat_map(|row| row.chunks_exact(3)))
-            {
-                *pixel = if message.pixel_format == "rgb8" {
-                    Rgb([source[0], source[1], source[2]])
-                } else {
-                    Rgb([source[2], source[1], source[0]])
-                };
-            }
-        }
-        "rgba8" | "bgra8" => {
-            for (pixel, source) in rgb
-                .pixels_mut()
-                .zip(packed_rows(message, 4)?.flat_map(|row| row.chunks_exact(4)))
-            {
-                *pixel = if message.pixel_format == "rgba8" {
-                    Rgb([source[0], source[1], source[2]])
-                } else {
-                    Rgb([source[2], source[1], source[0]])
-                };
-            }
-        }
-        "y8" => {
-            for (pixel, value) in rgb.pixels_mut().zip(packed_rows(message, 1)?.flatten()) {
-                *pixel = Rgb([*value; 3]);
-            }
-        }
-        other => bail!("不支持的彩色图编码 {other}"),
-    }
-    Ok(rgb)
-}
-
-fn packed_rows(
-    message: &CameraImagePlane,
-    bytes_per_pixel: usize,
-) -> Result<impl Iterator<Item = &[u8]>> {
-    let packed = message.width as usize * bytes_per_pixel;
-    if (message.stride_bytes as usize) < packed {
-        bail!("图像 stride 小于像素行宽");
-    }
-    Ok(message
-        .data
-        .chunks_exact(message.stride_bytes as usize)
-        .map(move |row| &row[..packed]))
+    Ok(
+        RgbImage::from_raw(message.width, message.height, message.packed_rgb()?)
+            .expect("validated packed RGB dimensions"),
+    )
 }
 
 fn color_png(message: &CameraImagePlane) -> Result<Vec<u8>> {

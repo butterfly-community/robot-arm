@@ -4,10 +4,10 @@ debug:
 
 nodes:
   - id: camera-node
-    path: /src/target/release/camera-node
+    path: /usr/local/bin/camera-node
     restart_policy: on-failure
     deploy:
-      machine: perception
+      machine: camera
     inputs:
       tick:
         # Polling is deliberately faster than any reported camera profile; the
@@ -40,7 +40,7 @@ nodes:
       - service_state
 
   - id: controller-input-node
-    path: /src/target/release/controller-input-node
+    path: /usr/local/bin/controller-input-node
     restart_policy: on-failure
     deploy:
       machine: controller-input
@@ -69,7 +69,7 @@ nodes:
       - simulation_request_result
 
   - id: scene-node
-    path: /src/target/release/scene-node
+    path: /usr/local/bin/scene-node
     restart_policy: on-failure
     deploy:
       machine: perception
@@ -95,7 +95,7 @@ nodes:
       - service_state
 
   - id: spatial-transform-node
-    path: /src/target/release/spatial-transform-node
+    path: /usr/local/bin/spatial-transform-node
     deploy:
       machine: spatial-transform
     inputs:
@@ -117,7 +117,7 @@ nodes:
       - request_result
 
   - id: stararm-102-motion-node
-    path: /src/target/release/stararm-102-motion-node
+    path: /usr/local/bin/stararm-102-motion-node
     deploy:
       machine: stararm-102-motion
     inputs:
@@ -162,7 +162,7 @@ nodes:
       - manipulation_request_result
 
   - id: stararm-102-execution-node
-    path: /src/target/release/stararm-102-execution-node
+    path: /usr/local/bin/stararm-102-execution-node
     deploy:
       machine: stararm-102-execution
     inputs:
@@ -188,7 +188,7 @@ nodes:
       - request_result
 
   - id: service-status-node
-    path: /src/target/release/service-status-node
+    path: /usr/local/bin/service-status-node
     deploy:
       machine: service-status
     inputs:
@@ -202,7 +202,7 @@ nodes:
       - system_readiness
 
   - id: web-gateway-node
-    path: /src/target/release/web-gateway-node
+    path: /usr/local/bin/web-gateway-node
     deploy:
       machine: web-gateway
     inputs:

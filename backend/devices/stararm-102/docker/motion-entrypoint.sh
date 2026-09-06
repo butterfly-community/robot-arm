@@ -20,7 +20,7 @@ openbox &
 window_manager_pid=$!
 ros2 launch stararm_102_motion_node motion_stack.launch.py &
 ros_pid=$!
-/src/docker/dora-entrypoint.sh "$@" &
+/usr/local/bin/dora-entrypoint.sh "$@" &
 daemon_pid=$!
 trap 'kill -INT "$display_pid" "$web_pid" "$window_manager_pid" "$ros_pid" "$daemon_pid" 2>/dev/null || true' INT TERM EXIT
 wait -n "$display_pid" "$web_pid" "$window_manager_pid" "$ros_pid" "$daemon_pid"

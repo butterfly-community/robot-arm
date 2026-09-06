@@ -26,7 +26,7 @@ import {
 } from "@robot/ui";
 import { useState } from "react";
 
-import { CameraVideo } from "./camera-video";
+import { FloatingCameraVideo } from "./camera-video";
 import type { InstructionResult } from "./instruction-flow";
 
 const initialBoard = {
@@ -99,6 +99,40 @@ function PerceptionSectionHeading({
   );
 }
 
+function PerceptionAssetImage({
+  src,
+  alt,
+  width,
+  height,
+  empty,
+}: {
+  src: string;
+  alt: string;
+  width: number;
+  height: number;
+  empty: string;
+}) {
+  const [failedSource, setFailedSource] = useState<string>();
+  return (
+    <div className="perception-preview-frame">
+      {failedSource === src ? (
+        <div className="visual-empty">{empty}</div>
+      ) : (
+        <Image
+          className="perception-preview"
+          src={src}
+          alt={alt}
+          width={width}
+          height={height}
+          loading="eager"
+          unoptimized
+          onError={() => setFailedSource(src)}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function Page() {
   const { snapshot, error, setError } = useGateway("perception");
   const values = snapshot?.values ?? {};
@@ -125,6 +159,8 @@ export default function Page() {
   const [board, setBoard] = useState(initialBoard);
   const [promptText, setPromptText] = useState("");
   const [placementLabels, setPlacementLabels] = useState("");
+  const [graspCollisionDistance, setGraspCollisionDistance] =
+    useState<string>();
   const [instruction, setInstruction] = useState("");
   const [instructionPending, setInstructionPending] = useState(false);
   const [instructionResult, setInstructionResult] =
@@ -139,8 +175,13 @@ export default function Page() {
   const selectedPrompts = promptText || perception?.classes.join(", ") || "";
   const selectedPlacementLabels =
     placementLabels || perception?.placement_labels.join(", ") || "";
+  const selectedGraspCollisionDistance =
+    graspCollisionDistance ??
+    (perception ? String(perception.grasp_collision_distance_m * 1000) : "");
+  const perceptionRequestResult = values.perception_request_result as
+    { request_id?: string } | undefined;
   const imageVersion =
-    perception?.last_frame_time_ns ?? perception?.last_scene_sequence ?? 0;
+    perceptionRequestResult?.request_id ?? perception?.last_scene_sequence ?? 0;
   const asset = (name: string) =>
     `/api/perception/assets/${name}?v=${imageVersion}`;
   const selectedObject =
@@ -333,6 +374,10 @@ export default function Page() {
               .map((value) => value.trim())
               .filter(Boolean)
           : null,
+        grasp_collision_distance_m:
+          appliesModel && selectedGraspCollisionDistance !== ""
+            ? Number(selectedGraspCollisionDistance) / 1000
+            : null,
       });
       if (action === "disconnect") setSourceId("");
     } finally {
@@ -515,10 +560,6 @@ export default function Page() {
       setPendingCalibrationAction(undefined);
     }
   }
-
-  const capturedFrames = [
-    ["深度图", "Depth frame", "depth.png", perception?.depth_frame],
-  ] as const;
 
   return (
     <Shell
@@ -704,6 +745,21 @@ export default function Page() {
                     }
                   />
                 </Field>
+                <Field
+                  label="抓取点云邻近距离 · mm"
+                  hint="GraspGenX 官方场景筛选参数：张开夹爪表面采样点与环境点云小于此距离时排除候选。它不是实体碰撞或 MoveIt 膨胀量；过大会排除实际离地的姿态。保存于后端，与模拟或真机来源无关。"
+                >
+                  <Input
+                    type="number"
+                    aria-label="抓取点云邻近距离"
+                    min={0}
+                    step="any"
+                    value={selectedGraspCollisionDistance}
+                    onChange={(event) =>
+                      setGraspCollisionDistance(event.currentTarget.value)
+                    }
+                  />
+                </Field>
               </div>
               <div className="card-actions perception-task-actions">
                 <Button
@@ -713,7 +769,7 @@ export default function Page() {
                 >
                   {pendingPerceptionAction === "model:apply"
                     ? "正在保存…"
-                    : "保存提示词配置"}
+                    : "保存模型配置"}
                 </Button>
                 <Button
                   variant="outline"
@@ -1031,7 +1087,7 @@ export default function Page() {
                 </div>
               </details>
             )}
-            <div className="card-actions card-actions-leading">
+            <div className="card-actions">
               <Button
                 variant="outline"
                 disabled={pending}
@@ -1506,61 +1562,38 @@ export default function Page() {
           <PerceptionSectionHeading
             index="02"
             title="采集数据"
-            description="彩色视频按相机实际采集频率直接显示；深度与感知 RGB-D 按独立上送频率更新。对齐、识别、分割与三维实例属于下方 AI 结果。"
+            description="彩色视频在可拖动、可收起的浮动窗口中按相机实际采集频率显示；深度与感知 RGB-D 按独立上送频率更新。"
           />
 
           <Card
             className="span-6 aligned-row-card"
-            eyebrow="Live color stream"
-            title="彩色视频"
+            eyebrow="Depth frame"
+            title="深度图"
           >
-            <CameraVideo streaming={camera?.streaming ?? false} />
+            {perception?.depth_frame ? (
+              <PerceptionAssetImage
+                src={asset("depth.png")}
+                alt="深度图"
+                width={perception.depth_frame.width}
+                height={perception.depth_frame.height}
+                empty="等待图像"
+              />
+            ) : (
+              <div className="visual-empty">等待图像</div>
+            )}
             <KeyValue
               label="尺寸 / 编码"
               value={
-                activeColorProfile
-                  ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
+                perception?.depth_frame
+                  ? `${perception.depth_frame.width} × ${perception.depth_frame.height} · ${perception.depth_frame.encoding}`
                   : "—"
               }
             />
             <KeyValue
-              label="设备采集 / 感知上送"
-              value={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
-              hint="彩色视频不受感知上送频率限制；两路来自同一个相机 pipeline，不会重复打开设备。"
+              label="坐标系"
+              value={perception?.depth_frame?.frame_id ?? "—"}
             />
           </Card>
-
-          {capturedFrames.map(([title, english, name, frame]) => (
-            <Card
-              className="span-6 aligned-row-card"
-              key={name}
-              eyebrow={english}
-              title={title}
-            >
-              {frame ? (
-                <Image
-                  className="perception-preview"
-                  src={asset(name)}
-                  alt={title}
-                  width={frame.width}
-                  height={frame.height}
-                  loading="eager"
-                  unoptimized
-                />
-              ) : (
-                <div className="visual-empty">等待图像</div>
-              )}
-              <KeyValue
-                label="尺寸 / 编码"
-                value={
-                  frame
-                    ? `${frame.width} × ${frame.height} · ${frame.encoding}`
-                    : "—"
-                }
-              />
-              <KeyValue label="坐标系" value={frame?.frame_id ?? "—"} />
-            </Card>
-          ))}
         </section>
 
         <section className="perception-section">
@@ -1577,14 +1610,12 @@ export default function Page() {
           >
             {perception?.last_scene_sequence != null &&
             perception.color_frame ? (
-              <Image
-                className="perception-preview"
+              <PerceptionAssetImage
                 src={asset("overlay.png")}
                 alt="识别与分割叠加图"
                 width={perception.color_frame.width}
                 height={perception.color_frame.height}
-                loading="eager"
-                unoptimized
+                empty="等待模型输出"
               />
             ) : (
               <div className="visual-empty">等待模型输出</div>
@@ -1681,6 +1712,15 @@ export default function Page() {
           <JsonView value={{ perception, scene, calibration, manipulation }} />
         </Card>
       </div>
+      <FloatingCameraVideo
+        streaming={camera?.streaming ?? false}
+        profile={
+          activeColorProfile
+            ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
+            : "等待彩色流配置"
+        }
+        rates={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
+      />
     </Shell>
   );
 }

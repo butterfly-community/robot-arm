@@ -686,10 +686,22 @@ datalist option {
 }
 .key-value strong {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-align: right;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+.key-value strong > .localized-label {
+  display: flex;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+.key-value strong > .localized-label > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .parameter-item .key-value,
 .pose-comparison .key-value {
@@ -978,11 +990,21 @@ input[type="range"] {
 .perception-preview {
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  height: 100%;
   object-fit: contain;
+}
+.perception-preview-frame {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: #070a0e;
+}
+.perception-preview-frame > .visual-empty {
+  height: 100%;
+  min-height: 0;
+  border: 0;
 }
 .camera-video {
   position: relative;
@@ -1007,6 +1029,77 @@ input[type="range"] {
   color: var(--danger);
   font-size: var(--text-caption);
   text-align: center;
+}
+.floating-camera-monitor {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 90;
+  width: min(420px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+.floating-camera-monitor.is-collapsed {
+  width: 240px;
+}
+.floating-camera-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 10px 8px 14px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  pointer-events: auto;
+}
+.floating-camera-header:active {
+  cursor: grabbing;
+}
+.floating-camera-header > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+.floating-camera-header strong {
+  font-size: var(--text-control);
+}
+.floating-camera-header span,
+.floating-camera-metadata {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+.floating-camera-toggle.button {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: var(--text-caption);
+}
+.floating-camera-content {
+  padding: 0 10px 10px;
+  border-top: 1px solid var(--line);
+}
+.floating-camera-content .camera-video {
+  margin-top: 10px;
+}
+.floating-camera-metadata {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 2px 1px;
+  font-variant-numeric: tabular-nums;
+}
+.floating-camera-metadata span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .perception-section {
@@ -1160,6 +1253,10 @@ input[type="range"] {
   gap: var(--space-3);
 }
 
+.instruction-task .field {
+  margin-bottom: 0;
+}
+
 .instruction-task .button {
   white-space: nowrap;
 }
@@ -1251,7 +1348,7 @@ input[type="range"] {
 }
 .perception-model-settings {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
   gap: 18px 24px;
 }

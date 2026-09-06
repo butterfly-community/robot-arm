@@ -4,7 +4,7 @@ use nalgebra::{
 };
 use opencv::{
     calib,
-    core::{self, Mat, Scalar, Size, Vector},
+    core::{self, Mat, Point2f, Scalar, Size, Vector},
     geometry, imgcodecs, imgproc, objdetect,
     prelude::*,
 };
@@ -14,6 +14,8 @@ use robot_arm_messages::{CalibrationBoard, Pose3};
 pub struct Detection {
     pub board_in_camera: Pose3,
     pub visualization_png: Vec<u8>,
+    pub matched_corner_count: usize,
+    pub reprojection_rmse_px: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -31,7 +33,11 @@ pub fn detect(
     distortion_values: &[f64],
     board_config: &CalibrationBoard,
 ) -> Result<Detection> {
-    let mut image = imgcodecs::imdecode(&Vector::from_slice(image_png), imgcodecs::IMREAD_COLOR)?;
+    // The public boundary is a standard PNG (RGB), not a raw BGR buffer.
+    // ChArUco treats three-channel Mats as BGR, and imencode expects BGR too.
+    // Let OpenCV's codecs own both boundary conversions; never swap manually.
+    let mut image =
+        imgcodecs::imdecode(&Vector::from_slice(image_png), imgcodecs::IMREAD_COLOR_BGR)?;
     if image.empty() {
         bail!("cannot decode calibration image");
     }
@@ -43,10 +49,28 @@ pub fn detect(
         board_config.marker_size_m as f32,
         &dictionary,
     )?;
-    let detector = objdetect::CharucoDetector::new_def(&board)?;
+    let camera_matrix = matrix3(camera_matrix_values)?;
+    let distortion = Mat::from_slice(distortion_values)?;
+    let mut charuco_parameters = objdetect::CharucoParameters::default()?;
+    charuco_parameters.set_camera_matrix(camera_matrix.clone());
+    charuco_parameters.set_dist_coeffs(distortion.try_clone()?);
+    // ChArUco refines chessboard corners itself. Keep marker refinement at the
+    // official default: nearby chess squares can bias marker subpixel windows.
+    let detector_parameters = objdetect::DetectorParameters::default()?;
+    let detector = objdetect::CharucoDetector::new(
+        &board,
+        &charuco_parameters,
+        &detector_parameters,
+        objdetect::RefineParameters::new_def()?,
+    )?;
     let mut corners = Mat::default();
     let mut ids = Mat::default();
-    detector.detect_board_def(&image, &mut corners, &mut ids)?;
+    // Mild prefiltering reduces raster phase bias in subpixel corner gradients.
+    // The 0.8 px sigma is measured against projected corner/pose truth, not a
+    // detection gate. Keep the original image for the diagnostic overlay.
+    let mut detection_image = Mat::default();
+    imgproc::gaussian_blur_def(&image, &mut detection_image, Size::new(0, 0), 0.8)?;
+    detector.detect_board_def(&detection_image, &mut corners, &mut ids)?;
     if ids.empty() {
         bail!("ChArUco board was not detected");
     }
@@ -58,8 +82,6 @@ pub fn detect(
     if matched_corner_count < 4 {
         bail!("ChArUco 只匹配到 {matched_corner_count} 个角点，求解位姿至少需要 4 个");
     }
-    let camera_matrix = matrix3(camera_matrix_values)?;
-    let distortion = Mat::from_slice(distortion_values)?;
     let mut rotation_vector = Mat::default();
     let mut translation = Mat::default();
     if !geometry::solve_pnp(
@@ -74,6 +96,30 @@ pub fn detect(
     )? {
         bail!("OpenCV solvePnP did not return a board pose");
     }
+    let mut reprojected_points = Mat::default();
+    geometry::project_points_def(
+        &object_points,
+        &rotation_vector,
+        &translation,
+        &camera_matrix,
+        &distortion,
+        &mut reprojected_points,
+    )?;
+    let observed_points = image_points.data_typed::<Point2f>()?;
+    let reprojected_points = reprojected_points.data_typed::<Point2f>()?;
+    if observed_points.len() != reprojected_points.len() || observed_points.is_empty() {
+        bail!("OpenCV returned an inconsistent set of reprojected ChArUco corners");
+    }
+    let squared_error_sum = observed_points
+        .iter()
+        .zip(reprojected_points)
+        .map(|(observed, reprojected)| {
+            let dx = f64::from(observed.x - reprojected.x);
+            let dy = f64::from(observed.y - reprojected.y);
+            dx * dx + dy * dy
+        })
+        .sum::<f64>();
+    let reprojection_rmse_px = (squared_error_sum / observed_points.len() as f64).sqrt();
     let mut rotation = Mat::default();
     geometry::rodrigues_def(&rotation_vector, &mut rotation)?;
     objdetect::draw_detected_corners_charuco(
@@ -97,6 +143,8 @@ pub fn detect(
     Ok(Detection {
         board_in_camera: matrix_pose(&rotation, &translation)?,
         visualization_png: visualization.to_vec(),
+        matched_corner_count,
+        reprojection_rmse_px,
     })
 }
 

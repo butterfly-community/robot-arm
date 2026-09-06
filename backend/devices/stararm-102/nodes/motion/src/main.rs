@@ -1051,25 +1051,17 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         })
     };
     let size = |[x, y, z]: [f64; 3]| json!({"x": x, "y": y, "z": z});
-    let support = placement
-        .source_object_id
-        .as_deref()
-        .and_then(|id| scene.objects.iter().find(|item| item.object_id == id));
     let mut placement_pose = placement.pose.clone();
-    if let Some(support) = support {
-        placement_pose.position_m[2] =
-            support.pose.position_m[2] + support.size_m[2] / 2.0 + object.size_m[2] / 2.0;
-    }
-    let mut obstacles = BTreeMap::new();
-    for item in scene.objects.iter().filter(|item| {
-        item.object_id != object.object_id
-            && Some(item.object_id.as_str()) != placement.source_object_id.as_deref()
-    }) {
-        obstacles.insert(item.object_id.clone(), (item.pose.clone(), item.size_m));
-    }
-    for item in &scene.obstacles {
-        obstacles.insert(item.obstacle_id.clone(), (item.pose.clone(), item.size_m));
-    }
+    // User-defined release: TCP 7 cm above the selected point. The gripper's
+    // X/Z opening plane is horizontal, with the same downward Y normal as the
+    // work pose; MTC remains free to choose its heading.
+    placement_pose.position_m[2] += 0.07;
+    placement_pose.orientation_xyzw = [
+        -std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+        std::f64::consts::FRAC_1_SQRT_2,
+    ];
     let goal = json!({
         "request_id": request.request_id,
         "frame_id": scene.frame_id,
@@ -1080,9 +1072,6 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         "placement_region_id": placement.region_id,
         "placement_pose": pose(&placement_pose),
         "placement_size": size(placement.size_m),
-        "obstacle_ids": obstacles.keys().cloned().collect::<Vec<_>>(),
-        "obstacle_poses": obstacles.values().map(|(item, _)| pose(item)).collect::<Vec<_>>(),
-        "obstacle_sizes": obstacles.values().map(|(_, item)| size(*item)).collect::<Vec<_>>(),
     });
     Ok(PendingManipulation {
         job: ManipulationJob {
@@ -1208,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn mtc_goal_maps_generic_scene_geometry_and_support_surface() {
+    fn mtc_goal_releases_tcp_7cm_above_selected_point_with_horizontal_opening() {
         let pose = Pose3 {
             position_m: [0.1, 0.2, 0.02],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -1263,8 +1252,19 @@ mod tests {
         .unwrap();
         assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
         assert_eq!(pending.job.goal["object_size"]["z"], 0.04);
-        assert_eq!(pending.job.goal["obstacle_ids"], json!([]));
+        assert!(pending.job.goal.get("obstacle_ids").is_none());
         assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));
-        assert_eq!(pending.state.place_position_m, Some([-0.1, 0.2, 0.1]));
+        let release = pending.state.place_position_m.unwrap();
+        assert_eq!(&release[..2], &[-0.1, 0.2]);
+        assert!((release[2] - 0.11).abs() < 1e-12);
+        assert_eq!(pending.job.goal["placement_pose"]["position"]["z"], release[2]);
+        assert_eq!(
+            pending.job.goal["placement_pose"]["orientation"]["x"],
+            -std::f64::consts::FRAC_1_SQRT_2
+        );
+        assert_eq!(
+            pending.job.goal["placement_pose"]["orientation"]["w"],
+            std::f64::consts::FRAC_1_SQRT_2
+        );
     }
 }

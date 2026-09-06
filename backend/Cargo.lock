@@ -611,6 +611,7 @@ dependencies = [
  "image",
  "json-config-store",
  "nalgebra",
+ "opencv",
  "realsense-camera",
  "robot-arm-messages",
  "serde",
@@ -3919,6 +3920,7 @@ dependencies = [
  "approx",
  "image",
  "nalgebra",
+ "opencv",
  "robot-arm-messages",
  "thiserror 2.0.20",
 ]

@@ -1,6 +1,5 @@
 #include <Eigen/Geometry>
 
-#include <moveit/planning_scene/planning_scene.hpp>
 #include <moveit/planning_scene_interface/planning_scene_interface.hpp>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/joint_interpolation.h>
@@ -8,7 +7,6 @@
 #include <moveit/task_constructor/stages/compute_ik.h>
 #include <moveit/task_constructor/stages/connect.h>
 #include <moveit/task_constructor/stages/current_state.h>
-#include <moveit/task_constructor/stages/generate_place_pose.h>
 #include <moveit/task_constructor/stages/generate_pose.h>
 #include <moveit/task_constructor/stages/modify_planning_scene.h>
 #include <moveit/task_constructor/stages/move_relative.h>
@@ -22,7 +20,9 @@
 #include <shape_msgs/msg/solid_primitive.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -45,9 +45,40 @@ constexpr char kOpenPose[] = "open";
 constexpr char kClosedPose[] = "closed";
 constexpr char kWorkPose[] = "work";
 constexpr char kGroundId[] = "ground";
+constexpr std::array<const char *, 2> kFingerLinks{"link7_left", "link7_right"};
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
+// MoveIt requires an attachable shape. This micrometre sphere represents only
+// the detected centre pose; it is not an estimate of the object's geometry.
+constexpr double kReferencePointRadius = 1e-6;
 constexpr std::size_t kPlaceYawSamples = 12;
+
+class GeneratePoses final : public mtc::stages::GeneratePose {
+public:
+  GeneratePoses(const std::string &name,
+                std::vector<geometry_msgs::msg::PoseStamped> poses)
+      : mtc::stages::GeneratePose(name),
+        poses_(std::move(poses)) {}
+
+  void compute() override {
+    if (upstream_solutions_.empty()) {
+      return;
+    }
+    const auto &upstream = *upstream_solutions_.pop();
+    const auto scene = upstream.end()->scene()->diff();
+    for (std::size_t index = 0; index < poses_.size(); ++index) {
+      mtc::InterfaceState state(scene);
+      forwardProperties(*upstream.end(), state);
+      state.properties().set("target_pose", poses_[index]);
+      mtc::SubTrajectory trajectory;
+      trajectory.setComment("candidate " + std::to_string(index));
+      spawn(std::move(state), std::move(trajectory));
+    }
+  }
+
+private:
+  std::vector<geometry_msgs::msg::PoseStamped> poses_;
+};
 
 moveit_msgs::msg::CollisionObject box(const std::string &frame_id,
                                       const std::string &id,
@@ -76,12 +107,54 @@ moveit_msgs::msg::CollisionObject ground(const std::string &frame_id) {
   return box(frame_id, kGroundId, pose, size);
 }
 
+moveit_msgs::msg::CollisionObject
+reference_point(const std::string &frame_id, const std::string &id,
+                const geometry_msgs::msg::Pose &pose) {
+  moveit_msgs::msg::CollisionObject object;
+  object.header.frame_id = frame_id;
+  object.id = id;
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = shape_msgs::msg::SolidPrimitive::SPHERE;
+  primitive.dimensions = {kReferencePointRadius};
+  object.primitives.push_back(std::move(primitive));
+  object.primitive_poses.push_back(pose);
+  object.operation = moveit_msgs::msg::CollisionObject::ADD;
+  return object;
+}
+
 geometry_msgs::msg::Vector3Stamped direction(const std::string &frame_id,
                                              double z) {
   geometry_msgs::msg::Vector3Stamped result;
   result.header.frame_id = frame_id;
   result.vector.z = z;
   return result;
+}
+
+std::string failure_summary(const mtc::Task &task,
+                            const std::string &stage_name) {
+  std::map<std::string, std::size_t> counts;
+  task.stages()->traverseRecursively(
+      [&](const mtc::Stage &stage, unsigned int) {
+        if (stage.name() == stage_name) {
+          for (const auto &failure : stage.failures()) {
+            auto reason = failure->comment();
+            if (reason.rfind("candidate ", 0) == 0) {
+              const auto separator = reason.find(": ");
+              if (separator != std::string::npos) {
+                reason.erase(0, separator + 2);
+              }
+            }
+            ++counts[reason];
+          }
+        }
+        return true;
+      });
+  std::ostringstream summary;
+  for (const auto &[reason, count] : counts) {
+    summary << (summary.tellp() == 0 ? "" : "; ") << count << "x "
+            << (reason.empty() ? "unspecified failure" : reason);
+  }
+  return summary.str();
 }
 
 } // namespace
@@ -119,14 +192,8 @@ private:
     std::vector<moveit_msgs::msg::CollisionObject> objects;
     objects.push_back(ground(goal.frame_id));
     objects.push_back(
-        box(goal.frame_id, goal.object_id, goal.object_pose, goal.object_size));
+        reference_point(goal.frame_id, goal.object_id, goal.object_pose));
     std::vector<std::string> temporary_ids{goal.object_id};
-    for (std::size_t index = 0; index < goal.obstacle_ids.size(); ++index) {
-      objects.push_back(box(goal.frame_id, goal.obstacle_ids[index],
-                            goal.obstacle_poses[index],
-                            goal.obstacle_sizes[index]));
-      temporary_ids.push_back(goal.obstacle_ids[index]);
-    }
     if (!scene_.applyCollisionObjects(objects)) {
       throw std::runtime_error("MoveIt rejected the task planning scene");
     }
@@ -206,35 +273,34 @@ private:
       approach->setDirection(direction(kTcpFrame, 1.0));
       pick->insert(std::move(approach));
 
-      auto candidates = std::make_unique<mtc::Alternatives>("compute grasp IK");
+      std::vector<geometry_msgs::msg::PoseStamped> candidate_poses;
+      candidate_poses.reserve(goal.grasp_poses.size());
       for (std::size_t index = 0; index < goal.grasp_poses.size(); ++index) {
-        auto generator = std::make_unique<mtc::stages::GeneratePose>(
-            "grasp candidate " + std::to_string(index + 1));
-        generator->properties().configureInitFrom(mtc::Stage::PARENT);
         geometry_msgs::msg::PoseStamped target;
         target.header.frame_id = goal.frame_id;
         target.pose = goal.grasp_poses[index];
-        generator->setPose(target);
-        generator->setMonitoredStage(open_stage);
-
-        auto grasp_ik = std::make_unique<mtc::stages::ComputeIK>(
-            "candidate IK " + std::to_string(index + 1), std::move(generator));
-        grasp_ik->setGroup(kArmGroup);
-        grasp_ik->setEndEffector(kEndEffector);
-        grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
-        grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
-                                                 {"target_pose"});
-        candidates->add(std::move(grasp_ik));
+        candidate_poses.push_back(std::move(target));
       }
-      pick->insert(std::move(candidates));
+      auto generator =
+          std::make_unique<GeneratePoses>("grasp candidates", std::move(candidate_poses));
+      generator->properties().configureInitFrom(mtc::Stage::PARENT);
+      generator->setMonitoredStage(open_stage);
+      auto grasp_ik = std::make_unique<mtc::stages::ComputeIK>(
+          "candidate IK", std::move(generator));
+      grasp_ik->setGroup(kArmGroup);
+      grasp_ik->setEndEffector(kEndEffector);
+      grasp_ik->setMaxIKSolutions(8);
+      grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
+      grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
+                                               {"target_pose"});
+      pick->insert(std::move(grasp_ik));
 
       auto allow = std::make_unique<mtc::stages::ModifyPlanningScene>(
           "allow gripper object collision");
-      allow->allowCollisions(goal.object_id,
-                             task.getRobotModel()
-                                 ->getJointModelGroup(kGripperGroup)
-                                 ->getLinkModelNamesWithCollisionGeometry(),
-                             true);
+      allow->allowCollisions(
+          goal.object_id,
+          std::vector<std::string>(kFingerLinks.begin(), kFingerLinks.end()),
+          true);
       pick->insert(std::move(allow));
 
       auto close = std::make_unique<mtc::stages::MoveTo>("close gripper",
@@ -280,35 +346,16 @@ private:
       place->properties().configureInitFrom(
           mtc::Stage::PARENT, {"eef", "hand", "group", "ik_frame"});
 
-      auto lower = std::make_unique<mtc::stages::MoveRelative>("lower object",
-                                                               cartesian);
-      lower->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      lower->setIKFrame(kTcpFrame);
-      lower->setMinMaxDistance(0.0, goal.object_size.z);
-      lower->setDirection(direction(goal.frame_id, -1.0));
-      place->insert(std::move(lower));
-
-      geometry_msgs::msg::PoseStamped attached_object_frame;
-      attached_object_frame.header.frame_id = goal.object_id;
-      attached_object_frame.pose.orientation.w = 1.0;
-
-      auto place_candidates =
-          std::make_unique<mtc::Alternatives>("compute place IK");
+      std::vector<geometry_msgs::msg::PoseStamped> release_poses;
       const Eigen::Quaterniond placement_orientation(
           goal.placement_pose.orientation.w, goal.placement_pose.orientation.x,
           goal.placement_pose.orientation.y, goal.placement_pose.orientation.z);
       for (std::size_t index = 0; index < kPlaceYawSamples; ++index) {
-        const auto yaw = 2.0 * std::acos(-1.0) *
-                         static_cast<double>(index) /
+        const auto yaw = 2.0 * std::acos(-1.0) * static_cast<double>(index) /
                          static_cast<double>(kPlaceYawSamples);
         const Eigen::Quaterniond orientation =
             Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
             placement_orientation;
-        auto generator = std::make_unique<mtc::stages::GeneratePlacePose>(
-            "place heading " + std::to_string(index + 1));
-        generator->properties().configureInitFrom(mtc::Stage::PARENT,
-                                                  {"ik_frame"});
-        generator->setObject(goal.object_id);
         geometry_msgs::msg::PoseStamped target;
         target.header.frame_id = goal.frame_id;
         target.pose = goal.placement_pose;
@@ -316,18 +363,21 @@ private:
         target.pose.orientation.y = orientation.y();
         target.pose.orientation.z = orientation.z();
         target.pose.orientation.w = orientation.w();
-        generator->setPose(target);
-        generator->setMonitoredStage(pick_stage);
-        auto place_ik = std::make_unique<mtc::stages::ComputeIK>(
-            "heading IK " + std::to_string(index + 1), std::move(generator));
-        place_ik->setGroup(kArmGroup);
-        place_ik->setEndEffector(kEndEffector);
-        place_ik->setIKFrame(attached_object_frame);
-        place_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
-                                                 {"target_pose"});
-        place_candidates->add(std::move(place_ik));
+        release_poses.push_back(std::move(target));
       }
-      place->insert(std::move(place_candidates));
+      auto generator = std::make_unique<GeneratePoses>(
+          "release headings", std::move(release_poses));
+      generator->properties().configureInitFrom(mtc::Stage::PARENT);
+      generator->setMonitoredStage(pick_stage);
+      auto place_ik = std::make_unique<mtc::stages::ComputeIK>(
+          "release TCP IK", std::move(generator));
+      place_ik->setGroup(kArmGroup);
+      place_ik->setEndEffector(kEndEffector);
+      place_ik->setMaxIKSolutions(2);
+      place_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
+      place_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
+                                               {"target_pose"});
+      place->insert(std::move(place_ik));
 
       auto open = std::make_unique<mtc::stages::MoveTo>("open gripper",
                                                         joint_interpolation);
@@ -344,7 +394,8 @@ private:
           "restore object collision");
       forbid->allowCollisions(
           goal.object_id,
-          *task.getRobotModel()->getJointModelGroup(kGripperGroup), false);
+          std::vector<std::string>(kFingerLinks.begin(), kFingerLinks.end()),
+          false);
       place->insert(std::move(forbid));
 
       auto retreat = std::make_unique<mtc::stages::MoveRelative>(
@@ -379,10 +430,6 @@ private:
     auto result = std::make_shared<PickPlace::Result>();
     std::vector<std::string> temporary_ids;
     try {
-      if (goal->obstacle_ids.size() != goal->obstacle_poses.size() ||
-          goal->obstacle_ids.size() != goal->obstacle_sizes.size()) {
-        throw std::runtime_error("obstacle arrays have different lengths");
-      }
       feedback(handle, "planning", "build planning scene");
       temporary_ids = apply_scene(*goal);
       auto task = create_task(*goal);
@@ -392,20 +439,24 @@ private:
       if (!plan_result || task.solutions().empty()) {
         std::ostringstream explanation;
         task.explainFailure(explanation);
+        const auto candidate_failures = failure_summary(task, "candidate IK");
         result->error_code = plan_result.val;
         result->message = explanation.str();
+        if (!candidate_failures.empty()) {
+          result->message += "Candidate summary: " + candidate_failures;
+        }
         cleanup_scene(temporary_ids);
         handle->abort(result);
         return;
       }
-      const auto &solution = *task.solutions().front();
-      result->selected_cost = solution.cost();
+      const auto *solution = task.solutions().front().get();
+      result->selected_cost = solution->cost();
       feedback(handle, "planned", "selected complete task solution",
-               task.numSolutions(), solution.cost());
-      task.introspection().publishSolution(solution);
+               task.numSolutions(), solution->cost());
+      task.introspection().publishSolution(*solution);
       feedback(handle, "executing", "execute selected task solution",
-               task.numSolutions(), solution.cost());
-      const auto execute_result = task.execute(solution);
+               task.numSolutions(), solution->cost());
+      const auto execute_result = task.execute(*solution);
       result->error_code = execute_result.val;
       result->message =
           execute_result ? "pick and place complete" : "task execution failed";

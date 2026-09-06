@@ -32,11 +32,20 @@ Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
 
 应用镜像固定继承已经验证的基础镜像：
 
-- 后端：`robot-arm-services-backend-base:2026.09.04-r1`
+- 后端构建基础：`robot-arm-services-backend-base:2026.09.05-r9`
+- 后端运行基础：`robot-arm-services-backend-runtime:2026.09.05-r3`
+- StarArm-102 厂商资产：`robot-arm-services-stararm-102-base:2026.09.05-r2`
+- 感知计算构建/运行：`robot-arm-services-perception-compute-base:2026.09.05-r4` /
+  `robot-arm-services-perception-compute-runtime:2026.09.05-r4`
 - 前端：`robot-arm-services-frontend-base:2026.09.03-r1`
 
-Compose 只构建应用层。只有系统依赖、ROS/MoveIt、OpenCV、相机 SDK、AI 环境、厂家包或设备
-补丁变化时才重新构建相应基础镜像并发布新标签。具体规则见
+每个服务在自己的 Dockerfile 中声明专属构建和运行依赖：相机拥有 librealsense，场景拥有
+OpenCV 5，运动拥有 ROS 2/MoveIt/RViz，感知计算拥有 Python、PyTorch、YOLOE、GraspGenX 和
+模型。全局后端基础只保留三个以上服务共同使用的 Rust/Dora 工具链及最小运行库；Compose
+不会再构建一个包含所有节点与硬件环境的总后端镜像。前端的构建与运行使用同一个经过验证的
+Ubuntu 基础镜像。
+
+只有对应依赖变化时才重新构建受影响的基础镜像并发布新标签。具体规则见
 [Docker 与服务镜像](docs/DOCKER.md)。
 
 ## 相机与感知
