@@ -764,6 +764,59 @@ test("color video floats, drags, collapses, and restores browser state", async (
   ).toBeVisible();
 });
 
+test("video preview collapse closes the connection and expand reconnects", async ({
+  page,
+  request,
+}) => {
+  const state = await (await request.get("/api/perception/state")).json();
+  if (!state.values.camera_state.streaming) {
+    for (const action of ["refresh", "select", "connect"]) {
+      const response = await request.post("/api/perception/camera", {
+        data: {
+          schema_version: 3,
+          request_id: `video-preview-${action}`,
+          action,
+          source_id: "simulation:pick-place-scene",
+          color_profile_key: "color:1920x1080:rgb8:10",
+          depth_profile_key: "depth:1920x1080:z16le:10",
+          output_frames_per_second: 1,
+        },
+      });
+      expect((await response.json()).original_error).toBeNull();
+    }
+  }
+  const connections: { closed: boolean; frames: number }[] = [];
+  page.on("websocket", (socket) => {
+    if (!socket.url().endsWith("/ws/camera-video")) return;
+    const connection = { closed: false, frames: 0 };
+    connections.push(connection);
+    socket.on("framereceived", () => connection.frames++);
+    socket.on("close", () => (connection.closed = true));
+  });
+  await page.goto("/perception/");
+  const monitor = page.getByLabel("彩色视频浮动窗口");
+  for (let round = 0; round < 3; round++) {
+    await expect.poll(() => connections.length).toBe(round + 1);
+    await expect.poll(() => connections[round].frames).toBeGreaterThan(1);
+    const collapse = monitor.getByRole("button", { name: "收起", exact: true });
+    await expect(collapse).toHaveAttribute(
+      "title",
+      "收起并断开视频预览，不停止相机采集",
+    );
+    await collapse.click();
+    await expect.poll(() => connections[round].closed).toBe(true);
+    await expect(
+      monitor.getByText("预览已收起", { exact: true }),
+    ).toBeVisible();
+    await expect(monitor.locator("canvas")).toHaveCount(0);
+    const current = await (await request.get("/api/perception/state")).json();
+    expect(current.values.camera_state.streaming).toBe(true);
+    if (round < 2) {
+      await monitor.getByRole("button", { name: "展开", exact: true }).click();
+    }
+  }
+});
+
 test("card status precedes the collapse button and collapse state persists", async ({
   page,
 }) => {

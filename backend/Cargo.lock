@@ -608,6 +608,7 @@ dependencies = [
  "camera-calibration",
  "dora-node-api",
  "eyre",
+ "futures",
  "image",
  "json-config-store",
  "nalgebra",
@@ -617,6 +618,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

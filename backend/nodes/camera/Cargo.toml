@@ -25,6 +25,7 @@ axum.workspace = true
 camera-calibration = { workspace = true, optional = true }
 dora-node-api.workspace = true
 eyre.workspace = true
+futures.workspace = true
 image.workspace = true
 json-config-store.workspace = true
 nalgebra.workspace = true
@@ -34,3 +35,6 @@ robot-arm-messages.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.29.0"

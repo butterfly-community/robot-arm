@@ -280,13 +280,20 @@ function FloatingCameraVideoWindow({
       >
         <div>
           <strong>彩色视频</strong>
-          <span>{streaming ? "实时" : "等待视频"}</span>
+          <span>
+            {collapsed ? "预览已收起" : streaming ? "实时" : "等待视频"}
+          </span>
         </div>
         <Button
           type="button"
           variant="outline"
           className="floating-camera-toggle"
           aria-expanded={!collapsed}
+          title={
+            collapsed
+              ? "展开并连接视频预览"
+              : "收起并断开视频预览，不停止相机采集"
+          }
           onPointerDown={(event) => event.stopPropagation()}
           onClick={() => {
             const next = !collapsed;
