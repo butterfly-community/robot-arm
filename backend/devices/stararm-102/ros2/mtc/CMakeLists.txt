@@ -13,6 +13,17 @@ find_package(shape_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(moveit_ros_perception REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(geometric_shapes REQUIRED)
+
+add_library(stararm_mesh_self_filter SHARED src/mesh_self_filter.cpp)
+target_compile_features(stararm_mesh_self_filter PUBLIC cxx_std_17)
+target_link_libraries(stararm_mesh_self_filter PUBLIC
+  moveit_ros_perception::moveit_pointcloud_octomap_updater_core
+  pluginlib::pluginlib ${geometric_shapes_TARGETS})
+pluginlib_export_plugin_description_file(moveit_ros_occupancy_map_monitor octomap_plugins.xml)
+install(TARGETS stararm_mesh_self_filter LIBRARY DESTINATION lib)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/PickPlace.action"

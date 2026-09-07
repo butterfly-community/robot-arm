@@ -17,6 +17,7 @@ from perception_compute.app import (
     Instance,
     SegmentRequest,
     YoloeBackend,
+    VisualPrompt,
     create_app,
 )
 
@@ -25,7 +26,7 @@ class FakeBackend:
     model_name = "fixture-seg"
     device = "cpu"
 
-    def segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
+    def segment(self, image: Image.Image, classes: list[str], prompt=None) -> list[Instance]:
         mask = Image.new("L", image.size, 255)
         encoded = io.BytesIO()
         mask.save(encoded, format="PNG")
@@ -78,6 +79,8 @@ class FakeTensor:
 
 class FakeYoloeModel:
     def __init__(self) -> None:
+        self.predictor = None
+        self.overrides = {}
         self.classes: list[str] = []
         self.predict_calls = 0
         self.predict_options: list[dict] = []
@@ -100,7 +103,8 @@ class FakeYoloeModel:
             cls=FakeTensor([0]),
         )
         masks = SimpleNamespace(data=FakeTensor([np.ones((6, 8))]))
-        return [SimpleNamespace(boxes=boxes, masks=masks, names={0: self.classes[0]})]
+        name = "object0" if "visual_prompts" in options else self.classes[0]
+        return [SimpleNamespace(boxes=boxes, masks=masks, names={0: name})]
 
 
 def encoded_image() -> str:
@@ -181,7 +185,7 @@ def test_prompt_update_and_inference_are_one_serial_operation() -> None:
     active = 0
     maximum_active = 0
 
-    def segment(image, classes):
+    def segment(image, classes, prompt=None):
         nonlocal active, maximum_active
         active += 1
         maximum_active = max(maximum_active, active)
@@ -199,6 +203,38 @@ def test_prompt_update_and_inference_are_one_serial_operation() -> None:
         )
     assert results == [["cube"], ["bin"], ["apple"], ["bottle"]]
     assert maximum_active == 1
+
+
+def test_visual_prompt_uses_reference_image_and_restores_text_mode():
+    backend = YoloeBackend.__new__(YoloeBackend)
+    backend.device = "cpu"
+    backend._model = FakeYoloeModel()
+    backend._classes = ()
+    backend._lock = threading.Lock()
+    visual = VisualPrompt(reference_image_base64=encoded_image(),
+                          bboxes=[(1, 1, 3, 3)], class_ids=[0])
+    image = Image.new("RGB", (1280, 720), "blue")
+    instances = backend.segment(image, ["white block"], visual)
+    options = backend._model.predict_options[-1]
+    assert options["refer_image"].size == (8, 6)
+    assert options["refer_image"].getpixel((0, 0)) == (255, 0, 0)
+    assert options["imgsz"] == 1280
+    assert instances[0].label == "white block"
+    assert "conf" not in options
+    backend.segment(image, ["white block"])
+    assert backend._model.classes == ["white block"]
+    assert "visual_prompts" not in backend._model.predict_options[-1]
+    assert "imgsz" not in backend._model.predict_options[-1]
+
+
+def test_visual_prompt_class_ids_follow_official_sequential_contract():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SegmentRequest(image_base64=encoded_image(), classes=["block"],
+                       prompt=VisualPrompt(reference_image_base64=encoded_image(),
+                                           bboxes=[(1, 1, 3, 3)], class_ids=[2]))
 
 
 def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monkeypatch):
@@ -245,7 +281,7 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
             "moe_obb_density": "dense-topandside",
             "moe_z_offsets_cm": (-2, 0),
             "grasp_threshold": 0.7,
-            "num_grasps": 200,
+            "num_grasps": backend.num_grasps,
             "topk_num_grasps": -1,
         }
         return [
@@ -282,6 +318,7 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
     assert result.candidates[0].branch == "diff"
     np.testing.assert_allclose(result.candidates[1].transform, poses[2] @ tool)
     assert result.candidates[1].branch == "obb"
+    backend.num_grasps = 1000
     backend.infer(
         GraspRequest(
             points_xyz_m=[(0.1, 0.2, 0.3)],

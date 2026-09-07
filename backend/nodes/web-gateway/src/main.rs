@@ -12,7 +12,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderValue, StatusCode, header},
@@ -256,7 +256,12 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/spatial/config", patch(request_spatial_config))
         .route("/api/spatial/snapshot", post(request_spatial_snapshot))
         .route("/api/perception/state", get(snapshot_perception))
-        .route("/api/perception/request", post(request_perception))
+        .route(
+            "/api/perception/request",
+            // Image-bearing visual prompts must not inherit the 2 MiB
+            // default intended for small JSON requests. Other routes keep it.
+            post(request_perception).layer(DefaultBodyLimit::disable()),
+        )
         .route("/api/perception/camera", post(request_camera))
         .route("/api/perception/calibration", post(request_calibration))
         .route("/api/perception/pick-place", post(request_pick_place))

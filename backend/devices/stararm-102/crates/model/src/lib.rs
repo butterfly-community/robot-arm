@@ -273,19 +273,20 @@ fn named_target(key: &str, label: &str, joints: [f64; 6]) -> NamedMotionTarget {
 }
 
 fn calibration_targets() -> Vec<NamedMotionTarget> {
-    // FK-verified board poses for the centre-line RGB-D fixture. The wrist
-    // rotates about independent axes; camera/board translation is not observable
-    // enough if J6 stays fixed. These are joint angles, never servo bus angles.
+    // User-approved default (2026-09-08): real-arm retest max 6.479 mm, RMS 4.808 mm.
+    // This restores the best historical pose set; see docs/STARARM-102.md for evidence.
+    // Keep the current raw-feedback calibration path; never restore old sampling bugs.
+    // Do not replace these device poses to suit a simulation camera viewpoint.
     [
-        [-37.82, 116.92, -183.36, 4.07, 50.84, -86.63],
-        [0.0, 117.89, -117.17, -85.18, 0.0, 0.0],
-        [39.86, 91.83, -129.99, -26.48, -51.76, 83.71],
-        [-10.49, 134.09, -156.02, -61.93, 15.86, -105.79],
-        [36.78, 104.11, -120.57, -65.17, -44.58, -43.16],
-        [-40.31, 88.62, -144.82, 13.5, 48.09, 143.51],
-        [25.06, 135.68, -166.64, -51.69, -30.24, -150.0],
-        [0.0, 76.48, -137.37, 36.43, 0.0, 0.0],
-        [-25.46, 122.76, -137.1, -68.94, 30.05, 150.0],
+        [0.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+        [0.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+        [0.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+        [-60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+        [60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
     ]
     .into_iter()
     .enumerate()
@@ -425,17 +426,21 @@ mod tests {
     fn calibration_targets_are_complete_and_use_declared_coordinates() {
         let targets = calibration_targets();
         let expected_degrees: [[f64; 6]; 9] = [
-            [-37.82, 116.92, -183.36, 4.07, 50.84, -86.63],
-            [0.0, 117.89, -117.17, -85.18, 0.0, 0.0],
-            [39.86, 91.83, -129.99, -26.48, -51.76, 83.71],
-            [-10.49, 134.09, -156.02, -61.93, 15.86, -105.79],
-            [36.78, 104.11, -120.57, -65.17, -44.58, -43.16],
-            [-40.31, 88.62, -144.82, 13.5, 48.09, 143.51],
-            [25.06, 135.68, -166.64, -51.69, -30.24, -150.0],
-            [0.0, 76.48, -137.37, 36.43, 0.0, 0.0],
-            [-25.46, 122.76, -137.1, -68.94, 30.05, 150.0],
+            [0.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 60.0, 0.0, 0.0],
+            [0.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 40.0, 0.0, 0.0],
+            [0.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+            [-60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
+            [60.0, 0.0, -60.0, 30.0, 0.0, 0.0],
         ];
         assert_eq!(targets.len(), expected_degrees.len());
+        assert_eq!(
+            targets[0].joint_positions_rad,
+            named_target("work", "工作位", WORK_JOINTS_RAD).joint_positions_rad
+        );
         for (target, expected) in targets.iter().zip(expected_degrees) {
             for (joint, expected_degrees) in JOINTS.iter().zip(expected) {
                 assert_eq!(

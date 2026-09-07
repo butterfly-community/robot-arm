@@ -52,6 +52,8 @@ constexpr char kOpenPose[] = "open";
 constexpr char kClosedPose[] = "closed";
 constexpr char kWorkPose[] = "work";
 constexpr char kGroundId[] = "ground";
+// The observed support also exists as occupied cells, not only the rigid plane.
+constexpr std::array<const char *, 2> kSupportIds{kGroundId, "<octomap>"};
 constexpr std::array<const char *, 2> kFingerLinks{"link7_left", "link7_right"};
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
@@ -73,37 +75,40 @@ public:
     std::vector<const moveit::core::AttachedBody *> bodies;
     from->getCurrentState().getAttachedBodies(bodies);
     for (const auto *body : bodies) {
-      auto &acm = planning_scene->getAllowedCollisionMatrixNonConst();
-      collision_detection::AllowedCollision::Type allowed;
-      if (!acm.getAllowedCollision(body->getName(), kGroundId, allowed) ||
-          allowed != collision_detection::AllowedCollision::ALWAYS) {
-        continue;
-      }
-      // Support contact during lift is not permission to drive into support.
-      // Preserve only the contact already present in the observed geometry.
-      // Native conditional ACM remains local to planning, not a ROS message.
-      acm.setEntry(body->getName(), kGroundId, false);
-      collision_detection::CollisionRequest request;
-      request.contacts = true;
-      request.max_contacts = std::numeric_limits<std::size_t>::max();
-      request.max_contacts_per_pair = request.max_contacts;
-      collision_detection::CollisionResult contacts;
-      planning_scene->checkCollision(request, contacts);
-      double initial_depth = 0.0;
-      for (const auto &[pair, entries] : contacts.contacts) {
-        if ((pair.first == body->getName() && pair.second == kGroundId) ||
-            (pair.second == body->getName() && pair.first == kGroundId)) {
-          for (const auto &contact : entries)
-            initial_depth = std::max(initial_depth, contact.depth);
+      for (const auto *support_id : kSupportIds) {
+        auto &acm = planning_scene->getAllowedCollisionMatrixNonConst();
+        collision_detection::AllowedCollision::Type allowed;
+        if (!acm.getAllowedCollision(body->getName(), support_id, allowed) ||
+            allowed != collision_detection::AllowedCollision::ALWAYS) {
+          continue;
         }
+        // Support contact during lift is not permission to drive into support.
+        // Preserve only the contact already present in the observed geometry.
+        // Native conditional ACM remains local to planning, not a ROS message.
+        acm.setEntry(body->getName(), support_id, false);
+        collision_detection::CollisionRequest request;
+        request.contacts = true;
+        request.max_contacts = std::numeric_limits<std::size_t>::max();
+        request.max_contacts_per_pair = request.max_contacts;
+        collision_detection::CollisionResult contacts;
+        planning_scene->checkCollision(request, contacts);
+        double initial_depth = 0.0;
+        for (const auto &[pair, entries] : contacts.contacts) {
+          if ((pair.first == body->getName() && pair.second == support_id) ||
+              (pair.second == body->getName() && pair.first == support_id)) {
+            for (const auto &contact : entries)
+              initial_depth = std::max(initial_depth, contact.depth);
+          }
+        }
+        collision_detection::DecideContactFn contact_allowed =
+            [initial_depth](collision_detection::Contact &contact) {
+              return contact.depth <= initial_depth;
+            };
+        acm.setEntry(body->getName(), support_id, contact_allowed);
       }
-      collision_detection::DecideContactFn contact_allowed =
-          [initial_depth](collision_detection::Contact &contact) {
-            return contact.depth <= initial_depth;
-          };
-      acm.setEntry(body->getName(), kGroundId, contact_allowed);
     }
-    const double tolerance = properties().get<double>("goal_position_tolerance");
+    const double tolerance =
+        properties().get<double>("goal_position_tolerance");
     geometry_msgs::msg::PointStamped point;
     point.header.frame_id = from->getPlanningFrame();
     point.point.x = target.translation().x();
@@ -136,6 +141,7 @@ public:
       mtc::InterfaceState state(scene);
       forwardProperties(*upstream.end(), state);
       state.properties().set("target_pose", poses_[index]);
+      state.properties().set("grasp_candidate_index", index);
       mtc::SubTrajectory trajectory;
       trajectory.setComment("candidate " + std::to_string(index));
       spawn(std::move(state), std::move(trajectory));
@@ -145,6 +151,23 @@ public:
 private:
   std::vector<geometry_msgs::msg::PoseStamped> poses_;
 };
+
+// Scene supplies candidates in descending model confidence. Preserve that
+// ordering among COMPLETE plans, then use motion cost within one candidate.
+// Joint travel alone is not a measure of whether a learned grasp will hold.
+std::size_t grasp_candidate_index(const mtc::SolutionBase &solution) {
+  // ComputeIK creates a NEW SubTrajectory, not a wrapper around the generator.
+  // Read the explicitly forwarded interface property instead of its creator.
+  if (solution.end() && solution.end()->properties().hasProperty("grasp_candidate_index"))
+    return solution.end()->properties().get<std::size_t>("grasp_candidate_index");
+  if (const auto *wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution))
+    return grasp_candidate_index(*wrapped->wrapped());
+  std::size_t index = std::numeric_limits<std::size_t>::max();
+  if (const auto *sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution))
+    for (const auto *child : sequence->solutions())
+      index = std::min(index, grasp_candidate_index(*child));
+  return index;
+}
 
 moveit_msgs::msg::CollisionObject box(const std::string &frame_id,
                                       const std::string &id,
@@ -213,6 +236,7 @@ std::string failure_summary(const mtc::Task &task,
 class PickPlaceServer : public rclcpp::Node {
 public:
   PickPlaceServer() : Node("stararm_102_mtc") {
+    octomap_resolution_ = declare_parameter<double>("octomap_resolution");
     cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         "/perception/depth/points", rclcpp::SensorDataQoS());
     filtered_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -255,6 +279,14 @@ private:
     objects.push_back(ground(goal.frame_id));
     objects.push_back(
         box(goal.frame_id, goal.object_id, goal.object_pose, goal.object_size));
+    const auto actual_target = objects.back();
+    // RGB-D edge ramps can leave target-owned occupied cells outside the
+    // segmented box. Exclude its adjacent voxel layer during native filtering
+    // only. Restore the actual collision/attachment dimensions before planning.
+    // Real replay: 17/121 closure collisions -> 0; all 707 destination cells
+    // unchanged. Do not enlarge the ground or relax collision checking.
+    for (auto &dimension : objects.back().primitives.front().dimensions)
+      dimension += 2.0 * octomap_resolution_;
     if (!scene_.applyCollisionObjects(objects)) {
       throw std::runtime_error("MoveIt rejected the task planning scene");
     }
@@ -278,6 +310,9 @@ private:
     // Only the corresponding callback certifies that Octomap finished updating.
     // Do not mistake publishing the message for a completed scene update.
     cloud_ready_.wait(lock, [&] { return filtered_stamp_ == cloud.header.stamp; });
+    lock.unlock();
+    if (!scene_.applyCollisionObject(actual_target))
+      throw std::runtime_error("MoveIt rejected restoration of actual target dimensions");
   }
 
   void cleanup_scene(const std::vector<std::string> &temporary_ids) {
@@ -320,7 +355,8 @@ private:
     {
       auto support = std::make_unique<mtc::stages::ModifyPlanningScene>(
           "allow object support contact");
-      support->allowCollisions(goal.object_id, kGroundId, true);
+      for (const auto *support_id : kSupportIds)
+        support->allowCollisions(goal.object_id, support_id, true);
       task.add(std::move(support));
     }
 
@@ -373,6 +409,7 @@ private:
       grasp_ik->setGroup(kArmGroup);
       grasp_ik->setEndEffector(kEndEffector);
       grasp_ik->setMaxIKSolutions(8);
+      grasp_ik->setForwardedProperties({"grasp_candidate_index"});
       grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
       grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
                                                {"target_pose"});
@@ -410,7 +447,8 @@ private:
 
       auto restore_support = std::make_unique<mtc::stages::ModifyPlanningScene>(
           "restore support collision after lift");
-      restore_support->allowCollisions(goal.object_id, kGroundId, false);
+      for (const auto *support_id : kSupportIds)
+        restore_support->allowCollisions(goal.object_id, support_id, false);
       pick->insert(std::move(restore_support));
 
       task.add(std::move(pick));
@@ -503,9 +541,20 @@ private:
         handle->abort(result);
         return;
       }
-      const auto *solution = task.solutions().front().get();
+      const auto best = std::min_element(
+          task.solutions().begin(), task.solutions().end(),
+          [](const auto &left, const auto &right) {
+            return std::make_pair(grasp_candidate_index(*left), left->cost()) <
+                   std::make_pair(grasp_candidate_index(*right), right->cost());
+          });
+      const auto *solution = best->get();
+      for (const auto &complete : task.solutions())
+        RCLCPP_INFO(get_logger(), "complete candidate %zu, motion cost %.6f%s",
+                    grasp_candidate_index(*complete), complete->cost(),
+                    complete.get() == solution ? " (selected)" : "");
       result->selected_cost = solution->cost();
-      feedback(handle, "planned", "selected complete task solution",
+      feedback(handle, "planned", "selected complete candidate " +
+                   std::to_string(grasp_candidate_index(*solution)),
                task.numSolutions(), solution->cost());
       task.introspection().publishSolution(*solution);
       feedback(handle, "executing", "execute selected task solution",
@@ -529,6 +578,7 @@ private:
   }
 
   moveit::planning_interface::PlanningSceneInterface scene_;
+  double octomap_resolution_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_subscription_;
   rclcpp::Client<std_srvs::srv::Empty>::SharedPtr clear_octomap_;

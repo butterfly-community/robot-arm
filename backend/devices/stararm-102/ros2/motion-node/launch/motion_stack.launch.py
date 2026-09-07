@@ -89,6 +89,7 @@ def generate_launch_description() -> LaunchDescription:
             package="stararm_102_mtc",
             executable="pick_place_server",
             parameters=[
+                {"octomap_resolution": move_group["octomap_resolution"]},
                 moveit.robot_description,
                 moveit.robot_description_semantic,
                 moveit.robot_description_kinematics,

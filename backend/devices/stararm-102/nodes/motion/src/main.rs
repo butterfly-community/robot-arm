@@ -18,7 +18,7 @@ use robot_arm_messages::{
     ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationTaskState,
     MotionRequest, MotionState, MotionStatus, PerceptionState, PickPlaceRequest, RequestAction,
     RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
-    SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose,
+    SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose, ToolPoseFeedback,
     TransformedControlFrame, WorldScene, from_arrow, to_arrow,
 };
 use serde::Serialize;
@@ -70,6 +70,7 @@ struct MotionNode {
     controller_output_armed: bool,
     last_controller_command: Option<(Vec<f64>, f64)>,
     current_tcp: Option<Pose>,
+    current_tcp_feedback: Option<ArmState>,
     anchor_tcp: Option<Pose>,
     target_tcp: Option<Pose>,
     control_session_id: Option<u64>,
@@ -134,6 +135,7 @@ fn run() -> Result<()> {
         controller_output_armed: false,
         last_controller_command: None,
         current_tcp: None,
+        current_tcp_feedback: None,
         anchor_tcp: None,
         target_tcp: None,
         control_session_id: None,
@@ -252,7 +254,8 @@ impl MotionNode {
             .publish_state(&planning_joints, planning_actuator)?;
         if !self.fk_pending {
             self.fk_pending = true;
-            self.ros.request_current_pose(planning_joints);
+            // FK measures reality; planning-only limit projection must not alter it.
+            self.ros.request_current_pose(state.clone());
         }
         self.latest_arm_state = Some(state);
         self.start_controller_sync();
@@ -648,10 +651,13 @@ impl MotionNode {
                     self.servo_message = value["message"].as_str().map(str::to_owned);
                     self.publish_state(node)?;
                 }
-                RosEvent::CurrentPose(result) => {
+                RosEvent::CurrentPose(feedback, result) => {
                     self.fk_pending = false;
                     match result {
-                        Ok(pose) => self.current_tcp = Some(pose),
+                        Ok(pose) => {
+                            self.current_tcp = Some(pose);
+                            self.current_tcp_feedback = Some(feedback);
+                        }
                         Err(error) => self.last_error = Some(error),
                     }
                     self.publish_state(node)?;
@@ -964,7 +970,13 @@ impl MotionNode {
         MotionState {
             schema_version: SCHEMA_VERSION,
             control_mode: self.config.control_mode,
-            current_tool_pose: self.current_tcp.map(tool_pose),
+            current_tool_pose: self
+                .current_tcp
+                .zip(self.current_tcp_feedback.as_ref())
+                .map(|(pose, feedback)| ToolPoseFeedback {
+                    pose: tool_pose(pose),
+                    arm_state: feedback.clone(),
+                }),
             target_tool_pose: self.target_tcp.map(tool_pose),
             control_session_id: self.control_session_id,
             latest_motion: Some(self.motion_status.clone()),

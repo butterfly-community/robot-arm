@@ -71,6 +71,7 @@ services:
     networks: [robot-services]
     environment:
       GRASPGENX_SEED: ${GRASPGENX_SEED:-0}
+      GRASPGENX_NUM_GRASPS: ${GRASPGENX_NUM_GRASPS:-200}
     healthcheck:
       test: ["CMD", "/opt/compute-venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
 

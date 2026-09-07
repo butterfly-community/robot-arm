@@ -17,13 +17,13 @@ use json_config_store::{load_or_default, save};
 #[cfg(feature = "opencv-runtime")]
 use robot_arm_messages::Pose3;
 use robot_arm_messages::{
-    ArmState, CalibrationAction, CalibrationObservation, CalibrationPhase, CalibrationRequest,
+    CalibrationAction, CalibrationObservation, CalibrationPhase, CalibrationRequest,
     CalibrationResult, CalibrationSessionState, CameraCaptureState, CameraDriverParameterValue,
     CameraFrameBundle, CameraRequest, CameraSourceConfiguration, CameraSourceInfo,
     CameraStreamKind, ControlMode, DepthCameraCalibration, JointPosition, MotionRequest,
     MotionState, NamedMotionTarget, PerceptionAssetRequest, PerceptionAssetResponse, RequestAction,
     RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
-    SetControlModeRequest, ToolPose, camera_frame_to_arrow, from_arrow, to_arrow,
+    SetControlModeRequest, ToolPose, ToolPoseFeedback, camera_frame_to_arrow, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "opencv-runtime")]
@@ -106,8 +106,7 @@ struct CameraNode {
     worker_capture_count: u64,
     original_error: Option<String>,
     latest_frame: Option<CameraFrameBundle>,
-    latest_arm_state: Option<ArmState>,
-    latest_tool_pose: Option<ToolPose>,
+    pending_calibration_frame: Option<CameraFrameBundle>,
     latest_motion_state: Option<MotionState>,
     robot_model: Option<RobotModelInfo>,
     calibration_capture_at: Option<Instant>,
@@ -118,6 +117,14 @@ struct CameraNode {
 enum CalibrationWork {
     Detected(CalibrationObservation, Vec<u8>),
     Solved(CalibrationResult),
+}
+
+fn calibration_feedback_after_frame(
+    tool: Option<&ToolPoseFeedback>,
+    frame_received_time_ns: i64,
+) -> Option<&ToolPoseFeedback> {
+    // Both timestamps use the host clock. Camera hardware timestamps are a different domain.
+    tool.filter(|tool| tool.arm_state.sample_time_ns >= frame_received_time_ns)
 }
 
 fn default_calibration_session() -> CalibrationSessionState {
@@ -182,8 +189,7 @@ fn run() -> Result<()> {
         worker_capture_count: 0,
         original_error: None,
         latest_frame: None,
-        latest_arm_state: None,
-        latest_tool_pose: None,
+        pending_calibration_frame: None,
         latest_motion_state: None,
         robot_model: None,
         calibration_capture_at: None,
@@ -213,12 +219,10 @@ fn run() -> Result<()> {
                     let request = from_arrow(data.as_array()).context("解析相机资源请求")?;
                     camera.send_asset(&mut node, request)?;
                 }
-                "arm_state" => camera.latest_arm_state = Some(from_arrow(data.as_array())?),
                 "motion_state" => {
                     let state: MotionState = from_arrow(data.as_array())?;
                     if let Some(pose) = state.current_tool_pose.clone() {
-                        camera.update_tool_pose(pose.clone())?;
-                        camera.latest_tool_pose = Some(pose);
+                        camera.update_tool_pose(pose.pose)?;
                     }
                     camera.latest_motion_state = Some(state);
                 }
@@ -815,6 +819,7 @@ impl CameraNode {
             CalibrationAction::Apply => self.apply_solved_calibration(),
             CalibrationAction::Cancel => {
                 self.calibration_work = None;
+                self.pending_calibration_frame = None;
                 self.config.calibration_session = default_calibration_session();
                 self.calibration_capture_at = None;
                 Ok(())
@@ -901,6 +906,7 @@ impl CameraNode {
             original_error: None,
         };
         self.last_calibration_attempt_ns = None;
+        self.pending_calibration_frame = None;
         self.calibration_work = None;
         self.calibration_capture_at = None;
         send(
@@ -983,6 +989,7 @@ impl CameraNode {
 
     fn send_current_calibration_target(&mut self, node: &mut DoraNode) -> Result<()> {
         self.calibration_capture_at = None;
+        self.pending_calibration_frame = None;
         let session = &self.config.calibration_session;
         let model = self
             .robot_model
@@ -1017,15 +1024,33 @@ impl CameraNode {
         {
             return Ok(());
         }
-        let Some(frame_time_ns) = self.latest_frame.as_ref().map(|frame| frame.device_time_ns)
-        else {
-            self.config.calibration_session.stage_message = Some("等待彩色相机帧".into());
+        if self.pending_calibration_frame.is_none() {
+            let Some(frame) = self.latest_frame.as_ref() else {
+                self.config.calibration_session.stage_message = Some("等待彩色相机帧".into());
+                return Ok(());
+            };
+            if self.last_calibration_attempt_ns == Some(frame.device_time_ns) {
+                return Ok(());
+            }
+            self.last_calibration_attempt_ns = Some(frame.device_time_ns);
+            // Freeze this image while FK for newly sampled motor feedback completes.
+            self.pending_calibration_frame = Some(frame.clone());
+        }
+        let frame = self
+            .pending_calibration_frame
+            .as_ref()
+            .expect("frame selected above");
+        let Some(tool) = calibration_feedback_after_frame(
+            self.latest_motion_state
+                .as_ref()
+                .and_then(|state| state.current_tool_pose.as_ref()),
+            frame.received_time_ns,
+        ) else {
+            self.config.calibration_session.stage_message =
+                Some("图像已采集，等待同次采样的新电机反馈及 TCP".into());
             return Ok(());
         };
-        if self.last_calibration_attempt_ns == Some(frame_time_ns) {
-            return Ok(());
-        }
-        self.last_calibration_attempt_ns = Some(frame_time_ns);
+        let tool = tool.clone();
         let index = self
             .config
             .calibration_session
@@ -1041,17 +1066,12 @@ impl CameraNode {
             index + 1
         );
         let session = self.config.calibration_session.clone();
-        let frame = self.latest_frame.clone().expect("frame checked above");
-        let arm = self
-            .latest_arm_state
-            .clone()
-            .ok_or_else(|| eyre!("尚未收到关节反馈"))?;
-        let tool = self
-            .latest_tool_pose
-            .clone()
-            .ok_or_else(|| eyre!("尚未收到当前 TCP 位姿"))?;
+        let frame = self
+            .pending_calibration_frame
+            .take()
+            .expect("frame selected above");
         self.calibration_work = Some(self.runtime.spawn_blocking(move || {
-            Self::capture_calibration_observation(&sample_id, &session, &frame, &arm, &tool)
+            Self::capture_calibration_observation(&sample_id, &session, &frame, &tool)
         }));
         Ok(())
     }
@@ -1133,6 +1153,7 @@ impl CameraNode {
 
     fn fail_automatic_calibration(&mut self, message: String) {
         self.calibration_work = None;
+        self.pending_calibration_frame = None;
         let session = &mut self.config.calibration_session;
         session.active = false;
         session.phase = CalibrationPhase::Failed;
@@ -1152,8 +1173,7 @@ impl CameraNode {
         sample_id: &str,
         session: &CalibrationSessionState,
         frame: &CameraFrameBundle,
-        arm: &ArmState,
-        tool: &ToolPose,
+        tool: &ToolPoseFeedback,
     ) -> Result<CalibrationWork> {
         let board = session
             .board
@@ -1169,14 +1189,18 @@ impl CameraNode {
         Ok(CalibrationWork::Detected(
             CalibrationObservation {
                 sample_id: sample_id.into(),
-                sample_time_ns: arm.sample_time_ns,
+                sample_time_ns: tool.arm_state.sample_time_ns,
                 camera_frame_id: frame.color.frame_id.clone(),
                 board_in_camera: detection.board_in_camera,
                 tcp_in_base: Pose3 {
-                    position_m: tool.position_m,
-                    orientation_xyzw: tool.orientation_xyzw,
+                    position_m: tool.pose.position_m,
+                    orientation_xyzw: tool.pose.orientation_xyzw,
                 },
-                joint_feedback_rad: arm.joints_rad.clone(),
+                joint_feedback_rad: tool.arm_state.joints_rad.clone(),
+                frame_received_time_ns: Some(frame.received_time_ns),
+                frame_sequence: Some(frame.sequence),
+                joint_feedback_sequence: Some(tool.arm_state.sequence),
+                feedback_source: Some(tool.arm_state.feedback_source),
             },
             detection.visualization_png,
         ))
@@ -1187,8 +1211,7 @@ impl CameraNode {
         _sample_id: &str,
         _session: &CalibrationSessionState,
         _frame: &CameraFrameBundle,
-        _arm: &ArmState,
-        _tool: &ToolPose,
+        _tool: &ToolPoseFeedback,
     ) -> Result<CalibrationWork> {
         bail!("camera-node 构建时未启用 OpenCV 标定支持")
     }
@@ -1529,6 +1552,36 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibration_waits_for_new_feedback_and_keeps_its_pose_and_raw_angles_together() {
+        let tool = ToolPoseFeedback {
+            pose: ToolPose {
+                frame: "base".into(),
+                position_m: [0.1, 0.2, 0.3],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+            arm_state: robot_arm_messages::ArmState {
+                schema_version: SCHEMA_VERSION,
+                sequence: 42,
+                sample_time_ns: 100,
+                model_revision: "fixture".into(),
+                joints_rad: vec![-0.005],
+                actuators_rad: vec![0.0],
+                feedback_source: robot_arm_messages::FeedbackSource::Hardware,
+            },
+        };
+        assert!(calibration_feedback_after_frame(None, 100).is_none());
+        assert!(calibration_feedback_after_frame(Some(&tool), 101).is_none());
+        let selected = calibration_feedback_after_frame(Some(&tool), 100).unwrap();
+        assert_eq!(selected, &tool);
+        assert_eq!(selected.arm_state.joints_rad, vec![-0.005]);
+        assert_eq!(selected.arm_state.sequence, 42);
+        assert_eq!(
+            calibration_feedback_after_frame(Some(&tool), 99),
+            Some(&tool)
+        );
+    }
 
     #[test]
     fn default_state_does_not_select_or_start_a_camera() {

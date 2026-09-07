@@ -1,0 +1,6 @@
+<library path="stararm_mesh_self_filter">
+  <class name="stararm_102/MeshSelfFilter" type="stararm_102::MeshSelfFilter"
+         base_class_type="occupancy_map_monitor::OccupancyMapUpdater">
+    <description>Official point-cloud updater with a separate excluded mesh envelope.</description>
+  </class>
+</library>

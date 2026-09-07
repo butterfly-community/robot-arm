@@ -3,11 +3,16 @@
 octomap_resolution: 0.005
 sensors: [depth]
 depth:
-  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  sensor_plugin: stararm_102/MeshSelfFilter
   point_cloud_topic: /perception/depth/points
   max_range: .inf
   point_subsample: 1
   # Shape-filter padding is derived from half the voxel size in the launch file.
   padding_scale: 1.0
+  # Real D415 replay: 15 mm cleared the static start but retained housing/wire
+  # points that blocked reachable grasps. 40 mm cleared candidate 52 while
+  # preserving all 766 acrylic-region voxel coordinates/sizes unchanged.
+  # Mesh envelopes only. Ground/primitive padding remains half a voxel.
+  mesh_padding_offset: 0.04
   max_update_rate: 0.0
   filtered_cloud_topic: /perception/depth/filtered

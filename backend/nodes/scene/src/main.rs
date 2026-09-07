@@ -15,8 +15,8 @@ use robot_arm_messages::{
     AlignedDepthFrame, CameraCaptureState, CameraFrameBundle, CameraImagePlane,
     DepthCameraCalibration, DetectedInstance2D, ImageFrameInfo, PerceptionAssetRequest,
     PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionState, Pose3,
-    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
-    WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
+    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt,
+    ServiceState, WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,8 @@ struct SceneConfig {
     compute_service_url: String,
     classes: Vec<String>,
     #[serde(default)]
+    prompt: SegmentationPrompt,
+    #[serde(default)]
     placement_labels: Vec<String>,
     #[serde(default = "default_grasp_collision_distance_m")]
     grasp_collision_distance_m: f64,
@@ -49,6 +51,7 @@ impl Default for SceneConfig {
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
             classes: Vec::new(),
+            prompt: SegmentationPrompt::Text,
             placement_labels: Vec::new(),
             grasp_collision_distance_m: default_grasp_collision_distance_m(),
         }
@@ -100,6 +103,7 @@ struct SceneTaskResult {
 struct SegmentRequest<'a> {
     image_base64: String,
     classes: &'a [String],
+    prompt: &'a SegmentationPrompt,
 }
 
 #[derive(Deserialize)]
@@ -524,6 +528,11 @@ impl SceneNode {
             RequestAction::Apply => {
                 if let Some(classes) = request.classes {
                     next.classes = classes;
+                    // Editing text classes explicitly restores text prompting.
+                    next.prompt = SegmentationPrompt::Text;
+                }
+                if let Some(prompt) = request.prompt {
+                    next.prompt = prompt;
                 }
                 if let Some(labels) = request.placement_labels {
                     next.placement_labels = labels;
@@ -606,6 +615,7 @@ impl SceneNode {
             compute_service_url: self.config.compute_service_url.clone(),
             model: self.model.clone(),
             classes: self.config.classes.clone(),
+            visual_prompt_active: matches!(self.config.prompt, SegmentationPrompt::Visual { .. }),
             placement_labels: self.config.placement_labels.clone(),
             grasp_collision_distance_m: self.config.grasp_collision_distance_m,
             color_frame: self.color_frame.clone(),
@@ -672,7 +682,14 @@ async fn process_scene(
         .await?
         .model;
     let color = frame.color.clone();
-    let instances = segment(&http, &config.compute_service_url, &config.classes, &color).await?;
+    let instances = segment(
+        &http,
+        &config.compute_service_url,
+        &config.classes,
+        &config.prompt,
+        &color,
+    )
+    .await?;
     let processing_color = color.clone();
     let processing_instances = instances.clone();
     let processing_placement_labels = config.placement_labels.clone();
@@ -740,6 +757,7 @@ async fn segment(
     http: &reqwest::Client,
     compute_service_url: &str,
     classes: &[String],
+    prompt: &SegmentationPrompt,
     color: &CameraImagePlane,
 ) -> Result<Vec<DetectedInstance2D>> {
     let color = color.clone();
@@ -755,6 +773,7 @@ async fn segment(
         .json(&SegmentRequest {
             image_base64,
             classes,
+            prompt,
         })
         .send()
         .await

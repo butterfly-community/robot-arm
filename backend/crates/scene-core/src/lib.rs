@@ -294,6 +294,11 @@ fn depth_continuous_component(
         imgproc::THRESH_BINARY | imgproc::THRESH_OTSU,
     )?
     .round() as u16;
+    // A Z16 step is the sensor's quantization unit, not a physical edge.
+    // Otsu on a smooth quantized slope often returns zero (mostly 0/1
+    // differences), splitting the surface into single-depth contour bands.
+    // Keep adjacent quantization levels connected; retain Otsu for real gaps.
+    let threshold = threshold.max(1);
 
     let mut visited = vec![false; valid.len()];
     let mut largest = Vec::new();
@@ -637,6 +642,31 @@ mod tests {
         assert!((center[0] - 0.23).abs() < 0.001);
         assert!((center[1] - 0.06).abs() < 0.001);
         assert!((center[2] - 0.21).abs() < 0.001);
+    }
+
+    #[test]
+    fn quantized_sloping_surface_is_not_split_into_depth_contours() {
+        let width = 130;
+        let height = 120;
+        let depth = AlignedDepthFrame {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            source_time_ns: 2,
+            source_id: TEST_SOURCE_ID.into(),
+            frame_id: TEST_FRAME_ID.into(),
+            width,
+            height,
+            depth_scale_m: 0.001,
+            depth: (0..height)
+                .flat_map(|y| (0..width).map(move |x| 800 + (x / 4 + y / 7) as u16))
+                .collect(),
+        };
+        let mask = GrayImage::from_pixel(width, height, Luma([255]));
+        let selected = depth_continuous_component(&mask, &depth).unwrap();
+        assert_eq!(
+            selected.iter().filter(|selected| **selected).count(),
+            (width * height) as usize
+        );
     }
 
     #[test]

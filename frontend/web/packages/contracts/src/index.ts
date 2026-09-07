@@ -111,7 +111,7 @@ export interface ToolPose {
 
 export interface MotionState {
   control_mode: "relative" | "manual" | "perception";
-  current_tool_pose?: ToolPose | null;
+  current_tool_pose?: (ToolPose & { arm_state: ArmState }) | null;
   target_tool_pose?: ToolPose | null;
 }
 
@@ -372,6 +372,7 @@ export interface PerceptionState {
   compute_service_url: string;
   model: string;
   classes: string[];
+  visual_prompt_active?: boolean;
   placement_labels: string[];
   grasp_collision_distance_m: number;
   color_frame?: ImageFrameInfo | null;

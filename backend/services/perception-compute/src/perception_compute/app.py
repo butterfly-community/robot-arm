@@ -8,17 +8,41 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class TextPrompt(BaseModel):
+    kind: Literal["text"] = "text"
+
+
+class VisualPrompt(BaseModel):
+    kind: Literal["visual"] = "visual"
+    reference_image_base64: str
+    bboxes: list[tuple[float, float, float, float]]
+    class_ids: list[int]
+
+
+SegmentationPrompt = Annotated[TextPrompt | VisualPrompt, Field(discriminator="kind")]
 
 
 class SegmentRequest(BaseModel):
     image_base64: str
     classes: list[str]
+    prompt: SegmentationPrompt = Field(default_factory=TextPrompt)
+
+    @model_validator(mode="after")
+    def visual_class_mapping(self):
+        if isinstance(self.prompt, VisualPrompt):
+            if not self.prompt.bboxes or len(self.prompt.bboxes) != len(self.prompt.class_ids):
+                raise ValueError("YOLOE requires one class ID per nonempty visual example box")
+            if set(self.prompt.class_ids) != set(range(len(self.classes))):
+                raise ValueError("YOLOE visual class IDs must cover the sequential configured classes")
+        return self
 
 
 class Instance(BaseModel):
@@ -64,7 +88,8 @@ class ModelBackend(Protocol):
     model_name: str
     device: str
 
-    def segment(self, image: Image.Image, classes: list[str]) -> list[Instance]: ...
+    def segment(self, image: Image.Image, classes: list[str],
+                prompt: SegmentationPrompt | None = None) -> list[Instance]: ...
 
 
 class GraspBackend(Protocol):
@@ -80,6 +105,7 @@ class GraspGenXBackend:
     gripper_assets: str
     device: str
     seed: int
+    num_grasps: int = 200
 
     model_name = "GraspGenX"
 
@@ -133,7 +159,7 @@ class GraspGenXBackend:
                 # Match demo_scene_pc.py, not the lower-level library's -1
                 # default (which also returns rejected, low-quality grasps).
                 grasp_threshold=0.7,
-                num_grasps=200,
+                num_grasps=self.num_grasps,
                 topk_num_grasps=-1,
             )
             # Official demo_scene_pc pipeline. The environment excludes this
@@ -183,24 +209,50 @@ class YoloeBackend:
         self._classes: tuple[str, ...] = ()
         self._lock = threading.Lock()
 
-    def segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
+    def segment(self, image: Image.Image, classes: list[str],
+                prompt: SegmentationPrompt | None = None) -> list[Instance]:
         if not classes:
             return []
         # FastAPI runs synchronous endpoints concurrently. Prompt mutation and
         # inference must share the lock, not only predict's internal lock.
         with self._lock:
-            return self._segment(image, classes)
+            return self._segment(image, classes, prompt)
 
-    def _segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
+    def _segment(self, image: Image.Image, classes: list[str],
+                 prompt: SegmentationPrompt | None = None) -> list[Instance]:
         requested = tuple(classes)
-        if requested != self._classes:
+        options: dict[str, Any] = {}
+        if isinstance(prompt, VisualPrompt):
+            from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
+
+            reference = Image.open(io.BytesIO(base64.b64decode(
+                prompt.reference_image_base64, validate=True))).convert("RGB")
+            # Official reference-image prompting: boxes refer to this saved
+            # image, never to a later camera frame. The model generates masks.
+            options = {
+                "refer_image": reference,
+                "visual_prompts": {"bboxes": np.asarray(prompt.bboxes),
+                                   "cls": np.asarray(prompt.class_ids)},
+                "predictor": YOLOEVPSegPredictor,
+                "imgsz": max(image.size + reference.size),
+            }
+            self._classes = ()  # Restore text embeddings on the next text request.
+        elif requested != self._classes:
             self._model.set_classes(classes)
             self._classes = requested
+        if not options and self._model.predictor is not None:
+            # A preceding visual request may have used a larger input size.
+            # Reset to the library default for the text interface.
+            if getattr(self, "_was_visual", False):
+                self._model.predictor = None
+                self._model.overrides.pop("imgsz", None)
+        self._was_visual = isinstance(prompt, VisualPrompt)
         result = self._model.predict(
             image.convert("RGB"),
             device=self.device,
             retina_masks=True,
             verbose=False,
+            **options,
         )[0]
         if result.boxes is None or result.masks is None:
             return []
@@ -212,7 +264,9 @@ class YoloeBackend:
         for index, (box, score, class_id, mask) in enumerate(
             zip(boxes, scores, class_ids, masks, strict=True)
         ):
-            label = result.names[class_id]
+            # Official visual outputs are object0/object1; class IDs refer
+            # to the caller's configured labels, not a fixed model vocabulary.
+            label = classes[class_id]
             mask_image = Image.fromarray((mask * 255).astype(np.uint8))
             encoded = io.BytesIO()
             mask_image.save(encoded, format="PNG")
@@ -243,6 +297,7 @@ def default_grasp_backend() -> GraspBackend:
         gripper_assets=os.getenv("GRASPGENX_GRIPPER_ASSETS", "/grippers"),
         device=os.getenv("GRASPGENX_DEVICE", os.getenv("PERCEPTION_DEVICE", "cpu")),
         seed=int(os.getenv("GRASPGENX_SEED", "0")),
+        num_grasps=int(os.getenv("GRASPGENX_NUM_GRASPS", "200")),
     )
 
 
@@ -286,7 +341,7 @@ def create_app(
     def segment(request: SegmentRequest) -> SegmentResponse:
         assert backend is not None
         image = Image.open(io.BytesIO(base64.b64decode(request.image_base64, validate=True)))
-        instances = backend.segment(image, request.classes)
+        instances = backend.segment(image, request.classes, request.prompt)
         return SegmentResponse(
             image_width=image.width,
             image_height=image.height,

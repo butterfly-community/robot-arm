@@ -822,6 +822,23 @@ pub struct PerceptionInstanceSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SegmentationPrompt {
+    Text,
+    Visual {
+        reference_image_base64: String,
+        bboxes: Vec<[f64; 4]>,
+        class_ids: Vec<u32>,
+    },
+}
+
+impl Default for SegmentationPrompt {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PerceptionState {
     pub schema_version: u32,
     pub enabled: bool,
@@ -829,6 +846,8 @@ pub struct PerceptionState {
     pub compute_service_url: String,
     pub model: String,
     pub classes: Vec<String>,
+    #[serde(default)]
+    pub visual_prompt_active: bool,
     #[serde(default)]
     pub placement_labels: Vec<String>,
     pub grasp_collision_distance_m: f64,
@@ -871,6 +890,8 @@ pub struct PerceptionRequest {
     pub request_id: String,
     pub action: RequestAction,
     pub classes: Option<Vec<String>>,
+    #[serde(default)]
+    pub prompt: Option<SegmentationPrompt>,
     #[serde(default)]
     pub placement_labels: Option<Vec<String>>,
     pub grasp_collision_distance_m: Option<f64>,
@@ -1020,6 +1041,15 @@ pub struct CalibrationObservation {
     pub board_in_camera: Pose3,
     pub tcp_in_base: Pose3,
     pub joint_feedback_rad: Vec<f64>,
+    /// Host receipt time, not camera exposure time. Older saved sessions lack this evidence.
+    #[serde(default)]
+    pub frame_received_time_ns: Option<i64>,
+    #[serde(default)]
+    pub frame_sequence: Option<u64>,
+    #[serde(default)]
+    pub joint_feedback_sequence: Option<u64>,
+    #[serde(default)]
+    pub feedback_source: Option<FeedbackSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1584,6 +1614,14 @@ pub struct ToolPose {
     pub orientation_xyzw: [f64; 4],
 }
 
+/// Measured TCP and the exact, unmodified feedback used for its FK request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolPoseFeedback {
+    #[serde(flatten)]
+    pub pose: ToolPose,
+    pub arm_state: ArmState,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticValue {
     pub key: String,
@@ -1594,7 +1632,7 @@ pub struct DiagnosticValue {
 pub struct MotionState {
     pub schema_version: u32,
     pub control_mode: ControlMode,
-    pub current_tool_pose: Option<ToolPose>,
+    pub current_tool_pose: Option<ToolPoseFeedback>,
     pub target_tool_pose: Option<ToolPose>,
     pub control_session_id: Option<u64>,
     pub latest_motion: Option<MotionStatus>,
@@ -2037,6 +2075,7 @@ mod tests {
             request_id: "reset-model-1".into(),
             action: RequestAction::Reset,
             classes: None,
+            prompt: None,
             placement_labels: None,
             grasp_collision_distance_m: None,
         };

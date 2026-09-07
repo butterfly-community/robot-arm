@@ -79,33 +79,12 @@ pub fn detect(
     )?;
     let mut corners = Mat::default();
     let mut ids = Mat::default();
-    // Mild prefiltering reduces raster phase bias in subpixel corner gradients.
-    // The 0.8 px sigma is measured against projected corner/pose truth, not a
-    // detection gate. Keep the original image for the diagnostic overlay.
-    let mut detection_image = Mat::default();
-    imgproc::gaussian_blur_def(&image, &mut detection_image, Size::new(0, 0), 0.8)?;
-    detector.detect_board_def(&detection_image, &mut corners, &mut ids)?;
+    // Detect on the original image. Pre-blurring erased small real-camera
+    // markers (D415: 16 chess corners without blur, only 2 with sigma=0.8).
+    detector.detect_board_def(&image, &mut corners, &mut ids)?;
     if ids.empty() {
         bail!("ChArUco board was not detected");
     }
-
-    // Refit the detected chess corners with OpenCV's local subpixel solver.
-    // ChArUco uses an adaptive window and 0.1 px default termination. This local
-    // refit was compared on identical PNGs against pose truth at 1280 and 1920;
-    // its window/iteration parameters are not observation rejection gates.
-    let mut gray = Mat::default();
-    imgproc::cvt_color_def(&detection_image, &mut gray, imgproc::COLOR_BGR2GRAY)?;
-    imgproc::corner_sub_pix(
-        &gray,
-        &mut corners,
-        Size::new(7, 7),
-        Size::new(-1, -1),
-        core::TermCriteria::new(
-            core::TermCriteria_Type::COUNT as i32 | core::TermCriteria_Type::EPS as i32,
-            100,
-            0.0001,
-        )?,
-    )?;
 
     let mut object_points = Mat::default();
     let mut image_points = Mat::default();

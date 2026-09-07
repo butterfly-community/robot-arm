@@ -50,10 +50,17 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
   `CharucoDetector`、`solvePnP` 与 `calibrateRobotWorldHandEye` 包装。不存在标定子进程或
   JSON/Base64 IPC。
 
-`detect_sample()` 和 `solve_calibration()` 在现有 Tokio 的阻塞任务池运行；Dora 循环通过
+`capture_calibration_observation()` 和 `solve_calibration()` 在现有 Tokio 的阻塞任务池运行；Dora 循环通过
 `poll_calibration_work()` 接收结果。会话取消后旧任务结果不再应用，不新增进程或服务。
 自动流程先等运动节点确认进入手动模式，再逐个提交姿态；成功后等 10 秒并等下一帧采样。
 会话进度只在内存中，只有确认应用的外参由 `apply_solved_calibration()` 先落盘再替换配置。
+
+标定采样先固定一张新图，等待主机接收该图之后采集的电机反馈及其 FK 结果，然后在同一任务中
+识别该图并保存观测。`current_tool_pose.arm_state` 是该 TCP 的原始 FK 输入，含反馈来源、批次、
+时间和关节角；相机不再单独订阅另一份 `arm_state` 来拼接样本。运动节点的 FK 输入不裁剪，
+只有规划/控制器同步仍使用 `planning_state()`。观测同时保存图像主机接收时间、图像序号与
+反馈序号，时间差可复查；相机硬件时间与主机时间不能直接相减。没有硬件同步触发，因此这只是
+软件时序配对，不保证曝光和每个电机读数严格同时，也不以已到位 10 秒替代来源一致性。
 
 配置保存每台相机的 profile、上送 FPS、实际修改的驱动参数和已确认外参；运行选择与 streaming
 不保存。simulation 的预置外参使用相同查询与逐帧发布逻辑，重置恢复预置；真实来源重置后未标定。
@@ -73,11 +80,10 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 
 OpenCV 5 支持 `IMREAD_COLOR_RGB`，但没有“所有算法切换 RGB”的全局开关。
 三通道 ChArUco 检测内部按 BGR 转灰度，因此不能直接把 RGB Mat 当作 BGR 使用。
-检测沿用官方默认的ArUco标记角点设置。ChArUco检测后再调用官方 `cornerSubPix`，
-局部半窗口7×7、零区(-1,-1)、最多100次迭代/精度1e-4 px；PnP与手眼算法不变。
-这些精修参数来自同一PNG/真值对照，结果见 [模拟标定验收](REVIEW.md)，不是额外的观测拒绝条件。
-检测前的 OpenCV 高斯预滤波（σ=0.8 像素）由同图、同真值对照确定，用于减小像素采样相位
-对梯度定位的影响；不改变几何或深度，诊断叠加仍绘制在原图上，不是新增检测通过门限。
+检测沿用官方默认的 ArUco/ChArUco 角点设置，不额外调用 `cornerSubPix`；PnP 与手眼算法不变。
+旧二次精修在同一 D415 图像上将平面拟合残差从 0.139 px 增至 0.258 px，已移除。
+检测使用原始图像，不做高斯预模糊：D415 同一工作位图像的默认检测得到 16 个角点，
+旧 σ=0.8 像素预模糊只剩 2 个角点，已移除。不得仅凭模拟图精度给真机加入该预处理。
 需要直接处理 RGB 的新算法应明确使用 `COLOR_RGB2GRAY` 等对应参数；不要在全链路来回换色。
 YOLOE 的官方 PIL loader 内部转 BGR，predictor 再转 RGB tensor，这是库内部契约，不应在调用前补一次转换。
 ChArUco/PnP 接受 forward Brown/rational 或零畸变针孔输入，调用时同时传入模型。
@@ -116,12 +122,33 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 提示词与放置区域角色由用户配置，
 不写死测试类别。新帧不会自动触发模型，刷新静态预览也不会触发模型。
 
+`PerceptionRequest.prompt` 可显式指定 `{"kind":"text"}` 或
+`{"kind":"visual","reference_image_base64":"…","bboxes":[[x1,y1,x2,y2]],"class_ids":[0]}`。
+类别仍由 `classes` 定义，视觉例子按从 0 开始的 class ID 对应；参考图内容与例子持久保存在场景配置，
+不引用临时文件。仅发布 `visual_prompt_active` 状态，不向网页状态流重复发送参考图。
+只有这个带图像的 `/api/perception/request` 路由解除 nginx 1 MiB / Axum 2 MiB 的默认文本请求体限制；
+其他控制接口保留原有行为。真实 1280×720 参考 PNG 的 base64 请求约 1.43 MB，已复现旧入口 HTTP 413。
+修改文字类别默认清除视觉提示；请求中显式提供 `prompt` 可覆盖。单纯刷新保留当前提示方式。
+
+实例深度采用 Otsu 相邻差分类与四连通区域，边阈值不能小于 Z16 的一个量化刻度。
+真实 3 mm 亚克力片的连续表面主要是 0/1 刻度差，旧 Otsu=0 会分裂为等深窄条，
+造成三维中心跳动。下限来自数据编码分辨率，不是毫米级噪声门限或物体尺寸，不改变深度值。
+
 ## `perception-compute`
+
+`GRASPGENX_NUM_GRASPS` 透传官方 `num_grasps`，默认 200；Compose 从 `.env` 读取。
+它只增加同一模型的候选探索数量，不修改分数门限、候选位姿、关节范围或碰撞规则。
+真实长方体任务最终使用 4000 个原始采样，得到 209 个有效候选；不能把采样数当作有效候选数或成功证明。
 
 FastAPI lifespan 只加载一次 `YoloeBackend` 与 `GraspGenXBackend`。`/v1/segment` 解码彩色图，
 按请求调用 YOLOE 提示词识别/分割并返回类别、置信度、二维框和 PNG mask；`/v1/grasps` 接收一个
 实例点云、排除该实例的环境点云和 `gripper_asset_id`，返回该资产 TCP 的 SE(3) 候选、分数与分支。
 YOLOE 的提示词更新和推理共用一把实例锁，避免并发请求混用类别；GraspGenX 也串行访问共享 sampler。
+文字与视觉提示使用同一 YOLOE 检查点、同一 `/v1/segment` 返回契约。
+视觉提示直接调用官方 `refer_image`/`YOLOEVPSegPredictor`，框属于保存的参考图，
+新帧掩膜由模型生成，官方 object0/object1 输出按 class ID 映射调用方名称。
+视觉输入尺寸取原图/参考图最长边，文字模式保留库默认；两种均不覆盖默认置信度。
+没有用示例框代替分割掩膜，也没有新增模拟/真机分支或外部算法服务。
 
 CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora、ROS 或 MoveIt，不读取类别名称
 推断抓放规则。夹爪资产在计算基础镜像中从设备清单与最终补丁 URDF 自动生成，`gripper_asset_id` 决定使用哪套

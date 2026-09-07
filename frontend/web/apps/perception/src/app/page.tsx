@@ -744,7 +744,9 @@ export default function Page() {
                 </Field>
                 <Field
                   label="识别与分割提示词"
-                  hint="逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
+                  hint={perception?.visual_prompt_active
+                    ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行一次感知会继续使用视觉示例。"
+                    : "逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"}
                 >
                   <Input
                     aria-label="识别与分割提示词"
@@ -782,6 +784,9 @@ export default function Page() {
                   />
                 </Field>
               </div>
+              {perception?.visual_prompt_active && (
+                <StatusBadge tone="cyan">已启用视觉示例提示</StatusBadge>
+              )}
               <div className="card-actions perception-task-actions">
                 <Button
                   variant="outline"

@@ -15,6 +15,7 @@ use r2r::stararm_102_mtc::action::PickPlace;
 use r2r::{
     ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
 };
+use robot_arm_messages::ArmState;
 use serde_json::{Value, json};
 use stararm_102_model::{BASE_FRAME, GRIPPER_JOINT, JOINTS, TCP_FRAME};
 
@@ -35,7 +36,7 @@ const ALLOWED_COLLISION_MATRIX: u64 = 128;
 pub enum RosEvent {
     ControllerCommand(Value),
     ServoStatus(Value),
-    CurrentPose(Result<Pose, String>),
+    CurrentPose(ArmState, Result<Pose, String>),
     PoseMode(Result<(), String>),
     SyncFinished(Result<(), String>),
     MotionExecuting {
@@ -274,24 +275,14 @@ impl RosInterface {
         })
     }
 
-    pub fn request_current_pose(&self, joints: Vec<f64>) {
+    pub fn request_current_pose(&self, feedback: ArmState) {
         let client = self.forward_kinematics.clone();
         let sender = self.event_sender.clone();
         thread::spawn(move || {
-            let result = block_on(call(
-                &client,
-                json!({
-                    "header": {"frame_id": BASE_FRAME},
-                    "fk_link_names": [TCP_FRAME],
-                    "robot_state": {
-                        "joint_state": {"name": JOINTS, "position": joints},
-                        "is_diff": false,
-                    },
-                }),
-            ))
-            .and_then(parse_fk)
-            .map_err(|error| error.to_string());
-            let _ = sender.send(RosEvent::CurrentPose(result));
+            let result = block_on(call(&client, current_pose_request(&feedback)))
+                .and_then(parse_fk)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(RosEvent::CurrentPose(feedback, result));
         });
     }
 
@@ -821,6 +812,17 @@ async fn call(client: &ClientUntyped, request: Value) -> EyreResult<Value> {
         .map_err(|error| eyre!(error))
 }
 
+fn current_pose_request(feedback: &ArmState) -> Value {
+    json!({
+        "header": {"frame_id": BASE_FRAME},
+        "fk_link_names": [TCP_FRAME],
+        "robot_state": {
+            "joint_state": {"name": JOINTS, "position": feedback.joints_rad},
+            "is_diff": false,
+        },
+    })
+}
+
 fn parse_fk(response: Value) -> EyreResult<Pose> {
     let code = response["error_code"]["val"].as_i64().unwrap_or_default();
     if code != MOVEIT_SUCCESS {
@@ -916,6 +918,31 @@ fn forward_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measured_fk_preserves_raw_feedback_outside_planning_limits() {
+        let feedback = ArmState {
+            schema_version: robot_arm_messages::SCHEMA_VERSION,
+            sequence: 123,
+            sample_time_ns: 456,
+            model_revision: stararm_102_model::MODEL_REVISION.into(),
+            joints_rad: vec![0.0, -0.3_f64.to_radians(), -1.03, 1.05, 0.01, 0.0],
+            actuators_rad: vec![0.0],
+            feedback_source: robot_arm_messages::FeedbackSource::Hardware,
+        };
+        let request = current_pose_request(&feedback);
+        assert_eq!(
+            request["robot_state"]["joint_state"]["position"],
+            json!(feedback.joints_rad)
+        );
+        assert_eq!(request["fk_link_names"], json!([TCP_FRAME]));
+        assert!(
+            request["robot_state"]["joint_state"]["position"][1]
+                .as_f64()
+                .unwrap()
+                < 0.0
+        );
+    }
 
     #[test]
     fn collision_matrix_expands_symmetrically() {

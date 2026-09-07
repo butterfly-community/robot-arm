@@ -19,10 +19,6 @@ nodes:
       calibration_mode_result: stararm-102-motion-node/mode_request_result
       asset_request: web-gateway-node/camera_asset_request
       snapshot: web-gateway-node/camera_snapshot
-      arm_state:
-        source: stararm-102-execution-node/arm_state
-        queue_size: 1
-        queue_policy: drop_oldest
       motion_state:
         source: stararm-102-motion-node/motion_state
         queue_size: 1
