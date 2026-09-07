@@ -95,6 +95,7 @@ enum RosWork {
 #[derive(Clone)]
 pub struct RosInterface {
     context: RosContext,
+    clock: Arc<Mutex<r2r::Clock>>,
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
@@ -175,6 +176,7 @@ impl RosInterface {
             QosProfile::default(),
         )?;
         let (work_sender, work_receiver) = channel();
+        let clock = node.get_ros_clock();
         let node = Arc::new(Mutex::new(node));
         let spin_node = Arc::clone(&node);
         thread::spawn(move || {
@@ -194,6 +196,7 @@ impl RosInterface {
 
         let interface = Self {
             context,
+            clock,
             pose_publisher,
             hand_publisher,
             state_publisher,
@@ -226,8 +229,14 @@ impl RosInterface {
     pub fn publish_pose(&self, pose: Pose) -> EyreResult<()> {
         let [x, y, z] = pose.position_m;
         let [qx, qy, qz, qw] = pose.orientation_xyzw;
+        // Servo rejects PoseStamped commands whose timestamp has expired.
+        let now = self
+            .clock
+            .lock()
+            .expect("ROS clock mutex poisoned")
+            .get_now()?;
         self.pose_publisher.publish(json!({
-            "header": {"frame_id": BASE_FRAME},
+            "header": {"frame_id": BASE_FRAME, "stamp": r2r::Clock::to_builtin_time(&now)},
             "pose": {
                 "position": {"x": x, "y": y, "z": z},
                 "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},

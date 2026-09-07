@@ -80,6 +80,7 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
     let retry: ReturnType<typeof setTimeout> | undefined;
     let metadata: FrameMetadata | undefined;
     const connect = () => {
+      metadata = undefined;
       const scheme = location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${location.host}/ws/camera-video`);
       socket.binaryType = "arraybuffer";
@@ -117,7 +118,10 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
         }
       };
       socket.onclose = () => {
-        if (!stopped) retry = setTimeout(connect, 1000);
+        if (!stopped) {
+          setError("相机视频连接中断，正在重连");
+          retry = setTimeout(connect, 1000);
+        }
       };
       socket.onerror = () => setError("相机视频连接中断，正在重连");
     };
@@ -281,7 +285,7 @@ function FloatingCameraVideoWindow({
         <div>
           <strong>彩色视频</strong>
           <span>
-            {collapsed ? "预览已收起" : streaming ? "实时" : "等待视频"}
+            {collapsed ? "预览已收起" : streaming ? "采集中" : "等待视频"}
           </span>
         </div>
         <Button

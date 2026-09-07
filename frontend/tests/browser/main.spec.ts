@@ -1435,7 +1435,7 @@ test("motion named target is submitted by the metadata-driven page", async ({
   }
 });
 
-test("motion actuator slider submits and restores a software command", async ({
+test("motion actuator target executes only by button and restores a software command", async ({
   page,
   request,
 }) => {
@@ -1454,7 +1454,6 @@ test("motion actuator slider submits and restores a software command", async ({
     })
     .toBe(true);
   await page.goto("/motion/");
-  await page.getByRole("button", { name: "手动控制" }).click();
   const slider = page.locator('input[type="range"]').last();
   await expect(slider).toBeVisible();
   const original = Number(await slider.inputValue());
@@ -1482,6 +1481,7 @@ test("motion actuator slider submits and restores a software command", async ({
   let target = endpoint;
   try {
     target = await commitEndpoint(endpoint);
+    await page.getByRole("button", { name: "执行目标", exact: true }).click();
     await expect
       .poll(async () => {
         const state = await (
@@ -1496,9 +1496,7 @@ test("motion actuator slider submits and restores a software command", async ({
       await request.get("/api/arm-execution/state")
     ).json();
     expect(atTarget.values.arm_state.feedback_source).toBe("software");
-    expect(atTarget.values.motion_state.latest_actuator?.state).toBe(
-      "succeeded",
-    );
+    expect(atTarget.values.motion_state.latest_motion?.state).toBe("succeeded");
   } finally {
     const current = await (
       await request.get("/api/arm-execution/state")

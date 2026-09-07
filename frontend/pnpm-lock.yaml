@@ -41,6 +41,9 @@ importers:
       '@robot/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@robot/visualization':
+        specifier: workspace:*
+        version: link:../../packages/visualization
       next:
         specifier: 16.3.4
         version: 16.3.4(@babel/core@7.29.7(supports-color@7.2.0))(@playwright/test@1.62.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -50,12 +53,6 @@ importers:
       react-dom:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
-      three:
-        specifier: 0.185.1
-        version: 0.185.1
-      urdf-loader:
-        specifier: 0.13.1
-        version: 0.13.1(three@0.185.1)
     devDependencies:
       '@types/node':
         specifier: 24.13.3
@@ -66,9 +63,6 @@ importers:
       '@types/react-dom':
         specifier: 19.2.6
         version: 19.2.6(@types/react@19.2.18)
-      '@types/three':
-        specifier: 0.185.4
-        version: 0.185.4
       eslint:
         specifier: 9.39.5
         version: 9.39.5(supports-color@7.2.0)
@@ -87,6 +81,9 @@ importers:
       '@robot/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@robot/visualization':
+        specifier: workspace:*
+        version: link:../../packages/visualization
       next:
         specifier: 16.3.4
         version: 16.3.4(@babel/core@7.29.7(supports-color@7.2.0))(@playwright/test@1.62.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -312,6 +309,9 @@ importers:
       three:
         specifier: 0.185.1
         version: 0.185.1
+      urdf-loader:
+        specifier: 0.13.1
+        version: 0.13.1(three@0.185.1)
     devDependencies:
       '@types/react':
         specifier: 19.2.18

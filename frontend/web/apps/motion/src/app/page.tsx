@@ -16,6 +16,7 @@ import {
   Button,
   Card,
   Field,
+  HelpDot,
   Input,
   JsonView,
   KeyValue,
@@ -25,6 +26,13 @@ import {
   StatusBadge,
 } from "@robot/ui";
 import { useState } from "react";
+import { RobotViewer } from "@robot/visualization/robot-viewer";
+
+type ManualTarget = {
+  model_revision: string;
+  positions: Record<string, number>;
+  actuators: Record<string, number>;
+};
 
 function degrees(value: number | undefined) {
   return Number.isFinite(value)
@@ -33,7 +41,7 @@ function degrees(value: number | undefined) {
 }
 
 export default function Page() {
-  const { snapshot, error, setError } = useGateway("motion");
+  const { snapshot, error, setError, connection } = useGateway("motion");
   const values = snapshot?.values ?? {};
   const model = values.robot_model_info as unknown as
     RobotModelInfo | undefined;
@@ -46,38 +54,48 @@ export default function Page() {
   const diagnostics = (motion?.diagnostics ?? []) as Array<
     Record<string, unknown>
   >;
-  const armKey = JSON.stringify([
-    model?.model_revision,
-    arm?.joints_rad,
-    arm?.actuators_rad,
-  ]);
-  const [previousArmKey, setPreviousArmKey] = useState("");
-  const [positions, setPositions] = useState<Record<string, number>>({});
-  const [actuators, setActuators] = useState<Record<string, number>>({});
-  const [editing, setEditing] = useState<string>();
+  const [draft, setDraft] = useState<ManualTarget>();
   const [options, setOptions] = useState<Record<string, number | undefined>>(
     {},
   );
   const [pendingAction, setPendingAction] = useState<string>();
+  const [cancelling, setCancelling] = useState(false);
 
-  if (arm && !editing && previousArmKey !== armKey) {
-    setPreviousArmKey(armKey);
-    setPositions(
-      Object.fromEntries(
-        (model?.joints ?? []).map((joint, index) => [
-          joint.key,
-          arm.joints_rad[index] ?? 0,
-        ]),
-      ),
-    );
-    setActuators(
-      Object.fromEntries(
-        (model?.tool_actuators ?? []).map((actuator, index) => [
-          actuator.key,
-          arm.actuators_rad[index] ?? 0,
-        ]),
-      ),
-    );
+  // Feedback follows the arm until edited. A draft survives feedback and failures.
+  // A different model must never inherit joint keys from the previous model.
+  const manualTarget =
+    draft?.model_revision === model?.model_revision && draft
+      ? draft
+      : {
+          model_revision: model?.model_revision ?? "",
+          positions: Object.fromEntries(
+            (model?.joints ?? []).map((joint, index) => [
+              joint.key,
+              arm?.joints_rad[index] ?? 0,
+            ]),
+          ),
+          actuators: Object.fromEntries(
+            (model?.tool_actuators ?? []).map((actuator, index) => [
+              actuator.key,
+              arm?.actuators_rad[index] ?? 0,
+            ]),
+          ),
+        };
+  const { positions, actuators } = manualTarget;
+  const preview = model
+    ? {
+        model_revision: model.model_revision,
+        joints_rad: model.joints.map((joint) => positions[joint.key]),
+        actuators_rad: model.tool_actuators.map(
+          (actuator) => actuators[actuator.key],
+        ),
+      }
+    : undefined;
+  function editJoint(key: string, value: number) {
+    setDraft({ ...manualTarget, positions: { ...positions, [key]: value } });
+  }
+  function editActuator(key: string, value: number) {
+    setDraft({ ...manualTarget, actuators: { ...actuators, [key]: value } });
   }
 
   async function mode(value: "relative" | "manual") {
@@ -110,7 +128,7 @@ export default function Page() {
 
   async function cancel() {
     setError(undefined);
-    setPendingAction("cancel");
+    setCancelling(true);
     try {
       await post("/api/motion/cancel", {
         schema_version: schemaVersion,
@@ -120,7 +138,7 @@ export default function Page() {
     } catch (reason) {
       setError(String(reason));
     } finally {
-      setPendingAction(undefined);
+      setCancelling(false);
     }
   }
 
@@ -138,6 +156,11 @@ export default function Page() {
     action = "manual-motion",
   ) {
     if (!model) return;
+    setDraft({
+      model_revision: model.model_revision,
+      positions: jointTarget,
+      actuators: actuatorTarget,
+    });
     setError(undefined);
     setPendingAction(action);
     try {
@@ -166,27 +189,6 @@ export default function Page() {
     }
   }
 
-  async function actuator(key: string, value: number) {
-    if (!model) return;
-    setError(undefined);
-    setPendingAction(`actuator:${key}`);
-    try {
-      await manualMode();
-      await post("/api/motion/actuator", {
-        schema_version: schemaVersion,
-        request_id: requestId(),
-        model_revision: model.model_revision,
-        actuator_key: key,
-        position_rad: value,
-        action: "apply",
-      });
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setPendingAction(undefined);
-    }
-  }
-
   const tool = motion?.current_tool_pose;
   const target = motion?.target_tool_pose;
   const state = String(latestMotion.state ?? "idle");
@@ -194,6 +196,7 @@ export default function Page() {
 
   return (
     <Shell
+      connection={connection}
       section="04 / MOVEIT MOTION"
       title="机械臂运动"
       description="相对控制、手动控制和感知控制具有明确模式边界，并共享同一个运动队列与 MoveIt 执行链路。"
@@ -242,7 +245,7 @@ export default function Page() {
         </div>
 
         <Card
-          className="span-8 aligned-row-card"
+          className="span-6 aligned-row-card"
           eyebrow="Joint workspace"
           title="关节与夹爪状态 / 手动目标"
           action={
@@ -270,33 +273,70 @@ export default function Page() {
           <RangeControls
             items={model?.joints ?? []}
             values={positions}
-            onBegin={setEditing}
-            onChange={(key, value) =>
-              setPositions({ ...positions, [key]: value })
-            }
-            onCommit={(key, value) => {
-              const next = { ...positions, [key]: value };
-              setEditing(undefined);
-              void move(next);
-            }}
+            onChange={editJoint}
+            onCommit={editJoint}
           />
           <RangeControls
             items={model?.tool_actuators ?? []}
             values={actuators}
-            onBegin={setEditing}
-            onChange={(key, value) =>
-              setActuators({ ...actuators, [key]: value })
-            }
-            onCommit={(key, value) => {
-              setEditing(undefined);
-              setActuators({ ...actuators, [key]: value });
-              void actuator(key, value);
-            }}
+            onChange={editActuator}
+            onCommit={editActuator}
           />
+          <div className="card-actions">
+            <Button
+              disabled={!model || Boolean(pendingAction)}
+              onClick={() => move()}
+            >
+              {pendingAction === "manual-motion" ? "正在执行…" : "执行目标"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!arm}
+              onClick={() => {
+                setDraft(undefined);
+                setError(undefined);
+              }}
+            >
+              恢复当前姿态
+            </Button>
+          </div>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
         </Card>
 
         <Card
-          className="span-4 aligned-row-card"
+          className="span-6 aligned-row-card viewer-fill-card robot-fill-card"
+          title="实际姿态 / 目标姿态"
+        >
+          {model ? (
+            <RobotViewer
+              model={model}
+              arm={arm}
+              command={preview}
+              parameters={[]}
+              showLabels={false}
+            />
+          ) : (
+            <p className="status">等待运动节点发布模型</p>
+          )}
+          <div className="viewer-legend">
+            <span>
+              <i className="feedback-dot" />
+              实体：实际反馈
+            </span>
+            <span>
+              <i className="command-dot" />
+              半透明：目标姿态
+              <HelpDot text="编辑不会发送运动；目标不是规划成功保证，执行失败后仍保留，便于继续调整。恢复当前姿态只重置编辑值，不取消正在执行的运动。" />
+            </span>
+          </div>
+        </Card>
+
+        <Card
+          className="span-12"
           eyebrow="Control ownership"
           title="控制模式 / 规划"
         >
@@ -366,6 +406,14 @@ export default function Page() {
             label="轨迹点"
             value={String(latestMotion.trajectory_points ?? "—")}
           />
+          <KeyValue
+            label="结果码"
+            value={String(latestMotion.result_code ?? "—")}
+          />
+          <KeyValue
+            label="计划时长 / 秒"
+            value={String(latestMotion.planned_duration_s ?? "—")}
+          />
           {(model?.motion_options ?? []).map((option) => (
             <Field
               key={option.key}
@@ -404,8 +452,6 @@ export default function Page() {
                 key={item.key}
                 disabled={motionBusy || Boolean(pendingAction)}
                 onClick={() => {
-                  setPositions(item.joint_positions_rad);
-                  setActuators(item.actuator_positions_rad);
                   void move(
                     item.joint_positions_rad,
                     item.actuator_positions_rad,
@@ -420,10 +466,11 @@ export default function Page() {
             ))}
             <Button
               variant="danger"
-              disabled={Boolean(pendingAction)}
+              disabled={cancelling}
               onClick={cancel}
+              title="取消普通运动请求，不是断电急停，也不取消 MTC 抓放任务。具体停止进度以运动节点反馈为准。"
             >
-              {pendingAction === "cancel" ? "正在取消…" : "取消普通运动"}
+              {cancelling ? "正在取消…" : "取消普通运动"}
             </Button>
           </div>
         </Card>
@@ -514,7 +561,6 @@ export default function Page() {
           </div>
         </Card>
       </div>
-      {error && <p className="error">{error}</p>}
     </Shell>
   );
 }

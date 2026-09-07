@@ -1,7 +1,7 @@
 "use client";
 
 import { virtualFeedbackTarget, type ActionFeedback } from "@robot/contracts";
-import { useGateway } from "@robot/gateway-client";
+import { useGateway, type ConnectionState } from "@robot/gateway-client";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -73,6 +73,8 @@ export function Card({
     const saved = window.localStorage.getItem(
       `robot-arm:card:${window.location.pathname}:${title}`,
     );
+    // Restore browser-only preferences after SSR hydration, not during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (saved !== null) setOpen(saved === "open");
   }, [title]);
 
@@ -133,6 +135,8 @@ export function Disclosure({
     const saved = window.localStorage.getItem(
       `robot-arm:disclosure:${window.location.pathname}:${title}`,
     );
+    // Restore browser-only preferences after SSR hydration, not during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (saved !== null) setOpen(saved === "open");
   }, [title]);
 
@@ -192,13 +196,33 @@ export function JsonView({
   title?: string;
   englishTitle?: string;
 }) {
+  const pre = useRef<HTMLPreElement>(null);
+  const [selectedText, setSelectedText] = useState<string>();
+  useEffect(() => {
+    const selectionChanged = () => {
+      const selection = window.getSelection();
+      if (
+        pre.current &&
+        selection?.toString() &&
+        selection.containsNode(pre.current, true)
+      ) {
+        const text = pre.current.textContent ?? "";
+        setSelectedText((current) => current ?? text);
+      } else {
+        setSelectedText(undefined);
+      }
+    };
+    document.addEventListener("selectionchange", selectionChanged);
+    return () =>
+      document.removeEventListener("selectionchange", selectionChanged);
+  }, []);
   return (
     <details className="diagnostics">
       <summary>
         <LocalizedLabel text={title} english={englishTitle} />
       </summary>
-      <pre className="json" tabIndex={0}>
-        {JSON.stringify(value ?? null, null, 2)}
+      <pre className="json" tabIndex={0} ref={pre}>
+        {selectedText ?? JSON.stringify(value ?? null, null, 2)}
       </pre>
     </details>
   );
@@ -414,11 +438,13 @@ export function Shell({
   title,
   description,
   section,
+  connection,
   children,
 }: {
   title: string;
   description: string;
   section?: string;
+  connection: ConnectionState;
   children: ReactNode;
 }) {
   const [sectionIndex, sectionEnglish] = section?.split(" / ", 2) ?? [
@@ -455,6 +481,7 @@ export function Shell({
             <a
               key={href}
               href={href}
+              title={label}
               aria-current={section?.startsWith(index) ? "page" : undefined}
             >
               <span>{index}</span>
@@ -462,11 +489,25 @@ export function Shell({
             </a>
           ))}
         </nav>
-        <div className="topbar-state">
+        <div
+          className="topbar-state"
+          data-state={connection}
+          role="status"
+          title="当前页面与网关的实时连接状态，不代表真机连接状态或所有服务就绪。断开时保留最后收到的数据。"
+        >
           <i />
-          <LocalizedLabel text="服务在线" english="Services online" />
+          {connection === "connected"
+            ? "实时连接正常"
+            : connection === "connecting"
+              ? "正在连接…"
+              : "连接中断 · 正在重连"}
         </div>
       </header>
+      {connection === "disconnected" && (
+        <p className="error" role="alert">
+          实时连接已中断，当前显示最后收到的数据；正在自动重连。
+        </p>
+      )}
       <div className="page-heading">
         <div>
           <p className="eyebrow">

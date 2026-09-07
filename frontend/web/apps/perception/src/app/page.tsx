@@ -134,7 +134,7 @@ function PerceptionAssetImage({
 }
 
 export default function Page() {
-  const { snapshot, error, setError } = useGateway("perception");
+  const { snapshot, error, setError, connection } = useGateway("perception");
   const values = snapshot?.values ?? {};
   const perception = values.perception_state as unknown as
     PerceptionState | undefined;
@@ -154,27 +154,32 @@ export default function Page() {
   const [driverParameterChanges, setDriverParameterChanges] = useState<
     Record<string, string>
   >({});
-  const [objectId, setObjectId] = useState("");
-  const [regionId, setRegionId] = useState("");
+  const [objectId, setObjectId] = useState<string>();
+  const [regionId, setRegionId] = useState<string>();
   const [board, setBoard] = useState(initialBoard);
-  const [promptText, setPromptText] = useState("");
-  const [placementLabels, setPlacementLabels] = useState("");
+  const [promptText, setPromptText] = useState<string>();
+  const [placementLabels, setPlacementLabels] = useState<string>();
   const [graspCollisionDistance, setGraspCollisionDistance] =
     useState<string>();
   const [instruction, setInstruction] = useState("");
   const [instructionPending, setInstructionPending] = useState(false);
   const [instructionResult, setInstructionResult] =
     useState<InstructionResult>();
-  const [pending, setPending] = useState(false);
+  const [requestPending, setPending] = useState(false);
   const [pendingPerceptionAction, setPendingPerceptionAction] =
     useState<string>();
   const [pendingCalibrationAction, setPendingCalibrationAction] =
     useState<CalibrationAction>();
+  const pending =
+    requestPending ||
+    Boolean(pendingPerceptionAction) ||
+    Boolean(pendingCalibrationAction) ||
+    instructionPending;
 
   const selectedSourceId = sourceId ?? camera?.selected_source_id ?? "";
-  const selectedPrompts = promptText || perception?.classes.join(", ") || "";
+  const selectedPrompts = promptText ?? perception?.classes.join(", ") ?? "";
   const selectedPlacementLabels =
-    placementLabels || perception?.placement_labels.join(", ") || "";
+    placementLabels ?? perception?.placement_labels.join(", ") ?? "";
   const selectedGraspCollisionDistance =
     graspCollisionDistance ??
     (perception ? String(perception.grasp_collision_distance_m * 1000) : "");
@@ -185,11 +190,21 @@ export default function Page() {
   const asset = (name: string) =>
     `/api/perception/assets/${name}?v=${imageVersion}`;
   const selectedObject =
-    objectId ||
-    scene?.objects.find((item) => item.grasp_candidates.length)?.object_id ||
-    "";
+    objectId === undefined
+      ? (scene?.objects.find((item) => item.grasp_candidates.length)
+          ?.object_id ?? "")
+      : scene?.objects.some(
+            (item) =>
+              item.object_id === objectId && item.grasp_candidates.length,
+          )
+        ? objectId
+        : "";
   const selectedRegion =
-    regionId || scene?.placement_regions[0]?.region_id || "";
+    regionId === undefined
+      ? (scene?.placement_regions[0]?.region_id ?? "")
+      : scene?.placement_regions.some((item) => item.region_id === regionId)
+        ? regionId
+        : "";
   const activeSource = camera?.available_sources.find(
     (item) => item.source_id === camera?.selected_source_id,
   );
@@ -481,11 +496,12 @@ export default function Page() {
     if (!selectedObject || !selectedRegion) return;
     setPendingPerceptionAction("pick-place");
     try {
-      await send("/api/motion/mode", {
+      const accepted = await send("/api/motion/mode", {
         schema_version: schemaVersion,
         request_id: requestId(),
         mode: "perception",
       });
+      if (!accepted) return;
       await send("/api/perception/pick-place", {
         schema_version: schemaVersion,
         request_id: requestId(),
@@ -563,10 +579,16 @@ export default function Page() {
 
   return (
     <Shell
+      connection={connection}
       section="03 / PERCEPTION"
       title="场景感知"
       description="深度相机、提示词识别与分割、深度、三维场景和标定集中在同一页面；结构化结果可交给下游动作使用。"
     >
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
           <Metric
@@ -833,20 +855,21 @@ export default function Page() {
                 </Button>
               </div>
               <KeyValue
-                label="阶段 / 方案 / 代价"
-                value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
-                hint="阶段来自运动节点当前进度；方案数和代价来自 MTC 规划结果，用于说明最终选择了哪一条方案。"
-              />
-              <KeyValue
                 label="抓取 / 放置位置"
                 value={`${numbers(manipulation?.pick_position_m ?? undefined)} / ${numbers(manipulation?.place_position_m ?? undefined)}`}
                 hint="来自当前选中物体和放置区域的结构化三维场景，单位为米，坐标系与场景坐标系一致。"
               />
-              <KeyValue
-                label="错误"
-                value={manipulation?.original_error ?? "无"}
-              />
             </Disclosure>
+            <KeyValue
+              label="阶段 / 方案 / 代价"
+              value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
+              hint="运动节点当前进度及 MTC 规划结果；不代表已经完成实际抓放。"
+            />
+            {manipulation?.original_error && (
+              <p className="error" role="alert">
+                {manipulation.original_error}
+              </p>
+            )}
           </Card>
           <Card
             className="span-6 aligned-row-card perception-camera-source"
@@ -1169,12 +1192,14 @@ export default function Page() {
               hint="设备缺帧来自序号跳变；主动略过是采集频率高于配置上送频率时有意不发送的中间帧，两者不混算。"
             />
             <KeyValue
+              label="最近采集帧序号"
+              value={String(camera?.last_sequence ?? "—")}
+              hint="相机实际发布的帧序号，与运行感知后产生的场景序号不同；停用后保留最后一帧。"
+            />
+            <KeyValue
               label="错误"
               value={
-                camera?.original_error ??
-                perception?.original_error ??
-                error ??
-                "无"
+                camera?.original_error ?? perception?.original_error ?? "无"
               }
             />
           </Card>

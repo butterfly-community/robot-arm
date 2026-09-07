@@ -48,7 +48,7 @@
 - [模拟图与标定板](../../backend/nodes/camera/src/drivers/simulation.rs)、[图像消息](../../backend/crates/robot-arm-messages/src/lib.rs)、[OpenCV 标定](../../backend/crates/camera-calibration/src/lib.rs)
 - [场景/图片/掩码](../../backend/nodes/scene/src/main.rs)、[三维重建](../../backend/crates/scene-core/src/lib.rs)、[计算服务](../../backend/services/perception-compute/src/perception_compute/app.py)
 - [视频服务](../../backend/nodes/camera/src/video_server.rs)、[网关图片响应](../../backend/nodes/web-gateway/src/main.rs)、[浏览器视频](../../frontend/web/apps/perception/src/app/camera-video.tsx)
-- [图片组件](../../frontend/web/apps/perception/src/app/page.tsx)、[反向代理](../../frontend/web/entry/nginx.conf)、[姿态纹理](../../frontend/web/packages/visualization/src/index.tsx)、[整臂纹理](../../frontend/web/apps/arm-execution/src/app/robot-viewer.tsx)
+- [图片组件](../../frontend/web/apps/perception/src/app/page.tsx)、[反向代理](../../frontend/web/entry/nginx.conf)、[姿态纹理](../../frontend/web/packages/visualization/src/index.tsx)、[整臂纹理](../../frontend/web/packages/visualization/src/robot-viewer.tsx)
 
 ## 生成资产和诊断工具
 

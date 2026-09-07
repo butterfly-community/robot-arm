@@ -30,10 +30,12 @@ import {
   StatusBadge,
 } from "@robot/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MouseControl } from "./mouse-control";
 
 type InputMode = "button" | "buttons" | "axis";
 type ActionDefinition = (typeof inputActionCatalog)[number];
 const simulationPhaseLabels: Record<string, string> = {
+  held: "鼠标控制中",
   starting: "正在开始",
   lifting: "正在抬升",
   outbound: "正在执行",
@@ -190,7 +192,7 @@ function DeviceNameEditor({
 }
 
 export default function Page() {
-  const { snapshot, error, setError } = useGateway("tracking");
+  const { snapshot, error, setError, connection } = useGateway("tracking");
   const values = snapshot?.values ?? {};
   const discovery = (values.discovery_state ?? {}) as Record<string, unknown>;
   const pose = values.absolute_pose as unknown as AbsolutePoseFrame | undefined;
@@ -320,7 +322,6 @@ export default function Page() {
       });
     } catch (reason) {
       setError(String(reason));
-      throw reason;
     }
   }
 
@@ -576,11 +577,18 @@ export default function Page() {
 
   return (
     <Shell
+      connection={connection}
       section="01 / MANUAL CONTROL BINDINGS"
       title="手动控制绑定"
       description="发现输入设备，选择位置与姿态能力，把按钮和轴绑定为设备无关的控制动作，并测试或模拟输入。"
     >
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <div className="dashboard-grid">
+        <MouseControl onError={setError} />
         <div className="span-12 metric-grid">
           <Metric label="输入驱动" value={String(drivers.length)} tone="cyan" />
           <Metric label="输入设备" value={String(sources.length)} tone="cyan" />
@@ -1094,7 +1102,6 @@ export default function Page() {
           </div>
         </Card>
       </div>
-      {error && <p className="error">{error}</p>}
     </Shell>
   );
 }

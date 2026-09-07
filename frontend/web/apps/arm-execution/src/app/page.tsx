@@ -24,7 +24,7 @@ import {
   StatusBadge,
 } from "@robot/ui";
 import { useState } from "react";
-import { RobotViewer } from "./robot-viewer";
+import { RobotViewer } from "@robot/visualization/robot-viewer";
 
 type ExecutionAction =
   | "connect"
@@ -42,7 +42,7 @@ function angle(value: number | undefined) {
 }
 
 export default function Page() {
-  const { snapshot, error, setError } = useGateway("arm-execution");
+  const { snapshot, error, setError, connection } = useGateway("arm-execution");
   const values = snapshot?.values ?? {};
   const model = values.robot_model_info as unknown as
     RobotModelInfo | undefined;
@@ -158,30 +158,44 @@ export default function Page() {
 
   return (
     <Shell
+      connection={connection}
       section="05 / ARM EXECUTION"
       title="机械臂执行"
       description="三维反馈、最后命令、串口状态和舵机参数形成同一高密度执行台；原始连接状态与消息只在排障区展开。"
     >
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
           <Metric
-            label="Transport"
+            label="执行连接"
             value={
-              connected
-                ? "CONNECTED"
-                : hardwareSelected
-                  ? "STOPPED"
-                  : "SIMULATION"
+              !arm
+                ? "等待状态"
+                : connected
+                  ? "真机已连接"
+                  : hardwareSelected
+                    ? "真机未连接"
+                    : "软件模拟"
             }
             tone={connected ? "green" : "cyan"}
           />
           <Metric
-            label="Feedback"
-            value={String(arm?.feedback_source ?? "WAIT").toUpperCase()}
+            label="反馈来源"
+            value={
+              arm?.feedback_source === "hardware"
+                ? "真机反馈"
+                : arm?.feedback_source === "software"
+                  ? "软件模拟"
+                  : (arm?.feedback_source ?? "等待反馈")
+            }
             tone={arm?.feedback_source === "hardware" ? "green" : undefined}
           />
           <Metric
-            label="Endpoint"
+            label="连接端点"
             value={String(transport.selected_endpoint ?? "—")}
           />
           <Metric
@@ -506,7 +520,6 @@ export default function Page() {
           </div>
         </Card>
       </div>
-      {error && <p className="error">{error}</p>}
     </Shell>
   );
 }

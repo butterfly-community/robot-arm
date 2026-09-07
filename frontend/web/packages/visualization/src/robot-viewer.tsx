@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  ArmCommand,
   ArmState,
   ExecutionInfo,
   ManipulationTaskState,
@@ -19,7 +18,7 @@ import type { URDFRobot } from "urdf-loader";
 type Props = {
   model: RobotModelInfo;
   arm?: ArmState;
-  command?: ArmCommand;
+  command?: Pick<ArmState, "model_revision" | "joints_rad" | "actuators_rad">;
   motion?: MotionState;
   manipulation?: ManipulationTaskState;
   execution?: ExecutionInfo;
@@ -96,6 +95,7 @@ function setState(
 }
 
 function centerView(viewer: Viewer, robot: URDFRobot) {
+  robot.updateWorldMatrix(true, true);
   const bounds = new THREE.Box3();
   robot.traverse((object) => {
     if (object instanceof THREE.Mesh) bounds.expandByObject(object);
@@ -170,6 +170,8 @@ export function RobotViewer({
   const [modelsReady, setModelsReady] = useState(0);
   const rootPath = model.visualization.root_path;
   const materialKey = JSON.stringify(model.visualization.link_materials);
+  const loadKey = `${model.model_revision}:${rootPath}:${materialKey}`;
+  const [loadState, setLoadState] = useState<{ key: string; error?: string }>();
   const labelMetadataKey = JSON.stringify([
     ...model.joints.map((joint, index) => {
       const label = execution?.actuator_labels[index] ?? joint.label;
@@ -265,42 +267,49 @@ export function RobotViewer({
     };
     render();
 
-    let loaded = 0;
-    const loadRobot = (preview: boolean) => {
-      const manager = new THREE.LoadingManager();
-      const loader = new URDFLoader(manager);
-      loader.packages = () => "/api/motion/assets";
-      let loadedRobot: URDFRobot | undefined;
-      manager.onLoad = () => {
-        if (!loadedRobot || !viewer.current) return;
-        const styled = applyMaterials(loadedRobot, materials, preview);
-        if (preview) viewer.current.commandRobot = loadedRobot;
-        else viewer.current.robot = loadedRobot;
-        loaded += 1;
-        element.dataset.modelsLoaded = String(loaded);
-        element.dataset.styledMeshes = String(
-          Number(element.dataset.styledMeshes ?? 0) + styled,
-        );
-        setModelsReady((value) => value + 1);
-      };
-      loader.load(
-        `/api/motion/assets/${rootPath}`,
-        (robot) => {
-          loadedRobot = robot;
-          robot.visible = !preview;
-          scene.add(robot);
-        },
-        undefined,
-        (reason) => {
-          element.dataset.error =
-            reason instanceof Error ? reason.message : String(reason);
-        },
-      );
+    // Load meshes once, then clone the complete URDF (including joint maps).
+    // Concurrent loaders share FileLoader requests, so the second manager can
+    // finish before its meshes arrive and silently miss preview materials.
+    const manager = new THREE.LoadingManager();
+    const loader = new URDFLoader(manager);
+    loader.packages = () => "/api/motion/assets";
+    let loadedRobot: URDFRobot | undefined;
+    let disposed = false;
+    let failed = false;
+    const loadFailed = (reason: unknown) => {
+      if (disposed) return;
+      failed = true;
+      const error = reason instanceof Error ? reason.message : String(reason);
+      element.dataset.error = error;
+      setLoadState({ key: loadKey, error });
     };
-    loadRobot(false);
-    loadRobot(true);
+    manager.onError = (url) => loadFailed(`资源加载失败：${url}`);
+    manager.onLoad = () => {
+      if (!loadedRobot || !viewer.current || disposed || failed) return;
+      const commandRobot = loadedRobot.clone();
+      const actualMeshes = applyMaterials(loadedRobot, materials, false);
+      const previewMeshes = applyMaterials(commandRobot, materials, true);
+      commandRobot.visible = false;
+      scene.add(loadedRobot, commandRobot);
+      viewer.current.robot = loadedRobot;
+      viewer.current.commandRobot = commandRobot;
+      element.dataset.modelsLoaded = "2";
+      element.dataset.styledMeshes = String(actualMeshes + previewMeshes);
+      element.dataset.previewMeshes = String(previewMeshes);
+      setModelsReady((value) => value + 1);
+      setLoadState({ key: loadKey });
+    };
+    loader.load(
+      `/api/motion/assets/${rootPath}`,
+      (robot) => {
+        loadedRobot = robot;
+      },
+      undefined,
+      loadFailed,
+    );
 
     return () => {
+      disposed = true;
       observer.disconnect();
       cancelAnimationFrame(animation);
       controls.dispose();
@@ -317,7 +326,7 @@ export function RobotViewer({
       renderer.domElement.remove();
       viewer.current = undefined;
     };
-  }, [materialKey, model.model_revision, rootPath]);
+  }, [loadKey, materialKey, model.model_revision, rootPath]);
 
   useEffect(() => {
     if (!arm) return;
@@ -415,6 +424,16 @@ export function RobotViewer({
       className="robot-viewer"
       ref={mount}
       aria-label="机械臂三维反馈与目标预览"
-    />
+    >
+      {loadState?.key !== loadKey ? (
+        <p className="robot-load-status" role="status">
+          正在加载机械臂模型…
+        </p>
+      ) : loadState.error ? (
+        <p className="robot-load-status error" role="alert">
+          机械臂模型加载失败，请刷新页面重试。{loadState.error}
+        </p>
+      ) : null}
+    </div>
   );
 }

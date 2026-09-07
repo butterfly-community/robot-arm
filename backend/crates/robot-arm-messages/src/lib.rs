@@ -1080,6 +1080,9 @@ pub struct InputSimulationRequest {
     pub request_id: String,
     pub enabled: bool,
     pub item: Option<InputSimulationItem>,
+    /// A held input value; absent means the existing prerecorded demonstration.
+    #[serde(default)]
+    pub value: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1796,6 +1799,7 @@ mod tests {
             request_id: "fixture".into(),
             enabled: true,
             item: Some(InputSimulationItem::ToolHelicalMotion),
+            value: None,
         };
         let encoded = to_arrow(&request).unwrap();
         let decoded: InputSimulationRequest = from_arrow(encoded.as_ref()).unwrap();

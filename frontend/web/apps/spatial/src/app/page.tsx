@@ -50,7 +50,7 @@ const neutralPose: PoseVisualization = {
 };
 
 export default function Page() {
-  const { snapshot, error, setError } = useGateway("spatial");
+  const { snapshot, error, setError, connection } = useGateway("spatial");
   const values = snapshot?.values ?? {};
   const config = (values.spatial_config_state ??
     values.config_state ??
@@ -71,8 +71,10 @@ export default function Page() {
         request_id: requestId(),
         patch: patchValue,
       });
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     }
   }
 
@@ -86,10 +88,16 @@ export default function Page() {
 
   return (
     <Shell
+      connection={connection}
       section="02 / SPATIAL TRANSFORM"
       title="空间转换"
       description="空间节点统一完成原点、坐标换基和比例转换；页面只显示转换结果与相对运动。"
     >
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
           <Metric
@@ -186,8 +194,10 @@ export default function Page() {
                       setAxesDraft(next);
                     }}
                     onBlur={() =>
-                      void update({ base_from_tracking_axes: axes }).then(() =>
-                        setAxesDraft(undefined),
+                      void update({ base_from_tracking_axes: axes }).then(
+                        (accepted) => {
+                          if (accepted) setAxesDraft(undefined);
+                        },
                       )
                     }
                   />
@@ -319,7 +329,6 @@ export default function Page() {
           </div>
         </Card>
       </div>
-      {error && <p className="error">{error}</p>}
     </Shell>
   );
 }

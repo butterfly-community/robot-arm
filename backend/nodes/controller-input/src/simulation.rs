@@ -20,6 +20,8 @@ const LIFT_M: f64 = 0.05;
 pub(super) struct SimulationPlayback {
     item: InputSimulationItem,
     sample_index: u64,
+    held_value: Option<f64>,
+    released: bool,
 }
 
 pub(super) struct SimulationSample {
@@ -71,11 +73,64 @@ impl SimulationPlayback {
         Self {
             item,
             sample_index: 0,
+            held_value: None,
+            released: false,
         }
     }
 
+    pub(super) fn held(item: InputSimulationItem, value: f64) -> Self {
+        Self {
+            held_value: Some(value),
+            ..Self::new(item)
+        }
+    }
+
+    pub(super) fn release(&mut self) -> bool {
+        self.released = self.held_value.is_some();
+        self.released
+    }
+
     pub(super) fn sample(&mut self, sequence: u64, now_ns: i64) -> SimulationSample {
-        let generated = generate(self.item, self.sample_index);
+        let generated = if let Some(value) = self.held_value {
+            // Reset the previous input session, then capture the current TCP.
+            // Release uses the existing origin-reset action, including a click
+            // released before the first sample. No lift or return trajectory.
+            GeneratedSample {
+                components: BTreeMap::from([
+                    (
+                        "action/emergency_stop".into(),
+                        if self.released || self.sample_index == 0 {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        START_STOP_COMPONENT.into(),
+                        if !self.released && self.sample_index == 1 {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        component_path(self.item)
+                            .expect("held item is validated")
+                            .into(),
+                        if !self.released && self.sample_index > 1 {
+                            value
+                        } else {
+                            0.0
+                        },
+                    ),
+                ]),
+                phase: if self.released { "complete" } else { "held" },
+                complete: self.released,
+                feedback: None,
+            }
+        } else {
+            generate(self.item, self.sample_index)
+        };
         let elapsed_s = self.sample_index as f64 / SAMPLE_RATE_HZ as f64;
         self.sample_index += 1;
         SimulationSample {
@@ -476,4 +531,39 @@ mod tests {
         assert_eq!(feedback_sample(PHASE_SAMPLES * 2).feedback, Some(0.0));
         assert!(feedback_sample(PHASE_SAMPLES * 2 + 1).complete);
     }
+}
+#[test]
+fn held_input_has_no_lift_or_return_and_release_resets_the_session() {
+    for item in [
+        InputSimulationItem::MoveForwardBack,
+        InputSimulationItem::MoveLeftRight,
+        InputSimulationItem::MoveUpDown,
+        InputSimulationItem::ToolPitch,
+        InputSimulationItem::ToolYaw,
+        InputSimulationItem::ToolRoll,
+    ] {
+        for value in [-1.0, 1.0] {
+            let mut input = SimulationPlayback::held(item, value);
+            let reset = input.sample(1, 1).raw.unwrap().components;
+            assert_eq!(reset["action/emergency_stop"], 1.0);
+            let start = input.sample(2, 2).raw.unwrap().components;
+            assert_eq!(start[START_STOP_COMPONENT], 1.0);
+            let moving = input.sample(3, 3).raw.unwrap().components;
+            assert_eq!(moving[component_path(item).unwrap()], value);
+            if item != InputSimulationItem::MoveUpDown {
+                assert!(!moving.contains_key("action/move_up_down"));
+            }
+            assert!(input.release());
+            let released = input.sample(4, 4);
+            assert!(released.complete);
+            let raw = released.raw.unwrap().components;
+            assert_eq!(raw["action/emergency_stop"], 1.0);
+            assert_eq!(raw[component_path(item).unwrap()], 0.0);
+        }
+    }
+    let mut quick_click = SimulationPlayback::held(InputSimulationItem::MoveUpDown, 1.0);
+    quick_click.release();
+    let released = quick_click.sample(1, 1);
+    assert!(released.complete);
+    assert_eq!(released.raw.unwrap().components["action/move_up_down"], 0.0);
 }

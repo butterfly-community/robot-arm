@@ -722,13 +722,45 @@ impl ControllerInput {
                     original_error: Some("启动演示必须指定测试项目".into()),
                 };
             };
+            if request.value.is_some_and(|value| !value.is_finite())
+                || (request.value.is_some()
+                    && !matches!(
+                        item,
+                        InputSimulationItem::MoveForwardBack
+                            | InputSimulationItem::MoveLeftRight
+                            | InputSimulationItem::MoveUpDown
+                            | InputSimulationItem::ToolPitch
+                            | InputSimulationItem::ToolYaw
+                            | InputSimulationItem::ToolRoll
+                    ))
+            {
+                return RequestResult {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    acknowledged_action: RequestAction::Apply,
+                    value: Some(self.simulation_state.clone()),
+                    original_error: Some("鼠标控制需要有效的平移或自身姿态分量".into()),
+                };
+            }
             if self.simulation.is_some() {
                 self.stop_simulation();
             }
             self.config_before_simulation = Some(self.config.clone());
             self.config = simulation_config(&self.config, item);
+            if request.value.is_some() {
+                self.config.bindings.push(ActionBinding {
+                    action: "emergency_stop".into(),
+                    action_type: ActionType::Boolean,
+                    source_id: SIMULATION_SOURCE_ID.into(),
+                    component_paths: vec!["action/emergency_stop".into()],
+                    invert: false,
+                });
+            }
             self.replace_driver_sources(simulation::driver_info(), vec![simulation::source_info()]);
-            self.simulation = Some(SimulationPlayback::new(item));
+            self.simulation = Some(match request.value {
+                Some(value) => SimulationPlayback::held(item, value),
+                None => SimulationPlayback::new(item),
+            });
             self.simulation_state = InputSimulationState {
                 schema_version: SCHEMA_VERSION,
                 active: true,
@@ -741,7 +773,13 @@ impl ControllerInput {
             self.virtual_feedback = None;
             None
         } else {
-            self.stop_simulation();
+            if !self
+                .simulation
+                .as_mut()
+                .is_some_and(SimulationPlayback::release)
+            {
+                self.stop_simulation();
+            }
             None
         };
         RequestResult {

@@ -22,11 +22,13 @@ export async function getSnapshot(namespace: Namespace): Promise<Snapshot> {
 export async function post<T extends Json>(
   path: string,
   value: T,
+  options?: Pick<RequestInit, "keepalive">,
 ): Promise<Json> {
   const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(value),
+    ...options,
   });
   return responseValue(response);
 }
@@ -66,6 +68,7 @@ async function responseValue(response: Response): Promise<Json> {
 export function subscribe(
   namespace: Namespace,
   update: (snapshot: Snapshot) => void,
+  connectionChanged?: (state: ConnectionState) => void,
 ): () => void {
   let stopped = false;
   let socket: WebSocket | undefined;
@@ -88,12 +91,16 @@ export function subscribe(
   const connect = () => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${scheme}://${location.host}/ws/${namespace}`);
+    socket.onopen = () => connectionChanged?.("connected");
     socket.onmessage = (event) => {
       update(JSON.parse(event.data) as Snapshot);
       socket?.send("next");
     };
     socket.onclose = () => {
-      if (!stopped) retry = setTimeout(connect, 1000);
+      if (!stopped) {
+        connectionChanged?.("disconnected");
+        retry = setTimeout(connect, 1000);
+      }
     };
   };
   connect();
@@ -103,7 +110,10 @@ export function subscribe(
   };
 }
 
+export type ConnectionState = "connecting" | "connected" | "disconnected";
+
 export function useGateway(namespace: Namespace) {
+  const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [transportError, setTransportError] = useState<string>();
   const [operationError, setOperationError] = useState<string>();
@@ -113,10 +123,6 @@ export function useGateway(namespace: Namespace) {
     const applyPending = () => {
       frame = undefined;
       if (!pending.current) return;
-      if (window.getSelection()?.toString()) {
-        frame = window.requestAnimationFrame(applyPending);
-        return;
-      }
       const value = pending.current;
       pending.current = undefined;
       setSnapshot(value);
@@ -128,7 +134,7 @@ export function useGateway(namespace: Namespace) {
         frame = window.requestAnimationFrame(applyPending);
       }
     };
-    const dispose = subscribe(namespace, accept);
+    const dispose = subscribe(namespace, accept, setConnection);
     getSnapshot(namespace)
       .then(accept)
       .catch((reason: unknown) =>
@@ -143,6 +149,7 @@ export function useGateway(namespace: Namespace) {
     };
   }, [namespace]);
   return {
+    connection,
     snapshot,
     error: operationError ?? transportError,
     setError: setOperationError,
