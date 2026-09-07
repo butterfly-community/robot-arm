@@ -179,7 +179,7 @@ services:
     healthcheck: { disable: true }
     volumes:
       - ./dataflow.yml:/config/dataflow.yml:ro
-      - ./tools/replay/artifacts:/recordings
+      - ./temp/recordings:/recordings
     depends_on:
       controller-input: { condition: service_healthy }
       perception: { condition: service_healthy }
@@ -225,12 +225,13 @@ services:
   integration-test:
     image: node:24-trixie-slim
     profiles: ["test"]
-    command: ["node", "/tests/integration/software-flow.mjs"]
+    command: ["node", "/workspace/tests/integration/software-flow.mjs"]
     environment:
       SERVICES_BASE_URL: http://web-entry:8765
     volumes:
-      - "./tests:/tests:ro"
-      - "./backend/nodes/camera/assets/pick-place-scene-geometry.json:/backend/nodes/camera/assets/pick-place-scene-geometry.json:ro"
+      - "./tests:/workspace/tests:ro"
+      - "./backend/nodes/camera/assets:/workspace/backend/nodes/camera/assets:ro"
+      - "./temp:/workspace/temp"
     networks: [robot-services]
 
 networks:

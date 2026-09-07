@@ -10,5 +10,6 @@ axum.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
 robot-arm-messages.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

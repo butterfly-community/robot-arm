@@ -31,8 +31,22 @@ pub fn detect(
     image_png: &[u8],
     camera_matrix_values: &[f64; 9],
     distortion_values: &[f64],
+    distortion_model: &str,
     board_config: &CalibrationBoard,
 ) -> Result<Detection> {
+    // ChArUco/PnP's distCoeffs are the forward Brown model, not interchangeable
+    // with SDK inverse Brown or fisheye coefficients. Do not produce false poses.
+    if matches!(distortion_model, "kannala_brandt4" | "equidistant")
+        || (distortion_values.iter().any(|value| *value != 0.0)
+            && !matches!(
+                distortion_model,
+                "brown_conrady" | "plumb_bob" | "rational_polynomial"
+            ))
+    {
+        bail!(
+            "ChArUco/PnP 不支持当前 {distortion_model} 投影；需要驱动提供校正后的彩色图与对应内参"
+        );
+    }
     // The public boundary is a standard PNG (RGB), not a raw BGR buffer.
     // ChArUco treats three-channel Mats as BGR, and imencode expects BGR too.
     // Let OpenCV's codecs own both boundary conversions; never swap manually.
@@ -403,6 +417,7 @@ pub fn self_test() -> Result<()> {
         encoded.as_slice(),
         &[800.0, 0.0, 300.0, 0.0, 800.0, 300.0, 0.0, 0.0, 1.0],
         &[0.0; 5],
+        "plumb_bob",
         &CalibrationBoard {
             pattern: "charuco".into(),
             dictionary: "DICT_4X4_50".into(),
@@ -422,6 +437,39 @@ pub fn self_test() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incompatible_distortion_is_not_silently_used_by_pnp() {
+        let board = robot_arm_messages::CalibrationBoard {
+            pattern: "charuco".into(),
+            dictionary: "DICT_4X4_50".into(),
+            squares_x: 5,
+            squares_y: 5,
+            square_size_m: 0.015,
+            marker_size_m: 0.011,
+            measured_width_m: 0.075,
+            measured_height_m: 0.075,
+        };
+        for (model, k1) in [
+            ("inverse_brown_conrady", 0.1),
+            ("modified_brown_conrady", 0.1),
+            ("kannala_brandt4", 0.1),
+            ("equidistant", 0.1),
+            ("ftheta", 0.1),
+            ("kannala_brandt4", 0.0),
+            ("equidistant", 0.0),
+        ] {
+            let error = super::detect(
+                &[],
+                &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                &[k1, 0.0, 0.0, 0.0],
+                model,
+                &board,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(model));
+        }
+    }
+
     #[test]
     fn opencv_rust_uses_opencv_5() {
         assert_eq!(opencv::core::CV_VERSION_MAJOR, 5);

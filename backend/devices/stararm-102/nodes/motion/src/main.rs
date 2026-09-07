@@ -33,13 +33,13 @@ use crate::{
         MotionConfig, Pose, merge_controller_command, target_pose, tool_action_transition,
         tool_position_rad,
     },
-    ros::{ManipulationJob, MotionJob, RosEvent, RosInterface},
+    ros::{ManipulationJob, MotionJob, MotionResult, RosEvent, RosInterface},
 };
 
 struct ActiveMotion {
     request_id: String,
     complete_in_relative_mode: bool,
-    cancelled: bool,
+    cancel: Arc<AtomicBool>,
 }
 
 struct PendingMotion {
@@ -264,6 +264,13 @@ impl MotionNode {
             self.reset_relative_baseline();
             return Ok(());
         }
+        if self.config.control_mode != ControlMode::Relative
+            || self.active_motion.is_some()
+            || self.active_manipulation.is_some()
+            || !self.work_queue.is_empty()
+        {
+            return Ok(());
+        }
         let open = frame.actuator_actions.primary_tool_open;
         let tool = frame.actuator_actions.primary_tool;
         if open.is_active && open.changed_since_last_sync && open.value {
@@ -275,13 +282,6 @@ impl MotionNode {
             if let Some(value) = transition {
                 self.publish_actuator("input-action", tool_position_rad(value))?;
             }
-        }
-        if self.config.control_mode != ControlMode::Relative
-            || self.active_motion.is_some()
-            || self.active_manipulation.is_some()
-            || !self.work_queue.is_empty()
-        {
-            return Ok(());
         }
         if frame.control_session_id != self.control_session_id {
             self.control_session_id = frame.control_session_id;
@@ -337,6 +337,7 @@ impl MotionNode {
         };
         let (current, _) = planning_state(state);
         let job = MotionJob {
+            cancel: Arc::default(),
             request_id,
             current,
             target: DEFAULT_JOINTS_RAD.to_vec(),
@@ -437,6 +438,7 @@ impl MotionNode {
             actuator = item.position_rad;
         }
         let job = MotionJob {
+            cancel: Arc::default(),
             request_id: request.request_id,
             current,
             target: JOINTS.map(|name| target[name]).to_vec(),
@@ -500,7 +502,7 @@ impl MotionNode {
         self.active_motion = Some(ActiveMotion {
             request_id: job.request_id.clone(),
             complete_in_relative_mode,
-            cancelled: false,
+            cancel: job.cancel.clone(),
         });
         self.ros.run_motion(job);
     }
@@ -510,37 +512,27 @@ impl MotionNode {
         node: &mut DoraNode,
         request: ToolActuatorRequest,
     ) -> Result<()> {
-        if self.config.control_mode != ControlMode::Manual {
-            let request_id = request.request_id.clone();
-            self.actuator_status = Some(ToolActuatorStatus {
-                schema_version: SCHEMA_VERSION,
-                request_id,
-                actuator_key: request.actuator_key,
-                state: RequestState::Failed,
-                result_code: None,
-                result_message: Some("夹爪手动命令只在手动控制模式接受".into()),
-            });
-            send(
-                node,
-                "actuator_status",
-                self.actuator_status.as_ref().expect("assigned above"),
-            )?;
-            return self.publish_state(node);
-        }
-        if request.model_revision != MODEL_REVISION
+        let error = if self.config.control_mode != ControlMode::Manual {
+            Some("夹爪手动命令只在手动控制模式接受".into())
+        } else if request.model_revision != MODEL_REVISION
             || request.actuator_key != GRIPPER_KEY
             || !request.position_rad.is_finite()
         {
+            Some("request does not match StarArm-102 gripper".into())
+        } else {
+            self.publish_actuator(&request.request_id, request.position_rad)
+                .err()
+                .map(|error| error.to_string())
+        };
+        if let Some(message) = &error {
             self.actuator_status = Some(ToolActuatorStatus {
                 schema_version: SCHEMA_VERSION,
-                request_id: request.request_id,
+                request_id: request.request_id.clone(),
                 actuator_key: request.actuator_key,
                 state: RequestState::Failed,
-                result_code: Some("invalid_request".into()),
-                result_message: Some("request does not match StarArm-102 gripper".into()),
+                result_code: None,
+                result_message: Some(message.clone()),
             });
-        } else {
-            self.publish_actuator(&request.request_id, request.position_rad)?;
         }
         send(
             node,
@@ -548,6 +540,17 @@ impl MotionNode {
             self.actuator_status
                 .as_ref()
                 .expect("status assigned above"),
+        )?;
+        send(
+            node,
+            "actuator_request_result",
+            &RequestResult {
+                schema_version: SCHEMA_VERSION,
+                request_id: request.request_id,
+                acknowledged_action: RequestAction::Apply,
+                value: self.actuator_status.clone(),
+                original_error: error,
+            },
         )?;
         self.publish_state(node)
     }
@@ -569,14 +572,7 @@ impl MotionNode {
     fn handle_pick_place(&mut self, node: &mut DoraNode, request: PickPlaceRequest) -> Result<()> {
         let request_id = request.request_id.clone();
         if self.config.control_mode != ControlMode::Perception {
-            self.manipulation_state = ManipulationTaskState {
-                request_id,
-                state: RequestState::Failed,
-                original_error: Some("抓放任务只在感知控制模式接受".into()),
-                ..idle_manipulation_state()
-            };
-            send(node, "manipulation_state", &self.manipulation_state)?;
-            return self.send_manipulation_result(node);
+            return self.fail_manipulation(node, request_id, "抓放任务只在感知控制模式接受".into());
         }
         let result = self
             .latest_scene
@@ -585,32 +581,46 @@ impl MotionNode {
             .and_then(|scene| manipulation_job(scene, request));
         match result {
             Ok(pending) => {
+                // Acknowledge validation/queueing before returning HTTP 202.
+                // Completion is still reported through manipulation_state.
+                Self::send_manipulation_result(node, &pending.state)?;
                 self.work_queue.push_back(WorkItem::Manipulation(pending));
                 self.start_next_work(node)
             }
-            Err(error) => {
-                self.manipulation_state = ManipulationTaskState {
-                    request_id,
-                    state: RequestState::Failed,
-                    original_error: Some(error.to_string()),
-                    ..idle_manipulation_state()
-                };
-                send(node, "manipulation_state", &self.manipulation_state)?;
-                self.send_manipulation_result(node)
-            }
+            Err(error) => self.fail_manipulation(node, request_id, error.to_string()),
         }
     }
 
-    fn send_manipulation_result(&self, node: &mut DoraNode) -> Result<()> {
+    fn fail_manipulation(
+        &mut self,
+        node: &mut DoraNode,
+        request_id: String,
+        message: String,
+    ) -> Result<()> {
+        let failed = ManipulationTaskState {
+            request_id,
+            state: RequestState::Failed,
+            original_error: Some(message),
+            ..idle_manipulation_state()
+        };
+        Self::send_manipulation_result(node, &failed)?;
+        if self.active_manipulation.is_none() {
+            self.manipulation_state = failed;
+            send(node, "manipulation_state", &self.manipulation_state)?;
+        }
+        Ok(())
+    }
+
+    fn send_manipulation_result(node: &mut DoraNode, status: &ManipulationTaskState) -> Result<()> {
         send(
             node,
             "manipulation_request_result",
             &RequestResult {
                 schema_version: SCHEMA_VERSION,
-                request_id: self.manipulation_state.request_id.clone(),
+                request_id: status.request_id.clone(),
                 acknowledged_action: RequestAction::Apply,
-                value: Some(self.manipulation_state.clone()),
-                original_error: self.manipulation_state.original_error.clone(),
+                value: Some(status.clone()),
+                original_error: status.original_error.clone(),
             },
         )
     }
@@ -677,7 +687,10 @@ impl MotionNode {
                                         self.manipulation_state.original_error =
                                             Some(format!("同步 ros2_control 控制器失败：{error}"));
                                         send(node, "manipulation_state", &self.manipulation_state)?;
-                                        self.send_manipulation_result(node)?;
+                                        Self::send_manipulation_result(
+                                            node,
+                                            &self.manipulation_state,
+                                        )?;
                                     }
                                 }
                             }
@@ -709,21 +722,19 @@ impl MotionNode {
                     }
                 }
                 RosEvent::MotionFinished { request_id, result } => {
-                    let Some(active) = self
-                        .active_motion
-                        .take()
-                        .filter(|active| active.request_id == request_id)
-                    else {
-                        continue;
-                    };
-                    self.reset_relative_baseline();
-                    if active.cancelled {
-                        self.start_next_work(node)?;
-                        self.publish_state(node)?;
+                    if !self.active_request_is(&request_id) {
                         continue;
                     }
+                    let active = self.active_motion.take().expect("active request checked");
+                    self.reset_relative_baseline();
                     match result {
-                        Ok(result) => {
+                        Ok(MotionResult::Cancelled) => {
+                            self.motion_status.state = RequestState::Cancelled;
+                            self.motion_status.result_message = Some("普通运动已取消".into());
+                            send(node, "motion_status", &self.motion_status)?;
+                            self.send_motion_result(node, &self.motion_status)?;
+                        }
+                        Ok(MotionResult::Succeeded(code)) => {
                             if active.complete_in_relative_mode
                                 && let Err(error) = self.apply_control_mode(ControlMode::Relative)
                             {
@@ -733,10 +744,12 @@ impl MotionNode {
                                     error.to_string(),
                                     RequestAction::Apply,
                                 )?;
+                                self.start_next_work(node)?;
+                                self.publish_state(node)?;
                                 continue;
                             }
                             self.motion_status.state = RequestState::Succeeded;
-                            self.motion_status.result_code = Some(result.code.to_string());
+                            self.motion_status.result_code = Some(code.to_string());
                             self.motion_status.result_message = Some("普通运动执行完成".into());
                             send(node, "motion_status", &self.motion_status)?;
                             self.send_motion_result(node, &self.motion_status)?;
@@ -788,7 +801,7 @@ impl MotionNode {
                         }
                     }
                     send(node, "manipulation_state", &self.manipulation_state)?;
-                    self.send_manipulation_result(node)?;
+                    Self::send_manipulation_result(node, &self.manipulation_state)?;
                     self.start_next_work(node)?;
                     self.publish_state(node)?;
                 }
@@ -859,10 +872,10 @@ impl MotionNode {
     }
 
     fn cancel_motion(&mut self, node: &mut DoraNode, request_id: String) -> Result<()> {
-        self.reset_relative_baseline();
-        if self.active_motion.is_none()
-            && let Some(WorkItem::Motion(_)) = self.work_queue.front()
-        {
+        let cancelling_active = self.active_motion.is_some();
+        if let Some(active) = &self.active_motion {
+            active.cancel.store(true, Ordering::Relaxed);
+        } else if let Some(WorkItem::Motion(_)) = self.work_queue.front() {
             let WorkItem::Motion(pending) = self.work_queue.pop_front().expect("front checked")
             else {
                 unreachable!()
@@ -876,25 +889,21 @@ impl MotionNode {
             self.send_motion_result(node, &cancelled)?;
             self.start_next_work(node)?;
         }
-        if let Some(active) = self.active_motion.as_mut() {
-            active.cancelled = true;
-            let cancelled = MotionStatus {
-                request_id: active.request_id.clone(),
-                state: RequestState::Cancelled,
-                result_message: Some("普通运动请求已取消；当前 MoveIt 动作结束后可再次运动".into()),
-                ..idle_status()
-            };
-            self.send_motion_result(node, &cancelled)?;
-        }
-        self.motion_status = MotionStatus {
+        let acknowledgement = MotionStatus {
             request_id,
             acknowledged_action: "cancel".into(),
-            state: RequestState::Cancelled,
-            result_message: Some("普通运动请求已取消".into()),
+            state: RequestState::Succeeded,
+            result_message: Some(
+                if cancelling_active {
+                    "已请求取消，原运动请求将返回最终结果"
+                } else {
+                    "当前没有正在执行的普通运动"
+                }
+                .into(),
+            ),
             ..idle_status()
         };
-        send(node, "motion_status", &self.motion_status)?;
-        self.send_motion_result(node, &self.motion_status)
+        self.send_motion_result(node, &acknowledgement)
     }
 
     fn fail_motion(
@@ -904,16 +913,19 @@ impl MotionNode {
         message: String,
         action: RequestAction,
     ) -> Result<()> {
-        self.reset_relative_baseline();
-        self.motion_status = MotionStatus {
+        let failed = MotionStatus {
             request_id,
             acknowledged_action: action_name(action).into(),
             state: RequestState::Failed,
             result_message: Some(message),
             ..idle_status()
         };
-        send(node, "motion_status", &self.motion_status)?;
-        self.send_motion_result(node, &self.motion_status)
+        self.send_motion_result(node, &failed)?;
+        if self.active_motion.is_none() || self.active_request_is(&failed.request_id) {
+            self.motion_status = failed;
+            send(node, "motion_status", &self.motion_status)?;
+        }
+        Ok(())
     }
 
     fn send_motion_result(&self, node: &mut DoraNode, status: &MotionStatus) -> Result<()> {
@@ -939,7 +951,7 @@ impl MotionNode {
     fn active_request_is(&self, request_id: &str) -> bool {
         self.active_motion
             .as_ref()
-            .is_some_and(|active| active.request_id == request_id && !active.cancelled)
+            .is_some_and(|active| active.request_id == request_id)
     }
 
     fn reset_relative_baseline(&mut self) {
@@ -1029,6 +1041,10 @@ fn idle_manipulation_state() -> ManipulationTaskState {
 }
 
 fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<PendingManipulation> {
+    eyre::ensure!(
+        scene.sequence == request.scene_sequence,
+        "感知场景已改变，请从当前场景重新选择目标"
+    );
     let object = scene
         .objects
         .iter()
@@ -1238,11 +1254,28 @@ mod tests {
             PickPlaceRequest {
                 schema_version: SCHEMA_VERSION,
                 request_id: "request".into(),
+                scene_sequence: scene.sequence,
                 object_id: "selected".into(),
                 placement_region_id: "destination".into(),
             },
         )
         .unwrap();
+        assert!(
+            manipulation_job(
+                &scene,
+                PickPlaceRequest {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: "stale-selection".into(),
+                    scene_sequence: scene.sequence - 1,
+                    object_id: "selected".into(),
+                    placement_region_id: "destination".into(),
+                },
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("场景")
+        );
         assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
         assert_eq!(pending.job.goal["object_size"]["z"], 0.04);
         assert!(pending.job.goal.get("obstacle_ids").is_none());
@@ -1262,6 +1295,7 @@ mod tests {
             PickPlaceRequest {
                 schema_version: SCHEMA_VERSION,
                 request_id: "elevated".into(),
+                scene_sequence: scene.sequence,
                 object_id: "selected".into(),
                 placement_region_id: "destination".into(),
             },

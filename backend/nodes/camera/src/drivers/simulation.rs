@@ -1152,6 +1152,7 @@ mod tests {
                     png.get_ref(),
                     &config.calibration.camera_matrix,
                     &config.calibration.distortion,
+                    &config.calibration.distortion_model,
                     &calibration_board,
                 )
                 .unwrap();

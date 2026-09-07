@@ -317,7 +317,6 @@ export default function Page() {
             schema_version: schemaVersion,
             request_id: requestId(),
             action: "snapshot",
-            source_id: null,
             classes: null,
             placement_labels: null,
           });
@@ -376,7 +375,6 @@ export default function Page() {
         schema_version: schemaVersion,
         request_id: requestId(),
         action,
-        source_id: null,
         classes: appliesModel
           ? selectedPrompts
               .split(",")
@@ -493,7 +491,7 @@ export default function Page() {
   }
 
   async function pickPlace() {
-    if (!selectedObject || !selectedRegion) return;
+    if (!scene || !selectedObject || !selectedRegion) return;
     setPendingPerceptionAction("pick-place");
     try {
       const accepted = await send("/api/motion/mode", {
@@ -506,6 +504,7 @@ export default function Page() {
         schema_version: schemaVersion,
         request_id: requestId(),
         object_id: selectedObject,
+        scene_sequence: scene.sequence,
         placement_region_id: selectedRegion,
       });
     } finally {

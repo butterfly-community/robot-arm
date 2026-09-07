@@ -65,7 +65,6 @@ export async function executeInstruction(
     schema_version: schemaVersion,
     request_id: makeRequestId(),
     action: "apply",
-    source_id: null,
     classes: plan.perception_prompts,
     placement_labels: plan.placement_labels,
   });
@@ -73,7 +72,6 @@ export async function executeInstruction(
     schema_version: schemaVersion,
     request_id: makeRequestId(),
     action: "refresh",
-    source_id: null,
     classes: null,
     placement_labels: null,
   });
@@ -104,6 +102,7 @@ export async function executeInstruction(
     schema_version: schemaVersion,
     request_id: requestId,
     object_id: selection.object_id,
+    scene_sequence: scene.sequence,
     placement_region_id: selection.placement_region_id,
   });
   return { request_id: requestId, accepted: true, ...plan, ...selection };

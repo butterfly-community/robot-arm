@@ -86,6 +86,10 @@ describe("executeInstruction", () => {
       "/api/motion/mode",
       "/api/perception/pick-place",
     ]);
+    expect(gateway.post).toHaveBeenLastCalledWith(
+      "/api/perception/pick-place",
+      expect.objectContaining({ scene_sequence: scene.sequence }),
+    );
     expect(result).toMatchObject({
       request_id: "request-4",
       object_id: "red-cube-0",

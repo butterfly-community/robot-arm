@@ -353,8 +353,33 @@ impl ControllerInput {
         if let Some(path) = &self.config_path {
             save_input_config(path, &config)?;
         }
-        self.apply_config(config);
+        self.apply_user_config(config);
         Ok(())
+    }
+
+    fn user_config(&self) -> &InputConfig {
+        self.config_before_simulation
+            .as_ref()
+            .unwrap_or(&self.config)
+    }
+
+    fn apply_user_config(&mut self, mut config: InputConfig) {
+        if let Some(saved) = &mut self.config_before_simulation {
+            *saved = config.clone();
+            // Only the generated input bindings are temporary. User edits must
+            // survive stopping the demo and must never persist these bindings.
+            config.bindings = self.config.bindings.clone();
+            config.position_source = self.config.position_source.clone();
+            config.orientation_source = self.config.orientation_source.clone();
+            config.feedback_bindings = simulation_config(
+                &config,
+                self.simulation_state
+                    .item
+                    .expect("active simulation has an item"),
+            )
+            .feedback_bindings;
+        }
+        self.apply_config(config);
     }
 
     fn drain(&mut self) {
@@ -616,22 +641,22 @@ impl ControllerInput {
             RequestAction::Select => selection
                 .ok_or_else(|| "选择的输入 source 不存在或不提供对应位姿能力".to_owned())
                 .map(|selection| {
-                    let mut config = self.config.clone();
+                    let mut config = self.user_config().clone();
                     match request.component {
                         PoseComponent::Position => config.position_source = Some(selection),
                         PoseComponent::Orientation => config.orientation_source = Some(selection),
                     }
                     config.config_version += 1;
-                    self.apply_config(config);
+                    self.apply_user_config(config);
                 }),
             RequestAction::Unselect => {
-                let mut config = self.config.clone();
+                let mut config = self.user_config().clone();
                 match request.component {
                     PoseComponent::Position => config.position_source = None,
                     PoseComponent::Orientation => config.orientation_source = None,
                 }
                 config.config_version += 1;
-                self.apply_config(config);
+                self.apply_user_config(config);
                 Ok(())
             }
             action => Err(format!("input 节点不处理 {action:?} pose source 请求")),
@@ -653,7 +678,7 @@ impl ControllerInput {
             .err()
             .map(|error| error.to_string());
         if error.is_none() {
-            let mut config = self.config.clone();
+            let mut config = self.user_config().clone();
             config.bindings = request.bindings.clone();
             config.feedback_bindings = request.feedback_bindings.clone();
             config.config_version += 1;
@@ -679,7 +704,7 @@ impl ControllerInput {
         request: RenameInputSourceRequest,
     ) -> RequestResult<InputSourceInfo> {
         let source = self.sources.get(&request.source_id).cloned();
-        let mut config = self.config.clone();
+        let mut config = self.user_config().clone();
         match request.custom_name.as_deref().map(str::trim) {
             Some(name) if !name.is_empty() => {
                 config
@@ -1848,6 +1873,46 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_edits_during_simulation_do_not_save_or_restore_generated_bindings() {
+        let (_driver, receiver) = mpsc::channel();
+        let (haptic, _commands) = mpsc::channel();
+        let mut input = ControllerInput::new(receiver, haptic);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../temp")
+            .join(format!("input-demo-config-{}.json", now_ns()));
+        input.config_path = Some(path.clone());
+        let result = input.set_simulation(InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "demo".into(),
+            enabled: true,
+            item: Some(InputSimulationItem::MoveUpDown),
+            value: Some(1.0),
+        });
+        assert!(result.original_error.is_none());
+        let generated = input.config.bindings.clone();
+        let generated_feedback = input.config.feedback_bindings.clone();
+        let renamed = input.rename_source(RenameInputSourceRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "rename".into(),
+            source_id: "controller".into(),
+            custom_name: Some("我的手柄".into()),
+        });
+        assert!(renamed.original_error.is_none());
+        assert!(input.user_config().bindings.is_empty());
+        assert_eq!(input.config.bindings, generated);
+        assert_eq!(input.config.feedback_bindings, generated_feedback);
+        let saved: InputConfig = json_config_store::load_or_default(&path).unwrap();
+        assert!(saved.bindings.is_empty());
+        assert!(saved.feedback_bindings.is_empty());
+        assert_eq!(saved.device_names["controller"], "我的手柄");
+        input.stop_simulation();
+        assert!(input.config.bindings.is_empty());
+        assert!(input.config.feedback_bindings.is_empty());
+        assert_eq!(input.config.device_names["controller"], "我的手柄");
+        std::fs::remove_file(path).unwrap();
+    }
     use std::collections::BTreeSet;
 
     fn source(
@@ -1892,11 +1957,13 @@ mod tests {
 
     #[test]
     fn persisted_config_contains_bindings_and_device_names() {
-        let path = std::env::temp_dir().join(format!(
-            "controller-input-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../temp")
+            .join(format!(
+                "controller-input-{}-{}.json",
+                std::process::id(),
+                now_ns()
+            ));
         let function_binding = ActionBinding {
             action: "start_stop".into(),
             action_type: ActionType::Boolean,
@@ -1943,11 +2010,14 @@ mod tests {
 
     #[test]
     fn version_two_config_is_normalized_once() {
-        let path = std::env::temp_dir().join(format!(
-            "controller-input-v2-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../temp")
+            .join(format!(
+                "controller-input-v2-{}-{}.json",
+                std::process::id(),
+                now_ns()
+            ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
             r#"{"schema_version":2,"bindings":[],"config_version":9}"#,
@@ -1962,11 +2032,13 @@ mod tests {
 
     #[test]
     fn custom_device_name_is_persisted_and_reported() {
-        let path = std::env::temp_dir().join(format!(
-            "controller-input-name-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../temp")
+            .join(format!(
+                "controller-input-name-{}-{}.json",
+                std::process::id(),
+                now_ns()
+            ));
         let (_driver_tx, driver_rx) = mpsc::channel();
         let (haptic_tx, _haptic_rx) = mpsc::channel();
         let mut input = ControllerInput::from_config(

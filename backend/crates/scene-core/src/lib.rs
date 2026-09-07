@@ -20,6 +20,8 @@ pub enum SceneError {
     InvalidIntrinsics,
     #[error("invalid camera transform quaternion")]
     InvalidTransform,
+    #[error("unsupported nonzero distortion model: {0}")]
+    UnsupportedDistortion(String),
     #[error("cannot decode instance mask: {0}")]
     InvalidMask(#[from] image::ImageError),
     #[error("mask dimensions do not match aligned depth")]
@@ -48,10 +50,24 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
     if depth.depth.len() != (depth.width as usize) * (depth.height as usize) {
         return Err(SceneError::InvalidDepthDimensions);
     }
-    let [fx, _, cx, _, fy, cy, _, _, _] = calibration.camera_matrix;
-    if fx == 0.0 || fy == 0.0 {
+    if calibration.width != depth.width
+        || calibration.height != depth.height
+        || !calibration
+            .camera_matrix
+            .iter()
+            .all(|value| value.is_finite())
+        || calibration.camera_matrix[0] <= 0.0
+        || calibration.camera_matrix[4] <= 0.0
+        || !depth.depth_scale_m.is_finite()
+        || depth.depth_scale_m <= 0.0
+    {
         return Err(SceneError::InvalidIntrinsics);
     }
+    let pixels = Vector::<Point2f>::from_iter(
+        (0..depth.height)
+            .flat_map(|y| (0..depth.width).map(move |x| Point2f::new(x as f32, y as f32))),
+    );
+    let rays = normalized_camera_rays(&pixels, calibration)?;
     let transform = isometry(calibration.translation_m, calibration.orientation_xyzw)?;
     let mut objects = Vec::new();
     let mut placement_regions = Vec::new();
@@ -72,11 +88,8 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
                 continue;
             }
             let z = f64::from(raw_depth) * depth.depth_scale_m;
-            let camera_point = Vector3::new(
-                (f64::from(x) - cx) * z / fx,
-                (f64::from(y) - cy) * z / fy,
-                z,
-            );
+            let ray = rays.get(index)?;
+            let camera_point = Vector3::new(f64::from(ray.x) * z, f64::from(ray.y) * z, z);
             let point = (transform * Point3::from(camera_point)).coords;
             let point = [point.x as f32, point.y as f32, point.z as f32];
             if mask_value[0] != 0 && selected[index] {
@@ -132,14 +145,45 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
     ))
 }
 
-/// Approximate a segmented instance with the smallest rectangle in the base
+fn normalized_camera_rays(
+    pixels: &Vector<Point2f>,
+    calibration: &DepthCameraCalibration,
+) -> Result<Vector<Point2f>, SceneError> {
+    let k = &calibration.camera_matrix;
+    let camera = Mat::from_slice_2d(&[&k[0..3], &k[3..6], &k[6..9]])?;
+    let distortion = Mat::from_slice(&calibration.distortion)?;
+    let mut rays = Vector::<Point2f>::new();
+    if matches!(
+        calibration.distortion_model.as_str(),
+        "kannala_brandt4" | "equidistant"
+    ) {
+        // Even D=0 is an equidistant projection, not a pinhole camera.
+        geometry::undistort_points_1_def(pixels, &mut rays, &camera, &distortion)?;
+    } else if calibration.distortion.iter().all(|value| *value == 0.0)
+        || matches!(
+            calibration.distortion_model.as_str(),
+            "brown_conrady" | "plumb_bob" | "rational_polynomial"
+        )
+    {
+        geometry::undistort_points_def(pixels, &mut rays, &camera, &distortion)?;
+    } else {
+        // Inverse/modified Brown and F-theta coefficients are not OpenCV's
+        // Brown model. Silently treating them as pinhole yields false geometry.
+        return Err(SceneError::UnsupportedDistortion(
+            calibration.distortion_model.clone(),
+        ));
+    }
+    Ok(rays)
+}
+
 struct GravityAlignedBoundingBox {
     center_m: Vector3<f64>,
     size_m: Vector3<f64>,
     orientation_xyzw: [f64; 4],
 }
 
-/// frame's gravity plane and the observed vertical extent. OpenCV's rotating
+/// Approximate the segmented instance in the base frame's gravity plane and
+/// observed vertical extent. OpenCV's rotating
 /// calipers preserve the footprint orientation that an axis-aligned box loses;
 /// this keeps the generic scene contract useful without assuming an object
 /// class or maintaining a second collision-geometry path.
@@ -338,6 +382,55 @@ mod tests {
             .write_to(&mut output, ImageFormat::Png)
             .unwrap();
         output.into_inner()
+    }
+
+    #[test]
+    fn brown_distortion_is_removed_before_depth_projection() {
+        let mut camera = calibration(640, 480);
+        camera.camera_matrix = [500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0];
+        camera.distortion = vec![0.1, 0.0, 0.0, 0.0, 0.0];
+        // Ray (0.4, 0.2), k1=0.1: radial scale = 1 + .1*(.4²+.2²) = 1.02.
+        let pixels = Vector::from_slice(&[Point2f::new(524.0, 342.0)]);
+        let ray = normalized_camera_rays(&pixels, &camera)
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert!((ray.x - 0.4).abs() < 1e-6);
+        assert!((ray.y - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inverse_brown_is_not_silently_interpreted_as_forward_brown() {
+        let mut camera = calibration(640, 480);
+        camera.distortion_model = "inverse_brown_conrady".into();
+        camera.distortion[0] = 0.1;
+        assert!(matches!(
+            normalized_camera_rays(&Vector::from_slice(&[Point2f::new(1.0, 1.0)]), &camera),
+            Err(SceneError::UnsupportedDistortion(_))
+        ));
+    }
+
+    #[test]
+    fn equidistant_projection_is_not_pinhole_even_with_zero_coefficients() {
+        let mut camera = calibration(640, 480);
+        camera.camera_matrix = [500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0];
+        camera.distortion_model = "equidistant".into();
+        let radius = 0.4_f64.hypot(0.2);
+        let theta = radius.atan();
+        for k1 in [0.0, 0.1] {
+            camera.distortion = vec![k1, 0.0, 0.0, 0.0];
+            let scale = theta * (1.0 + k1 * theta * theta) / radius;
+            let pixel = Point2f::new(
+                (320.0 + 500.0 * 0.4 * scale) as f32,
+                (240.0 + 500.0 * 0.2 * scale) as f32,
+            );
+            let ray = normalized_camera_rays(&Vector::from_slice(&[pixel]), &camera)
+                .unwrap()
+                .get(0)
+                .unwrap();
+            assert!((ray.x - 0.4).abs() < 1e-6);
+            assert!((ray.y - 0.2).abs() < 1e-6);
+        }
     }
 
     #[test]

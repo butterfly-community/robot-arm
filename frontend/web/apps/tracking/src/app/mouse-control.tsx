@@ -103,8 +103,10 @@ export function MouseControl({
         started.current = true;
       })
       .catch((reason) => {
-        held.current = undefined;
-        setActive(undefined);
+        if (held.current === pressId) {
+          held.current = undefined;
+          setActive(undefined);
+        }
         onError(String(reason));
       });
   }

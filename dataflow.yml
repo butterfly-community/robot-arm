@@ -5,7 +5,6 @@ debug:
 nodes:
   - id: camera-node
     path: /usr/local/bin/camera-node
-    restart_policy: on-failure
     deploy:
       machine: camera
     inputs:
@@ -17,6 +16,7 @@ nodes:
         queue_policy: drop_oldest
       request: web-gateway-node/camera_request
       calibration_request: web-gateway-node/calibration_request
+      calibration_mode_result: stararm-102-motion-node/mode_request_result
       asset_request: web-gateway-node/camera_asset_request
       snapshot: web-gateway-node/camera_snapshot
       arm_state:
@@ -41,7 +41,6 @@ nodes:
 
   - id: controller-input-node
     path: /usr/local/bin/controller-input-node
-    restart_policy: on-failure
     deploy:
       machine: controller-input
     inputs:
@@ -70,7 +69,6 @@ nodes:
 
   - id: scene-node
     path: /usr/local/bin/scene-node
-    restart_policy: on-failure
     deploy:
       machine: perception
     inputs:
@@ -155,6 +153,7 @@ nodes:
       - service_state
       - motion_status
       - actuator_status
+      - actuator_request_result
       - arm_command
       - mode_request_result
       - motion_request_result
@@ -243,6 +242,7 @@ nodes:
       motion_state: stararm-102-motion-node/motion_state
       motion_status: stararm-102-motion-node/motion_status
       actuator_status: stararm-102-motion-node/actuator_status
+      actuator_request_result: stararm-102-motion-node/actuator_request_result
       mode_request_result: stararm-102-motion-node/mode_request_result
       motion_request_result: stararm-102-motion-node/motion_request_result
       manipulation_state: stararm-102-motion-node/manipulation_state

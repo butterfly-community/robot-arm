@@ -10,6 +10,7 @@ use std::{
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result, bail, eyre};
+use futures::FutureExt;
 #[cfg(feature = "opencv-runtime")]
 use image::{DynamicImage, ImageFormat, RgbImage};
 use json_config_store::{load_or_default, save};
@@ -75,6 +76,8 @@ impl Default for CameraConfigStore {
 }
 
 struct CameraNode {
+    runtime: tokio::runtime::Handle,
+    calibration_work: Option<tokio::task::JoinHandle<Result<CalibrationWork>>>,
     config_path: PathBuf,
     config: CameraConfigStore,
     sources: Vec<CameraSourceInfo>,
@@ -88,6 +91,7 @@ struct CameraNode {
     capture_completions: tokio::sync::mpsc::Receiver<CaptureCompletion>,
     capture_outputs: tokio::sync::watch::Receiver<Option<CaptureOutput>>,
     desired_streaming: bool,
+    pending_open_request_id: Option<String>,
     streaming: bool,
     last_sequence: Option<u64>,
     last_frame_time_ns: Option<i64>,
@@ -109,6 +113,11 @@ struct CameraNode {
     calibration_capture_at: Option<Instant>,
     last_calibration_attempt_ns: Option<i64>,
     calibration_preview: Option<Vec<u8>>,
+}
+
+enum CalibrationWork {
+    Detected(CalibrationObservation, Vec<u8>),
+    Solved(CalibrationResult),
 }
 
 fn default_calibration_session() -> CalibrationSessionState {
@@ -143,6 +152,8 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("/config/camera.json"));
     let config = load_config(&config_path)?;
     let mut camera = CameraNode {
+        runtime: runtime.handle().clone(),
+        calibration_work: None,
         config_path,
         config,
         sources: vec![],
@@ -156,6 +167,7 @@ fn run() -> Result<()> {
         capture_completions: capture.completions,
         capture_outputs: capture.outputs,
         desired_streaming: false,
+        pending_open_request_id: None,
         streaming: false,
         last_sequence: None,
         last_frame_time_ns: None,
@@ -210,6 +222,24 @@ fn run() -> Result<()> {
                     }
                     camera.latest_motion_state = Some(state);
                 }
+                "calibration_mode_result" => {
+                    let result: RequestResult<MotionState> = from_arrow(data.as_array())?;
+                    if camera.config.calibration_session.phase == CalibrationPhase::Preparing
+                        && camera
+                            .config
+                            .calibration_session
+                            .run_id
+                            .as_ref()
+                            .is_some_and(|run| result.request_id == format!("{run}-manual-mode"))
+                    {
+                        if let Some(error) = result.original_error {
+                            camera.fail_automatic_calibration(error);
+                        } else if let Err(error) = camera.send_current_calibration_target(&mut node)
+                        {
+                            camera.fail_automatic_calibration(error.to_string());
+                        }
+                    }
+                }
                 "robot_model_info" => camera.robot_model = Some(from_arrow(data.as_array())?),
                 _ => {}
             },
@@ -229,11 +259,12 @@ impl CameraNode {
         }
         if let Err(error) = self.advance_automatic_calibration(node) {
             self.fail_automatic_calibration(error.to_string());
-            self.persist_config()?;
         }
-        if let Err(error) = self.try_automatic_calibration_capture(node) {
+        if let Err(error) = self
+            .poll_calibration_work(node)
+            .and_then(|()| self.try_automatic_calibration_capture())
+        {
             self.fail_automatic_calibration(error.to_string());
-            self.persist_config()?;
         }
         if self.capture_outputs.has_changed().unwrap_or(false) {
             let output = self.capture_outputs.borrow_and_update().clone();
@@ -246,6 +277,11 @@ impl CameraNode {
                         captured_count,
                         skipped_count,
                     } => {
+                        if !self.streaming
+                            || self.selected_source_id.as_deref() != Some(frame.source_id.as_str())
+                        {
+                            return self.publish_state(node);
+                        }
                         let captured_since_update =
                             captured_count.saturating_sub(self.worker_capture_count);
                         if let Some(previous) = self.last_sequence {
@@ -259,11 +295,6 @@ impl CameraNode {
                         self.frame_window_count += captured_since_update;
                         self.skipped_output_frame_count = skipped_count;
                         let mut frame = *frame;
-                        if !self.streaming
-                            || self.selected_source_id.as_deref() != Some(frame.source_id.as_str())
-                        {
-                            return self.publish_state(node);
-                        }
                         frame.calibration = self.calibration_for_frame(&frame)?;
                         self.latest_frame = Some(frame.clone());
                         node.send_output(
@@ -275,13 +306,16 @@ impl CameraNode {
                         self.output_window_count += 1;
                     }
                     CaptureOutput::Failed(error) => {
+                        if self.pending_open_request_id.is_some() {
+                            return self.publish_state(node);
+                        }
                         if self.config.calibration_session.active {
                             self.fail_automatic_calibration(error.clone());
-                            self.persist_config()?;
                         }
                         self.original_error = Some(error);
                         self.desired_streaming = false;
                         self.streaming = false;
+                        self.latest_frame = None;
                     }
                 }
             }
@@ -335,19 +369,26 @@ impl CameraNode {
                 source_id,
                 result,
             } => {
-                let result = result.and_then(|()| {
-                    if self.desired_streaming
-                        && self.selected_source_id.as_deref() == Some(source_id.as_str())
-                    {
-                        self.streaming = true;
-                        self.reset_stream_statistics();
-                        Ok(())
-                    } else {
-                        let _ = self.capture_commands.try_send(CaptureCommand::Stop);
-                        Err("相机启动期间选择或运行状态已改变".into())
-                    }
-                });
-                if result.is_err() {
+                let current = self.pending_open_request_id.as_deref() == Some(request_id.as_str());
+                let result = if !current {
+                    Err("相机启动请求已被后续操作替换".into())
+                } else {
+                    result.and_then(|()| {
+                        if self.desired_streaming
+                            && self.selected_source_id.as_deref() == Some(source_id.as_str())
+                        {
+                            self.streaming = true;
+                            self.reset_stream_statistics();
+                            Ok(())
+                        } else {
+                            Err("相机启动期间选择或运行状态已改变".into())
+                        }
+                    })
+                };
+                if current {
+                    self.pending_open_request_id = None;
+                }
+                if current && result.is_err() {
                     self.desired_streaming = false;
                     self.streaming = false;
                 }
@@ -627,10 +668,15 @@ impl CameraNode {
             })
             .map_err(capture_command_error)?;
         self.desired_streaming = true;
+        self.streaming = false;
+        self.latest_frame = None;
+        self.pending_open_request_id = Some(request.request_id.clone());
         Ok(())
     }
 
     fn stop_capture(&mut self) -> Result<()> {
+        self.latest_frame = None;
+        self.pending_open_request_id = None;
         if !self.streaming && !self.desired_streaming {
             return Ok(());
         }
@@ -641,7 +687,6 @@ impl CameraNode {
         self.streaming = false;
         if self.config.calibration_session.active {
             self.fail_automatic_calibration("相机采集已停止，自动标定已结束".into());
-            self.persist_config()?;
         }
         Ok(())
     }
@@ -716,11 +761,6 @@ impl CameraNode {
         Ok(())
     }
 
-    fn persist_config(&mut self) -> Result<()> {
-        self.config.config_version += 1;
-        save(&self.config_path, &self.config)
-    }
-
     fn calibration_for_frame(
         &self,
         frame: &CameraFrameBundle,
@@ -774,6 +814,7 @@ impl CameraNode {
             CalibrationAction::Start => self.start_automatic_calibration(node, &request),
             CalibrationAction::Apply => self.apply_solved_calibration(),
             CalibrationAction::Cancel => {
+                self.calibration_work = None;
                 self.config.calibration_session = default_calibration_session();
                 self.calibration_capture_at = None;
                 Ok(())
@@ -790,9 +831,6 @@ impl CameraNode {
             self.config.calibration_session.original_error = None;
         }
         self.set_simulation_calibration_active(self.config.calibration_session.active);
-        if let Err(error) = self.persist_config() {
-            self.config.calibration_session.original_error = Some(error.to_string());
-        }
         send(
             node,
             "calibration_request_result",
@@ -863,6 +901,7 @@ impl CameraNode {
             original_error: None,
         };
         self.last_calibration_attempt_ns = None;
+        self.calibration_work = None;
         self.calibration_capture_at = None;
         send(
             node,
@@ -882,71 +921,62 @@ impl CameraNode {
         if self.config.calibration_session.camera_source_id != self.selected_source_id {
             bail!("当前相机来源已改变，自动标定已停止");
         }
-        match self.config.calibration_session.phase {
-            CalibrationPhase::Preparing => {
-                if self
-                    .latest_motion_state
-                    .as_ref()
-                    .is_some_and(|state| state.control_mode == ControlMode::Manual)
-                {
-                    self.send_current_calibration_target(node)?;
-                }
+        if self.config.calibration_session.phase == CalibrationPhase::Moving {
+            let expected = self.config.calibration_session.motion_request_id.as_deref();
+            let latest = self
+                .latest_motion_state
+                .as_ref()
+                .and_then(|state| state.latest_motion.as_ref());
+            if latest.map(|status| status.request_id.as_str()) != expected {
+                return Ok(());
             }
-            CalibrationPhase::Moving => {
-                let expected = self.config.calibration_session.motion_request_id.as_deref();
-                let latest = self
-                    .latest_motion_state
-                    .as_ref()
-                    .and_then(|state| state.latest_motion.as_ref());
-                if latest.map(|status| status.request_id.as_str()) != expected {
-                    return Ok(());
+            match latest.map(|status| status.state) {
+                Some(RequestState::Succeeded) => {
+                    if self
+                        .config
+                        .calibration_session
+                        .current_target_index
+                        .is_none()
+                    {
+                        self.config.calibration_session.current_target_index = Some(0);
+                        self.send_current_calibration_target(node)?;
+                        return Ok(());
+                    }
+                    let capture_at = *self
+                        .calibration_capture_at
+                        .get_or_insert_with(|| Instant::now() + CALIBRATION_CAPTURE_DELAY);
+                    let remaining = capture_at.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero() {
+                        self.config.calibration_session.stage_message = Some(format!(
+                            "运动完成，等待 {:.1} 秒后采样",
+                            remaining.as_secs_f64()
+                        ));
+                        return Ok(());
+                    }
+                    self.calibration_capture_at = None;
+                    // The first sample must come from a frame received
+                    // after the requested settling wait, not its old cache.
+                    self.latest_frame = None;
+                    self.config.calibration_session.phase = CalibrationPhase::Detecting;
+                    self.config.calibration_session.stage_message =
+                        Some("运动完成，正在识别 ChArUco".into());
                 }
-                match latest.map(|status| status.state) {
-                    Some(RequestState::Succeeded) => {
-                        if self
-                            .config
-                            .calibration_session
-                            .current_target_index
-                            .is_none()
-                        {
-                            self.config.calibration_session.current_target_index = Some(0);
-                            self.send_current_calibration_target(node)?;
-                            return Ok(());
-                        }
-                        let capture_at = *self
-                            .calibration_capture_at
-                            .get_or_insert_with(|| Instant::now() + CALIBRATION_CAPTURE_DELAY);
-                        let remaining = capture_at.saturating_duration_since(Instant::now());
-                        if !remaining.is_zero() {
-                            self.config.calibration_session.stage_message = Some(format!(
-                                "运动完成，等待 {:.1} 秒后采样",
-                                remaining.as_secs_f64()
-                            ));
-                            return Ok(());
-                        }
-                        self.calibration_capture_at = None;
-                        self.config.calibration_session.phase = CalibrationPhase::Detecting;
-                        self.config.calibration_session.stage_message =
-                            Some("运动完成，正在识别 ChArUco".into());
-                    }
-                    Some(RequestState::Failed | RequestState::Cancelled) => {
-                        let message = latest
-                            .and_then(|status| status.result_message.clone())
-                            .unwrap_or_else(|| "标定姿态运动失败".into());
-                        self.fail_automatic_calibration(message);
-                    }
-                    Some(RequestState::Planning) => {
-                        self.config.calibration_session.stage_message =
-                            Some("正在规划当前标定姿态".into());
-                    }
-                    Some(RequestState::Executing) => {
-                        self.config.calibration_session.stage_message =
-                            Some("正在执行当前标定姿态".into());
-                    }
-                    _ => {}
+                Some(RequestState::Failed | RequestState::Cancelled) => {
+                    let message = latest
+                        .and_then(|status| status.result_message.clone())
+                        .unwrap_or_else(|| "标定姿态运动失败".into());
+                    self.fail_automatic_calibration(message);
                 }
+                Some(RequestState::Planning) => {
+                    self.config.calibration_session.stage_message =
+                        Some("正在规划当前标定姿态".into());
+                }
+                Some(RequestState::Executing) => {
+                    self.config.calibration_session.stage_message =
+                        Some("正在执行当前标定姿态".into());
+                }
+                _ => {}
             }
-            _ => {}
         }
         Ok(())
     }
@@ -981,8 +1011,10 @@ impl CameraNode {
         Ok(())
     }
 
-    fn try_automatic_calibration_capture(&mut self, node: &mut DoraNode) -> Result<()> {
-        if self.config.calibration_session.phase != CalibrationPhase::Detecting {
+    fn try_automatic_calibration_capture(&mut self) -> Result<()> {
+        if self.calibration_work.is_some()
+            || self.config.calibration_session.phase != CalibrationPhase::Detecting
+        {
             return Ok(());
         }
         let Some(frame_time_ns) = self.latest_frame.as_ref().map(|frame| frame.device_time_ns)
@@ -1008,37 +1040,74 @@ impl CameraNode {
                 .unwrap_or("calibration"),
             index + 1
         );
-        let observation = match self.capture_calibration_observation(&sample_id) {
-            Ok(observation) => observation,
-            Err(error) => {
+        let session = self.config.calibration_session.clone();
+        let frame = self.latest_frame.clone().expect("frame checked above");
+        let arm = self
+            .latest_arm_state
+            .clone()
+            .ok_or_else(|| eyre!("尚未收到关节反馈"))?;
+        let tool = self
+            .latest_tool_pose
+            .clone()
+            .ok_or_else(|| eyre!("尚未收到当前 TCP 位姿"))?;
+        self.calibration_work = Some(self.runtime.spawn_blocking(move || {
+            Self::capture_calibration_observation(&sample_id, &session, &frame, &arm, &tool)
+        }));
+        Ok(())
+    }
+
+    fn poll_calibration_work(&mut self, node: &mut DoraNode) -> Result<()> {
+        let Some(result) = self
+            .calibration_work
+            .as_mut()
+            .and_then(|work| work.now_or_never())
+        else {
+            return Ok(());
+        };
+        self.calibration_work = None;
+        let result = result.context("标定计算任务异常结束")?;
+        let observation = match result {
+            Ok(CalibrationWork::Detected(observation, preview)) => {
+                self.calibration_preview = Some(preview);
+                observation
+            }
+            Ok(CalibrationWork::Solved(solved)) => {
+                self.config.calibration_session.solved_result = Some(solved);
+                self.config.calibration_session.phase = CalibrationPhase::AwaitingConfirmation;
+                self.config.calibration_session.stage_message =
+                    Some("自动采样和求解完成，等待确认应用".into());
+                return Ok(());
+            }
+            Err(error) if self.config.calibration_session.phase == CalibrationPhase::Detecting => {
                 self.config.calibration_session.stage_message =
                     Some(format!("等待识别 ChArUco：{error}"));
                 return Ok(());
             }
+            Err(error) => return Err(error),
         };
         self.config
             .calibration_session
             .observations
             .push(observation);
         self.config.calibration_session.solved_result = None;
-        let next = index + 1;
+        let next = self
+            .config
+            .calibration_session
+            .current_target_index
+            .unwrap_or_default()
+            + 1;
         if next < self.config.calibration_session.target_count {
             self.config.calibration_session.current_target_index = Some(next);
             self.send_current_calibration_target(node)?;
         } else {
             self.config.calibration_session.phase = CalibrationPhase::Solving;
             self.config.calibration_session.stage_message = Some("正在求解相机外参".into());
-            match self.solve_calibration() {
-                Ok(solved) => {
-                    self.config.calibration_session.solved_result = Some(solved);
-                    self.config.calibration_session.phase = CalibrationPhase::AwaitingConfirmation;
-                    self.config.calibration_session.stage_message =
-                        Some("自动采样和求解完成，等待确认应用".into());
-                }
-                Err(error) => self.fail_automatic_calibration(error.to_string()),
-            }
+            let session = self.config.calibration_session.clone();
+            self.calibration_work = Some(self.runtime.spawn_blocking(move || {
+                Self::solve_calibration(&session).map(CalibrationWork::Solved)
+            }));
         }
-        self.persist_config()
+        Ok(())
     }
 
     fn apply_solved_calibration(&mut self) -> Result<()> {
@@ -1049,11 +1118,11 @@ impl CameraNode {
             .clone()
             .ok_or_else(|| eyre!("尚无可应用的标定结果"))?;
         let source_id = solved.camera_source_id.clone();
-        self.config
-            .cameras
-            .entry(source_id)
-            .or_default()
-            .calibration = Some(solved);
+        let mut next = self.config.clone();
+        next.cameras.entry(source_id).or_default().calibration = Some(solved);
+        next.config_version += 1;
+        save(&self.config_path, &next)?;
+        self.config = next;
         let session = &mut self.config.calibration_session;
         session.active = false;
         session.phase = CalibrationPhase::Applied;
@@ -1063,6 +1132,7 @@ impl CameraNode {
     }
 
     fn fail_automatic_calibration(&mut self, message: String) {
+        self.calibration_work = None;
         let session = &mut self.config.calibration_session;
         session.active = false;
         session.phase = CalibrationPhase::Failed;
@@ -1079,57 +1149,52 @@ impl CameraNode {
 
     #[cfg(feature = "opencv-runtime")]
     fn capture_calibration_observation(
-        &mut self,
         sample_id: &str,
-    ) -> Result<CalibrationObservation> {
-        let session = &self.config.calibration_session;
+        session: &CalibrationSessionState,
+        frame: &CameraFrameBundle,
+        arm: &ArmState,
+        tool: &ToolPose,
+    ) -> Result<CalibrationWork> {
         let board = session
             .board
             .as_ref()
             .ok_or_else(|| eyre!("标定板配置缺失"))?;
-        let frame = self
-            .latest_frame
-            .as_ref()
-            .ok_or_else(|| eyre!("尚未收到彩色相机帧"))?;
-        let arm = self
-            .latest_arm_state
-            .as_ref()
-            .ok_or_else(|| eyre!("尚未收到真实关节反馈"))?;
-        let tool = self
-            .latest_tool_pose
-            .as_ref()
-            .ok_or_else(|| eyre!("尚未收到当前 TCP 位姿"))?;
         let detection = camera_calibration::detect(
             &color_png(&frame.color)?,
             &intrinsics_matrix(&frame.intrinsics),
             &frame.intrinsics.distortion,
+            &frame.intrinsics.distortion_model,
             board,
         )?;
-        self.calibration_preview = Some(detection.visualization_png);
-        Ok(CalibrationObservation {
-            sample_id: sample_id.into(),
-            sample_time_ns: arm.sample_time_ns,
-            camera_frame_id: frame.color.frame_id.clone(),
-            board_in_camera: detection.board_in_camera,
-            tcp_in_base: Pose3 {
-                position_m: tool.position_m,
-                orientation_xyzw: tool.orientation_xyzw,
+        Ok(CalibrationWork::Detected(
+            CalibrationObservation {
+                sample_id: sample_id.into(),
+                sample_time_ns: arm.sample_time_ns,
+                camera_frame_id: frame.color.frame_id.clone(),
+                board_in_camera: detection.board_in_camera,
+                tcp_in_base: Pose3 {
+                    position_m: tool.position_m,
+                    orientation_xyzw: tool.orientation_xyzw,
+                },
+                joint_feedback_rad: arm.joints_rad.clone(),
             },
-            joint_feedback_rad: arm.joints_rad.clone(),
-        })
+            detection.visualization_png,
+        ))
     }
 
     #[cfg(not(feature = "opencv-runtime"))]
     fn capture_calibration_observation(
-        &mut self,
         _sample_id: &str,
-    ) -> Result<CalibrationObservation> {
+        _session: &CalibrationSessionState,
+        _frame: &CameraFrameBundle,
+        _arm: &ArmState,
+        _tool: &ToolPose,
+    ) -> Result<CalibrationWork> {
         bail!("camera-node 构建时未启用 OpenCV 标定支持")
     }
 
     #[cfg(feature = "opencv-runtime")]
-    fn solve_calibration(&self) -> Result<CalibrationResult> {
-        let session = &self.config.calibration_session;
+    fn solve_calibration(session: &CalibrationSessionState) -> Result<CalibrationResult> {
         let tcp = session
             .observations
             .iter()
@@ -1170,7 +1235,7 @@ impl CameraNode {
     }
 
     #[cfg(not(feature = "opencv-runtime"))]
-    fn solve_calibration(&self) -> Result<CalibrationResult> {
+    fn solve_calibration(_session: &CalibrationSessionState) -> Result<CalibrationResult> {
         bail!("camera-node 构建时未启用 OpenCV 标定支持")
     }
 

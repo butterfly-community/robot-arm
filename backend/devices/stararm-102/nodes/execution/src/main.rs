@@ -77,6 +77,7 @@ fn main() -> Result<()> {
                 }
                 "tick" => {
                     if execution.poll_hardware() {
+                        publish_transport(&mut node, &execution)?;
                         publish_state(&mut node, &execution)?;
                     }
                 }
@@ -524,7 +525,7 @@ impl StarArmExecution {
             }
             Some(Err(error)) => {
                 self.reopen_after_io_error(error);
-                false
+                true
             }
             None => false,
         }
@@ -776,11 +777,14 @@ fn publish_transport(node: &mut DoraNode, execution: &StarArmExecution) -> Resul
 }
 fn publish_state(node: &mut DoraNode, execution: &StarArmExecution) -> Result<()> {
     send(node, "arm_state", &execution.state)?;
-    send(
-        node,
-        "action_feedback",
-        &primary_tool_feedback(&execution.telemetry),
-    )?;
+    if execution.transport.connected && execution.state.feedback_source == FeedbackSource::Hardware
+    {
+        send(
+            node,
+            "action_feedback",
+            &primary_tool_feedback(&execution.telemetry),
+        )?;
+    }
     send(node, "service_state", &execution.service_state())
 }
 fn send<T: serde::Serialize>(node: &mut DoraNode, id: &str, value: &T) -> Result<()> {
@@ -812,11 +816,13 @@ mod tests {
         }
     }
     fn config_path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "stararm-execution-config-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../../temp")
+            .join(format!(
+                "stararm-execution-config-{}-{}.json",
+                std::process::id(),
+                now_ns()
+            ))
     }
 
     #[test]

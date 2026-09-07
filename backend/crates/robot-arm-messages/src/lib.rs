@@ -870,7 +870,6 @@ pub struct PerceptionRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub action: RequestAction,
-    pub source_id: Option<String>,
     pub classes: Option<Vec<String>>,
     #[serde(default)]
     pub placement_labels: Option<Vec<String>>,
@@ -1046,6 +1045,7 @@ pub struct CalibrationSessionState {
 pub struct PickPlaceRequest {
     pub schema_version: u32,
     pub request_id: String,
+    pub scene_sequence: u64,
     pub object_id: String,
     pub placement_region_id: String,
 }
@@ -1956,22 +1956,22 @@ mod tests {
             from_arrow(to_arrow(&calibration).unwrap().as_ref()).unwrap();
         assert_eq!(decoded, calibration);
 
-        let camera_request = PerceptionRequest {
+        let model_request = PerceptionRequest {
             schema_version: SCHEMA_VERSION,
-            request_id: "reset-camera-1".into(),
+            request_id: "reset-model-1".into(),
             action: RequestAction::Reset,
-            source_id: Some("simulation:pick-place-scene".into()),
             classes: None,
             placement_labels: None,
             grasp_collision_distance_m: None,
         };
         let decoded: PerceptionRequest =
-            from_arrow(to_arrow(&camera_request).unwrap().as_ref()).unwrap();
-        assert_eq!(decoded, camera_request);
+            from_arrow(to_arrow(&model_request).unwrap().as_ref()).unwrap();
+        assert_eq!(decoded, model_request);
 
         let request = PickPlaceRequest {
             schema_version: SCHEMA_VERSION,
             request_id: "pick-place-1".into(),
+            scene_sequence: 7,
             object_id: "red-cube-0".into(),
             placement_region_id: "basket-interior".into(),
         };

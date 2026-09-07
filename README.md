@@ -13,16 +13,15 @@
 在仓库根目录统一启停，不维护单个节点的独立运行状态：
 
 ```bash
-docker compose up -d
+docker compose up -d --no-build
 docker compose down
 ```
 
 应用代码变化时：
 
 ```bash
-docker compose build
-docker compose down
-docker compose up -d
+docker compose build <受影响的服务>
+docker compose up -d --no-build --force-recreate
 ```
 
 Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
@@ -30,16 +29,9 @@ Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
 
 ## 镜像
 
-应用镜像固定继承已经验证的基础镜像：
+应用镜像固定继承已经验证的基础镜像；标签只在 [镜像清单](docs/DOCKER.md) 维护，避免多份清单失配。
 
-- 后端构建基础：`robot-arm-services-backend-base:2026.09.05-r9`
-- 后端运行基础：`robot-arm-services-backend-runtime:2026.09.05-r3`
-- StarArm-102 厂商资产：`robot-arm-services-stararm-102-base:2026.09.05-r2`
-- 感知计算构建/运行：`robot-arm-services-perception-compute-base:2026.09.05-r4` /
-  `robot-arm-services-perception-compute-runtime:2026.09.05-r4`
-- 前端：`robot-arm-services-frontend-base:2026.09.03-r1`
-
-每个服务在自己的 Dockerfile 中声明专属构建和运行依赖：相机拥有 librealsense，场景拥有
+每个服务在自己的 Dockerfile 中声明专属构建和运行依赖：相机拥有 librealsense，相机和场景各自拥有
 OpenCV 5，运动拥有 ROS 2/MoveIt/RViz，感知计算拥有 Python、PyTorch、YOLOE、GraspGenX 和
 模型。全局后端基础只保留三个以上服务共同使用的 Rust/Dora 工具链及最小运行库；Compose
 不会再构建一个包含所有节点与硬件环境的总后端镜像。前端的构建与运行使用同一个经过验证的
@@ -56,12 +48,12 @@ Ubuntu 基础镜像。
 
 `CameraFrameBundle` 原子携带已对齐到彩色平面的 RGB-D、共享平面内参、设备深度比例、时间信息
 和逐帧外参快照。原始相机数据不经过 ROS；`camera-node` 负责采集、对齐和标定，`scene-node` 负责编排识别、分割、三维实例和
-抓取候选，MoveIt 只接收结构化目标、放置区和显式障碍。相机 profile 与已确认标定由后端文件
+抓取候选，MoveIt 只接收任务目标、放置位姿和候选；碰撞场景只有刚性地面及目标中心参考点，不含筐壁。相机 profile 与已确认标定由后端文件
 保存，当前选择不持久化，因此重启仍回到未选择状态。配置以设备序列号等稳定身份关联，不使用
 枚举索引或 USB 口；离线设备及暂时缺失的 profile 仍保留在配置中，并在网页置灰说明。网页可
 选择驱动实际报告的分辨率、格式和采集 FPS，并独立设置不高于采集频率的上送 FPS；厂商专属
 底层参数通过驱动命名空间扩展展示，不会形成第二条感知链路。采集和 SDK Align 在 Tokio 长期
-任务中执行，高采集、低上送时只物化待发布帧。YOLOE 和 GraspGenX 只在用户点击
+任务中执行，高采集、低上送时只对待发布 RGB-D 帧做深度对齐；实时彩色视频仍按采集频率复制。YOLOE 和 GraspGenX 只在用户点击
 “运行一次感知”时调用。
 
 感知页顶部把抓放作为一个可折叠应用场景展示。自然语言入口由 Next.js 服务端使用 AI SDK 将
@@ -75,10 +67,6 @@ Ubuntu 基础镜像。
 ## 常用验收
 
 ```bash
-cargo fmt --manifest-path backend/Cargo.toml --all -- --check
-cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
-cargo test --manifest-path backend/Cargo.toml --workspace
-cargo machete --manifest-path backend/Cargo.toml
 pnpm --dir frontend format:check
 pnpm --dir frontend lint
 pnpm --dir frontend typecheck
@@ -88,14 +76,28 @@ docker compose config --quiet
 node tests/integration/software-flow.mjs
 ```
 
+Rust 测试、Clippy 和模型测试必须在各自服务的构建/运行镜像执行，不能在 Host 用
+`cargo test --workspace` 混测 ROS、SDL 和 OpenCV。分组命令见
+[测试入口与环境](tests/README.md)。
+
 测试脚本和诊断工具位于 `tests/`、`tools/` 与各节点自己的测试目录。项目中间资源只能放仓库
 `temp/`；运行配置位于 `backend/config/runtime/`，网页不保存服务配置副本。
+服务停止后 `temp/` 随时可以清空，下次启动/测试不依赖旧临时数据；正式输入和配置不放在其中。
 
 ## 文档入口
 
+- [下一步任务与验收顺序](TODO.md)：唯一待办清单；已完成事项不重复立项。
 - [当前系统设计](docs/SUMMARY.md)
 - [后端方法与依赖](docs/BACKEND.md)
 - [Docker 与服务镜像](docs/DOCKER.md)
 - [StarArm-102 型号适配](docs/STARARM-102.md)
-- [最终审查与验收](docs/REVIEW.md)
-- [抓取与闭合穿地排查过程](docs/investigations/stararm-102-grasp-ground.md)
+- [资产基线与验收边界](docs/REVIEW.md)
+- [测试入口与环境](tests/README.md)
+- 排查归档：[全仓库审查](docs/investigations/repository-audit.md)、
+  [模拟抓取与 AI 验收](docs/investigations/simulated-grasp-acceptance.md)、
+  [抓取与闭合穿地](docs/investigations/stararm-102-grasp-ground.md)、
+  [图片与视频 RGB/BGR](docs/investigations/image-video-rgb-audit.md)。
+
+`docs/` 维护当前事实，`docs/investigations/` 保留带日期的原因、试验和取舍，不是待执行配置。
+本轮模拟六图经用户确认，20 轮软件执行与真实 AI 编排已完成；下一步是真机前核对、标定和实际夹持。
+固定物体几何及筐壁诊断的局限仍保留；详细边界与未完成事项统一见 TODO。

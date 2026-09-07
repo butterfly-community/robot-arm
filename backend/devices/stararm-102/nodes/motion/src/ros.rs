@@ -61,8 +61,9 @@ pub enum RosEvent {
 }
 
 #[derive(Debug)]
-pub struct MotionResult {
-    pub code: i64,
+pub enum MotionResult {
+    Succeeded(i64),
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -74,6 +75,7 @@ pub struct ManipulationResult {
 
 #[derive(Clone)]
 pub struct MotionJob {
+    pub cancel: Arc<AtomicBool>,
     pub request_id: String,
     pub current: Vec<f64>,
     pub target: Vec<f64>,
@@ -463,7 +465,9 @@ impl RosInterface {
         } else {
             Some(self.allowed_collision_matrix(&collision_pairs).await?)
         };
-        let result = self.request_plan(job, matrix, actions)?;
+        let Some(result) = self.request_plan(job, matrix, actions)? else {
+            return Ok(MotionResult::Cancelled);
+        };
         let code = result["error_code"]["val"].as_i64().unwrap_or_default();
         if code != MOVEIT_SUCCESS {
             bail!("MoveIt 规划失败，错误码 {code}");
@@ -484,16 +488,29 @@ impl RosInterface {
             duration_s,
             collision_pairs: collision_pairs.clone(),
         });
-        self.publish_actuator(job.actuator)?;
-        let result = actions.execute(json!({
-            "trajectory": trajectory,
-            "controller_names": ["arm_controller"],
-        }))?;
-        let code = result["error_code"]["val"].as_i64().unwrap_or_default();
-        if code != MOVEIT_SUCCESS {
-            bail!("普通运动执行失败，MoveIt 错误码 {code}");
+        if job.cancel.load(Ordering::Relaxed) {
+            return Ok(MotionResult::Cancelled);
         }
-        Ok(MotionResult { code })
+        self.publish_actuator(job.actuator)?;
+        let Some(result) = actions.execute(
+            json!({
+                "trajectory": trajectory["joint_trajectory"],
+            }),
+            &job.cancel,
+        )?
+        else {
+            return Ok(MotionResult::Cancelled);
+        };
+        let code = result["error_code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            bail!(
+                "关节轨迹执行失败，控制器错误码 {code}：{}",
+                result["error_string"].as_str().unwrap_or_default()
+            );
+        }
+        // Keep the existing motion result convention: MoveIt planned this
+        // trajectory successfully and the controller confirmed execution.
+        Ok(MotionResult::Succeeded(MOVEIT_SUCCESS))
     }
 
     fn request_plan(
@@ -501,7 +518,7 @@ impl RosInterface {
         job: &MotionJob,
         matrix: Option<Value>,
         actions: &mut MotionActions,
-    ) -> EyreResult<Value> {
+    ) -> EyreResult<Option<Value>> {
         let goal_constraints = json!([{
             "name": "joint_target",
             "joint_constraints": JOINTS
@@ -539,7 +556,10 @@ impl RosInterface {
                 "allowed_collision_matrix": matrix,
             });
         }
-        actions.plan(json!({"request": request, "planning_options": planning_options}))
+        actions.plan(
+            json!({"request": request, "planning_options": planning_options}),
+            &job.cancel,
+        )
     }
 
     async fn apply_ground(&self) -> EyreResult<()> {
@@ -626,7 +646,7 @@ impl RosInterface {
 struct MotionActions {
     node: Node,
     move_group: ActionClientUntyped,
-    execute_trajectory: ActionClientUntyped,
+    follow_joint_trajectory: ActionClientUntyped,
     pick_place: ActionClientUntyped,
 }
 
@@ -635,9 +655,12 @@ impl MotionActions {
         let mut node = Node::create(context, "stararm_102_motion_action_worker", "")?;
         let move_group =
             node.create_action_client_untyped("/move_action", "moveit_msgs/action/MoveGroup")?;
-        let execute_trajectory = node.create_action_client_untyped(
-            "/execute_trajectory",
-            "moveit_msgs/action/ExecuteTrajectory",
+        // Execute the unchanged MoveIt plan through the controller's standard
+        // action. MoveIt 2.15 ExecuteTrajectory blocks its cancel callback until
+        // execution finishes; FollowJointTrajectory owns real cancellation.
+        let follow_joint_trajectory = node.create_action_client_untyped(
+            "/arm_controller/follow_joint_trajectory",
+            "control_msgs/action/FollowJointTrajectory",
         )?;
         let pick_place = node.create_action_client_untyped(
             "/stararm102/pick_place",
@@ -646,17 +669,17 @@ impl MotionActions {
         Ok(Self {
             node,
             move_group,
-            execute_trajectory,
+            follow_joint_trajectory,
             pick_place,
         })
     }
 
-    fn plan(&mut self, goal: Value) -> EyreResult<Value> {
-        action(&mut self.node, &self.move_group, goal)
+    fn plan(&mut self, goal: Value, cancel: &AtomicBool) -> EyreResult<Option<Value>> {
+        action(&mut self.node, &self.move_group, goal, cancel)
     }
 
-    fn execute(&mut self, goal: Value) -> EyreResult<Value> {
-        action(&mut self.node, &self.execute_trajectory, goal)
+    fn execute(&mut self, goal: Value, cancel: &AtomicBool) -> EyreResult<Option<Value>> {
+        action(&mut self.node, &self.follow_joint_trajectory, goal, cancel)
     }
 
     fn pick_place(
@@ -703,15 +726,47 @@ impl MotionActions {
     }
 }
 
-fn action(node: &mut Node, client: &ActionClientUntyped, goal: Value) -> EyreResult<Value> {
+fn action(
+    node: &mut Node,
+    client: &ActionClientUntyped,
+    goal: Value,
+    cancel: &AtomicBool,
+) -> EyreResult<Option<Value>> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     spin_until(node, Node::is_available(client)?)?;
-    let (_handle, result, _feedback) = spin_until(node, client.send_goal_request(goal)?)?;
-    let (status, value) = spin_until(node, result)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let (handle, result, _feedback) = spin_until(node, client.send_goal_request(goal)?)?;
+    futures::pin_mut!(result);
+    let mut cancel_sent = false;
+    let (status, value) = loop {
+        if let Some(result) = result.as_mut().now_or_never() {
+            break result?;
+        }
+        if !cancel_sent && cancel.load(Ordering::Relaxed) {
+            // Cancellation is a request, not a completed motion. The terminal
+            // action result remains authoritative, including a completion race.
+            let response = spin_until(node, handle.cancel()?);
+            if let Err(error) = response {
+                eprintln!("MoveIt cancel request: {error}");
+            }
+            cancel_sent = true;
+        }
+        node.spin_once(Duration::from_millis(10));
+    };
     value
         .map_err(|error| eyre!(error))
         .and_then(|value| match status {
-            r2r::GoalStatus::Succeeded => Ok(value),
-            other => bail!("MoveIt action ended with {other}"),
+            r2r::GoalStatus::Succeeded => Ok(Some(value)),
+            r2r::GoalStatus::Canceled => Ok(None),
+            other => bail!(
+                "ROS action ended with {other}: code={}, {}",
+                value["error_code"],
+                value["error_string"].as_str().unwrap_or_default()
+            ),
         })
 }
 

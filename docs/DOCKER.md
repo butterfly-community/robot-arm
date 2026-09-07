@@ -48,39 +48,31 @@ motion 镜像；AI 环境与模型仅存在于 perception-compute 镜像。
 
 ## 构建顺序
 
-基础依赖变化时只重建受影响的标签：
-
-```bash
-docker build --progress=plain -f backend/docker/base/Dockerfile \
-  -t robot-arm-services-backend-base:2026.09.05-r9 .
-
-docker build --progress=plain -f backend/docker/runtime/Dockerfile \
-  -t robot-arm-services-backend-runtime:2026.09.05-r3 .
-
-docker build --progress=plain -f backend/devices/stararm-102/Dockerfile.base \
-  -t robot-arm-services-stararm-102-base:2026.09.05-r2 .
-
-docker build --progress=plain -f backend/services/perception-compute/Dockerfile.base \
-  -t robot-arm-services-perception-compute-base:2026.09.07-r7 .
-
-docker build --progress=plain -f backend/services/perception-compute/Dockerfile.runtime \
-  -t robot-arm-services-perception-compute-runtime:2026.09.07-r7 .
-```
+只有基础依赖实际变化才构建对应基础 Dockerfile，并发布**新标签**，不覆盖上表已验证标签。
+顺序为受影响的公共构建/运行基础 → 型号资产（若变更）→ 计算构建/运行基础（若变更）→ 应用。
+未受影响的层直接复用；不能因为应用源码改动重跑全套基础构建。
 
 前端基础镜像仅在 Node 或 pnpm 变化时重建。基础标签更新后，应一次性修改直接引用它的
 Dockerfile；不得用 `latest` 隐式漂移。应用代码的日常构建仍只有：
 
 ```bash
-docker compose build
-docker compose down
-docker compose up -d
+docker compose build <受影响的服务>
+docker compose up -d --no-build --force-recreate
 ```
 
 系统统一启停，不维护单节点生命周期。需要保留容器定义并整体恢复时使用
-`docker compose up -d --force-recreate`。自然语言 API 的地址、模型和密钥只通过根目录
+`docker compose up -d --no-build --force-recreate`，且不指定单个服务；dataflow 不单独自动重启某个节点。
+Rust 构建目标中的测试复用该服务环境，Python 运行测试用计算运行镜像，夹爪生成测试用含官方向导的计算构建镜像。
+不要把“精简运行镜像没有构建向导”或“构建镜像未安装显示运行库”错误地补成第二套运行环境。
+自然语言 API 的地址、模型和密钥只通过根目录
 `.env` 注入 `web-perception`；它们不进入镜像层或浏览器 bundle。
 
 ## 设备与存储
+
+服务停止后，根目录 `temp/` 可随时清空；下次构建/启动不依赖其中的历史文件。
+Compose 只把 `temp/recordings` 作为录制输出，以及测试 profile 的结果目录；缺失时挂载会创建目录。
+正式配置在 `backend/config/runtime`，相机资产在 `backend/nodes/camera/assets`，
+模型在计算服务所属目录并打入镜像，均不依赖 `temp/`。不要求服务运行中清理的容错。
 
 controller-input、camera 和 execution 只挂载各自需要的 `/dev`、udev/sysfs 和 cgroup 规则。
 相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D

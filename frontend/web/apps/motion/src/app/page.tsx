@@ -199,7 +199,7 @@ export default function Page() {
       connection={connection}
       section="04 / MOVEIT MOTION"
       title="机械臂运动"
-      description="相对控制、手动控制和感知控制具有明确模式边界，并共享同一个运动队列与 MoveIt 执行链路。"
+      description="相对输入由 Servo 连续处理；手动和感知任务顺序执行。三种模式独立，共用同一套机械臂模型和执行反馈。"
     >
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">

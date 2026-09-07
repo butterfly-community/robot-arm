@@ -16,7 +16,7 @@
   },
   "bin": {
     "label": "gray storage bin",
-    "placement_region_prompt": "tv",
+    "placement_region_prompt": "dark rectangle",
     "center_xy_m": [0.1875, -0.115],
     "outer_size_m": [0.1, 0.1, 0.05],
     "wall_thickness_m": 0.005,

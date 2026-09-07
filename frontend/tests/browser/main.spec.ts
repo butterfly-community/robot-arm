@@ -443,17 +443,15 @@ test("tracking page persists a custom input device name", async ({
   request,
 }) => {
   const before = await (await request.get("/api/tracking/state")).json();
-  const source = before.values.discovery_state?.sources?.find(
-    (candidate: { driver_id?: string }) =>
-      candidate.driver_id === "sdl3-gamepad",
-  ) as
+  // Naming is a shared input capability, not an SDL-specific path.
+  const source = before.values.discovery_state?.sources?.[0] as
     | {
         source_id: string;
         display_name: string;
         custom_name: string | null;
       }
     | undefined;
-  test.skip(!source, "需要一个在线 SDL3 输入设备");
+  test.skip(!source, "需要一个在线输入设备");
 
   try {
     await page.goto("/tracking/");
@@ -505,7 +503,6 @@ test("perception page uses the simulation camera through the canonical path", as
         schema_version: 3,
         request_id: "browser-perception-prompts",
         action: "apply",
-        source_id: null,
         classes: simulationPrompts,
         placement_labels: simulationPlacementLabels,
       },
@@ -711,7 +708,6 @@ test("perception page uses the simulation camera through the canonical path", as
           schema_version: 3,
           request_id: "browser-perception-restore",
           action: "apply",
-          source_id: null,
           classes: original.classes,
           placement_labels: original.placement_labels,
         },
@@ -1138,7 +1134,6 @@ test("execution viewer shows the selected pick and placement points only during 
         schema_version: 3,
         request_id: "browser-pick-points-scene",
         action: "apply",
-        source_id: null,
         classes: simulationPrompts,
         placement_labels: simulationPlacementLabels,
       },
@@ -1154,7 +1149,6 @@ test("execution viewer shows the selected pick and placement points only during 
         schema_version: 3,
         request_id: "browser-pick-points-run",
         action: "refresh",
-        source_id: null,
         classes: null,
         placement_labels: null,
       },
@@ -1197,6 +1191,7 @@ test("execution viewer shows the selected pick and placement points only during 
       data: {
         schema_version: 3,
         request_id: "browser-pick-points",
+        scene_sequence: currentScene.sequence,
         object_id: object.object_id,
         placement_region_id: placement.region_id,
       },
@@ -1210,7 +1205,7 @@ test("execution viewer shows the selected pick and placement points only during 
       "data-pick-point-z",
       object.pose.position_m[2].toFixed(3),
     );
-    const expectedPlaceZ = placement.pose.position_m[2] + 0.07;
+    const expectedPlaceZ = Math.max(placement.pose.position_m[2], 0.1);
     await expect(viewer).toHaveAttribute(
       "data-place-point-z",
       expectedPlaceZ.toFixed(3),
@@ -1290,7 +1285,6 @@ test("execution viewer shows the selected pick and placement points only during 
             schema_version: 3,
             request_id: "browser-pick-points-restore",
             action: "apply",
-            source_id: null,
             classes: original.classes,
             placement_labels: original.placement_labels,
           }
@@ -1298,7 +1292,6 @@ test("execution viewer shows the selected pick and placement points only during 
             schema_version: 3,
             request_id: "browser-pick-points-restore",
             action: "disconnect",
-            source_id: null,
             classes: null,
             placement_labels: null,
           },

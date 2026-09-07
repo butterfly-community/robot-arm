@@ -1,5 +1,24 @@
 import { expect, test, type WebSocketRoute } from "@playwright/test";
 
+test("the initial page state comes only from the WebSocket snapshot", async ({
+  page,
+  request,
+}) => {
+  const snapshot = await (await request.get("/api/motion/state")).json();
+  snapshot.values.arm_state.joints_rad[0] = 0.2;
+  let duplicateSnapshotRequests = 0;
+  await page.route("**/api/motion/state", (route) => {
+    duplicateSnapshotRequests += 1;
+    return route.abort();
+  });
+  await page.routeWebSocket("**/ws/motion", (route) =>
+    route.send(JSON.stringify(snapshot)),
+  );
+  await page.goto("/motion/");
+  await expect(page.locator(".joint-gauge strong").first()).toHaveText("11.5°");
+  expect(duplicateSnapshotRequests).toBe(0);
+});
+
 // Browser-only fault injection: never send motion, camera or model commands to
 // the running system. Keep real model meshes and the normal page contracts.
 test("selected diagnostics do not freeze feedback and disconnect is visible", async ({

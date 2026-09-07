@@ -86,14 +86,13 @@ struct ProcessedScene {
     aligned_depth: AlignedDepthFrame,
     calibration: DepthCameraCalibration,
     instances: Vec<DetectedInstance2D>,
-    overlay: CameraImagePlane,
+    assets: BTreeMap<String, (String, Vec<u8>)>,
     point_count: u64,
 }
 
 struct SceneTaskResult {
     request_id: String,
-    source_id: String,
-    config_version: u64,
+    input_sequence: u64,
     result: Result<ProcessedScene, String>,
 }
 
@@ -207,14 +206,26 @@ fn run() -> Result<()> {
                         .streaming
                         .then(|| state.selected_source_id.clone())
                         .flatten();
-                    let changed = scene_node.config.source_id != active_source;
+                    let changed = scene_node.config.source_id != active_source
+                        || scene_node.camera_state.as_ref().is_some_and(|previous| {
+                            previous.service.config_version != state.service.config_version
+                        });
                     scene_node.config.source_id = active_source;
                     scene_node.camera_state = Some(state);
                     if changed {
                         scene_node.clear_output(&mut node)?;
                     }
                 }
-                "robot_model_info" => scene_node.robot_model = Some(from_arrow(data.as_array())?),
+                "robot_model_info" => {
+                    let model: RobotModelInfo = from_arrow(data.as_array())?;
+                    if scene_node.robot_model.as_ref().is_some_and(|previous| {
+                        previous.gripper_asset_id != model.gripper_asset_id
+                            || previous.model_revision != model.model_revision
+                    }) {
+                        scene_node.clear_scene(&mut node)?;
+                    }
+                    scene_node.robot_model = Some(model);
+                }
                 "snapshot" => scene_node.publish_snapshot(&mut node)?,
                 "tick" => scene_node.tick(&mut node)?,
                 _ => {}
@@ -334,6 +345,13 @@ impl SceneNode {
         if frame.calibration.is_none() {
             bail!("当前相机尚未配置外参");
         }
+        if !self.config.enabled {
+            let mut next = self.config.clone();
+            next.enabled = true;
+            next.config_version += 1;
+            save(&self.config_path, &next)?;
+            self.config = next;
+        }
         let http = self.http.clone();
         let config = self.config.clone();
         let gripper_asset_id = self
@@ -343,8 +361,7 @@ impl SceneNode {
         let sequence = self.sequence + 1;
         let sender = self.task_sender.clone();
         let completed_request_id = request_id.clone();
-        let completed_source_id = frame.source_id.clone();
-        let completed_config_version = self.config.config_version;
+        let input_sequence = self.sequence;
         runtime.spawn(async move {
             let result = process_scene(http, config, gripper_asset_id, frame, sequence)
                 .await
@@ -352,8 +369,7 @@ impl SceneNode {
             let _ = sender
                 .send(SceneTaskResult {
                     request_id: completed_request_id,
-                    source_id: completed_source_id,
-                    config_version: completed_config_version,
+                    input_sequence,
                     result,
                 })
                 .await;
@@ -365,12 +381,12 @@ impl SceneNode {
     }
 
     fn finish_scene_task(&mut self, node: &mut DoraNode, completed: SceneTaskResult) -> Result<()> {
-        let result = if self.config.source_id.as_deref() == Some(&completed.source_id)
-            && self.config.config_version == completed.config_version
-        {
+        // Clearing inputs increments the scene sequence, including A → B → A
+        // source switches and calibration changes on the same physical camera.
+        let result = if self.sequence == completed.input_sequence {
             completed.result
         } else {
-            Err("感知任务运行期间相机来源或配置已改变，已丢弃旧结果".into())
+            Err("感知任务运行期间相机、标定、模型或配置已改变，已丢弃旧结果".into())
         };
         let error = match result {
             Ok(processed) => {
@@ -380,12 +396,11 @@ impl SceneNode {
                 self.store_frame_details(
                     &processed.color,
                     &processed.aligned_depth,
-                    &processed.overlay,
                     &processed.calibration,
                     &processed.instances,
                     &processed.scene,
-                )?;
-                self.last_frame_time_ns = Some(processed.scene.sample_time_ns);
+                    processed.assets,
+                );
                 self.publish_scene(node, processed.scene)?;
                 self.task_state = RequestState::Succeeded;
                 None
@@ -421,16 +436,16 @@ impl SceneNode {
         &mut self,
         color: &CameraImagePlane,
         depth: &AlignedDepthFrame,
-        overlay: &CameraImagePlane,
         calibration: &DepthCameraCalibration,
         instances: &[DetectedInstance2D],
         scene: &WorldScene,
-    ) -> Result<()> {
+        assets: BTreeMap<String, (String, Vec<u8>)>,
+    ) {
         self.color_frame = Some(image_frame_info(color));
         self.depth_frame = Some(ImageFrameInfo {
             width: depth.width,
             height: depth.height,
-            encoding: "16UC1".into(),
+            encoding: "z16le".into(),
             frame_id: depth.frame_id.clone(),
         });
         self.camera_calibration = Some(calibration.clone());
@@ -454,17 +469,7 @@ impl SceneNode {
                 }
             })
             .collect();
-        self.assets
-            .insert("color.png".into(), ("image/png".into(), color_png(color)?));
-        self.assets.insert(
-            "overlay.png".into(),
-            ("image/png".into(), color_png(overlay)?),
-        );
-        self.assets.insert(
-            "depth.png".into(),
-            ("image/png".into(), depth_preview_png(depth)?),
-        );
-        Ok(())
+        self.assets = assets;
     }
 
     fn send_asset(&self, node: &mut DoraNode, request: PerceptionAssetRequest) -> Result<()> {
@@ -587,7 +592,7 @@ impl SceneNode {
             .insert("color.png".into(), ("image/png".into(), color_png));
         self.assets
             .insert("depth.png".into(), ("image/png".into(), depth_png));
-        self.last_frame_time_ns = Some(depth.source_time_ns);
+        self.last_frame_time_ns = Some(bundle.received_time_ns);
         Ok(())
     }
 
@@ -669,7 +674,7 @@ async fn process_scene(
     let processing_color = color.clone();
     let processing_instances = instances.clone();
     let processing_placement_labels = config.placement_labels.clone();
-    let (aligned_depth, calibration, overlay, mut scene, instance_clouds) =
+    let (aligned_depth, calibration, assets, mut scene, instance_clouds) =
         tokio::task::spawn_blocking(move || {
             let mut aligned_depth = decode_depth(&frame)?;
             let mut calibration = frame
@@ -686,7 +691,21 @@ async fn process_scene(
                 &processing_instances,
                 &processing_placement_labels,
             )?;
-            Ok::<_, eyre::Report>((aligned_depth, calibration, overlay, scene, instance_clouds))
+            let assets = BTreeMap::from([
+                (
+                    "color.png".into(),
+                    ("image/png".into(), color_png(&processing_color)?),
+                ),
+                (
+                    "overlay.png".into(),
+                    ("image/png".into(), color_png(&overlay)?),
+                ),
+                (
+                    "depth.png".into(),
+                    ("image/png".into(), depth_preview_png(&aligned_depth)?),
+                ),
+            ]);
+            Ok::<_, eyre::Report>((aligned_depth, calibration, assets, scene, instance_clouds))
         })
         .await
         .context("场景计算任务异常结束")??;
@@ -710,7 +729,7 @@ async fn process_scene(
         aligned_depth,
         calibration,
         instances,
-        overlay,
+        assets,
         point_count,
     })
 }
@@ -806,12 +825,12 @@ async fn attach_grasp_candidates(
         object.grasp_candidates = candidates
             .iter()
             .map(|candidate| candidate_tcp_pose_in_base(candidate.transform))
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
     }
     Ok(())
 }
 
-fn candidate_tcp_pose_in_base(base_tcp: [[f64; 4]; 4]) -> Result<Pose3> {
+fn candidate_tcp_pose_in_base(base_tcp: [[f64; 4]; 4]) -> Pose3 {
     let base_tcp = Isometry3::from_parts(
         Translation3::new(base_tcp[0][3], base_tcp[1][3], base_tcp[2][3]),
         UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(Matrix3::new(
@@ -827,10 +846,10 @@ fn candidate_tcp_pose_in_base(base_tcp: [[f64; 4]; 4]) -> Result<Pose3> {
         ))),
     );
     let quaternion = base_tcp.rotation.quaternion();
-    Ok(Pose3 {
+    Pose3 {
         position_m: base_tcp.translation.vector.into(),
         orientation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
-    })
+    }
 }
 
 fn load_config(path: &Path) -> Result<SceneConfig> {
@@ -996,8 +1015,7 @@ mod tests {
             [0.0, 1.0, 0.0, 0.2],
             [0.0, 0.0, 1.0, 0.3],
             [0.0, 0.0, 0.0, 1.0],
-        ])
-        .unwrap();
+        ]);
         assert_eq!(pose.position_m, [0.1, 0.2, 0.3]);
         assert_eq!(pose.orientation_xyzw, [0.0, 0.0, 0.0, 1.0]);
     }

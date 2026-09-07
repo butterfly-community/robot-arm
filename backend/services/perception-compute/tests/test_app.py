@@ -3,6 +3,7 @@ import base64
 import io
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
@@ -119,6 +120,7 @@ def test_yoloe_uses_official_image_and_native_mask_contract() -> None:
     backend.device = "cpu"
     backend._model = FakeYoloeModel()
     backend._classes = ()
+    backend._lock = threading.Lock()
     image = Image.new("RGB", (8, 6), "red")
 
     assert backend.segment(image, []) == []
@@ -163,11 +165,40 @@ def test_yoloe_keeps_source_resolution_without_overriding_model_input_size() -> 
     backend.device = "cpu"
     backend._model = FakeYoloeModel()
     backend._classes = ()
+    backend._lock = threading.Lock()
 
     for size in ((1280, 720), (1920, 1080)):
         backend.segment(Image.new("RGB", size), ["object"])
         assert backend._model.last_image.size == size
         assert "imgsz" not in backend._model.predict_options[-1]
+
+
+def test_prompt_update_and_inference_are_one_serial_operation() -> None:
+    import time
+
+    backend = YoloeBackend.__new__(YoloeBackend)
+    backend._lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def segment(image, classes):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        time.sleep(0.01)
+        active -= 1
+        return classes
+
+    backend._segment = segment
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda label: backend.segment(Image.new("RGB", (1, 1)), [label]),
+                ["cube", "bin", "apple", "bottle"],
+            )
+        )
+    assert results == [["cube"], ["bin"], ["apple"], ["bottle"]]
+    assert maximum_active == 1
 
 
 def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monkeypatch):

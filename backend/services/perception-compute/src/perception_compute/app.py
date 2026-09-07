@@ -181,10 +181,17 @@ class YoloeBackend:
 
         self._model = YOLOE(self.model_name)
         self._classes: tuple[str, ...] = ()
+        self._lock = threading.Lock()
 
     def segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
         if not classes:
             return []
+        # FastAPI runs synchronous endpoints concurrently. Prompt mutation and
+        # inference must share the lock, not only predict's internal lock.
+        with self._lock:
+            return self._segment(image, classes)
+
+    def _segment(self, image: Image.Image, classes: list[str]) -> list[Instance]:
         requested = tuple(classes)
         if requested != self._classes:
             self._model.set_classes(classes)

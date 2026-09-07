@@ -190,11 +190,13 @@ mod tests {
 
     #[test]
     fn persisted_config_excludes_runtime_state() {
-        let path = std::env::temp_dir().join(format!(
-            "spatial-transform-{}-{}.json",
-            std::process::id(),
-            now_ns()
-        ));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../temp")
+            .join(format!(
+                "spatial-transform-{}-{}.json",
+                std::process::id(),
+                now_ns()
+            ));
         let configured = SpatialConfigState {
             translation_scale: 0.25,
             control_session_id: Some(9),

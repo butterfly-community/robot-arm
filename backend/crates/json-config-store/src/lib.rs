@@ -1,5 +1,10 @@
-use std::{fs, io::ErrorKind, path::Path};
+use std::{
+    fs,
+    io::{ErrorKind, Write},
+    path::Path,
+};
 
+use atomic_write_file::AtomicWriteFile;
 use eyre::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -20,7 +25,12 @@ pub fn save<T: Serialize>(path: &Path, config: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, bytes).wrap_err_with(|| format!("写入 {}", path.display()))
+    let mut file =
+        AtomicWriteFile::open(path).wrap_err_with(|| format!("打开 {}", path.display()))?;
+    file.write_all(&bytes)
+        .wrap_err_with(|| format!("写入 {}", path.display()))?;
+    file.commit()
+        .wrap_err_with(|| format!("提交 {}", path.display()))
 }
 
 #[cfg(test)]
@@ -37,7 +47,10 @@ mod tests {
     }
 
     fn path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../temp/json-config-store-tests");
+        fs::create_dir_all(&root).unwrap();
+        root.join(format!(
             "json-config-store-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
@@ -69,6 +82,24 @@ mod tests {
         let path = path("malformed");
         fs::write(&path, b"{").unwrap();
         assert!(load_or_default::<Fixture>(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn readers_never_observe_a_partial_replacement() {
+        let path = path("atomic");
+        let value = vec![42u64; 4096];
+        save(&path, &value).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..100 {
+                    save(&path, &value).unwrap();
+                }
+            });
+            for _ in 0..100 {
+                assert_eq!(load_or_default::<Vec<u64>>(&path).unwrap(), value);
+            }
+        });
         fs::remove_file(path).unwrap();
     }
 }

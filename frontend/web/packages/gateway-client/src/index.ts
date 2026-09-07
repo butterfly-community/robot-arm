@@ -5,18 +5,10 @@ import {
   type Snapshot,
 } from "@robot/contracts";
 import { nanoid } from "nanoid/non-secure";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 export function requestId(): string {
   return nanoid();
-}
-
-export async function getSnapshot(namespace: Namespace): Promise<Snapshot> {
-  const response = await fetch(`/api/${namespace}/state`, {
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<Snapshot>;
 }
 
 export async function post<T extends Json>(
@@ -115,43 +107,34 @@ export type ConnectionState = "connecting" | "connected" | "disconnected";
 export function useGateway(namespace: Namespace) {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const [transportError, setTransportError] = useState<string>();
   const [operationError, setOperationError] = useState<string>();
-  const pending = useRef<Snapshot | undefined>(undefined);
   useEffect(() => {
+    let pending: Snapshot | undefined;
     let frame: number | undefined;
     const applyPending = () => {
       frame = undefined;
-      if (!pending.current) return;
-      const value = pending.current;
-      pending.current = undefined;
+      if (!pending) return;
+      const value = pending;
+      pending = undefined;
       setSnapshot(value);
-      setTransportError(undefined);
     };
     const accept = (value: Snapshot) => {
-      pending.current = value;
+      pending = value;
       if (frame === undefined) {
         frame = window.requestAnimationFrame(applyPending);
       }
     };
     const dispose = subscribe(namespace, accept, setConnection);
-    getSnapshot(namespace)
-      .then(accept)
-      .catch((reason: unknown) =>
-        setTransportError(
-          reason instanceof Error ? reason.message : String(reason),
-        ),
-      );
     return () => {
       if (frame !== undefined) window.cancelAnimationFrame(frame);
-      pending.current = undefined;
+      pending = undefined;
       dispose();
     };
   }, [namespace]);
   return {
     connection,
     snapshot,
-    error: operationError ?? transportError,
+    error: operationError,
     setError: setOperationError,
   };
 }

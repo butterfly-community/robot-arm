@@ -22,6 +22,7 @@ use axum::{
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result};
 use robot_arm_messages::{ExecutionRequest, SCHEMA_VERSION, from_arrow, to_arrow};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
 
@@ -60,7 +61,15 @@ fn main() -> Result<()> {
 
     let mut pending = BTreeMap::<String, oneshot::Sender<Value>>::new();
     loop {
+        pending.retain(|_, response| !response.is_closed());
         while let Ok(request) = request_rx.try_recv() {
+            if pending.contains_key(&request.request_id) {
+                if let Some(response) = request.response {
+                    let _ = response.send(json!({"request_id": request.request_id,
+                        "original_error": "request_id already pending"}));
+                }
+                continue;
+            }
             let output = request.output.clone();
             let request_id = request.request_id.clone();
             let result = node.send_output(
@@ -92,8 +101,7 @@ fn main() -> Result<()> {
                 if (input.ends_with("request_result")
                     || input == "model_asset_response"
                     || input == "camera_asset_response"
-                    || input == "perception_asset_response"
-                    || input == "actuator_status")
+                    || input == "perception_asset_response")
                     && let Some(request_id) = value.get("request_id").and_then(Value::as_str)
                     && let Some(sender) = pending.remove(request_id)
                 {
@@ -111,6 +119,8 @@ fn main() -> Result<()> {
         }
     }
     let _ = shutdown_tx.send(true);
+    pending.clear();
+    drop(request_rx);
     drop(state);
     let _ = server.join();
     Ok(())
@@ -204,6 +214,7 @@ fn namespace_for_input(input: &str) -> Option<&'static str> {
         | "motion_status"
         | "motion_request_result"
         | "actuator_status"
+        | "actuator_request_result"
         | "mode_request_result" => Some("motion"),
         "perception_state"
         | "camera_state"
@@ -306,97 +317,129 @@ snapshot_handler!(snapshot_motion, "motion");
 snapshot_handler!(snapshot_execution, "arm-execution");
 
 async fn forward(state: AppState, output: &str, body: Value) -> Response {
-    let Some(request_id) = body
-        .get("request_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"original_error":"request_id is required"})),
-        )
-            .into_response();
-    };
-    let (sender, receiver) = oneshot::channel();
-    if state
-        .requests
-        .send(OutgoingRequest {
-            output: output.into(),
-            request_id,
-            body,
-            response: Some(sender),
-        })
-        .is_err()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"original_error":"Dora gateway is stopping"})),
-        )
-            .into_response();
-    }
-    match receiver.await {
+    match forward_value(state, output, body).await {
         Ok(result) => Json(result).into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"original_error":error.to_string()})),
-        )
-            .into_response(),
+        Err(response) => response,
     }
 }
 
 macro_rules! request_handler {
-    ($name:ident, $output:literal) => {
+    ($name:ident, $output:literal, $request:ty) => {
         async fn $name(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+            if let Err(response) = validate_request::<$request>(&body) {
+                return response.into_response();
+            }
             forward(state, $output, body).await
         }
     };
 }
-request_handler!(request_pose_source, "select_pose_source_request");
-request_handler!(request_bindings, "apply_bindings_request");
-request_handler!(request_source_name, "rename_input_source_request");
-request_handler!(request_simulation, "set_simulation_request");
-request_handler!(request_perception, "perception_request");
-request_handler!(request_camera, "camera_request");
-request_handler!(request_calibration, "calibration_request");
-request_handler!(request_spatial_config, "update_spatial_config_request");
-request_handler!(request_mode, "set_control_mode_request");
-request_handler!(request_prepare_relative, "prepare_relative_request");
-request_handler!(request_motion, "motion_request");
-request_handler!(request_actuator, "tool_actuator_request");
+request_handler!(
+    request_pose_source,
+    "select_pose_source_request",
+    robot_arm_messages::SelectPoseSourceRequest
+);
+request_handler!(
+    request_bindings,
+    "apply_bindings_request",
+    robot_arm_messages::ApplyInputBindingsRequest
+);
+request_handler!(
+    request_source_name,
+    "rename_input_source_request",
+    robot_arm_messages::RenameInputSourceRequest
+);
+request_handler!(
+    request_simulation,
+    "set_simulation_request",
+    robot_arm_messages::InputSimulationRequest
+);
+request_handler!(
+    request_perception,
+    "perception_request",
+    robot_arm_messages::PerceptionRequest
+);
+request_handler!(
+    request_camera,
+    "camera_request",
+    robot_arm_messages::CameraRequest
+);
+request_handler!(
+    request_calibration,
+    "calibration_request",
+    robot_arm_messages::CalibrationRequest
+);
+request_handler!(
+    request_spatial_config,
+    "update_spatial_config_request",
+    robot_arm_messages::UpdateSpatialConfigRequest
+);
+request_handler!(
+    request_mode,
+    "set_control_mode_request",
+    robot_arm_messages::SetControlModeRequest
+);
+request_handler!(
+    request_prepare_relative,
+    "prepare_relative_request",
+    RequestHeader
+);
+request_handler!(
+    request_actuator,
+    "tool_actuator_request",
+    robot_arm_messages::ToolActuatorRequest
+);
+
+// These operations have no joint target payload. Validate their shared envelope
+// without inventing default joint values for the regular motion contract.
+#[derive(serde::Deserialize)]
+struct RequestHeader {
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
+    #[serde(rename = "request_id")]
+    _request_id: String,
+}
+
+fn validate_request<T: DeserializeOwned>(
+    body: &Value,
+) -> std::result::Result<(), (StatusCode, Json<Value>)> {
+    serde_json::from_value::<T>(body.clone())
+        .map(|_| ())
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"original_error": error.to_string()})),
+            )
+        })
+}
+
+async fn request_motion(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let validation = if body["action"] == "cancel" {
+        validate_request::<RequestHeader>(&body)
+    } else {
+        validate_request::<robot_arm_messages::MotionRequest>(&body)
+    };
+    if let Err(response) = validation {
+        return response.into_response();
+    }
+    forward(state, "motion_request", body).await
+}
 
 async fn request_pick_place(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    let Some(request_id) = body
-        .get("request_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"original_error":"request_id is required"})),
-        )
-            .into_response();
+    if let Err(response) = validate_request::<robot_arm_messages::PickPlaceRequest>(&body) {
+        return response.into_response();
+    }
+    let result = match forward_value(state, "pick_place_request", body).await {
+        Ok(result) => result,
+        Err(response) => return response,
     };
-    if state
-        .requests
-        .send(OutgoingRequest {
-            output: "pick_place_request".into(),
-            request_id: request_id.clone(),
-            body,
-            response: None,
-        })
-        .is_err()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"original_error":"Dora gateway is stopping"})),
-        )
-            .into_response();
+    if result["original_error"].is_string() {
+        return (StatusCode::BAD_REQUEST, Json(result)).into_response();
     }
     (
         StatusCode::ACCEPTED,
         Json(json!({
             "schema_version": SCHEMA_VERSION,
-            "request_id": request_id,
+            "request_id": result["request_id"],
             "accepted": true
         })),
     )
@@ -436,6 +479,10 @@ async fn request_motion_snapshot(State(s): State<AppState>) -> Response {
     fire(s, "motion_snapshot").await
 }
 async fn request_perception_snapshot(State(s): State<AppState>) -> Response {
+    let camera = fire(s.clone(), "camera_snapshot").await;
+    if camera.status() != StatusCode::ACCEPTED {
+        return camera;
+    }
     fire(s, "perception_snapshot").await
 }
 async fn request_execution_snapshot(State(s): State<AppState>) -> Response {
@@ -460,7 +507,9 @@ async fn model_asset(State(state): State<AppState>, Path(path): Path<String>) ->
         "relative_path": path,
     });
     let response = forward_value(state, "model_asset_request", body).await;
-    binary_response(response)
+    response
+        .map(binary_response)
+        .unwrap_or_else(|response| response)
 }
 
 async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>) -> Response {
@@ -483,7 +532,9 @@ async fn perception_asset(State(state): State<AppState>, Path(key): Path<String>
         }),
     )
     .await;
-    binary_response(response)
+    response
+        .map(binary_response)
+        .unwrap_or_else(|response| response)
 }
 
 fn binary_response(response: Value) -> Response {
@@ -506,7 +557,11 @@ fn binary_response(response: Value) -> Response {
     result
 }
 
-async fn forward_value(state: AppState, output: &str, body: Value) -> Value {
+async fn forward_value(
+    state: AppState,
+    output: &str,
+    body: Value,
+) -> std::result::Result<Value, Response> {
     let request_id = body
         .get("request_id")
         .and_then(Value::as_str)
@@ -523,11 +578,19 @@ async fn forward_value(state: AppState, output: &str, body: Value) -> Value {
         })
         .is_err()
     {
-        return json!({"original_error":"Dora gateway is stopping"});
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"original_error":"Dora gateway is stopping"})),
+        )
+            .into_response());
     }
-    receiver
-        .await
-        .unwrap_or_else(|error| json!({"original_error":error.to_string()}))
+    receiver.await.map_err(|error| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"original_error":error.to_string()})),
+        )
+            .into_response()
+    })
 }
 
 macro_rules! ws_handler {
@@ -576,6 +639,37 @@ async fn websocket(mut socket: WebSocket, state: AppState, namespace: &'static s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn malformed_request_is_not_forwarded_to_a_node() {
+        let (sender, receiver) = mpsc::channel();
+        let response = request_camera(
+            State(AppState::new(sender)),
+            Json(json!({
+                "schema_version": SCHEMA_VERSION, "request_id": "bad", "action": "not-an-action"
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn perception_snapshot_refreshes_both_owners() {
+        let (sender, receiver) = mpsc::channel();
+        let response = request_perception_snapshot(State(AppState::new(sender))).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(receiver.try_recv().unwrap().output, "camera_snapshot");
+        assert_eq!(receiver.try_recv().unwrap().output, "perception_snapshot");
+    }
+
+    #[test]
+    fn motion_target_requires_its_full_contract() {
+        let envelope =
+            json!({"schema_version": SCHEMA_VERSION, "request_id": "cancel", "action": "cancel"});
+        assert!(validate_request::<RequestHeader>(&envelope).is_ok());
+        assert!(validate_request::<robot_arm_messages::MotionRequest>(&envelope).is_err());
+    }
+
     #[test]
     fn every_state_input_has_one_web_namespace() {
         for input in [

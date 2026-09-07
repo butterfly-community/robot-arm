@@ -87,6 +87,9 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
         let mut captured_count = 0;
         let mut skipped_count = 0;
         loop {
+            if command_receiver.is_closed() {
+                return;
+            }
             while let Ok(command) = command_receiver.try_recv() {
                 match command {
                     Command::Discover { request_id, action } => {
@@ -111,6 +114,8 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         output_frames_per_second,
                         capture_frames_per_second,
                     } => {
+                        drop(stream.take());
+                        output_sender.send_replace(None);
                         video_sender.send_replace(None);
                         let opened_source_id = source_id.clone();
                         let result =
@@ -150,6 +155,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         }
                     }
                     Command::Stop => {
+                        output_sender.send_replace(None);
                         video_sender.send_replace(None);
                         stream = None;
                         output_rate = None;
@@ -162,6 +168,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         action,
                         source_id,
                     } => {
+                        output_sender.send_replace(None);
                         video_sender.send_replace(None);
                         stream = None;
                         output_rate = None;
@@ -248,5 +255,27 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
         completions,
         outputs,
         video: video_outputs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_exits_when_its_owner_drops_the_command_channel() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let Channels {
+            commands,
+            mut outputs,
+            ..
+        } = spawn(&runtime);
+        drop(commands);
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), outputs.changed()).await
+        });
+        // The timeout is only a regression deadline, not a device policy.
+        runtime.shutdown_background();
+        assert!(result.unwrap().is_err());
     }
 }

@@ -42,9 +42,11 @@ async function snapshot(namespace) {
 async function waitFor(read, accept, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   let latestError;
+  let latestValue;
   while (Date.now() < deadline) {
     try {
       const value = await read();
+      latestValue = value;
       if (accept(value)) return value;
     } catch (error) {
       latestError = error;
@@ -52,7 +54,18 @@ async function waitFor(read, accept, timeoutMs = 60_000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   if (latestError) throw latestError;
-  assert.fail("state did not converge during integration test");
+  const directory = new URL(
+    `../../temp/software-flow-${runId}/`,
+    import.meta.url,
+  );
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    new URL("last-state.json", directory),
+    JSON.stringify(latestValue ?? null, null, 2),
+  );
+  assert.fail(
+    `state did not converge; last observed state: ${directory.pathname}last-state.json`,
+  );
 }
 
 function translationError(actual, expected) {
@@ -277,9 +290,12 @@ const perceptionModelConfigured = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-model-config",
   action: "apply",
-  source_id: null,
-  classes: ["red cube", "tv"],
-  placement_labels: ["tv"],
+  // The fixture owns its matching prompts; these are not production categories.
+  classes: [
+    pickPlaceFixture.cube.recognition_prompt,
+    pickPlaceFixture.bin.placement_region_prompt,
+  ],
+  placement_labels: [pickPlaceFixture.bin.placement_region_prompt],
   grasp_collision_distance_m:
     pickPlaceFixture.perception.grasp_collision_distance_m,
 });
@@ -302,11 +318,36 @@ await waitFor(
     state.values.perception_state?.depth_frame != null &&
     state.values.perception_state?.calibrated === true,
 );
+const obsoleteRun = request("/api/perception/request", {
+  schema_version: 3,
+  request_id: "integration-obsolete-perception",
+  action: "refresh",
+});
+await waitFor(
+  () => snapshot("perception"),
+  (state) => state.values.perception_state?.task_state === "executing",
+);
+const changedDuringRun = await request("/api/perception/request", {
+  schema_version: 3,
+  request_id: "integration-config-during-inference",
+  action: "apply",
+  classes: [
+    pickPlaceFixture.cube.recognition_prompt,
+    pickPlaceFixture.bin.placement_region_prompt,
+  ],
+  placement_labels: [pickPlaceFixture.bin.placement_region_prompt],
+});
+assert.equal(changedDuringRun.original_error, null);
+assert.match((await obsoleteRun).original_error, /已丢弃旧结果/);
+assert.deepEqual(
+  (await snapshot("perception")).values.world_scene.objects,
+  [],
+  "an obsolete asynchronous inference result cannot repopulate the cleared scene",
+);
 const firstPerceptionRun = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-run",
   action: "refresh",
-  source_id: null,
   classes: null,
   placement_labels: null,
 });
@@ -326,7 +367,8 @@ const readyPerceptionSnapshot = await waitFor(
       (object) =>
         object.label === "red cube" && object.grasp_candidates.length > 0,
     ) &&
-    state.values.world_scene?.placement_regions?.length === 1,
+    // A prompt can match both the interior and rim; instance count is not fixed.
+    state.values.world_scene?.placement_regions?.length > 0,
 );
 const perceptionScene = readyPerceptionSnapshot.values.world_scene;
 const perceptionSnapshot = readyPerceptionSnapshot;
@@ -569,7 +611,6 @@ const calibratedPerceptionRun = await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-run-after-calibration",
   action: "refresh",
-  source_id: null,
   classes: null,
   placement_labels: null,
 });
@@ -607,6 +648,7 @@ const pickPlaceResult = await observeManipulation(
       schema_version: 3,
       request_id: "integration-pick-place",
       object_id: graspable.object_id,
+      scene_sequence: calibratedScene.sequence,
       placement_region_id: placementRegion.region_id,
     }),
 );
@@ -624,7 +666,7 @@ assert.deepEqual(pickPlaceResult.pick_position_m, [
 const expectedPlacePosition = [
   placementRegion.pose.position_m[0],
   placementRegion.pose.position_m[1],
-  placementRegion.pose.position_m[2] + 0.07,
+  Math.max(placementRegion.pose.position_m[2], 0.1),
 ];
 assert.deepEqual(
   pickPlaceResult.place_position_m.slice(0, 2),
@@ -637,7 +679,7 @@ assert.ok(
 
 // This is an API/execution contract test, not proof of gripping. The independent
 // FK/mesh oracle in tools/graspgenx/verify-executed-pick-place.py checks recorded
-// joint feedback, opposing contact, lift and the horizontal TCP release.
+// joint feedback, opposing contact, lift and release; orientation is not fixed.
 const executionPickPlace = await waitFor(
   () => snapshot("arm-execution"),
   (state) => {
@@ -737,7 +779,6 @@ await request("/api/perception/request", {
   schema_version: 3,
   request_id: "integration-perception-stop",
   action: "disconnect",
-  source_id: null,
   classes: null,
   placement_labels: null,
 });
@@ -791,7 +832,6 @@ if (originalPerception?.enabled) {
     schema_version: 3,
     request_id: "integration-perception-restore",
     action: "apply",
-    source_id: null,
     classes: originalPerception.classes,
     placement_labels: originalPerception.placement_labels,
     grasp_collision_distance_m: originalPerception.grasp_collision_distance_m,
@@ -1009,10 +1049,15 @@ try {
     ],
   );
   assert.equal(virtualResult.original_error, null);
-  const feedbackSnapshot = await fetch(`${base}/api/arm-execution/snapshot`, {
-    method: "POST",
+  // Software joint feedback is not measured force. Use the existing explicit
+  // feedback demo rather than expecting a snapshot to invent hardware telemetry.
+  const feedbackDemo = await request("/api/tracking/simulation", {
+    schema_version: 3,
+    request_id: "integration-virtual-feedback-demo",
+    enabled: true,
+    item: "primary_tool_feedback",
   });
-  assert.equal(feedbackSnapshot.status, 202);
+  assert.equal(feedbackDemo.original_error, null);
   await waitFor(
     () => snapshot("tracking"),
     (state) =>
@@ -1025,6 +1070,12 @@ try {
       state.values.discovery_state?.virtual_feedback?.action === "primary_tool",
   );
 } finally {
+  await request("/api/tracking/simulation", {
+    schema_version: 3,
+    request_id: "integration-virtual-feedback-demo-stop",
+    enabled: false,
+    item: null,
+  });
   const restored = await applyBindings(
     "integration-virtual-feedback-restore",
     originalBindings,
@@ -1140,7 +1191,8 @@ const actuatorResult = await request("/api/motion/actuator", {
   actuator_key: actuator.key,
   position_rad: actuatorTarget,
 });
-assert.equal(actuatorResult.state, "succeeded");
+assert.equal(actuatorResult.original_error, null);
+assert.equal(actuatorResult.value.state, "succeeded");
 const atActuatorTarget = await waitFor(
   () => snapshot("arm-execution"),
   (state) => state.values.arm_state.actuators_rad[0] > before.actuators_rad[0],
@@ -1218,7 +1270,11 @@ const cancelResult = await request("/api/motion/cancel", {
   action: "cancel",
 });
 assert.equal(cancelResult.request_id, requestIdForRun("integration-cancel"));
-assert.equal(cancelResult.value.state, "cancelled");
+assert.equal(
+  cancelResult.value.state,
+  "succeeded",
+  "cancel request acknowledged; original motion owns its terminal state",
+);
 const interruptedResult = await interruptedRequest;
 assert.equal(
   interruptedResult.request_id,
