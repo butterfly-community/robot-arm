@@ -171,6 +171,8 @@ def test_yoloe_keeps_source_resolution_without_overriding_model_input_size() -> 
 
 
 def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monkeypatch):
+    import trimesh
+
     backend = GraspGenXBackend.__new__(GraspGenXBackend)
     backend.seed = 0
     backend.device = "cpu"
@@ -178,8 +180,26 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
     tool = np.eye(4)
     tool[2, 3] = 0.09
     mesh = object()
+    surface = np.zeros((2000, 3), dtype=np.float32)
     sampler = SimpleNamespace(gripper=SimpleNamespace(tool_tcp_transform=tool, collision_mesh=mesh))
-    backend._samplers = {"test-tool": sampler}
+    backend._samplers = {}
+    backend._config = object()
+    backend._model = object()
+    backend.gripper_assets = "test-assets"
+    backend._sampler_type = lambda *args, **kwargs: sampler
+    surface_calls = []
+
+    def sample_mesh(actual_mesh, count):
+        assert actual_mesh is mesh
+        assert count == 2000
+        surface_calls.append(count)
+        return surface, None
+
+    monkeypatch.setattr(trimesh.sample, "sample_surface", sample_mesh)
+    poses = np.array([np.eye(4)] * 3)
+    # Distinct approach axes must survive unchanged; TCP conversion is in the
+    # gripper frame, not a world-Z correction or a top-down orientation rewrite.
+    poses[2, :3, :3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]
 
     def unexpected_reseed(*args, **kwargs):
         raise AssertionError("inference must advance sampling, not restart its seed")
@@ -189,21 +209,24 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
     def run(points, actual_sampler, **options):
         np.testing.assert_allclose(points, [[[0.1, 0.2, 0.3]]])
         assert actual_sampler is sampler
-        assert options["moe_obb_density"] == "dense-topandside"
-        assert options["planner"] == "graspmoe"
-        assert options["grasp_threshold"] == 0.7
-        assert options["topk_num_grasps"] == -1
-        assert options["moe_z_offsets_cm"] == (-2, 0, 2)
+        assert options == {
+            "planner": "graspmoe",
+            "moe_obb_density": "dense-topandside",
+            "moe_z_offsets_cm": (-2, 0),
+            "grasp_threshold": 0.7,
+            "num_grasps": 200,
+            "topk_num_grasps": -1,
+        }
         return [
-            (np.array([np.eye(4)] * 3), np.array([0.8, 0.7, 0.9]), ["obb", "obb", "diff"], None)
+            (poses, np.array([0.8, 0.7, 0.9]), ["diff", "obb", "obb"], None)
         ]
 
     def filter_scene(**options):
         np.testing.assert_allclose(options["scene_pc"], [[0.0, 0.0, 0.0]])
-        assert options["gripper_collision_mesh"] is mesh
+        assert options["gripper_surface_points"] is surface
         assert options["collision_threshold"] == 0.01
         assert options["device"] == "cpu"
-        np.testing.assert_allclose(options["grasp_poses"][0], np.eye(4))
+        np.testing.assert_allclose(options["grasp_poses"], poses)
         assert len(options["grasp_poses"]) == 3
         return np.array([True, False, True])
 
@@ -225,8 +248,18 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
     )
     assert len(result.candidates) == 2
     np.testing.assert_allclose(result.candidates[0].transform, tool)
-    assert result.candidates[0].branch == "obb"
-    assert result.candidates[1].branch == "diff"
+    assert result.candidates[0].branch == "diff"
+    np.testing.assert_allclose(result.candidates[1].transform, poses[2] @ tool)
+    assert result.candidates[1].branch == "obb"
+    backend.infer(
+        GraspRequest(
+            points_xyz_m=[(0.1, 0.2, 0.3)],
+            scene_points_xyz_m=[(0.0, 0.0, 0.0)],
+            gripper_asset_id="test-tool",
+            collision_threshold_m=0.01,
+        )
+    )
+    assert surface_calls == [2000]
 
 
 async def exercise_contract() -> None:

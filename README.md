@@ -98,3 +98,4 @@ node tests/integration/software-flow.mjs
 - [Docker 与服务镜像](docs/DOCKER.md)
 - [StarArm-102 型号适配](docs/STARARM-102.md)
 - [最终审查与验收](docs/REVIEW.md)
+- [抓取与闭合穿地排查过程](docs/investigations/stararm-102-grasp-ground.md)

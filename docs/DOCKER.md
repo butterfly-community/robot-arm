@@ -16,8 +16,8 @@ MoveIt、RViz、Python、AI 模型和设备厂商包都不属于全局基础层�
 | `robot-arm-services-backend-base:2026.09.05-r9` | Ubuntu 26.04、Rust 1.97、Dora 和多个 Rust 服务共同使用的原生构建工具 |
 | `robot-arm-services-backend-runtime:2026.09.05-r3` | Ubuntu 26.04、Dora 可执行文件、入口脚本和最小 Rust 运行库 |
 | `robot-arm-services-stararm-102-base:2026.09.05-r2` | 固定厂商提交、校验、StarArm-102 型号补丁与验证后的厂商资产 |
-| `robot-arm-services-perception-compute-base:2026.09.06-r5` | Python 3.11、PyTorch、YOLOE、GraspGenX、仓库模型和构建期夹爪资产 |
-| `robot-arm-services-perception-compute-runtime:2026.09.06-r5` | 上述计算环境的运行文件，不含其构建工具 |
+| `robot-arm-services-perception-compute-base:2026.09.07-r7` | Python 3.11、PyTorch、YOLOE、GraspGenX、仓库模型和构建期夹爪资产；由张开夹指几何测量采样深度 |
+| `robot-arm-services-perception-compute-runtime:2026.09.07-r7` | 上述计算环境的运行文件，不含其构建工具 |
 | `robot-arm-services-frontend-base:2026.09.03-r1` | Ubuntu 26.04、Node.js 24 与 pnpm 11 |
 
 StarArm-102 基础不是全局后端基础。运动和执行镜像读取同一份已打补丁的型号资产，计算基础镜像
@@ -61,10 +61,10 @@ docker build --progress=plain -f backend/devices/stararm-102/Dockerfile.base \
   -t robot-arm-services-stararm-102-base:2026.09.05-r2 .
 
 docker build --progress=plain -f backend/services/perception-compute/Dockerfile.base \
-  -t robot-arm-services-perception-compute-base:2026.09.06-r5 .
+  -t robot-arm-services-perception-compute-base:2026.09.07-r7 .
 
 docker build --progress=plain -f backend/services/perception-compute/Dockerfile.runtime \
-  -t robot-arm-services-perception-compute-runtime:2026.09.06-r5 .
+  -t robot-arm-services-perception-compute-runtime:2026.09.07-r7 .
 ```
 
 前端基础镜像仅在 Node 或 pnpm 变化时重建。基础标签更新后，应一次性修改直接引用它的

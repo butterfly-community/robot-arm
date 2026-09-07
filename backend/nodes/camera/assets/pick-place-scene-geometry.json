@@ -7,23 +7,23 @@
   "cube": {
     "label": "red cube",
     "recognition_prompt": "red cube",
-    "center_xy_m": [0.15, -0.05],
+    "center_xy_m": [0.1875, 0.065],
     "size_m": [0.03, 0.03, 0.03],
-    "yaw_degrees": -25.0
+    "yaw_degrees": 0.0
   },
   "perception": {
-    "grasp_collision_distance_m": 0.01
+    "grasp_collision_distance_m": 0.02
   },
   "bin": {
     "label": "gray storage bin",
     "placement_region_prompt": "tv",
-    "center_xy_m": [0.1, 0.25],
-    "outer_size_m": [0.3, 0.4, 0.08],
+    "center_xy_m": [0.1875, -0.115],
+    "outer_size_m": [0.1, 0.1, 0.05],
     "wall_thickness_m": 0.005,
     "base_thickness_m": 0.005,
     "corner_radius_m": 0.01,
     "rim_overhang_m": 0.015,
     "rim_thickness_m": 0.005,
-    "yaw_degrees": -29.0
+    "yaw_degrees": 0.0
   }
 }

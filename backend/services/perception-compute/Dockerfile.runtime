@@ -1,4 +1,4 @@
-FROM robot-arm-services-perception-compute-base:2026.09.06-r5 AS compute-base
+FROM robot-arm-services-perception-compute-base:2026.09.07-r7 AS compute-base
 
 RUN mkdir -p /runtime-root/opt /runtime-root/service \
     && cp -a /opt/python /runtime-root/opt/python \

@@ -1052,16 +1052,9 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
     };
     let size = |[x, y, z]: [f64; 3]| json!({"x": x, "y": y, "z": z});
     let mut placement_pose = placement.pose.clone();
-    // User-defined release: TCP 7 cm above the selected point. The gripper's
-    // X/Z opening plane is horizontal, with the same downward Y normal as the
-    // work pose; MTC remains free to choose its heading.
-    placement_pose.position_m[2] += 0.07;
-    placement_pose.orientation_xyzw = [
-        -std::f64::consts::FRAC_1_SQRT_2,
-        0.0,
-        0.0,
-        std::f64::consts::FRAC_1_SQRT_2,
-    ];
+    // User-defined minimum TCP release height above the Z=0 ground, not an
+    // offset from the destination. MTC ignores the destination orientation.
+    placement_pose.position_m[2] = placement_pose.position_m[2].max(0.10);
     let goal = json!({
         "request_id": request.request_id,
         "frame_id": scene.frame_id,
@@ -1197,12 +1190,12 @@ mod tests {
     }
 
     #[test]
-    fn mtc_goal_releases_tcp_7cm_above_selected_point_with_horizontal_opening() {
+    fn mtc_goal_releases_tcp_above_10cm_without_overriding_orientation() {
         let pose = Pose3 {
             position_m: [0.1, 0.2, 0.02],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
         };
-        let scene = WorldScene {
+        let mut scene = WorldScene {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
             sample_time_ns: 2,
@@ -1256,15 +1249,24 @@ mod tests {
         assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));
         let release = pending.state.place_position_m.unwrap();
         assert_eq!(&release[..2], &[-0.1, 0.2]);
-        assert!((release[2] - 0.11).abs() < 1e-12);
-        assert_eq!(pending.job.goal["placement_pose"]["position"]["z"], release[2]);
+        assert_eq!(release[2], 0.10);
         assert_eq!(
-            pending.job.goal["placement_pose"]["orientation"]["x"],
-            -std::f64::consts::FRAC_1_SQRT_2
+            pending.job.goal["placement_pose"]["position"]["z"],
+            release[2]
         );
-        assert_eq!(
-            pending.job.goal["placement_pose"]["orientation"]["w"],
-            std::f64::consts::FRAC_1_SQRT_2
-        );
+        assert_eq!(pending.job.goal["placement_pose"]["orientation"]["x"], 0.0);
+        assert_eq!(pending.job.goal["placement_pose"]["orientation"]["w"], 1.0);
+        scene.placement_regions[0].pose.position_m[2] = 0.25;
+        let elevated = manipulation_job(
+            &scene,
+            PickPlaceRequest {
+                schema_version: SCHEMA_VERSION,
+                request_id: "elevated".into(),
+                object_id: "selected".into(),
+                placement_region_id: "destination".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(elevated.state.place_position_m, Some([-0.1, 0.2, 0.25]));
     }
 }

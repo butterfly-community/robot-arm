@@ -75,6 +75,24 @@ pub fn detect(
         bail!("ChArUco board was not detected");
     }
 
+    // Refit the detected chess corners with OpenCV's local subpixel solver.
+    // ChArUco uses an adaptive window and 0.1 px default termination. This local
+    // refit was compared on identical PNGs against pose truth at 1280 and 1920;
+    // its window/iteration parameters are not observation rejection gates.
+    let mut gray = Mat::default();
+    imgproc::cvt_color_def(&detection_image, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+    imgproc::corner_sub_pix(
+        &gray,
+        &mut corners,
+        Size::new(7, 7),
+        Size::new(-1, -1),
+        core::TermCriteria::new(
+            core::TermCriteria_Type::COUNT as i32 | core::TermCriteria_Type::EPS as i32,
+            100,
+            0.0001,
+        )?,
+    )?;
+
     let mut object_points = Mat::default();
     let mut image_points = Mat::default();
     board.match_image_points(&corners, &ids, &mut object_points, &mut image_points)?;

@@ -1074,29 +1074,29 @@ mod tests {
             measured_height_m: CHARUCO.measured_height_m,
         };
         let samples = [
-            ([-0.010, -0.010, 0.17], [0.5, 0.0, 0.0]),
+            ([-0.010, -0.010, 0.17], [0.6, 0.0, 0.0]),
             (
                 [0.00, -0.010, 0.19],
-                [0.5, 0.0, std::f64::consts::TAU / 3.0],
+                [0.6, 0.0, std::f64::consts::TAU / 3.0],
             ),
             (
                 [0.010, -0.010, 0.18],
-                [0.5, 0.0, -std::f64::consts::TAU / 3.0],
+                [0.6, 0.0, -std::f64::consts::TAU / 3.0],
             ),
-            ([-0.010, 0.00, 0.19], [0.0, 0.5, 0.0]),
-            ([0.00, 0.00, 0.17], [0.0, 0.5, std::f64::consts::TAU / 3.0]),
+            ([-0.010, 0.00, 0.19], [0.0, 0.6, 0.0]),
+            ([0.00, 0.00, 0.17], [0.0, 0.6, std::f64::consts::TAU / 3.0]),
             (
                 [0.010, 0.00, 0.18],
-                [0.0, 0.5, -std::f64::consts::TAU / 3.0],
+                [0.0, 0.6, -std::f64::consts::TAU / 3.0],
             ),
-            ([-0.010, 0.010, 0.18], [-0.5, 0.0, 0.0]),
+            ([-0.010, 0.010, 0.18], [-0.6, 0.0, 0.0]),
             (
                 [0.00, 0.010, 0.19],
-                [-0.5, 0.0, std::f64::consts::TAU / 3.0],
+                [-0.6, 0.0, std::f64::consts::TAU / 3.0],
             ),
             (
                 [0.010, 0.010, 0.17],
-                [-0.5, 0.0, -std::f64::consts::TAU / 3.0],
+                [-0.6, 0.0, -std::f64::consts::TAU / 3.0],
             ),
         ];
         let expected_camera = isometry(&config.camera_in_base);
@@ -1126,7 +1126,11 @@ mod tests {
             let mut minimum_corner_count = usize::MAX;
             for (sample, (center, angles)) in samples.into_iter().enumerate() {
                 let center = Vector3::from(center) + Vector3::from(center_offset);
-                let angles = Vector3::from(angles) + Vector3::from(angle_offset);
+                // Avoid aligning whole rows of chess corners with the pixel grid;
+                // the independent round offsets still exercise subpixel phases.
+                let angles = Vector3::from(angles)
+                    + Vector3::from(angle_offset)
+                    + Vector3::new(0.0, 0.0, 15.0_f64.to_radians());
                 let rotation = UnitQuaternion::from_euler_angles(angles.x, angles.y, angles.z);
                 let origin = center - rotation * Vector3::new(0.0375, 0.0375, 0.0);
                 let board_in_camera = recorded_boards.as_ref().map_or_else(

@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -42,7 +42,6 @@ class GraspRequest(BaseModel):
     scene_points_xyz_m: list[tuple[float, float, float]]
     gripper_asset_id: str
     collision_threshold_m: float = Field(ge=0, allow_inf_nan=False)
-    planner: Literal["graspmoe", "diffusion"] = "graspmoe"
 
 
 class GraspCandidate(BaseModel):
@@ -95,7 +94,7 @@ class GraspGenXBackend:
             os.path.join(self.checkpoint_root, "dis"),
         )
         self._model = load_grasp_gen_model(self._config, device=self.device)
-        self._samplers: dict[str, Any] = {}
+        self._samplers: dict[str, tuple[Any, np.ndarray]] = {}
         self._lock = threading.Lock()
         # Seed the service's sampling sequence, not every request. Repeated
         # explicit inference must explore new diffusion/environment samples.
@@ -103,36 +102,39 @@ class GraspGenXBackend:
         torch.manual_seed(self.seed)
 
     def infer(self, request: GraspRequest) -> GraspResponse:
+        import trimesh
         from graspgenx.samplers import run_planner_on_batch
         from graspgenx.utils.collision_filter import filter_colliding_grasps
 
         key = request.gripper_asset_id
         with self._lock:
-            sampler = self._samplers.get(key)
-            if sampler is None:
+            if key not in self._samplers:
                 sampler = self._sampler_type(
                     self._config,
                     gripper_name=request.gripper_asset_id,
                     assets_dir=self.gripper_assets,
                     model=self._model,
                 )
-                self._samplers[key] = sampler
+                # demo_scene_pc samples the open mesh once per gripper and
+                # reuses those points across objects and scene requests.
+                surface, _ = trimesh.sample.sample_surface(sampler.gripper.collision_mesh, 2000)
+                self._samplers[key] = sampler, np.asarray(surface, dtype=np.float32)
+            sampler, surface = self._samplers[key]
             started = time.perf_counter()
             [(grasps, scores, branches, _)] = run_planner_on_batch(
                 [np.asarray(request.points_xyz_m, dtype=np.float32)],
                 sampler,
-                planner=request.planner,
+                # Match demo_scene_pc's default planner and scene-level
+                # overrides. Keep diffusion AND top/side OBB candidates;
+                # do not rewrite poses or impose a top-only preference.
+                planner="graspmoe",
+                moe_obb_density="dense-topandside",
+                moe_z_offsets_cm=(-2, 0),
                 # Match demo_scene_pc.py, not the lower-level library's -1
                 # default (which also returns rejected, low-quality grasps).
                 grasp_threshold=0.7,
+                num_grasps=200,
                 topk_num_grasps=-1,
-                moe_obb_density="dense-topandside",
-                # Retain the scene demo's inward/surface samples and include
-                # its supported outward sample. With a rotating-finger sweep
-                # reference, surface-only samples can put the closed TCP below
-                # the support plane. These are scored by GraspGenX as usual;
-                # no offset is added to the returned grasp or motion target.
-                moe_z_offsets_cm=(-2, 0, 2),
             )
             # Official demo_scene_pc pipeline. The environment excludes this
             # target, but retains the support surface and surrounding objects.
@@ -142,7 +144,7 @@ class GraspGenXBackend:
             keep = filter_colliding_grasps(
                 scene_pc=scene,
                 grasp_poses=grasps,
-                gripper_collision_mesh=sampler.gripper.collision_mesh,
+                gripper_surface_points=surface,
                 collision_threshold=request.collision_threshold_m,
                 device=self.device,
             )

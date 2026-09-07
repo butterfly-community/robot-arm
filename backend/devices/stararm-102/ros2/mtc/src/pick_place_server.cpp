@@ -1,5 +1,6 @@
 #include <Eigen/Geometry>
 
+#include <moveit/kinematic_constraints/utils.hpp>
 #include <moveit/planning_scene_interface/planning_scene_interface.hpp>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/joint_interpolation.h>
@@ -51,7 +52,35 @@ constexpr double kGroundDepth = 1.0;
 // MoveIt requires an attachable shape. This micrometre sphere represents only
 // the detected centre pose; it is not an estimate of the object's geometry.
 constexpr double kReferencePointRadius = 1e-6;
-constexpr std::size_t kPlaceYawSamples = 12;
+
+// MoveTo normally keeps orientation even for a PointStamped goal. Use MoveIt's
+// position-only goal construction for release; keep its planner and tolerances.
+class ReleasePlanner final : public mtc::solvers::PipelinePlanner {
+public:
+  using PipelinePlanner::PipelinePlanner;
+  using PipelinePlanner::plan;
+
+  Result plan(const planning_scene::PlanningSceneConstPtr &from,
+              const moveit::core::LinkModel &link,
+              const Eigen::Isometry3d &offset, const Eigen::Isometry3d &target,
+              const moveit::core::JointModelGroup *group, double timeout,
+              robot_trajectory::RobotTrajectoryPtr &result,
+              const moveit_msgs::msg::Constraints &path_constraints) override {
+    const double tolerance = properties().get<double>("goal_position_tolerance");
+    geometry_msgs::msg::PointStamped point;
+    point.header.frame_id = from->getPlanningFrame();
+    point.point.x = target.translation().x();
+    point.point.y = target.translation().y();
+    // The lower edge, not the centre, must meet the requested release height.
+    point.point.z = target.translation().z() + tolerance;
+    auto goal = kinematic_constraints::constructGoalConstraints(link.getName(), point, tolerance);
+    auto &tcp_offset = goal.position_constraints.front().target_point_offset;
+    tcp_offset.x = offset.translation().x();
+    tcp_offset.y = offset.translation().y();
+    tcp_offset.z = offset.translation().z();
+    return PipelinePlanner::plan(from, group, goal, timeout, result, path_constraints);
+  }
+};
 
 class GeneratePoses final : public mtc::stages::GeneratePose {
 public:
@@ -257,7 +286,6 @@ private:
       task.add(std::move(stage));
     }
 
-    mtc::Stage *pick_stage = nullptr;
     {
       auto pick = std::make_unique<mtc::SerialContainer>("pick object");
       task.properties().exposeTo(pick->properties(),
@@ -327,16 +355,7 @@ private:
       restore_support->allowCollisions(goal.object_id, kGroundId, false);
       pick->insert(std::move(restore_support));
 
-      pick_stage = pick.get();
       task.add(std::move(pick));
-    }
-
-    {
-      auto stage = std::make_unique<mtc::stages::Connect>(
-          "transport object",
-          mtc::stages::Connect::GroupPlannerVector{{kArmGroup, pipeline}});
-      stage->properties().configureInitFrom(mtc::Stage::PARENT);
-      task.add(std::move(stage));
     }
 
     {
@@ -346,38 +365,15 @@ private:
       place->properties().configureInitFrom(
           mtc::Stage::PARENT, {"eef", "hand", "group", "ik_frame"});
 
-      std::vector<geometry_msgs::msg::PoseStamped> release_poses;
-      const Eigen::Quaterniond placement_orientation(
-          goal.placement_pose.orientation.w, goal.placement_pose.orientation.x,
-          goal.placement_pose.orientation.y, goal.placement_pose.orientation.z);
-      for (std::size_t index = 0; index < kPlaceYawSamples; ++index) {
-        const auto yaw = 2.0 * std::acos(-1.0) * static_cast<double>(index) /
-                         static_cast<double>(kPlaceYawSamples);
-        const Eigen::Quaterniond orientation =
-            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-            placement_orientation;
-        geometry_msgs::msg::PoseStamped target;
-        target.header.frame_id = goal.frame_id;
-        target.pose = goal.placement_pose;
-        target.pose.orientation.x = orientation.x();
-        target.pose.orientation.y = orientation.y();
-        target.pose.orientation.z = orientation.z();
-        target.pose.orientation.w = orientation.w();
-        release_poses.push_back(std::move(target));
-      }
-      auto generator = std::make_unique<GeneratePoses>(
-          "release headings", std::move(release_poses));
-      generator->properties().configureInitFrom(mtc::Stage::PARENT);
-      generator->setMonitoredStage(pick_stage);
-      auto place_ik = std::make_unique<mtc::stages::ComputeIK>(
-          "release TCP IK", std::move(generator));
-      place_ik->setGroup(kArmGroup);
-      place_ik->setEndEffector(kEndEffector);
-      place_ik->setMaxIKSolutions(2);
-      place_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
-      place_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
-                                               {"target_pose"});
-      place->insert(std::move(place_ik));
+      geometry_msgs::msg::PointStamped release_point;
+      release_point.header.frame_id = goal.frame_id;
+      release_point.point = goal.placement_pose.position;
+      auto release = std::make_unique<mtc::stages::MoveTo>(
+          "transport to release point", std::make_shared<ReleasePlanner>(shared_from_this()));
+      release->setGroup(kArmGroup);
+      release->setIKFrame(kTcpFrame);
+      release->setGoal(release_point);
+      place->insert(std::move(release));
 
       auto open = std::make_unique<mtc::stages::MoveTo>("open gripper",
                                                         joint_interpolation);
