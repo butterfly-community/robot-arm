@@ -16,7 +16,7 @@ def build_moveit_configs():
         .planning_pipelines(pipelines=["ompl"])
         .to_moveit_configs()
     )
-    # The camera/scene path ends at structured grasp data. Do not inherit the
-    # vendor package's Kinect occupancy updaters into MoveIt.
+    # Do not inherit vendor Kinect drivers. The launch file configures the
+    # official updater for explicit task observations from our scene node.
     config.sensors_3d = {}
     return config

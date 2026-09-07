@@ -15,6 +15,8 @@ setup(
             [
                 "config/controllers.yaml",
                 "config/servo.yaml",
+                "config/sensors_3d.yaml",
+                "config/fastdds.xml",
                 "config/stararm102_description.srdf",
                 "config/stararm102.rviz",
             ],

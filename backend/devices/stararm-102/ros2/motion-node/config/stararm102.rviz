@@ -9,6 +9,18 @@ Visualization Manager:
     Background Color: 7; 10; 14
     Fixed Frame: base_link
   Displays:
+    - Class: rviz_default_plugins/PointCloud2
+      Name: 本次抓放点云快照（不持续更新）
+      Enabled: true
+      Topic:
+        Value: /perception/depth/points
+        Reliability Policy: Best Effort
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+      Use Fixed Frame: true
+      Style: Points
+      Size (Pixels): 2
     - Class: rviz_default_plugins/Grid
       Name: Ground
       Enabled: true

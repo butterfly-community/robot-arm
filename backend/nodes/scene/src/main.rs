@@ -274,6 +274,7 @@ impl SceneNode {
                 objects: vec![],
                 placement_regions: vec![],
                 obstacles: vec![],
+                point_cloud: None,
             },
         )
     }
@@ -300,6 +301,7 @@ impl SceneNode {
                 objects: vec![],
                 placement_regions: vec![],
                 obstacles: vec![],
+                point_cloud: None,
             },
         )
     }
@@ -427,7 +429,7 @@ impl SceneNode {
     }
 
     fn publish_scene(&mut self, node: &mut DoraNode, scene: WorldScene) -> Result<()> {
-        send(node, "world_scene", &scene)?;
+        send_scene(node, &scene)?;
         self.last_scene = Some(scene);
         Ok(())
     }
@@ -643,7 +645,7 @@ impl SceneNode {
     fn publish_snapshot(&self, node: &mut DoraNode) -> Result<()> {
         self.publish_state(node)?;
         if let Some(scene) = &self.last_scene {
-            send(node, "world_scene", scene)?;
+            send_scene(node, scene)?;
         }
         Ok(())
     }
@@ -979,6 +981,15 @@ fn segmentation_debug_image(
         stride_bytes: image.width() * 3,
         data: image.into_raw(),
     })
+}
+
+fn send_scene(node: &mut DoraNode, scene: &WorldScene) -> Result<()> {
+    node.send_output(
+        "world_scene".into(),
+        MetadataParameters::default(),
+        robot_arm_messages::world_scene_to_arrow(scene)?,
+    )?;
+    Ok(())
 }
 
 fn send<T: Serialize>(node: &mut DoraNode, output: &str, value: &T) -> Result<()> {

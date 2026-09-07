@@ -132,8 +132,15 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 离散的 manual、calibration、准备相对控制及 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
 依次暂停 Servo、规划/执行并恢复 Servo。连续 relative 输入不进 FIFO，只有相对模式且队列空闲时才发送 Servo 位姿和输入夹爪动作。
 普通运动由 MoveGroup 规划，并把未改写的关节轨迹交给现有 ros2_control 的 `FollowJointTrajectory` action；抓放使用型号 MTC
-组件。motion 只从 `WorldScene` 提取目标中心、放置中心和抓取候选；MTC 场景只加入刚性地平面
-和可附着的目标中心参考点，不订阅或转换相机、图像、PointCloud2、OctoMap 和结构化包围体。
+组件。motion 从 `WorldScene` 提取目标包围体、放置中心、抓取候选及同帧点云快照，使用原生
+`PickPlace` action 传递给 MTC。目标成为可附着对象，完整点云进入官方
+`PointCloudOctomapUpdater`；不启动 ROS 相机驱动，不把非目标实例包围盒当作实心障碍。
+一次任务只建立一次环境快照，结束后清理。更新确认、世界对象过滤和占用地图由官方插件处理，
+运输体积由原有 MTC attach/detach 管理。
+
+`WorldScene` 的 JSON 仅含点云 frame、外参和尺寸；Arrow 的 `point_cloud_xyz` 二进制列保存光学
+XYZ float32 LE，避免几百万浮点数展开为 JSON。网页只读元数据。motion 的 Rust 构建/测试须在
+自己的 ROS 构建镜像内进行，使用同次构建生成的 `stararm_102_mtc` 类型，不再用 doc-only 消息替身。
 
 所有 FK、IK、抓放、attach 和可视化统一使用模型声明的 `tcp_link`。MTC 采用标准
 `GeneratePose`、`ComputeIK`、`MoveRelative`、`MoveTo`、`Connect` 与

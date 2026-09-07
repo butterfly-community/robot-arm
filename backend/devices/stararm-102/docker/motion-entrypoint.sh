@@ -3,6 +3,7 @@ set -e
 source /opt/ros/lyrical/setup.bash
 source /opt/moveit_ws/install/setup.bash
 source /opt/devices/stararm-102/ros_ws/install/setup.bash
+export FASTDDS_DEFAULT_PROFILES_FILE=/opt/devices/stararm-102/ros_ws/install/stararm_102_motion_node/share/stararm_102_motion_node/config/fastdds.xml
 export AMENT_PREFIX_PATH="/opt/devices/stararm-102/ros_ws/install/stararm_102_motion_node:${AMENT_PREFIX_PATH}"
 export DISPLAY=:1
 export LIBGL_ALWAYS_SOFTWARE=1

@@ -46,6 +46,11 @@ Docker 内容缓存复用，不因此增加共享基础镜像或隐藏依赖。O
 `/opt/opencv5` 而不是 ROS 的 OpenCV 4。RealSense 仅存在于 camera 镜像；ROS/MoveIt 仅存在于
 motion 镜像；AI 环境与模型仅存在于 perception-compute 镜像。
 
+motion 还安装官方 `moveit-ros-perception`，处理显式抓放请求里的点云快照，不安装 ROS 相机驱动。
+完整 1920×1080 XYZ 消息约 24.9 MB：该服务的 Fast DDS 配置为每个 participant 分配 128 MiB SHM
+segment，Compose `/dev/shm` 为 2 GiB，供 MoveGroup、MTC、Rust 桥和 RViz 共用；UDP 仍用于
+常规 ROS 发现和外部诊断。配置归 motion，不改全局 DDS 或其他服务。
+
 ## 构建顺序
 
 只有基础依赖实际变化才构建对应基础 Dockerfile，并发布**新标签**，不覆盖上表已验证标签。

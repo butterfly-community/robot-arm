@@ -11,6 +11,7 @@ use std::{
 
 use eyre::{Context, Result as EyreResult, bail, eyre};
 use futures::{Future, FutureExt, StreamExt, executor::block_on};
+use r2r::stararm_102_mtc::action::PickPlace;
 use r2r::{
     ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
 };
@@ -87,6 +88,7 @@ pub struct MotionJob {
 pub struct ManipulationJob {
     pub request_id: String,
     pub goal: Value,
+    pub point_cloud: robot_arm_messages::ScenePointCloud,
 }
 
 enum RosWork {
@@ -647,7 +649,7 @@ struct MotionActions {
     node: Node,
     move_group: ActionClientUntyped,
     follow_joint_trajectory: ActionClientUntyped,
-    pick_place: ActionClientUntyped,
+    pick_place: r2r::ActionClient<PickPlace::Action>,
 }
 
 impl MotionActions {
@@ -662,10 +664,8 @@ impl MotionActions {
             "/arm_controller/follow_joint_trajectory",
             "control_msgs/action/FollowJointTrajectory",
         )?;
-        let pick_place = node.create_action_client_untyped(
-            "/stararm102/pick_place",
-            "stararm_102_mtc/action/PickPlace",
-        )?;
+        let pick_place =
+            node.create_action_client::<PickPlace::Action>("/stararm102/pick_place")?;
         Ok(Self {
             node,
             move_group,
@@ -688,39 +688,72 @@ impl MotionActions {
         sender: &Sender<RosEvent>,
     ) -> EyreResult<ManipulationResult> {
         spin_until(&mut self.node, Node::is_available(&self.pick_place)?)?;
+        // JSON remains only for the small existing goal fields. Never expand
+        // the XYZ buffer into millions of JSON numbers at the ROS boundary.
+        let mut goal: PickPlace::Goal = serde_json::from_value(job.goal)?;
+        let cloud = job.point_cloud;
+        goal.scene_cloud = r2r::sensor_msgs::msg::PointCloud2 {
+            header: r2r::std_msgs::msg::Header {
+                frame_id: cloud.frame_id,
+                ..Default::default()
+            },
+            height: cloud.height,
+            width: cloud.width,
+            fields: ["x", "y", "z"]
+                .iter()
+                .enumerate()
+                .map(|(index, name)| r2r::sensor_msgs::msg::PointField {
+                    name: (*name).into(),
+                    offset: index as u32 * 4,
+                    datatype: r2r::sensor_msgs::msg::PointField::FLOAT32 as u8,
+                    count: 1,
+                })
+                .collect(),
+            point_step: 12,
+            row_step: cloud.width * 12,
+            data: cloud.xyz_le,
+            ..Default::default()
+        };
+        let [x, y, z] = cloud.sensor_in_scene.position_m;
+        let [qx, qy, qz, qw] = cloud.sensor_in_scene.orientation_xyzw;
+        goal.sensor_in_scene = r2r::geometry_msgs::msg::Pose {
+            position: r2r::geometry_msgs::msg::Point { x, y, z },
+            orientation: r2r::geometry_msgs::msg::Quaternion {
+                x: qx,
+                y: qy,
+                z: qz,
+                w: qw,
+            },
+        };
         let (_handle, result, mut feedback) =
-            spin_until(&mut self.node, self.pick_place.send_goal_request(job.goal)?)?;
+            spin_until(&mut self.node, self.pick_place.send_goal_request(goal)?)?;
         futures::pin_mut!(result);
         loop {
             self.node.spin_once(Duration::from_millis(10));
             while let Some(Some(message)) = feedback.next().now_or_never() {
-                if let Ok(message) = message {
-                    let _ = sender.send(RosEvent::ManipulationFeedback {
-                        request_id: job.request_id.clone(),
-                        state: message["state"].as_str().unwrap_or_default().into(),
-                        stage: message["stage"].as_str().unwrap_or_default().into(),
-                        solution_count: message["solution_count"].as_u64().unwrap_or_default()
-                            as u32,
-                        selected_cost: message["selected_cost"].as_f64().unwrap_or_default(),
-                    });
-                }
+                let _ = sender.send(RosEvent::ManipulationFeedback {
+                    request_id: job.request_id.clone(),
+                    state: message.state,
+                    stage: message.stage,
+                    solution_count: message.solution_count,
+                    selected_cost: message.selected_cost,
+                });
             }
             let Some(result) = result.as_mut().now_or_never() else {
                 continue;
             };
             let (status, value) = result?;
-            let value = value.map_err(|error| eyre!(error))?;
             if status != r2r::GoalStatus::Succeeded {
                 bail!(
                     "MTC action ended with {status}, MoveIt/MTC code {}: {}",
-                    value["error_code"].as_i64().unwrap_or_default(),
-                    value["message"].as_str().unwrap_or_default()
+                    value.error_code,
+                    value.message
                 );
             }
             return Ok(ManipulationResult {
-                message: value["message"].as_str().unwrap_or_default().into(),
-                solution_count: value["solution_count"].as_u64().unwrap_or_default() as u32,
-                selected_cost: value["selected_cost"].as_f64().unwrap_or_default(),
+                message: value.message,
+                solution_count: value.solution_count,
+                selected_cost: value.selected_cost,
             });
         }
     }

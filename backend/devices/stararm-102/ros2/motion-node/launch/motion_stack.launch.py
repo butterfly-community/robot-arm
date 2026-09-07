@@ -13,6 +13,11 @@ def generate_launch_description() -> LaunchDescription:
         ParameterBuilder("stararm_102_motion_node").yaml("config/servo.yaml").to_dict()
     )
     move_group = moveit.to_dict()
+    move_group.update(ParameterBuilder("stararm_102_motion_node").yaml("config/sensors_3d.yaml").to_dict())
+    # Filter duplicate samples around known geometry before voxelization. This
+    # does not pad collision objects or lower the physical ground. Zero padding
+    # left quantized ground samples in the 0..5 mm voxel layer, blocking closure.
+    move_group["depth"]["padding_offset"] = move_group["octomap_resolution"] / 2
     controllers = str(
         Path(get_package_share_directory("stararm_102_motion_node"))
         / "config"

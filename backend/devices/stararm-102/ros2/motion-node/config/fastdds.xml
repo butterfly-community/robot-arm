@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>motion_shm</transport_id>
+        <type>SHM</type>
+        <!-- A 1920x1080 XYZ observation alone is 24,883,200 bytes. -->
+        <segment_size>134217728</segment_size>
+      </transport_descriptor>
+      <transport_descriptor><transport_id>motion_udp</transport_id><type>UDPv4</type></transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="motion" is_default_profile="true">
+      <rtps>
+        <userTransports><transport_id>motion_shm</transport_id><transport_id>motion_udp</transport_id></userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

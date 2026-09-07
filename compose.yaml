@@ -152,6 +152,7 @@ services:
   stararm-102-motion:
     <<: *dora-daemon
     image: robot-arm-services-stararm-102-motion
+    shm_size: 2g
     build:
       context: .
       dockerfile: backend/devices/stararm-102/nodes/motion/Dockerfile

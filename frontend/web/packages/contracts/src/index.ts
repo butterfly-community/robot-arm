@@ -422,6 +422,13 @@ export interface WorldScene {
     pose: ScenePose;
     size_m: [number, number, number];
   }>;
+  /** Metadata only in HTTP/UI; XYZ travels in the backend Arrow buffer. */
+  point_cloud?: {
+    frame_id: string;
+    sensor_in_scene: ScenePose;
+    width: number;
+    height: number;
+  };
 }
 
 export interface ManipulationTaskState {

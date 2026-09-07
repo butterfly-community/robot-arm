@@ -10,10 +10,13 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(shape_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/PickPlace.action"
-  DEPENDENCIES geometry_msgs
+  DEPENDENCIES geometry_msgs sensor_msgs
 )
 
 add_executable(pick_place_server src/pick_place_server.cpp)
@@ -26,6 +29,9 @@ target_link_libraries(pick_place_server PUBLIC
   rclcpp::rclcpp
   rclcpp_action::rclcpp_action
   ${shape_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  tf2_ros::tf2_ros
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 target_link_libraries(pick_place_server PRIVATE "${cpp_typesupport_target}")

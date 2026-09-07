@@ -69,6 +69,22 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
     );
     let rays = normalized_camera_rays(&pixels, calibration)?;
     let transform = isometry(calibration.translation_m, calibration.orientation_xyzw)?;
+    let mut xyz_le = Vec::with_capacity(depth.depth.len() * 12);
+    let mut world_points = Vec::with_capacity(depth.depth.len());
+    for (index, raw) in depth.depth.iter().copied().enumerate() {
+        let ray = rays.get(index)?;
+        let z = if raw == 0 {
+            f64::NAN
+        } else {
+            f64::from(raw) * depth.depth_scale_m
+        };
+        let optical = Point3::new(f64::from(ray.x) * z, f64::from(ray.y) * z, z);
+        for value in optical.coords.iter() {
+            xyz_le.extend_from_slice(&(*value as f32).to_le_bytes());
+        }
+        let point = transform * optical;
+        world_points.push([point.x as f32, point.y as f32, point.z as f32]);
+    }
     let mut objects = Vec::new();
     let mut placement_regions = Vec::new();
     let mut instance_clouds = Vec::new();
@@ -87,11 +103,7 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
             if raw_depth == 0 {
                 continue;
             }
-            let z = f64::from(raw_depth) * depth.depth_scale_m;
-            let ray = rays.get(index)?;
-            let camera_point = Vector3::new(f64::from(ray.x) * z, f64::from(ray.y) * z, z);
-            let point = (transform * Point3::from(camera_point)).coords;
-            let point = [point.x as f32, point.y as f32, point.z as f32];
+            let point = world_points[index];
             if mask_value[0] != 0 && selected[index] {
                 points_xyz_m.push(point);
             } else {
@@ -140,6 +152,16 @@ pub fn world_scene_and_instance_clouds_from_aligned_depth(
             objects,
             placement_regions,
             obstacles: vec![],
+            point_cloud: Some(robot_arm_messages::ScenePointCloud {
+                frame_id: depth.frame_id.clone(),
+                sensor_in_scene: Pose3 {
+                    position_m: calibration.translation_m,
+                    orientation_xyzw: calibration.orientation_xyzw,
+                },
+                width: depth.width,
+                height: depth.height,
+                xyz_le,
+            }),
         },
         instance_clouds,
     ))
@@ -502,6 +524,21 @@ mod tests {
         assert_eq!(clouds[0].points_xyz_m[0], [2.0, 1.0, 1.0]);
         assert_eq!(clouds[0].scene_points_xyz_m.len(), 10);
         assert_eq!(clouds[0].scene_points_xyz_m[0], [1.0, 0.0, 1.0]);
+        let observation = scene.point_cloud.as_ref().unwrap();
+        assert_eq!(
+            (observation.width, observation.height),
+            (depth.width, depth.height)
+        );
+        let optical: Vec<f32> = observation
+            .xyz_le
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(&optical[..3], &[0.0, 0.0, 1.0]);
+        assert_eq!(
+            observation.sensor_in_scene.position_m,
+            calibration.translation_m
+        );
         assert!(
             clouds[0]
                 .points_xyz_m

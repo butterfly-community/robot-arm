@@ -19,12 +19,18 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_srvs/srv/empty.hpp>
+#include <tf2_ros/static_transform_broadcaster.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
+#include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -49,13 +55,10 @@ constexpr char kGroundId[] = "ground";
 constexpr std::array<const char *, 2> kFingerLinks{"link7_left", "link7_right"};
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
-// MoveIt requires an attachable shape. This micrometre sphere represents only
-// the detected centre pose; it is not an estimate of the object's geometry.
-constexpr double kReferencePointRadius = 1e-6;
 
 // MoveTo normally keeps orientation even for a PointStamped goal. Use MoveIt's
-// position-only goal construction for release; keep its planner and tolerances.
-class ReleasePlanner final : public mtc::solvers::PipelinePlanner {
+// position-only goal construction for lifting and release; keep its tolerances.
+class PositionOnlyPlanner final : public mtc::solvers::PipelinePlanner {
 public:
   using PipelinePlanner::PipelinePlanner;
   using PipelinePlanner::plan;
@@ -66,19 +69,53 @@ public:
               const moveit::core::JointModelGroup *group, double timeout,
               robot_trajectory::RobotTrajectoryPtr &result,
               const moveit_msgs::msg::Constraints &path_constraints) override {
+    auto planning_scene = from->diff();
+    std::vector<const moveit::core::AttachedBody *> bodies;
+    from->getCurrentState().getAttachedBodies(bodies);
+    for (const auto *body : bodies) {
+      auto &acm = planning_scene->getAllowedCollisionMatrixNonConst();
+      collision_detection::AllowedCollision::Type allowed;
+      if (!acm.getAllowedCollision(body->getName(), kGroundId, allowed) ||
+          allowed != collision_detection::AllowedCollision::ALWAYS) {
+        continue;
+      }
+      // Support contact during lift is not permission to drive into support.
+      // Preserve only the contact already present in the observed geometry.
+      // Native conditional ACM remains local to planning, not a ROS message.
+      acm.setEntry(body->getName(), kGroundId, false);
+      collision_detection::CollisionRequest request;
+      request.contacts = true;
+      request.max_contacts = std::numeric_limits<std::size_t>::max();
+      request.max_contacts_per_pair = request.max_contacts;
+      collision_detection::CollisionResult contacts;
+      planning_scene->checkCollision(request, contacts);
+      double initial_depth = 0.0;
+      for (const auto &[pair, entries] : contacts.contacts) {
+        if ((pair.first == body->getName() && pair.second == kGroundId) ||
+            (pair.second == body->getName() && pair.first == kGroundId)) {
+          for (const auto &contact : entries)
+            initial_depth = std::max(initial_depth, contact.depth);
+        }
+      }
+      collision_detection::DecideContactFn contact_allowed =
+          [initial_depth](collision_detection::Contact &contact) {
+            return contact.depth <= initial_depth;
+          };
+      acm.setEntry(body->getName(), kGroundId, contact_allowed);
+    }
     const double tolerance = properties().get<double>("goal_position_tolerance");
     geometry_msgs::msg::PointStamped point;
     point.header.frame_id = from->getPlanningFrame();
     point.point.x = target.translation().x();
     point.point.y = target.translation().y();
-    // The lower edge, not the centre, must meet the requested release height.
+    // The lower edge, not the centre, must meet the requested height.
     point.point.z = target.translation().z() + tolerance;
     auto goal = kinematic_constraints::constructGoalConstraints(link.getName(), point, tolerance);
     auto &tcp_offset = goal.position_constraints.front().target_point_offset;
     tcp_offset.x = offset.translation().x();
     tcp_offset.y = offset.translation().y();
     tcp_offset.z = offset.translation().z();
-    return PipelinePlanner::plan(from, group, goal, timeout, result, path_constraints);
+    return PipelinePlanner::plan(planning_scene, group, goal, timeout, result, path_constraints);
   }
 };
 
@@ -136,21 +173,6 @@ moveit_msgs::msg::CollisionObject ground(const std::string &frame_id) {
   return box(frame_id, kGroundId, pose, size);
 }
 
-moveit_msgs::msg::CollisionObject
-reference_point(const std::string &frame_id, const std::string &id,
-                const geometry_msgs::msg::Pose &pose) {
-  moveit_msgs::msg::CollisionObject object;
-  object.header.frame_id = frame_id;
-  object.id = id;
-  shape_msgs::msg::SolidPrimitive primitive;
-  primitive.type = shape_msgs::msg::SolidPrimitive::SPHERE;
-  primitive.dimensions = {kReferencePointRadius};
-  object.primitives.push_back(std::move(primitive));
-  object.primitive_poses.push_back(pose);
-  object.operation = moveit_msgs::msg::CollisionObject::ADD;
-  return object;
-}
-
 geometry_msgs::msg::Vector3Stamped direction(const std::string &frame_id,
                                              double z) {
   geometry_msgs::msg::Vector3Stamped result;
@@ -191,6 +213,17 @@ std::string failure_summary(const mtc::Task &task,
 class PickPlaceServer : public rclcpp::Node {
 public:
   PickPlaceServer() : Node("stararm_102_mtc") {
+    cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/perception/depth/points", rclcpp::SensorDataQoS());
+    filtered_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/perception/depth/filtered", rclcpp::SensorDataQoS(),
+        [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
+          std::lock_guard<std::mutex> lock(cloud_mutex_);
+          filtered_stamp_ = cloud->header.stamp;
+          cloud_ready_.notify_all();
+        });
+    clear_octomap_ = create_client<std_srvs::srv::Empty>("/clear_octomap");
+    sensor_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
     server_ = rclcpp_action::create_server<PickPlace>(
         this, "/stararm102/pick_place",
         [](const rclcpp_action::GoalUUID &,
@@ -217,16 +250,34 @@ private:
     handle->publish_feedback(message);
   }
 
-  std::vector<std::string> apply_scene(const PickPlace::Goal &goal) {
+  void apply_scene(const PickPlace::Goal &goal) {
     std::vector<moveit_msgs::msg::CollisionObject> objects;
     objects.push_back(ground(goal.frame_id));
     objects.push_back(
-        reference_point(goal.frame_id, goal.object_id, goal.object_pose));
-    std::vector<std::string> temporary_ids{goal.object_id};
+        box(goal.frame_id, goal.object_id, goal.object_pose, goal.object_size));
     if (!scene_.applyCollisionObjects(objects)) {
       throw std::runtime_error("MoveIt rejected the task planning scene");
     }
-    return temporary_ids;
+    // Establish the independent target before the native updater self-filters
+    // its duplicate points. One observation builds this task's frozen map.
+    auto cleared = clear_octomap_->async_send_request(std::make_shared<std_srvs::srv::Empty::Request>());
+    cleared.get();
+    auto cloud = goal.scene_cloud;
+    cloud.header.stamp = now();
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.frame_id = goal.frame_id;
+    transform.header.stamp = cloud.header.stamp;
+    transform.child_frame_id = cloud.header.frame_id;
+    transform.transform.translation.x = goal.sensor_in_scene.position.x;
+    transform.transform.translation.y = goal.sensor_in_scene.position.y;
+    transform.transform.translation.z = goal.sensor_in_scene.position.z;
+    transform.transform.rotation = goal.sensor_in_scene.orientation;
+    sensor_tf_->sendTransform(transform);
+    cloud_publisher_->publish(cloud);
+    std::unique_lock<std::mutex> lock(cloud_mutex_);
+    // Only the corresponding callback certifies that Octomap finished updating.
+    // Do not mistake publishing the message for a completed scene update.
+    cloud_ready_.wait(lock, [&] { return filtered_stamp_ == cloud.header.stamp; });
   }
 
   void cleanup_scene(const std::vector<std::string> &temporary_ids) {
@@ -242,6 +293,10 @@ private:
       scene_.applyAttachedCollisionObjects(removals);
     }
     scene_.removeCollisionObjects(temporary_ids);
+    // This map describes the pre-grasp observation, not the scene after release.
+    // Keep it for the complete task, then discard it with the temporary target.
+    clear_octomap_->async_send_request(
+        std::make_shared<std_srvs::srv::Empty::Request>()).get();
   }
 
   mtc::Task create_task(const PickPlace::Goal &goal) {
@@ -343,10 +398,13 @@ private:
       pick->insert(std::move(attach));
 
       auto lift =
-          std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian);
+          std::make_unique<mtc::stages::MoveRelative>(
+              "lift object", std::make_shared<PositionOnlyPlanner>(shared_from_this()));
       lift->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
       lift->setIKFrame(kTcpFrame);
-      lift->setMinMaxDistance(0.0, goal.object_size.z);
+      // A zero minimum lets MoveRelative accept an empty Cartesian path.
+      // Require the complete lift before restoring support collision.
+      lift->setMinMaxDistance(goal.object_size.z, goal.object_size.z);
       lift->setDirection(direction(goal.frame_id, 1.0));
       pick->insert(std::move(lift));
 
@@ -369,7 +427,7 @@ private:
       release_point.header.frame_id = goal.frame_id;
       release_point.point = goal.placement_pose.position;
       auto release = std::make_unique<mtc::stages::MoveTo>(
-          "transport to release point", std::make_shared<ReleasePlanner>(shared_from_this()));
+          "transport to release point", std::make_shared<PositionOnlyPlanner>(shared_from_this()));
       release->setGroup(kArmGroup);
       release->setIKFrame(kTcpFrame);
       release->setGoal(release_point);
@@ -424,10 +482,10 @@ private:
   void execute(const std::shared_ptr<GoalHandle> &handle) {
     const auto goal = handle->get_goal();
     auto result = std::make_shared<PickPlace::Result>();
-    std::vector<std::string> temporary_ids;
+    const std::vector<std::string> temporary_ids{goal->object_id};
     try {
       feedback(handle, "planning", "build planning scene");
-      temporary_ids = apply_scene(*goal);
+      apply_scene(*goal);
       auto task = create_task(*goal);
       feedback(handle, "planning", "search complete task solutions");
       const auto plan_result = task.plan();
@@ -471,6 +529,13 @@ private:
   }
 
   moveit::planning_interface::PlanningSceneInterface scene_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_publisher_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_subscription_;
+  rclcpp::Client<std_srvs::srv::Empty>::SharedPtr clear_octomap_;
+  std::unique_ptr<tf2_ros::StaticTransformBroadcaster> sensor_tf_;
+  std::mutex cloud_mutex_;
+  std::condition_variable cloud_ready_;
+  builtin_interfaces::msg::Time filtered_stamp_;
   rclcpp_action::Server<PickPlace>::SharedPtr server_;
 };
 

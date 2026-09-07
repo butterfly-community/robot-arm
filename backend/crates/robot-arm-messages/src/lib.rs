@@ -941,6 +941,63 @@ pub struct WorldScene {
     pub objects: Vec<SceneObject>,
     pub placement_regions: Vec<PlacementRegion>,
     pub obstacles: Vec<SceneObstacle>,
+    /// Same observation as the instances. JSON/UI carry metadata only;
+    /// world_scene_to_arrow carries XYZ as a binary buffer for motion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_cloud: Option<ScenePointCloud>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScenePointCloud {
+    pub frame_id: String,
+    pub sensor_in_scene: Pose3,
+    pub width: u32,
+    pub height: u32,
+    /// Organized optical XYZ, little-endian float32; NaN marks missing depth.
+    #[serde(skip)]
+    pub xyz_le: Vec<u8>,
+}
+
+pub fn world_scene_to_arrow(scene: &WorldScene) -> Result<ArrayRef, ArrowCodecError> {
+    if let Some(cloud) = &scene.point_cloud {
+        if cloud.xyz_le.len() != cloud.width as usize * cloud.height as usize * 12 {
+            return Err(ArrowCodecError::InvalidShape);
+        }
+    }
+    let header = to_arrow(scene)?;
+    let header = header.as_any().downcast_ref::<StructArray>().unwrap();
+    let mut fields = header.fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        "point_cloud_xyz",
+        DataType::Binary,
+        false,
+    )));
+    let mut columns = header.columns().to_vec();
+    let data = scene
+        .point_cloud
+        .as_ref()
+        .map_or(&[][..], |cloud| cloud.xyz_le.as_slice());
+    columns.push(Arc::new(BinaryArray::from_vec(vec![data])));
+    Ok(Arc::new(StructArray::new(fields.into(), columns, None)))
+}
+
+pub fn world_scene_from_arrow(array: &dyn Array) -> Result<WorldScene, ArrowCodecError> {
+    let mut scene: WorldScene = from_arrow(array)?;
+    if let Some(cloud) = &mut scene.point_cloud {
+        let data = array
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .and_then(|array| array.column_by_name("point_cloud_xyz"))
+            .and_then(|column| column.as_any().downcast_ref::<BinaryArray>())
+            .ok_or(ArrowCodecError::InvalidArrowType)?;
+        if data.is_null(0)
+            || data.value(0).len() != cloud.width as usize * cloud.height as usize * 12
+        {
+            return Err(ArrowCodecError::InvalidShape);
+        }
+        cloud.xyz_le = data.value(0).to_vec();
+    }
+    Ok(scene)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1904,7 +1961,7 @@ mod tests {
             position_m: [0.1, 0.2, 0.3],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
         };
-        let scene = WorldScene {
+        let mut scene = WorldScene {
             schema_version: SCHEMA_VERSION,
             sequence: 4,
             sample_time_ns: 5,
@@ -1925,9 +1982,28 @@ mod tests {
                 source_object_id: Some("basket-1".into()),
             }],
             obstacles: vec![],
+            point_cloud: None,
         };
         let decoded: WorldScene = from_arrow(to_arrow(&scene).unwrap().as_ref()).unwrap();
         assert_eq!(decoded, scene);
+
+        scene.point_cloud = Some(ScenePointCloud {
+            frame_id: "camera_optical".into(),
+            sensor_in_scene: pose.clone(),
+            width: 2,
+            height: 1,
+            xyz_le: [0.0_f32, 0.0, 1.0, f32::NAN, f32::NAN, f32::NAN]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        });
+        let encoded = world_scene_to_arrow(&scene).unwrap();
+        assert_eq!(world_scene_from_arrow(encoded.as_ref()).unwrap(), scene);
+        let metadata_only: WorldScene = from_arrow(encoded.as_ref()).unwrap();
+        assert!(metadata_only.point_cloud.unwrap().xyz_le.is_empty());
+        assert!(world_scene_from_arrow(to_arrow(&scene).unwrap().as_ref()).is_err());
+        scene.point_cloud.as_mut().unwrap().xyz_le.pop();
+        assert!(world_scene_to_arrow(&scene).is_err());
 
         let calibration = CalibrationResult {
             schema_version: SCHEMA_VERSION,

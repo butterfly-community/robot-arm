@@ -1,5 +1,8 @@
 string request_id
 string frame_id
+# Same-frame observation, encoded as native ROS binary data rather than JSON.
+sensor_msgs/PointCloud2 scene_cloud
+geometry_msgs/Pose sensor_in_scene
 string object_id
 geometry_msgs/Pose object_pose
 geometry_msgs/Vector3 object_size

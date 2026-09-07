@@ -21,6 +21,7 @@ RUN apt-get update \
        ros-lyrical-moveit-configs-utils \
        ros-lyrical-moveit-planners-ompl \
        ros-lyrical-moveit-ros-move-group \
+       ros-lyrical-moveit-ros-perception \
        ros-lyrical-moveit-ros-visualization \
        ros-lyrical-moveit-servo \
        ros-lyrical-moveit-simple-controller-manager \
@@ -80,6 +81,7 @@ RUN apt-get install --yes /opt/build/downloads/ros2-apt-source.deb \
        ros-lyrical-moveit-configs-utils \
        ros-lyrical-moveit-planners-ompl \
        ros-lyrical-moveit-ros-move-group \
+       ros-lyrical-moveit-ros-perception \
        ros-lyrical-moveit-ros-visualization \
        ros-lyrical-moveit-servo \
        ros-lyrical-moveit-simple-controller-manager \

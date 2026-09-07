@@ -1,0 +1,13 @@
+# One observation per explicit grasp task, not a continuously refreshed map.
+# 5 mm was checked with the full 1920x1080 scene and the 5 mm basket walls.
+octomap_resolution: 0.005
+sensors: [depth]
+depth:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /perception/depth/points
+  max_range: .inf
+  point_subsample: 1
+  # Shape-filter padding is derived from half the voxel size in the launch file.
+  padding_scale: 1.0
+  max_update_rate: 0.0
+  filtered_cloud_topic: /perception/depth/filtered

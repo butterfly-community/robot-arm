@@ -200,7 +200,7 @@ fn run() -> Result<()> {
                         motion.handle_actuator_request(&mut node, from_arrow(data.as_array())?)?
                     }
                     "world_scene" => {
-                        let scene: WorldScene = from_arrow(data.as_array())?;
+                        let scene = robot_arm_messages::world_scene_from_arrow(data.as_array())?;
                         motion.latest_scene = Some(scene);
                     }
                     "perception_state" => {
@@ -1086,6 +1086,10 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         job: ManipulationJob {
             request_id: request.request_id.clone(),
             goal,
+            point_cloud: scene
+                .point_cloud
+                .clone()
+                .ok_or_else(|| eyre::eyre!("当前场景没有同帧点云，请重新运行感知"))?,
         },
         state: ManipulationTaskState {
             schema_version: SCHEMA_VERSION,
@@ -1248,6 +1252,13 @@ mod tests {
                 source_object_id: Some("support".into()),
             }],
             obstacles: vec![],
+            point_cloud: Some(robot_arm_messages::ScenePointCloud {
+                frame_id: "camera".into(),
+                sensor_in_scene: pose.clone(),
+                width: 1,
+                height: 1,
+                xyz_le: vec![0; 12],
+            }),
         };
         let pending = manipulation_job(
             &scene,

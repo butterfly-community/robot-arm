@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["ros-doc-only"]
-ros-doc-only = ["dep:r2r", "r2r/doc-only"]
+default = ["ros-runtime"]
 ros-runtime = ["dep:r2r"]
 
 [dependencies]
