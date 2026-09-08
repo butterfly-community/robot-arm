@@ -192,18 +192,18 @@ impl StarArmBus {
         Ok(())
     }
 
-    fn write(&mut self, command: &ArmCommand, gripper_power_mw: u16) -> Result<bool, String> {
+    fn write(&mut self, command: &ArmCommand, gripper_power_mw: u16) -> Result<(), String> {
         let mut commands = encode_command(command)?;
         commands[6].power_mw = gripper_power_mw;
         let changed = changed_servo_commands(self.last_commands.as_ref(), &commands);
         if changed.is_empty() {
-            return Ok(false);
+            return Ok(());
         }
         self.bus
             .write_positions(&changed)
             .map_err(|error| format!("串口写入失败：{error}"))?;
         self.last_commands = Some(commands);
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -240,7 +240,7 @@ struct StarArmExecution {
     bus: Option<StarArmBus>,
     next_sequence: u64,
     last_feedback_poll: Option<Instant>,
-    gripper_hold: GripperFeedbackController,
+    gripper_feedback: GripperFeedbackController,
 }
 
 impl StarArmExecution {
@@ -300,7 +300,7 @@ impl StarArmExecution {
             bus: None,
             next_sequence: 1,
             last_feedback_poll: None,
-            gripper_hold: GripperFeedbackController::default(),
+            gripper_feedback: GripperFeedbackController::default(),
         }
     }
 
@@ -411,7 +411,7 @@ impl StarArmExecution {
             .ok_or_else(|| "真机串口未连接".to_owned())?
             .set_torque(hold)?;
         if !hold {
-            self.gripper_hold = GripperFeedbackController::default();
+            self.gripper_feedback = GripperFeedbackController::default();
             self.transport.gripper_control_power_mw = None;
         }
         Ok(())
@@ -518,7 +518,7 @@ impl StarArmExecution {
     }
 
     fn disconnect(&mut self) {
-        self.gripper_hold = GripperFeedbackController::default();
+        self.gripper_feedback = GripperFeedbackController::default();
         self.transport.gripper_control_power_mw = None;
         self.transport.gripper_strength_feedback_percent = None;
         self.transport.gripper_feedback_telemetry = None;
@@ -541,11 +541,11 @@ impl StarArmExecution {
                 return;
             }
         };
-        self.gripper_hold.request(gripper_angle);
-        self.transport.gripper_control_power_mw = self.gripper_hold.regulated_power_mw;
+        self.gripper_feedback.request(gripper_angle);
+        self.transport.gripper_control_power_mw = self.gripper_feedback.regulated_power_mw;
         if let Some(bus) = self.bus.as_mut() {
             self.transport.last_command = Some(command.clone());
-            if let Err(error) = bus.write(&command, self.gripper_hold.command_power_mw()) {
+            if let Err(error) = bus.write(&command, self.gripper_feedback.command_power_mw()) {
                 self.reopen_after_io_error(error);
             } else {
                 self.transport.last_error = None;
@@ -593,19 +593,18 @@ impl StarArmExecution {
                 let strength = primary_tool_feedback(&self.telemetry).strength_percent;
                 self.transport.gripper_strength_feedback_percent = Some(strength);
                 if self
-                    .gripper_hold
+                    .gripper_feedback
                     .observe(strength, self.config.gripper_strength_percent)
                 {
-                    self.transport.gripper_control_power_mw = self.gripper_hold.regulated_power_mw;
+                    self.transport.gripper_control_power_mw =
+                        self.gripper_feedback.regulated_power_mw;
                     if let (Some(bus), Some(requested)) =
                         (&mut self.bus, &self.transport.last_command)
+                        && let Err(error) =
+                            bus.write(requested, self.gripper_feedback.command_power_mw())
                     {
-                        if let Err(error) =
-                            bus.write(requested, self.gripper_hold.command_power_mw())
-                        {
-                            self.reopen_after_io_error(error);
-                            return true;
-                        }
+                        self.reopen_after_io_error(error);
+                        return true;
                     }
                 }
                 self.next_sequence += 1;
@@ -952,25 +951,28 @@ mod tests {
         let mut execution = StarArmExecution::new();
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 1.0));
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.0));
-        let holding = execution.gripper_hold.regulated_power_mw;
+        let holding = execution.gripper_feedback.regulated_power_mw;
         assert!(holding.is_some());
         // Native trajectory endpoint seen in execution 9; it encodes to 0°.
-        execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 6.811975009831889e-17));
-        assert_eq!(execution.gripper_hold.regulated_power_mw, holding);
+        execution.apply_command(command(
+            DEFAULT_JOINTS_RAD.to_vec(),
+            6.811_975_009_831_89e-17,
+        ));
+        assert_eq!(execution.gripper_feedback.regulated_power_mw, holding);
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.1_f64.to_radians()));
-        assert_eq!(execution.gripper_hold.regulated_power_mw, None);
+        assert_eq!(execution.gripper_feedback.regulated_power_mw, None);
     }
 
     #[test]
     fn disconnect_removes_regulation_and_stale_strength() {
         let mut execution = StarArmExecution::new();
-        execution.gripper_hold.request(10);
-        execution.gripper_hold.request(0);
-        execution.gripper_hold.observe(50.0, 50.0);
+        execution.gripper_feedback.request(10);
+        execution.gripper_feedback.request(0);
+        execution.gripper_feedback.observe(50.0, 50.0);
         execution.transport.gripper_strength_feedback_percent = Some(50.0);
         execution.disconnect();
-        assert!(!execution.gripper_hold.observe(20.0, 50.0));
-        assert_eq!(execution.gripper_hold.regulated_power_mw, None);
+        assert!(!execution.gripper_feedback.observe(20.0, 50.0));
+        assert_eq!(execution.gripper_feedback.regulated_power_mw, None);
         assert_eq!(execution.transport.gripper_strength_feedback_percent, None);
     }
     #[test]

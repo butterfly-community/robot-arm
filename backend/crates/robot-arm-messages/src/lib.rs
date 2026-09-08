@@ -821,21 +821,16 @@ pub struct PerceptionInstanceSummary {
     pub grasp_candidate_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SegmentationPrompt {
+    #[default]
     Text,
     Visual {
         reference_image_base64: String,
         bboxes: Vec<[f64; 4]>,
         class_ids: Vec<u32>,
     },
-}
-
-impl Default for SegmentationPrompt {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -980,10 +975,10 @@ pub struct ScenePointCloud {
 }
 
 pub fn world_scene_to_arrow(scene: &WorldScene) -> Result<ArrayRef, ArrowCodecError> {
-    if let Some(cloud) = &scene.point_cloud {
-        if cloud.xyz_le.len() != cloud.width as usize * cloud.height as usize * 12 {
-            return Err(ArrowCodecError::InvalidShape);
-        }
+    if let Some(cloud) = &scene.point_cloud
+        && cloud.xyz_le.len() != cloud.width as usize * cloud.height as usize * 12
+    {
+        return Err(ArrowCodecError::InvalidShape);
     }
     let header = to_arrow(scene)?;
     let header = header.as_any().downcast_ref::<StructArray>().unwrap();

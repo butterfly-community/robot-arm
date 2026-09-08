@@ -21,6 +21,7 @@ docker compose down
 
 ```bash
 docker compose build <受影响的服务>
+docker compose down
 docker compose up -d --no-build --force-recreate
 ```
 
@@ -97,8 +98,12 @@ Rust 测试、Clippy 和模型测试必须在各自服务的构建/运行镜像�
 - 排查归档：[全仓库审查](docs/investigations/repository-audit.md)、
   [模拟抓取与 AI 验收](docs/investigations/simulated-grasp-acceptance.md)、
   [抓取与闭合穿地](docs/investigations/stararm-102-grasp-ground.md)、
-  [图片与视频 RGB/BGR](docs/investigations/image-video-rgb-audit.md)。
+  [图片与视频 RGB/BGR](docs/investigations/image-video-rgb-audit.md)、
+  [真机标定历史](docs/investigations/real-calibration-history.md)、
+  [真机抓放](docs/investigations/real-white-block-yellow-sheet.md)、
+  [持续夹持与交换布局验收](docs/investigations/real-white-acrylic-feedback.md)。
 
 `docs/` 维护当前事实，`docs/investigations/` 保留带日期的原因、试验和取舍，不是待执行配置。
-本轮模拟六图经用户确认，20 轮软件执行与真实 AI 编排已完成；下一步是真机前核对、标定和实际夹持。
-固定物体几何及筐壁诊断的局限仍保留；详细边界与未完成事项统一见 TODO。
+真机标定已经应用，真实长方体搬到亚克力片上的任务已有录像与稳定照片；交换布局后的持续
+夹持修正也已实测。正常力度波动不作为失败门限，但一次成功不能证明多轮成功率。
+通信层报错、模拟标定精度回归和未验证边界统一见 TODO，不再把已完成的真机工作列为下一步。

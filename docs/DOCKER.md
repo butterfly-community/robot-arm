@@ -62,11 +62,13 @@ Dockerfile；不得用 `latest` 隐式漂移。应用代码的日常构建仍只
 
 ```bash
 docker compose build <受影响的服务>
+docker compose down
 docker compose up -d --no-build --force-recreate
 ```
 
-系统统一启停，不维护单节点生命周期。需要保留容器定义并整体恢复时使用
-`docker compose up -d --no-build --force-recreate`，且不指定单个服务；dataflow 不单独自动重启某个节点。
+系统统一启停，不维护单节点生命周期。重启时先整套 `down`，再整体 `up`，不指定单个服务；
+dataflow 不单独自动重启某个节点。只读审查或不改变行为的源码整理不要求打断当前真机运行；
+需要部署应用变化时再使用上述完整流程。
 Rust 构建目标中的测试复用该服务环境，Python 运行测试用计算运行镜像，夹爪生成测试用含官方向导的计算构建镜像。
 不要把“精简运行镜像没有构建向导”或“构建镜像未安装显示运行库”错误地补成第二套运行环境。
 自然语言 API 的地址、模型和密钥只通过根目录

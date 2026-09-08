@@ -4,6 +4,9 @@
 临时输出统一根目录 `temp/`。软件反馈测试不证明真机夹持、力度或实际定位精度。
 服务停止后 `temp/` 可以随时清空；测试自行创建结果目录，正式夹具不在其中。
 
+文档整理后在根目录运行 `node tools/check-doc-links.mjs` 检查本地内联链接目标；
+此检查不访问服务、不发控制请求，也不验证外部网页和标题锚点。
+
 ## 前端
 
 在 `frontend` 执行 `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`。

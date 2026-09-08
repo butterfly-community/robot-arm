@@ -185,12 +185,18 @@ XYZ float32 LE，避免几百万浮点数展开为 JSON。网页只读元数据�
 ## `stararm-102-execution-node`
 
 `configure_endpoint()` 保存用户串口选择并显式连接/断开；未选串口时同一 `ArmCommand` 产生软件
-反馈，选择串口但连接失败时不会回退。`StarArmBus::encode_command()` 按模型映射总线指令；
+反馈，选择串口但连接失败时不会回退。模块级 `encode_command()` 按模型映射总线指令，
+`StarArmBus::write()` 只用同一同步写入协议发送编码发生变化的舵机；
 Monitor 读取失败先在同一串口重试一次，仍失败才进入重连逻辑。
 读取/重连失败仍发布连接状态；断连后的最后硬件读数可以保留显示，但不再作为当前力度反馈发出。
 
 `primary_tool_feedback()` 只在设备边界把实际功率映射为 0–100 通用反馈。稳定 0 是有效样本，
 不代表“没有反馈”；软件模式不伪造真机力度。
+
+`GripperFeedbackController::request()` 按原生 UART 位置编码识别闭合/释放意图，避免浮点噪声
+误判张开。`poll_hardware()` 每次获取新 Monitor 后调用 `observe()`，按实际负载误差调整
+原生功率上限，持续到显式张开、卸力或断开；不锁存保持角，不把目标百分比换成固定功率。
+型号刻度、用户配置和真实效果见 [夹持反馈](STARARM-102.md#参数归属与当前值)，不在此重复维护数值。
 
 ## `web-gateway-node`
 

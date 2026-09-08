@@ -90,7 +90,7 @@
 
 ## 复现与人工检查
 
-命令、文件职责、GUI 开关及产物说明见 [工具 README](../../../tools/diagnostics/octomap/README.md)。
+命令、文件职责、GUI 开关及产物说明见 [工具 README](../../tools/diagnostics/octomap/README.md)。
 原始反馈输入来自 `tools/diagnostics/results/grasp-acceptance-20260907.tar.gz`。
 本轮原生地图/接触响应/报告与日志保存在 `tools/diagnostics/results/official-octomap-20260907.tar.gz`，
 派生图片和 XYZ 可从正式资产及工具重建，不放入 docs/assets。
