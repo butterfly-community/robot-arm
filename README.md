@@ -88,23 +88,14 @@ Rust 测试、Clippy 和模型测试必须在各自服务的构建/运行镜像�
 
 ## 文档入口
 
-- [收尾验证](docs/investigations/closure-20260908.md)：共享内存根因、模拟资产标准与验证范围。
 - [当前系统设计](docs/SUMMARY.md)
 - [后端方法与依赖](docs/BACKEND.md)
 - [Docker 与服务镜像](docs/DOCKER.md)
 - [StarArm-102 型号适配](docs/STARARM-102.md)
 - [资产基线与验收边界](docs/REVIEW.md)
 - [测试入口与环境](tests/README.md)
-- 排查归档：[全仓库审查](docs/investigations/repository-audit.md)、
-  [模拟抓取与 AI 验收](docs/investigations/simulated-grasp-acceptance.md)、
-  [抓取与闭合穿地](docs/investigations/stararm-102-grasp-ground.md)、
-  [图片与视频 RGB/BGR](docs/investigations/image-video-rgb-audit.md)、
-  [真机标定历史](docs/investigations/real-calibration-history.md)、
-  [真机抓放](docs/investigations/real-white-block-yellow-sheet.md)、
-  [持续夹持与交换布局验收](docs/investigations/real-white-acrylic-feedback.md)。
+- [MTC 模块化 TODO](docs/MTC-MODULARIZATION-TODO.md)：仅计划，尚未实施。
 
-`docs/` 维护当前事实，`docs/investigations/` 保留带日期的原因、试验和取舍，不是待执行配置。
-真机标定已经应用，真实长方体搬到亚克力片上的任务已有录像与稳定照片；交换布局后的持续
-夹持修正也已实测。正常力度波动不作为失败门限，但一次成功不能证明多轮成功率。
-共享内存锁页修复和模拟资产按用户新标准的复核见收尾验证；未验证边界见
-[验收说明](docs/REVIEW.md)。已完成待办后移除 TODO.md，不把历史限制重复列成任务。
+真实抓放已完成，用户确认实际完成率可接受，主线验收结束。
+`docs/` 只维护当前实现、操作方法和必要限制；历史调查与逐轮记录不再保留在工作树，
+需要追溯可从 Git 基线 `a37d8c0` 恢复。标定与运行配置保留，不受文档清理影响。

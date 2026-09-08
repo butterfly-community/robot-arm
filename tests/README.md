@@ -68,4 +68,4 @@ docker run --rm -v "$PWD":/workspace -w /workspace/backend \
 - 计算**构建镜像**：`/workspace/tools/graspgenx/tests/test_description.py`，需要官方生成向导与补丁厂商 URDF。
 
 运行镜像故意不含生成向导，构建镜像不是 GUI 运行环境；不要为混跑测试向两边补入不属于它们的依赖。
-本轮问题与实际通过记录见 [全仓库审查](../docs/investigations/repository-audit.md)。
+当前验收状态与测试范围见 [验收说明](../docs/REVIEW.md)。复测结果写 `temp/`，不依赖历史运行记录。
