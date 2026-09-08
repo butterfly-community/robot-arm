@@ -1,17 +1,45 @@
-/backend/target/
-/target/
+# Rebuildable toolchain output (including independent crates / apps).
+**/target/
 **/node_modules/
-/frontend/web/**/.next/
+**/.next/
+**/.turbo/
+**/.pnpm-store/
 *.tsbuildinfo
 **/__pycache__/
-*.pyc
+*.py[cod]
 **/.ruff_cache/
 **/.pytest_cache/
+**/.mypy_cache/
+**/.venv/
+**/.uv-cache/
+**/coverage/
 **/test-results/
 **/playwright-report/
 **/blob-report/
-/backend/services/perception-compute/.venv/
-/backend/services/perception-compute/.uv-cache/
+
+# Downloaded models and task-local output; do not ignore source assets / archives.
 /backend/services/perception-compute/models/
 /temp
-/.env
+
+# Local secrets at any depth; keep explicitly named shareable templates.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Core dumps previously appeared in the repository root. Never use core*:
+# backend/devices/stararm-102/nodes/motion/src/core.rs is source code.
+/core
+/core.[0-9]*
+
+# Local editor / package-manager leftovers, not recorded diagnostic logs.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*

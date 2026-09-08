@@ -82,22 +82,10 @@ public:
   }
 };
 
-// Lift along the requested line with the grasp orientation unchanged. A free
-// position-only endpoint allowed a 124-degree wrist turn during a 20-mm lift.
-// Keep the measured support-contact handling, using MoveIt's native Cartesian IK.
-class SupportAwareCartesianPath final : public mtc::solvers::CartesianPath {
-public:
-  SupportAwareCartesianPath() {
-    setMaxVelocityScalingFactor(kDefaultVelocityScaling);
-  }
-  using CartesianPath::plan;
-
-  Result plan(const planning_scene::PlanningSceneConstPtr &from,
-              const moveit::core::LinkModel &link,
-              const Eigen::Isometry3d &offset, const Eigen::Isometry3d &target,
-              const moveit::core::JointModelGroup *group, double timeout,
-              robot_trajectory::RobotTrajectoryPtr &result,
-              const moveit_msgs::msg::Constraints &path_constraints) override {
+// Preserve measured initial support contact while departing with an attached
+// object. This is the same conditional ACM formerly used for Cartesian lift.
+planning_scene::PlanningScenePtr support_departure_scene(
+    const planning_scene::PlanningSceneConstPtr &from) {
     auto planning_scene = from->diff();
     std::vector<const moveit::core::AttachedBody *> bodies;
     from->getCurrentState().getAttachedBodies(bodies);
@@ -134,13 +122,31 @@ public:
         acm.setEntry(body->getName(), support_id, contact_allowed);
       }
     }
-    return CartesianPath::plan(planning_scene, link, offset, target, group,
-                               timeout, result, path_constraints);
+    return planning_scene;
+}
+
+// A named arm target avoids requiring a continuous fixed-orientation vertical
+// IK path, without leaving the departure endpoint's wrist orientation arbitrary.
+// The gripper and attached object are preserved; only the arm group moves.
+class SupportAwarePipelinePlanner final : public mtc::solvers::PipelinePlanner {
+public:
+  explicit SupportAwarePipelinePlanner(const rclcpp::Node::SharedPtr &node) : PipelinePlanner(node) {
+    setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+  }
+  using PipelinePlanner::plan;
+  Result plan(const planning_scene::PlanningSceneConstPtr &from,
+              const planning_scene::PlanningSceneConstPtr &to,
+              const moveit::core::JointModelGroup *group, double timeout,
+              robot_trajectory::RobotTrajectoryPtr &result,
+              const moveit_msgs::msg::Constraints &constraints) override {
+    auto prepared = support_departure_scene(from);
+    auto target = to->diff();
+    target->getAllowedCollisionMatrixNonConst() = prepared->getAllowedCollisionMatrix();
+    return PipelinePlanner::plan(prepared, target, group, timeout, result, constraints);
   }
 };
 
-// The release endpoint remains position-only as requested by the user. This
-// freedom belongs to transport, not the short lift while still at the object.
+// The release endpoint remains position-only as requested by the user.
 class PositionOnlyPlanner final : public mtc::solvers::PipelinePlanner {
 public:
   explicit PositionOnlyPlanner(const rclcpp::Node::SharedPtr &node) : PipelinePlanner(node) {
@@ -581,19 +587,14 @@ private:
       attach->attachObject(goal.object_id, kTcpFrame);
       pick->insert(std::move(attach));
 
-      auto lift =
-          std::make_unique<mtc::stages::MoveRelative>(
-              "lift object", std::make_shared<SupportAwareCartesianPath>());
-      lift->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      lift->setIKFrame(kTcpFrame);
-      // A zero minimum lets MoveRelative accept an empty Cartesian path.
-      // Require the complete lift before restoring support collision.
-      lift->setMinMaxDistance(goal.object_size.z, goal.object_size.z);
-      lift->setDirection(direction(goal.frame_id, 1.0));
-      pick->insert(std::move(lift));
+      auto depart = std::make_unique<mtc::stages::MoveTo>(
+          "carry to work pose", std::make_shared<SupportAwarePipelinePlanner>(shared_from_this()));
+      depart->setGroup(kArmGroup);
+      depart->setGoal(kWorkPose);
+      pick->insert(std::move(depart));
 
       auto restore_support = std::make_unique<mtc::stages::ModifyPlanningScene>(
-          "restore support collision after lift");
+          "restore support collision after departure");
       for (const auto *support_id : kSupportIds)
         restore_support->allowCollisions(goal.object_id, support_id, false);
       pick->insert(std::move(restore_support));
@@ -637,13 +638,9 @@ private:
           false);
       place->insert(std::move(forbid));
 
-      auto retreat = std::make_unique<mtc::stages::MoveRelative>(
-          "retreat after place", cartesian);
-      retreat->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      retreat->setIKFrame(kTcpFrame);
-      retreat->setMinMaxDistance(0.0, goal.object_size.z);
-      retreat->setDirection(direction(goal.frame_id, 1.0));
-      place->insert(std::move(retreat));
+      // Return directly with the arm planner after release. A separate vertical
+      // Cartesian retreat unnecessarily required continuous fixed-orientation IK.
+      // The detached object and all collision checks remain in the scene.
       task.add(std::move(place));
     }
 
