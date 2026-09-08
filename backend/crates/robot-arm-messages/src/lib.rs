@@ -923,13 +923,21 @@ pub struct DetectedInstance2D {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraspCandidate {
+    // Keep pose coordinates directly addressable in recorded/rendered scenes.
+    #[serde(flatten)]
+    pub pose: Pose3,
+    pub confidence: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SceneObject {
     pub object_id: String,
     pub label: String,
     pub pose: Pose3,
     pub size_m: [f64; 3],
     pub confidence: f64,
-    pub grasp_candidates: Vec<Pose3>,
+    pub grasp_candidates: Vec<GraspCandidate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2015,7 +2023,10 @@ mod tests {
                 pose: pose.clone(),
                 size_m: [0.04; 3],
                 confidence: 0.9,
-                grasp_candidates: vec![pose.clone()],
+                grasp_candidates: vec![GraspCandidate {
+                    pose: pose.clone(),
+                    confidence: 0.87,
+                }],
             }],
             placement_regions: vec![PlacementRegion {
                 region_id: "basket-interior".into(),

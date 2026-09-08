@@ -13,10 +13,11 @@ use json_config_store::{load_or_default, save};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use robot_arm_messages::{
     AlignedDepthFrame, CameraCaptureState, CameraFrameBundle, CameraImagePlane,
-    DepthCameraCalibration, DetectedInstance2D, ImageFrameInfo, PerceptionAssetRequest,
-    PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest, PerceptionState, Pose3,
-    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt,
-    ServiceState, WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
+    DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo,
+    PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest,
+    PerceptionState, Pose3, RequestAction, RequestResult, RequestState, RobotModelInfo,
+    SCHEMA_VERSION, SegmentationPrompt, ServiceState, WorldScene, camera_frame_from_arrow,
+    from_arrow, to_arrow,
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
@@ -845,7 +846,10 @@ async fn attach_grasp_candidates(
         candidates.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
         object.grasp_candidates = candidates
             .iter()
-            .map(|candidate| candidate_tcp_pose_in_base(candidate.transform))
+            .map(|candidate| GraspCandidate {
+                pose: candidate_tcp_pose_in_base(candidate.transform),
+                confidence: candidate.confidence,
+            })
             .collect();
     }
     Ok(())

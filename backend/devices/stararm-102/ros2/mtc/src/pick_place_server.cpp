@@ -13,6 +13,7 @@
 #include <moveit/task_constructor/stages/move_relative.h>
 #include <moveit/task_constructor/stages/move_to.h>
 #include <moveit/task_constructor/task.h>
+#include <moveit/task_constructor/cost_terms.h>
 #include <moveit_msgs/msg/attached_collision_object.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
@@ -27,6 +28,7 @@
 #include <array>
 #include <cmath>
 #include <condition_variable>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
@@ -243,10 +245,7 @@ private:
   std::vector<DepthPose> poses_;
 };
 
-// Scene supplies candidates in descending model confidence. Preserve that
-// ordering among COMPLETE plans, then prefer deeper insertion within that
-// candidate, and finally motion cost. A zero-depth variant is always retained.
-// Joint travel alone is not a measure of whether a learned grasp will hold.
+// Preserve candidate identity through MTC's replacement/wrapper stages.
 std::size_t grasp_candidate_index(const mtc::SolutionBase &solution) {
   // ComputeIK creates a NEW SubTrajectory, not a wrapper around the generator.
   // Read the explicitly forwarded interface property instead of its creator.
@@ -273,8 +272,53 @@ double grasp_depth(const mtc::SolutionBase &solution) {
   return depth;
 }
 
-auto grasp_solution_rank(const mtc::SolutionBase &solution) {
-  return std::make_tuple(grasp_candidate_index(solution), -grasp_depth(solution), solution.cost());
+// Dimensionless mean fraction of the arm's existing joint travel. Native MTC
+// computes joint distances along every waypoint (including reversals), not
+// merely endpoint distance. No gripper travel or hard-coded joint IDs/weights.
+mtc::cost::PathLength arm_motion_cost(const moveit::core::RobotModel &model) {
+  const auto &joints = model.getJointModelGroup(kArmGroup)->getActiveJointModels();
+  std::map<std::string, double> weights;
+  for (const auto *joint : joints)
+    weights.emplace(joint->getName(), 1.0 / (joints.size() * joint->getMaximumExtent()));
+  return mtc::cost::PathLength(std::move(weights));
+}
+
+struct RankedGrasp {
+  const mtc::SolutionBase *solution;
+  std::size_t candidate_index;
+  double depth_m;
+  double confidence;
+  double motion_cost;
+
+  double cost() const { return (1.0 - confidence) + motion_cost; }
+};
+
+// First keep each candidate's DEEPEST complete solution, even if a shallower
+// variant is cheaper. Then balance original model quality and native arm
+// travel. Extra insertion is NOT comparable across different original poses.
+std::vector<RankedGrasp> rank_complete_grasps(
+    const std::vector<const mtc::SolutionBase *> &solutions,
+    const std::vector<double> &confidences, const mtc::cost::PathLength &motion_cost) {
+  std::map<std::size_t, RankedGrasp> deepest;
+  for (const auto *solution : solutions) {
+    const auto index = grasp_candidate_index(*solution);
+    std::string comment;
+    RankedGrasp candidate{solution, index, grasp_depth(*solution), confidences.at(index),
+                          solution->computeCost(motion_cost, comment)};
+    auto previous = deepest.find(index);
+    if (previous == deepest.end() ||
+        std::make_pair(-candidate.depth_m, candidate.motion_cost) <
+            std::make_pair(-previous->second.depth_m, previous->second.motion_cost))
+      deepest.insert_or_assign(index, candidate);
+  }
+  std::vector<RankedGrasp> ranked;
+  for (const auto &[index, candidate] : deepest)
+    ranked.push_back(candidate);
+  std::sort(ranked.begin(), ranked.end(), [](const auto &left, const auto &right) {
+    return std::make_tuple(left.cost(), -left.confidence, left.motion_cost, left.candidate_index) <
+           std::make_tuple(right.cost(), -right.confidence, right.motion_cost, right.candidate_index);
+  });
+  return ranked;
 }
 
 moveit_msgs::msg::CollisionObject box(const std::string &frame_id,
@@ -625,6 +669,10 @@ private:
     auto result = std::make_shared<PickPlace::Result>();
     const std::vector<std::string> temporary_ids{goal->object_id};
     try {
+      if (goal->grasp_poses.size() != goal->grasp_confidences.size() ||
+          !std::all_of(goal->grasp_confidences.begin(), goal->grasp_confidences.end(),
+                       [](double confidence) { return std::isfinite(confidence); }))
+        throw std::runtime_error("Grasp poses require matching finite model confidences");
       feedback(handle, "planning", "build planning scene");
       apply_scene(*goal);
       auto task = create_task(*goal);
@@ -644,24 +692,28 @@ private:
         handle->abort(result);
         return;
       }
-      const auto best = std::min_element(
-          task.solutions().begin(), task.solutions().end(),
-          [](const auto &left, const auto &right) {
-            return grasp_solution_rank(*left) < grasp_solution_rank(*right);
-          });
-      const auto *solution = best->get();
+      std::vector<const mtc::SolutionBase *> complete_solutions;
       for (const auto &complete : task.solutions())
-        RCLCPP_INFO(get_logger(), "complete candidate %zu, insertion +%.3f mm, motion cost %.6f%s",
-                    grasp_candidate_index(*complete), grasp_depth(*complete) * 1000.0, complete->cost(),
-                    complete.get() == solution ? " (selected)" : "");
-      result->selected_cost = solution->cost();
-      feedback(handle, "planned", "selected complete candidate " +
-                   std::to_string(grasp_candidate_index(*solution)) + " / 加深 " +
-                   std::to_string(grasp_depth(*solution) * 1000.0) + " mm",
-               task.numSolutions(), solution->cost());
+        complete_solutions.push_back(complete.get());
+      const auto ranked = rank_complete_grasps(complete_solutions, goal->grasp_confidences,
+                                               arm_motion_cost(*task.getRobotModel()));
+      const auto &best = ranked.front();
+      const auto *solution = best.solution;
+      for (const auto &candidate : ranked)
+        RCLCPP_INFO(get_logger(),
+                    "deepest complete candidate %zu, insertion +%.3f mm, model %.6f, "
+                    "normalized arm travel %.6f, selection cost %.6f%s",
+                    candidate.candidate_index, candidate.depth_m * 1000.0, candidate.confidence,
+                    candidate.motion_cost, candidate.cost(), candidate.solution == solution ? " (selected)" : "");
+      result->selected_cost = best.cost();
+      std::ostringstream selection;
+      selection << std::fixed << std::setprecision(3)
+                << "候选 " << best.candidate_index << " / 加深 " << best.depth_m * 1000.0
+                << " mm / 模型分 " << best.confidence << " / 关节行程代价 " << best.motion_cost;
+      feedback(handle, "planned", selection.str(), task.numSolutions(), best.cost());
       task.introspection().publishSolution(*solution);
-      feedback(handle, "executing", "execute selected task solution",
-               task.numSolutions(), solution->cost());
+      feedback(handle, "executing", "执行：" + selection.str(),
+               task.numSolutions(), best.cost());
       const auto execute_result = task.execute(*solution);
       result->error_code = execute_result.val;
       result->message =

@@ -394,13 +394,17 @@ export interface ScenePose {
   orientation_xyzw: [number, number, number, number];
 }
 
+export interface GraspCandidate extends ScenePose {
+  confidence: number;
+}
+
 export interface SceneObject {
   object_id: string;
   label: string;
   pose: ScenePose;
   size_m: [number, number, number];
   confidence: number;
-  grasp_candidates: ScenePose[];
+  grasp_candidates: GraspCandidate[];
 }
 
 export interface PlacementRegion {

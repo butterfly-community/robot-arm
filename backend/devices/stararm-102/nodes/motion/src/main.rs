@@ -54,7 +54,7 @@ struct PendingManipulation {
 
 enum WorkItem {
     Motion(PendingMotion),
-    Manipulation(PendingManipulation),
+    Manipulation(Box<PendingManipulation>),
 }
 
 struct MotionNode {
@@ -587,7 +587,8 @@ impl MotionNode {
                 // Acknowledge validation/queueing before returning HTTP 202.
                 // Completion is still reported through manipulation_state.
                 Self::send_manipulation_result(node, &pending.state)?;
-                self.work_queue.push_back(WorkItem::Manipulation(pending));
+                self.work_queue
+                    .push_back(WorkItem::Manipulation(Box::new(pending)));
                 self.start_next_work(node)
             }
             Err(error) => self.fail_manipulation(node, request_id, error.to_string()),
@@ -1089,7 +1090,8 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         "object_id": object.object_id,
         "object_pose": pose(&object.pose),
         "object_size": size(object.size_m),
-        "grasp_poses": object.grasp_candidates.iter().map(pose).collect::<Vec<_>>(),
+        "grasp_poses": object.grasp_candidates.iter().map(|candidate| pose(&candidate.pose)).collect::<Vec<_>>(),
+        "grasp_confidences": object.grasp_candidates.iter().map(|candidate| candidate.confidence).collect::<Vec<_>>(),
         "placement_region_id": placement.region_id,
         "placement_pose": pose(&placement_pose),
         "placement_size": size(placement.size_m),
@@ -1239,7 +1241,10 @@ mod tests {
                     pose: pose.clone(),
                     size_m: [0.04; 3],
                     confidence: 1.0,
-                    grasp_candidates: vec![pose.clone()],
+                    grasp_candidates: vec![robot_arm_messages::GraspCandidate {
+                        pose: pose.clone(),
+                        confidence: 0.87,
+                    }],
                 },
                 SceneObject {
                     object_id: "support".into(),
@@ -1300,6 +1305,14 @@ mod tests {
             .contains("场景")
         );
         assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
+        assert_eq!(pending.job.goal["grasp_confidences"], json!([0.87]));
+        #[cfg(feature = "ros-runtime")]
+        {
+            let native_goal: r2r::stararm_102_mtc::action::PickPlace::Goal =
+                serde_json::from_value(pending.job.goal.clone()).unwrap();
+            assert_eq!(native_goal.grasp_confidences, vec![0.87]);
+        }
+        assert_eq!(pending.job.goal["grasp_poses"][0]["position"]["z"], 0.02);
         assert_eq!(pending.job.goal["object_size"]["z"], 0.04);
         assert!(pending.job.goal.get("obstacle_ids").is_none());
         assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));

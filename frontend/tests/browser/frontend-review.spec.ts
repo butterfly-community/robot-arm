@@ -117,7 +117,7 @@ test("perception supports empty roles, rejects stale selections and stops after 
         pose,
         size_m: [0.03, 0.03, 0.03],
         confidence: 0.9,
-        grasp_candidates: [pose],
+        grasp_candidates: [{ ...pose, confidence: 0.87 }],
       },
     ],
     placement_regions: [

@@ -7,6 +7,8 @@ string object_id
 geometry_msgs/Pose object_pose
 geometry_msgs/Vector3 object_size
 geometry_msgs/Pose[] grasp_poses
+# One original model score per pose, same order; never reconstructed from rank.
+float64[] grasp_confidences
 string placement_region_id
 # TCP release position with minimum Z; orientation is ignored (unconstrained).
 geometry_msgs/Pose placement_pose

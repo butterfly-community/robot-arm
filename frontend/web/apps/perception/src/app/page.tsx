@@ -869,7 +869,7 @@ export default function Page() {
             <KeyValue
               label="阶段 / 方案 / 代价"
               value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
-              hint="运动节点当前进度及 MTC 规划结果；不代表已经完成实际抓放。"
+              hint="每个候选优先选择最深的完整可行方案，再比较综合代价（1−模型分＋归一化关节行程，越低越好）。阶段显示所选候选和加深量；规划成功不代表实际夹持成功。"
             />
             {manipulation?.original_error && (
               <p className="error" role="alert">

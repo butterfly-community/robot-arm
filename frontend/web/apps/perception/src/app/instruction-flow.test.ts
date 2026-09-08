@@ -24,6 +24,7 @@ const scene: WorldScene = {
       size_m: [0.04, 0.04, 0.04],
       grasp_candidates: [
         {
+          confidence: 0.87,
           position_m: [0.1, 0.2, 0.05],
           orientation_xyzw: [0, 0, 0, 1],
         },
