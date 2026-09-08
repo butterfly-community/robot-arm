@@ -6,6 +6,10 @@ x-dora-environment: &dora-environment
 
 x-dora-daemon: &dora-daemon
   init: true
+  # Zenoh locks POSIX SHM pages: its default 16 MiB pool exceeds Docker's
+  # 8 MiB memlock allowance. Keep the same SHM transport, without an app fallback.
+  ulimits:
+    memlock: -1
   entrypoint: ["/usr/local/bin/dora-entrypoint.sh"]
   command:
     [
@@ -164,8 +168,6 @@ services:
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     ports: ["192.168.100.10:6080:6080"]
-    ulimits:
-      memlock: -1
     volumes: ["./backend/config/runtime:/config"]
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291 && exec 4<>/dev/tcp/127.0.0.1/6080"]

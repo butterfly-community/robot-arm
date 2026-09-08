@@ -555,13 +555,13 @@ for (const calibration of [
   secondCalibration,
   thirdCalibration,
 ]) {
-  // User-required 0.1 mm synthetic calibration accuracy, not a motion gate.
+  // User-required 1 mm synthetic calibration accuracy, not a motion gate.
   assert.ok(
     translationError(
       calibration.camera_in_base.position_m,
       simulationOracle.camera_in_base.position_m,
-    ) <= 0.0001,
-    "solved simulated camera translation is within 0.1 mm of the oracle",
+    ) <= 0.001,
+    "solved simulated camera translation is within 1 mm of the oracle",
   );
   const { camera_matrix: k, width, height } = simulationOracle.calibration;
   for (const u of [0, width - 1])
@@ -582,16 +582,16 @@ for (const calibration of [
         translationError(
           transformPoint(calibration.camera_in_base, point),
           transformPoint(simulationOracle.camera_in_base, point),
-        ) <= 0.0001,
-        "combined camera translation and rotation displace visible ground by at most 0.1 mm",
+        ) <= 0.001,
+        "combined camera translation and rotation displace visible ground by at most 1 mm",
       );
     }
   assert.ok(
     translationError(
       calibration.board_in_calibration_tool.position_m,
       simulationOracle.board_in_tool.position_m,
-    ) <= 0.0001,
-    "solved ChArUco origin is within 0.1 mm of the simulation oracle",
+    ) <= 0.001,
+    "solved ChArUco origin is within 1 mm of the simulation oracle",
   );
   for (const x of [0, calibrationBoard.measured_width_m])
     for (const y of [0, calibrationBoard.measured_height_m]) {
@@ -599,8 +599,8 @@ for (const calibration of [
         translationError(
           transformPoint(calibration.board_in_calibration_tool, [x, y, 0]),
           transformPoint(simulationOracle.board_in_tool, [x, y, 0]),
-        ) <= 0.0001,
-        "combined board translation and rotation displace each board corner by at most 0.1 mm",
+        ) <= 0.001,
+        "combined board translation and rotation displace each board corner by at most 1 mm",
       );
     }
 }

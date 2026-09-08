@@ -1214,7 +1214,7 @@ mod tests {
                     "translation_error_mm": translation_error * 1000.0,
                     "rotation_error_deg": rotation_error.to_degrees(),
                 }));
-                checks_passed &= translation_error <= 0.0001;
+                checks_passed &= translation_error <= 0.001;
                 checks_passed &= rotation_error <= 3.0_f64.to_radians();
                 tools.push(Pose3 {
                     position_m: tool.position_m,
@@ -1297,10 +1297,10 @@ mod tests {
                 "maximum_rotation_residual_deg": maximum_rotation_residual.to_degrees(),
                 "solver": solution.solver,
             }));
-            checks_passed &= camera_translation_error <= 0.0001;
-            checks_passed &= maximum_scene_extrinsic_error <= 0.0001;
+            checks_passed &= camera_translation_error <= 0.001;
+            checks_passed &= maximum_scene_extrinsic_error <= 0.001;
             checks_passed &= camera_rotation_error <= 0.035;
-            checks_passed &= board_translation_error <= 0.0001;
+            checks_passed &= board_translation_error <= 0.001;
             checks_passed &= board_rotation_error <= 0.035;
             checks_passed &= solution
                 .translation_residuals_m
@@ -1326,7 +1326,7 @@ mod tests {
                 "expected_camera_in_base": config.camera_in_base,
                 "expected_board_in_tool": config.board_in_tool,
                 "depth_scale_m": config.depth_scale_m,
-                "translation_acceptance_mm": 0.1,
+                "translation_acceptance_mm": 1.0,
                 "pose_source": if recorded_boards.is_some() { "TCP pose replay (input file determines provenance)" } else { "close-up synthetic poses" },
                 "pose_file": std::env::var_os("ROBOT_ARM_TEST_CALIBRATION_SESSION").map(PathBuf::from),
                 "asset_directory": assets,

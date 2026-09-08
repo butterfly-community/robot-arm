@@ -11,6 +11,11 @@ MoveIt、RViz、Python、AI 模型和设备厂商包都不属于全局基础层�
 
 ## 固定基础标签
 
+Dora daemon 的公共 Compose 配置声明 `ulimits.memlock: -1`。Zenoh 1.9.0 使用 `mlock`
+锁定 POSIX SHM；默认 16 MiB 传输池超过原容器 8 MiB 锁页额度，会报 `OS error 12`，
+即使 `/dev/shm` 和主机 RAM 空余很多。只调整容器锁页额度，不关闭共享内存、不增加传输分支；
+motion 原有同项配置保持一致。复现方法见[诊断工具](../tools/diagnostics/README.md#zenoh-共享内存锁页复现)。
+
 | 标签 | 唯一职责 |
 | --- | --- |
 | `robot-arm-services-backend-base:2026.09.05-r9` | Ubuntu 26.04、Rust 1.97、Dora 和多个 Rust 服务共同使用的原生构建工具 |

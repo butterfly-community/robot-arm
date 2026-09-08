@@ -5,7 +5,7 @@
 修复验收使用模拟相机，未发出机械臂运动指令，未构建基础镜像。
 
 本文是该次排查归档；后续全仓库复测见 [审查报告](repository-audit.md)，
-现行方法见 [BACKEND](../BACKEND.md)，未完成任务只在 [TODO](../../TODO.md) 维护。
+现行方法见 [BACKEND](../BACKEND.md)，当前验收边界见 [REVIEW](../REVIEW.md)。
 
 ## 结论与约束边界
 
