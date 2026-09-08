@@ -1,6 +1,8 @@
 moveit_servo:
   move_group_name: arm
   command_in_type: speed_units
+  # User requested half speed twice; native joint velocity limits still apply.
+  override_velocity_scaling_factor: 0.25
   command_out_topic: /arm_controller/joint_trajectory
   publish_joint_velocities: false
   monitored_planning_scene_topic: /monitored_planning_scene

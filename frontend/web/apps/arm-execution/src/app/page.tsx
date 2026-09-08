@@ -63,6 +63,11 @@ export default function Page() {
     string | undefined
   >();
   const [pendingAction, setPendingAction] = useState<ExecutionAction>();
+  const [strengthOverride, setStrengthOverride] = useState<string>();
+  const strengthTarget =
+    strengthOverride ?? String(transport.gripper_strength_percent ?? "");
+  const configChanged =
+    feedbackIntervalOverride !== undefined || strengthOverride !== undefined;
   const feedbackIntervalMs =
     feedbackIntervalOverride ?? String(transport.feedback_interval_ms ?? "");
 
@@ -99,9 +104,13 @@ export default function Page() {
         schema_version: schemaVersion,
         request_id: requestId(),
         action: "apply",
-        fields: { feedback_interval_ms: feedbackIntervalMs },
+        fields: {
+          feedback_interval_ms: feedbackIntervalMs,
+          gripper_strength_percent: strengthTarget,
+        },
       });
       setFeedbackIntervalOverride(undefined);
+      setStrengthOverride(undefined);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -355,6 +364,28 @@ export default function Page() {
                 }
               />
             </Field>
+            <Field label="夹持反馈目标（0–100）">
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                value={strengthTarget}
+                title="使用已有负载反馈刻度，不是牛顿。夹住后持续调节，运输中仍保持；显式张开或卸力退出。"
+                onChange={(event) =>
+                  setStrengthOverride(event.currentTarget.value)
+                }
+              />
+              <span className="muted">
+                实测：
+                {transport.connected &&
+                typeof transport.gripper_strength_feedback_percent === "number"
+                  ? transport.gripper_strength_feedback_percent.toFixed(1)
+                  : "—"}
+                {transport.gripper_control_power_mw != null
+                  ? " · 持续力度调节中"
+                  : " · 未进入夹持调节"}
+              </span>
+            </Field>
             <Field label="全部电机力矩">
               <div className="card-actions">
                 <Button
@@ -409,17 +440,14 @@ export default function Page() {
               </Button>
               <Button
                 variant="outline"
-                disabled={
-                  Boolean(pendingAction) ||
-                  feedbackIntervalOverride === undefined
-                }
+                disabled={Boolean(pendingAction) || !configChanged}
                 onClick={saveExecutionConfig}
               >
                 {pendingAction === "save-config"
                   ? "正在保存…"
-                  : feedbackIntervalOverride === undefined
-                    ? "反馈周期已保存"
-                    : "保存反馈周期"}
+                  : !configChanged
+                    ? "执行配置已保存"
+                    : "保存执行配置"}
               </Button>
             </div>
             {transport.last_error != null && (

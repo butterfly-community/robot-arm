@@ -34,6 +34,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -57,13 +58,37 @@ constexpr std::array<const char *, 2> kSupportIds{kGroundId, "<octomap>"};
 constexpr std::array<const char *, 2> kFingerLinks{"link7_left", "link7_right"};
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
+constexpr double kDefaultVelocityScaling = 0.25; // User default; physical limits unchanged.
 
-// MoveTo normally keeps orientation even for a PointStamped goal. Use MoveIt's
-// position-only goal construction for lifting and release; keep its tolerances.
-class PositionOnlyPlanner final : public mtc::solvers::PipelinePlanner {
+// Upstream checks coarse joint interpolation BEFORE time parameterization.
+// Retiming introduces different waypoints: real replay had a narrow collision
+// at 27..31 degrees, missed by the 0.1-rad grid but hit by retimed point 6.
+// Check the exact outgoing path now, with the same native scene/ACM, instead of
+// discovering that invalid waypoint only after the arm reaches the object.
+class CheckedJointInterpolation final : public mtc::solvers::JointInterpolationPlanner {
 public:
-  using PipelinePlanner::PipelinePlanner;
-  using PipelinePlanner::plan;
+  using JointInterpolationPlanner::plan;
+  Result plan(const planning_scene::PlanningSceneConstPtr &from,
+              const planning_scene::PlanningSceneConstPtr &to,
+              const moveit::core::JointModelGroup *group, double timeout,
+              robot_trajectory::RobotTrajectoryPtr &result,
+              const moveit_msgs::msg::Constraints &constraints) override {
+    auto status = JointInterpolationPlanner::plan(from, to, group, timeout, result, constraints);
+    if (status && !from->isPathValid(*result, constraints, group->getName()))
+      return {false, "Retimed joint trajectory is invalid in the planning scene"};
+    return status;
+  }
+};
+
+// Lift along the requested line with the grasp orientation unchanged. A free
+// position-only endpoint allowed a 124-degree wrist turn during a 20-mm lift.
+// Keep the measured support-contact handling, using MoveIt's native Cartesian IK.
+class SupportAwareCartesianPath final : public mtc::solvers::CartesianPath {
+public:
+  SupportAwareCartesianPath() {
+    setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+  }
+  using CartesianPath::plan;
 
   Result plan(const planning_scene::PlanningSceneConstPtr &from,
               const moveit::core::LinkModel &link,
@@ -107,6 +132,26 @@ public:
         acm.setEntry(body->getName(), support_id, contact_allowed);
       }
     }
+    return CartesianPath::plan(planning_scene, link, offset, target, group,
+                               timeout, result, path_constraints);
+  }
+};
+
+// The release endpoint remains position-only as requested by the user. This
+// freedom belongs to transport, not the short lift while still at the object.
+class PositionOnlyPlanner final : public mtc::solvers::PipelinePlanner {
+public:
+  explicit PositionOnlyPlanner(const rclcpp::Node::SharedPtr &node) : PipelinePlanner(node) {
+    setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+  }
+  using PipelinePlanner::plan;
+
+  Result plan(const planning_scene::PlanningSceneConstPtr &from,
+              const moveit::core::LinkModel &link,
+              const Eigen::Isometry3d &offset, const Eigen::Isometry3d &target,
+              const moveit::core::JointModelGroup *group, double timeout,
+              robot_trajectory::RobotTrajectoryPtr &result,
+              const moveit_msgs::msg::Constraints &path_constraints) override {
     const double tolerance =
         properties().get<double>("goal_position_tolerance");
     geometry_msgs::msg::PointStamped point;
@@ -120,14 +165,57 @@ public:
     tcp_offset.x = offset.translation().x();
     tcp_offset.y = offset.translation().y();
     tcp_offset.z = offset.translation().z();
-    return PipelinePlanner::plan(planning_scene, group, goal, timeout, result, path_constraints);
+    return PipelinePlanner::plan(from, group, goal, timeout, result, path_constraints);
   }
 };
+
+struct DepthPose {
+  geometry_msgs::msg::PoseStamped pose;
+  std::size_t candidate_index;
+  double depth_m;
+};
+
+// Search only the one-dimensional insertion coordinate, not a new orientation
+// or a model-side offset. Bound insertion by the observed object's far face
+// projected onto TCP +Z. Use the existing scene resolution, including both
+// endpoints; this is a discrete search, not a claim of an exact global optimum.
+std::vector<DepthPose> grasp_depth_poses(const PickPlace::Goal &goal, double resolution) {
+  std::vector<DepthPose> result;
+  const auto &object = goal.object_pose;
+  const Eigen::Vector3d center(object.position.x, object.position.y, object.position.z);
+  const Eigen::Quaterniond object_rotation(object.orientation.w, object.orientation.x,
+                                          object.orientation.y, object.orientation.z);
+  const Eigen::Vector3d size(goal.object_size.x, goal.object_size.y, goal.object_size.z);
+  for (std::size_t index = 0; index < goal.grasp_poses.size(); ++index) {
+    const auto &pose = goal.grasp_poses[index];
+    const Eigen::Quaterniond rotation(pose.orientation.w, pose.orientation.x,
+                                      pose.orientation.y, pose.orientation.z);
+    const Eigen::Vector3d axis = rotation * Eigen::Vector3d::UnitZ();
+    const Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
+    const Eigen::Vector3d object_axis = object_rotation.conjugate() * axis;
+    const double far_face = axis.dot(center - position) + 0.5 * object_axis.cwiseAbs().dot(size);
+    const double maximum = std::max(0.0, far_face);
+    const std::size_t steps = static_cast<std::size_t>(std::ceil(maximum / resolution));
+    for (std::size_t step = 0; step <= steps; ++step) {
+      const double depth = std::min(step * resolution, maximum);
+      DepthPose variant;
+      variant.pose.header.frame_id = goal.frame_id;
+      variant.pose.pose = pose;
+      variant.pose.pose.position.x += axis.x() * depth;
+      variant.pose.pose.position.y += axis.y() * depth;
+      variant.pose.pose.position.z += axis.z() * depth;
+      variant.candidate_index = index;
+      variant.depth_m = depth;
+      result.push_back(std::move(variant));
+    }
+  }
+  return result;
+}
 
 class GeneratePoses final : public mtc::stages::GeneratePose {
 public:
   GeneratePoses(const std::string &name,
-                std::vector<geometry_msgs::msg::PoseStamped> poses)
+                std::vector<DepthPose> poses)
       : mtc::stages::GeneratePose(name),
         poses_(std::move(poses)) {}
 
@@ -140,20 +228,24 @@ public:
     for (std::size_t index = 0; index < poses_.size(); ++index) {
       mtc::InterfaceState state(scene);
       forwardProperties(*upstream.end(), state);
-      state.properties().set("target_pose", poses_[index]);
-      state.properties().set("grasp_candidate_index", index);
+      const auto &variant = poses_[index];
+      state.properties().set("target_pose", variant.pose);
+      state.properties().set("grasp_candidate_index", variant.candidate_index);
+      state.properties().set("grasp_depth_m", variant.depth_m);
       mtc::SubTrajectory trajectory;
-      trajectory.setComment("candidate " + std::to_string(index));
+      trajectory.setComment("candidate " + std::to_string(variant.candidate_index) +
+                            " depth +" + std::to_string(variant.depth_m * 1000.0) + " mm");
       spawn(std::move(state), std::move(trajectory));
     }
   }
 
 private:
-  std::vector<geometry_msgs::msg::PoseStamped> poses_;
+  std::vector<DepthPose> poses_;
 };
 
 // Scene supplies candidates in descending model confidence. Preserve that
-// ordering among COMPLETE plans, then use motion cost within one candidate.
+// ordering among COMPLETE plans, then prefer deeper insertion within that
+// candidate, and finally motion cost. A zero-depth variant is always retained.
 // Joint travel alone is not a measure of whether a learned grasp will hold.
 std::size_t grasp_candidate_index(const mtc::SolutionBase &solution) {
   // ComputeIK creates a NEW SubTrajectory, not a wrapper around the generator.
@@ -167,6 +259,22 @@ std::size_t grasp_candidate_index(const mtc::SolutionBase &solution) {
     for (const auto *child : sequence->solutions())
       index = std::min(index, grasp_candidate_index(*child));
   return index;
+}
+
+double grasp_depth(const mtc::SolutionBase &solution) {
+  if (solution.end() && solution.end()->properties().hasProperty("grasp_depth_m"))
+    return solution.end()->properties().get<double>("grasp_depth_m");
+  if (const auto *wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution))
+    return grasp_depth(*wrapped->wrapped());
+  double depth = 0.0;
+  if (const auto *sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution))
+    for (const auto *child : sequence->solutions())
+      depth = std::max(depth, grasp_depth(*child));
+  return depth;
+}
+
+auto grasp_solution_rank(const mtc::SolutionBase &solution) {
+  return std::make_tuple(grasp_candidate_index(solution), -grasp_depth(solution), solution.cost());
 }
 
 moveit_msgs::msg::CollisionObject box(const std::string &frame_id,
@@ -347,7 +455,10 @@ private:
         std::make_shared<mtc::solvers::PipelinePlanner>(shared_from_this());
     auto cartesian = std::make_shared<mtc::solvers::CartesianPath>();
     auto joint_interpolation =
-        std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+        std::make_shared<CheckedJointInterpolation>();
+    pipeline->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+    cartesian->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+    joint_interpolation->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
 
     auto current = std::make_unique<mtc::stages::CurrentState>("current state");
     task.add(std::move(current));
@@ -392,16 +503,8 @@ private:
       approach->setDirection(direction(kTcpFrame, 1.0));
       pick->insert(std::move(approach));
 
-      std::vector<geometry_msgs::msg::PoseStamped> candidate_poses;
-      candidate_poses.reserve(goal.grasp_poses.size());
-      for (std::size_t index = 0; index < goal.grasp_poses.size(); ++index) {
-        geometry_msgs::msg::PoseStamped target;
-        target.header.frame_id = goal.frame_id;
-        target.pose = goal.grasp_poses[index];
-        candidate_poses.push_back(std::move(target));
-      }
       auto generator =
-          std::make_unique<GeneratePoses>("grasp candidates", std::move(candidate_poses));
+          std::make_unique<GeneratePoses>("grasp candidates", grasp_depth_poses(goal, octomap_resolution_));
       generator->properties().configureInitFrom(mtc::Stage::PARENT);
       generator->setMonitoredStage(open_stage);
       auto grasp_ik = std::make_unique<mtc::stages::ComputeIK>(
@@ -409,7 +512,7 @@ private:
       grasp_ik->setGroup(kArmGroup);
       grasp_ik->setEndEffector(kEndEffector);
       grasp_ik->setMaxIKSolutions(8);
-      grasp_ik->setForwardedProperties({"grasp_candidate_index"});
+      grasp_ik->setForwardedProperties({"grasp_candidate_index", "grasp_depth_m"});
       grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
       grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
                                                {"target_pose"});
@@ -436,7 +539,7 @@ private:
 
       auto lift =
           std::make_unique<mtc::stages::MoveRelative>(
-              "lift object", std::make_shared<PositionOnlyPlanner>(shared_from_this()));
+              "lift object", std::make_shared<SupportAwareCartesianPath>());
       lift->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
       lift->setIKFrame(kTcpFrame);
       // A zero minimum lets MoveRelative accept an empty Cartesian path.
@@ -544,17 +647,17 @@ private:
       const auto best = std::min_element(
           task.solutions().begin(), task.solutions().end(),
           [](const auto &left, const auto &right) {
-            return std::make_pair(grasp_candidate_index(*left), left->cost()) <
-                   std::make_pair(grasp_candidate_index(*right), right->cost());
+            return grasp_solution_rank(*left) < grasp_solution_rank(*right);
           });
       const auto *solution = best->get();
       for (const auto &complete : task.solutions())
-        RCLCPP_INFO(get_logger(), "complete candidate %zu, motion cost %.6f%s",
-                    grasp_candidate_index(*complete), complete->cost(),
+        RCLCPP_INFO(get_logger(), "complete candidate %zu, insertion +%.3f mm, motion cost %.6f%s",
+                    grasp_candidate_index(*complete), grasp_depth(*complete) * 1000.0, complete->cost(),
                     complete.get() == solution ? " (selected)" : "");
       result->selected_cost = solution->cost();
       feedback(handle, "planned", "selected complete candidate " +
-                   std::to_string(grasp_candidate_index(*solution)),
+                   std::to_string(grasp_candidate_index(*solution)) + " / 加深 " +
+                   std::to_string(grasp_depth(*solution) * 1000.0) + " mm",
                task.numSolutions(), solution->cost());
       task.introspection().publishSolution(*solution);
       feedback(handle, "executing", "execute selected task solution",

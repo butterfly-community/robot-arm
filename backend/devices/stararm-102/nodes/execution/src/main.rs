@@ -22,6 +22,9 @@ use stararm_102_model::{
     validate_command,
 };
 
+mod gripper_feedback;
+use gripper_feedback::GripperFeedbackController;
+
 const ADAPTER_REVISION: &str = "stararm-102-fashionstar-v1";
 const SERVO_IDS: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
 const ALL_SERVOS_ID: u8 = 0xff;
@@ -35,6 +38,23 @@ const DEFAULT_FEEDBACK_INTERVAL_MS: u64 = 100;
 
 fn default_feedback_interval_ms() -> u64 {
     DEFAULT_FEEDBACK_INTERVAL_MS
+}
+
+fn default_gripper_strength_percent() -> f64 {
+    50.0 // User-requested measured feedback target, not a power command.
+}
+
+fn changed_servo_commands(
+    previous: Option<&[PositionCommand; 7]>,
+    commands: &[PositionCommand; 7],
+) -> Vec<PositionCommand> {
+    commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            (previous.is_none_or(|last| last[index] != *command)).then_some(*command)
+        })
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -107,7 +127,7 @@ impl StarArmBus {
         let parameters = read_parameters(&mut bus);
         let monitors = read_sorted_monitors(&mut bus)?;
         let state = state_from_monitors(&monitors, 1);
-        let telemetry = telemetry_from_monitors(&monitors, 1, state.sample_time_ns);
+        let telemetry = telemetry_from_monitors(&monitors, 1, state.sample_time_ns, None);
         Ok((
             Self {
                 bus,
@@ -122,7 +142,14 @@ impl StarArmBus {
     fn read_state(&mut self, sequence: u64) -> Result<(ArmState, ArmTelemetry), String> {
         let monitors = read_sorted_monitors(&mut self.bus)?;
         let state = state_from_monitors(&monitors, sequence);
-        let telemetry = telemetry_from_monitors(&monitors, sequence, state.sample_time_ns);
+        let telemetry = telemetry_from_monitors(
+            &monitors,
+            sequence,
+            state.sample_time_ns,
+            self.last_commands
+                .as_ref()
+                .map(|commands| commands[6].power_mw),
+        );
         Ok((state, telemetry))
     }
 
@@ -165,13 +192,15 @@ impl StarArmBus {
         Ok(())
     }
 
-    fn write(&mut self, command: &ArmCommand) -> Result<bool, String> {
-        let commands = encode_command(command)?;
-        if self.last_commands.as_ref() == Some(&commands) {
+    fn write(&mut self, command: &ArmCommand, gripper_power_mw: u16) -> Result<bool, String> {
+        let mut commands = encode_command(command)?;
+        commands[6].power_mw = gripper_power_mw;
+        let changed = changed_servo_commands(self.last_commands.as_ref(), &commands);
+        if changed.is_empty() {
             return Ok(false);
         }
         self.bus
-            .write_positions(&commands)
+            .write_positions(&changed)
             .map_err(|error| format!("串口写入失败：{error}"))?;
         self.last_commands = Some(commands);
         Ok(true)
@@ -185,6 +214,8 @@ struct ExecutionConfig {
     selected_endpoint: Option<String>,
     #[serde(default = "default_feedback_interval_ms")]
     feedback_interval_ms: u64,
+    #[serde(default = "default_gripper_strength_percent")]
+    gripper_strength_percent: f64,
 }
 
 impl Default for ExecutionConfig {
@@ -194,6 +225,7 @@ impl Default for ExecutionConfig {
             config_version: 1,
             selected_endpoint: None,
             feedback_interval_ms: DEFAULT_FEEDBACK_INTERVAL_MS,
+            gripper_strength_percent: default_gripper_strength_percent(),
         }
     }
 }
@@ -208,6 +240,7 @@ struct StarArmExecution {
     bus: Option<StarArmBus>,
     next_sequence: u64,
     last_feedback_poll: Option<Instant>,
+    gripper_hold: GripperFeedbackController,
 }
 
 impl StarArmExecution {
@@ -237,6 +270,7 @@ impl StarArmExecution {
 
     fn with_config(config_path: PathBuf, config: ExecutionConfig) -> Self {
         let feedback_interval_ms = config.feedback_interval_ms;
+        let gripper_strength_percent = config.gripper_strength_percent;
         Self {
             config_path,
             config,
@@ -244,6 +278,7 @@ impl StarArmExecution {
             transport: ExecutionTransportState {
                 schema_version: SCHEMA_VERSION,
                 feedback_interval_ms,
+                gripper_strength_percent: Some(gripper_strength_percent),
                 ..Default::default()
             },
             state: ArmState {
@@ -265,6 +300,7 @@ impl StarArmExecution {
             bus: None,
             next_sequence: 1,
             last_feedback_poll: None,
+            gripper_hold: GripperFeedbackController::default(),
         }
     }
 
@@ -344,7 +380,9 @@ impl StarArmExecution {
             RequestAction::Apply => {
                 if request.fields.contains_key("torque_mode") {
                     self.apply_torque(&request.fields).err()
-                } else if request.fields.contains_key("feedback_interval_ms") {
+                } else if request.fields.contains_key("feedback_interval_ms")
+                    || request.fields.contains_key("gripper_strength_percent")
+                {
                     self.apply_execution_config(&request.fields).err()
                 } else {
                     self.apply_parameters(&request.fields).err()
@@ -371,7 +409,12 @@ impl StarArmExecution {
         self.bus
             .as_mut()
             .ok_or_else(|| "真机串口未连接".to_owned())?
-            .set_torque(hold)
+            .set_torque(hold)?;
+        if !hold {
+            self.gripper_hold = GripperFeedbackController::default();
+            self.transport.gripper_control_power_mw = None;
+        }
+        Ok(())
     }
 
     fn apply_parameters(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
@@ -406,17 +449,26 @@ impl StarArmExecution {
     }
 
     fn apply_execution_config(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
-        let feedback_interval_ms = fields
-            .get("feedback_interval_ms")
-            .ok_or_else(|| "执行配置缺少 feedback_interval_ms".to_owned())?
-            .parse::<u64>()
-            .map_err(|error| format!("feedback_interval_ms 无效：{error}"))?;
         let mut next = self.config.clone();
-        next.feedback_interval_ms = feedback_interval_ms;
+        if let Some(value) = fields.get("feedback_interval_ms") {
+            next.feedback_interval_ms = value
+                .parse::<u64>()
+                .map_err(|error| format!("feedback_interval_ms 无效：{error}"))?;
+        }
+        if let Some(value) = fields.get("gripper_strength_percent") {
+            let strength = value
+                .parse::<f64>()
+                .map_err(|error| format!("夹爪力度无效：{error}"))?;
+            if !strength.is_finite() || !(0.0..=100.0).contains(&strength) {
+                return Err("夹爪力度使用已有的 0–100 反馈刻度".into());
+            }
+            next.gripper_strength_percent = strength;
+        }
         next.config_version += 1;
         save(&self.config_path, &next).map_err(|error| error.to_string())?;
         self.config = next;
-        self.transport.feedback_interval_ms = feedback_interval_ms;
+        self.transport.feedback_interval_ms = self.config.feedback_interval_ms;
+        self.transport.gripper_strength_percent = Some(self.config.gripper_strength_percent);
         self.last_feedback_poll = None;
         Ok(())
     }
@@ -466,6 +518,11 @@ impl StarArmExecution {
     }
 
     fn disconnect(&mut self) {
+        self.gripper_hold = GripperFeedbackController::default();
+        self.transport.gripper_control_power_mw = None;
+        self.transport.gripper_strength_feedback_percent = None;
+        self.transport.gripper_feedback_telemetry = None;
+        self.transport.gripper_feedback_time_ns = None;
         self.bus = None;
         self.last_feedback_poll = None;
         self.transport.connected = false;
@@ -477,9 +534,18 @@ impl StarArmExecution {
             self.transport.last_error = Some(error);
             return;
         }
+        let gripper_angle = match degrees_to_tenths(command.actuators_rad[0].to_degrees()) {
+            Ok(angle) => angle,
+            Err(error) => {
+                self.transport.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        self.gripper_hold.request(gripper_angle);
+        self.transport.gripper_control_power_mw = self.gripper_hold.regulated_power_mw;
         if let Some(bus) = self.bus.as_mut() {
             self.transport.last_command = Some(command.clone());
-            if let Err(error) = bus.write(&command) {
+            if let Err(error) = bus.write(&command, self.gripper_hold.command_power_mw()) {
                 self.reopen_after_io_error(error);
             } else {
                 self.transport.last_error = None;
@@ -517,6 +583,31 @@ impl StarArmExecution {
             Some(Ok((state, telemetry))) => {
                 self.state = state;
                 self.telemetry = telemetry;
+                self.transport.gripper_feedback_telemetry = self
+                    .telemetry
+                    .actuators
+                    .iter()
+                    .find(|actuator| actuator.actuator_key == "gripper")
+                    .cloned();
+                self.transport.gripper_feedback_time_ns = Some(self.telemetry.sample_time_ns);
+                let strength = primary_tool_feedback(&self.telemetry).strength_percent;
+                self.transport.gripper_strength_feedback_percent = Some(strength);
+                if self
+                    .gripper_hold
+                    .observe(strength, self.config.gripper_strength_percent)
+                {
+                    self.transport.gripper_control_power_mw = self.gripper_hold.regulated_power_mw;
+                    if let (Some(bus), Some(requested)) =
+                        (&mut self.bus, &self.transport.last_command)
+                    {
+                        if let Err(error) =
+                            bus.write(requested, self.gripper_hold.command_power_mw())
+                        {
+                            self.reopen_after_io_error(error);
+                            return true;
+                        }
+                    }
+                }
                 self.next_sequence += 1;
                 self.transport.last_error = None;
                 self.transport.feedback_summary =
@@ -694,6 +785,7 @@ fn telemetry_from_monitors(
     monitors: &[Monitor; 7],
     sequence: u64,
     sample_time_ns: i64,
+    gripper_command_power_mw: Option<u16>,
 ) -> ArmTelemetry {
     ArmTelemetry {
         schema_version: SCHEMA_VERSION,
@@ -707,7 +799,11 @@ fn telemetry_from_monitors(
                 voltage_mv: monitor.voltage_mv,
                 current_ma: monitor.current_ma,
                 power_mw: monitor.power_mw,
-                command_power_limit_mw: (monitor.id == 6).then_some(GRIPPER_COMMAND_POWER_MW),
+                command_power_limit_mw: if monitor.id == 6 {
+                    gripper_command_power_mw
+                } else {
+                    None
+                },
                 temperature_raw: monitor.temperature_raw,
                 status: monitor.status,
             })
@@ -833,6 +929,50 @@ mod tests {
         assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
         assert_eq!(execution.state.joints_rad, joints);
     }
+
+    #[test]
+    fn strength_config_persists_without_changing_feedback_period() {
+        let path = config_path();
+        let mut execution = StarArmExecution::with_config(path.clone(), ExecutionConfig::default());
+        let result = execution.handle_request(ExecutionRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "strength-config".into(),
+            action: RequestAction::Apply,
+            fields: BTreeMap::from([("gripper_strength_percent".into(), "50".into())]),
+        });
+        assert!(result.original_error.is_none());
+        let saved: ExecutionConfig = load_or_default(&path).unwrap();
+        assert_eq!(saved.gripper_strength_percent, 50.0);
+        assert_eq!(saved.feedback_interval_ms, DEFAULT_FEEDBACK_INTERVAL_MS);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn sub_uart_roundoff_is_not_a_release_command() {
+        let mut execution = StarArmExecution::new();
+        execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 1.0));
+        execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.0));
+        let holding = execution.gripper_hold.regulated_power_mw;
+        assert!(holding.is_some());
+        // Native trajectory endpoint seen in execution 9; it encodes to 0°.
+        execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 6.811975009831889e-17));
+        assert_eq!(execution.gripper_hold.regulated_power_mw, holding);
+        execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.1_f64.to_radians()));
+        assert_eq!(execution.gripper_hold.regulated_power_mw, None);
+    }
+
+    #[test]
+    fn disconnect_removes_regulation_and_stale_strength() {
+        let mut execution = StarArmExecution::new();
+        execution.gripper_hold.request(10);
+        execution.gripper_hold.request(0);
+        execution.gripper_hold.observe(50.0, 50.0);
+        execution.transport.gripper_strength_feedback_percent = Some(50.0);
+        execution.disconnect();
+        assert!(!execution.gripper_hold.observe(20.0, 50.0));
+        assert_eq!(execution.gripper_hold.regulated_power_mw, None);
+        assert_eq!(execution.transport.gripper_strength_feedback_percent, None);
+    }
     #[test]
     fn selected_but_disconnected_hardware_freezes_the_visible_state() {
         let mut execution = StarArmExecution::new();
@@ -927,6 +1067,25 @@ mod tests {
         let first = encode_command(&command(vec![0.1; 6], 0.2)).unwrap();
         let same_tenths = encode_command(&command(vec![0.1001; 6], 0.2001)).unwrap();
         assert_eq!(first, same_tenths);
+    }
+    #[test]
+    fn arm_transport_does_not_reissue_an_unchanged_gripper_command() {
+        let first = encode_command(&command(vec![0.1; 6], 0.0)).unwrap();
+        let mut next = first;
+        next[0].position_tenths_degree += 1;
+        assert_eq!(changed_servo_commands(Some(&first), &next), vec![next[0]]);
+        assert_eq!(changed_servo_commands(None, &next), next.to_vec());
+        assert!(changed_servo_commands(Some(&next), &next).is_empty());
+        let previous = next;
+        next[6].power_mw -= 1;
+        assert_eq!(
+            changed_servo_commands(Some(&previous), &next),
+            vec![next[6]]
+        );
+        assert_eq!(
+            next[6].position_tenths_degree,
+            previous[6].position_tenths_degree
+        );
     }
     #[test]
     fn parameter_refresh_does_not_enumerate_serial_endpoints() {

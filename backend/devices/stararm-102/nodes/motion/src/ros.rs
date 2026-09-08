@@ -23,7 +23,7 @@ use crate::core::Pose;
 
 const MOVEIT_SUCCESS: i64 = 1;
 const MOVE_GROUP_DEFAULT_PLANNING_TIME_S: f64 = 5.0;
-const MOVE_GROUP_DEFAULT_SCALING_FACTOR: f64 = 1.0;
+const MOVE_GROUP_DEFAULT_VELOCITY_SCALING_FACTOR: f64 = 0.25;
 // FCL's distance query used by MoveIt Servo does not support an infinite plane
 // reliably. This solid covers the complete StarArm-102-FL workspace and keeps
 // the same ground surface at Z=0.
@@ -528,8 +528,8 @@ impl RosInterface {
             "group_name": "arm",
             "pipeline_id": "ompl",
             "allowed_planning_time": MOVE_GROUP_DEFAULT_PLANNING_TIME_S,
-            "max_velocity_scaling_factor": MOVE_GROUP_DEFAULT_SCALING_FACTOR,
-            "max_acceleration_scaling_factor": MOVE_GROUP_DEFAULT_SCALING_FACTOR,
+            "max_velocity_scaling_factor": MOVE_GROUP_DEFAULT_VELOCITY_SCALING_FACTOR,
+            "max_acceleration_scaling_factor": 1.0,
             "start_state": {
                 "joint_state": {"name": JOINTS, "position": job.current},
                 "is_diff": false,

@@ -1772,6 +1772,16 @@ pub struct ExecutionTransportState {
     pub selected_endpoint: Option<String>,
     pub connected: bool,
     pub feedback_interval_ms: u64,
+    #[serde(default)]
+    pub gripper_strength_percent: Option<f64>,
+    #[serde(default)]
+    pub gripper_strength_feedback_percent: Option<f64>,
+    #[serde(default)]
+    pub gripper_control_power_mw: Option<u16>,
+    #[serde(default)]
+    pub gripper_feedback_telemetry: Option<ActuatorTelemetry>,
+    #[serde(default)]
+    pub gripper_feedback_time_ns: Option<i64>,
     pub last_error: Option<String>,
     pub last_command: Option<ArmCommand>,
     pub feedback_summary: Option<String>,
