@@ -5,7 +5,7 @@
   "scripts": {
     "format:check": "prettier --check web tests *.config.* components.json ../tests/integration/*.mjs",
     "format": "prettier --write web tests *.config.* components.json ../tests/integration/*.mjs",
-    "lint": "pnpm -r --if-present lint",
+    "lint": "eslint web",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
     "test:e2e": "playwright test",

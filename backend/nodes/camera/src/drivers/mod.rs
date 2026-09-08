@@ -241,8 +241,7 @@ mod tests {
             #[cfg(feature = "opencv-runtime")]
             {
                 use opencv::imgcodecs;
-                // This module is also compiled by the hardware smoke binary;
-                // its tests must not depend on camera-node's private helpers.
+                // Exercise the codec boundary independently of snapshot helpers.
                 let image = image::RgbImage::from_raw(
                     frame.width,
                     frame.height,

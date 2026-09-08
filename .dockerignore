@@ -1,4 +1,13 @@
 .git
+.codex
+.agents
+.env
+.env.*
+**/.env
+**/.env.*
+backend/config/runtime
+core
+core.[0-9]*
 temp
 **/target
 **/.venv

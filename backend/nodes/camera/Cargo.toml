@@ -15,9 +15,8 @@ opencv-runtime = ["dep:camera-calibration"]
 name = "camera-node"
 path = "src/main.rs"
 
-[[bin]]
+[[example]]
 name = "realsense-smoke"
-path = "src/bin/realsense-smoke.rs"
 required-features = ["realsense-runtime"]
 
 [dependencies]

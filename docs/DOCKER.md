@@ -1,5 +1,12 @@
 # Docker 与服务镜像
 
+构建上下文仅使用根目录、`frontend/` 和 `backend/services/perception-compute/`；
+各自的 `.dockerignore` 排除本地 `.env*`、缓存和运行配置。计算基础镜像使用根上下文及
+`Dockerfile.base.dockerignore`，该文件会覆盖根规则，必须同步排除这些本地资源。
+不维护未被构建入口使用的 `backend/.dockerignore`。正式标定配置只由 Compose 挂载，不打进镜像。
+规则按 [Docker 构建上下文约定](https://docs.docker.com/build/concepts/context/#dockerignore-files) 生效，
+不是 Git 忽略规则的继承。
+
 ## 原则
 
 每个服务在自己的目录维护 Dockerfile、专属构建依赖和专属运行依赖。只有三个以上后端服务共同

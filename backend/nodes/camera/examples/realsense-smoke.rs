@@ -1,14 +1,9 @@
-#![allow(dead_code)]
-
-#[path = "../drivers/mod.rs"]
-mod drivers;
-
 use std::time::{Duration, Instant};
 
 use eyre::{Result, eyre};
 use robot_arm_messages::CameraStreamKind;
 
-use crate::drivers::RealSenseDriver;
+use realsense_camera::RealSenseDriver;
 
 fn main() -> Result<()> {
     let mut driver = RealSenseDriver::new()?;

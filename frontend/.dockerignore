@@ -1,4 +1,10 @@
 .git
+.env
+.env.*
+**/.env
+**/.env.*
+.pnpm-store
+**/.turbo
 node_modules
 **/node_modules
 **/.next

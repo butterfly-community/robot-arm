@@ -35,6 +35,11 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 编号。SDK 类型与指针只存在于该 crate。`docs-only` feature 供无 SDK 环境检查，运行镜像启用
 `runtime`。
 
+硬件诊断使用 `camera-node` 的 `realsense-smoke` Cargo example，直接调用此 crate；
+不再引入整个节点驱动模块，也不重复编译模拟资产测试。使用相机所属构建环境执行
+`cargo run --release --locked -p camera-node --example realsense-smoke --features realsense-runtime`；
+会实际占用相机，须先停用该相机的采集，不能与服务争用设备。
+
 ## `camera-node`
 
 节点统一管理硬件与 simulation 适配器、持久配置、采集和标定。Dora 循环只处理请求、状态和

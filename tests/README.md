@@ -6,10 +6,13 @@
 
 文档整理后在根目录运行 `node tools/check-doc-links.mjs` 检查本地内联链接目标；
 此检查不访问服务、不发控制请求，也不验证外部网页和标题锚点。
+检查器本身的回归运行 `node --test tests/tools/check-doc-links.test.mjs`；
+Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成输入，不构建基础镜像。
 
 ## 前端
 
 在 `frontend` 执行 `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`。
+`lint` 覆盖 `web/apps` 和 `web/packages`，不能只检查有独立脚本的应用而遗漏共享库。
 服务启动后执行 `pnpm test:e2e`，使用正式页面、模型与软件反馈；部分测试会断开执行器、
 运行模型、切换相机和改变模拟姿态，不能和人工操作并行。测试中的拦截只用于浏览器故障回归，
 不会进入生产链路。截图在 `temp/playwright/`。
