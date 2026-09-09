@@ -59,6 +59,10 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 `poll_calibration_work()` 接收结果。会话取消后旧任务结果不再应用，不新增进程或服务。
 自动流程先等运动节点确认进入手动模式，再逐个提交姿态；成功后等 10 秒并等下一帧采样。
 会话进度只在内存中，只有确认应用的外参由 `apply_solved_calibration()` 先落盘再替换配置。
+`camera_state.saved_calibrations` 独立发布已落盘的完整结果，不依赖当前会话、相机连接或新图像。
+网页显示上次标定的时间、样本数、外参和拟合残差；已有结果时禁用开始按钮，使用确认按钮旁的
+“重新标定”启动同一流程。重新标定或取消不会删除旧外参，只有确认应用才替换。
+相机节点启动时通过现有异步采集 worker 自动发现来源（与网页刷新共用），不自动选择或打开设备。
 
 标定采样先固定一张新图，等待主机接收该图之后采集的电机反馈及其 FK 结果，然后在同一任务中
 识别该图并保存观测。`current_tool_pose.arm_state` 是该 TCP 的原始 FK 输入，含反馈来源、批次、
@@ -124,8 +128,10 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 `undistortPoints`，支持 Brown-Conrady / rational 和 Kannala-Brandt / equidistant；
 后者即使系数为零也调用 fisheye 版本，非鱼眼的零畸变才按针孔反投影。
 非零畸变的其他模型明确返回不支持，不再忽略系数产生错误点云。深度注册仍由采集层 SDK 完成。
-提示词与放置区域角色由用户配置，
-不写死测试类别。新帧不会自动触发模型，刷新静态预览也不会触发模型。
+提示词模式的文字与放置区域角色由用户配置，不写死测试类别。自动分割模式不使用这些
+隐藏配置，实际识别出的实例同时提供抓取与放置候选，由用户或 AI 选择目标。
+模型 ID 持久保存在场景配置；切换模型不丢弃已保存的文字配置。
+新帧不会自动触发模型，刷新静态预览也不会触发模型。
 
 `PerceptionRequest.prompt` 可显式指定 `{"kind":"text"}` 或
 `{"kind":"visual","reference_image_base64":"…","bboxes":[[x1,y1,x2,y2]],"class_ids":[0]}`。
@@ -145,8 +151,10 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 它只增加同一模型的候选探索数量，不修改分数门限、候选位姿、关节范围或碰撞规则。
 真实长方体任务最终使用 4000 个原始采样，得到 209 个有效候选；不能把采样数当作有效候选数或成功证明。
 
-FastAPI lifespan 只加载一次 `YoloeBackend` 与 `GraspGenXBackend`。`/v1/segment` 解码彩色图，
-按请求调用 YOLOE 提示词识别/分割并返回类别、置信度、二维框和 PNG mask；`/v1/grasps` 接收一个
+FastAPI lifespan 加载提示词 `yoloe-26x-seg.pt`、自动分割 `yoloe-26x-seg-pf.pt` 和
+共用的 `GraspGenXBackend`。`/v1/model` 返回模型目录和 `prompt_free` 能力；网页据此隐藏
+提示词专属配置，不新增自动模式的配置面板。`/v1/segment` 按请求 `model` 选择模型，
+解码同一 RGB 图并返回模型 ID、类别、置信度、二维框和 PNG mask；`/v1/grasps` 接收一个
 实例点云、排除该实例的环境点云和 `gripper_asset_id`，返回该资产 TCP 的 SE(3) 候选、分数与分支。
 YOLOE 的提示词更新和推理共用一把实例锁，避免并发请求混用类别；GraspGenX 也串行访问共享 sampler。
 文字与视觉提示使用同一 YOLOE 检查点、同一 `/v1/segment` 返回契约。
@@ -154,6 +162,11 @@ YOLOE 的提示词更新和推理共用一把实例锁，避免并发请求混�
 新帧掩膜由模型生成，官方 object0/object1 输出按 class ID 映射调用方名称。
 视觉输入尺寸取原图/参考图最长边，文字模式保留库默认；两种均不覆盖默认置信度。
 没有用示例框代替分割掩膜，也没有新增模拟/真机分支或外部算法服务。
+
+自动分割使用官方 prompt-free 权重的内置词表和 `result.names`，不调用 `set_classes`，
+不传入文字或视觉提示，也不覆盖默认阈值/输入尺寸。它不是任意物体都能识别的保证；
+也不是普通 YOLO26 的固定 COCO 80 类模型。两种模型共用后续深度融合、抓取与运动链路。
+参见 [YOLOE 官方用法](https://docs.ultralytics.com/models/yoloe/)。
 
 CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora、ROS 或 MoveIt，不读取类别名称
 推断抓放规则。夹爪资产在计算基础镜像中从设备清单与最终补丁 URDF 自动生成，`gripper_asset_id` 决定使用哪套
@@ -222,10 +235,11 @@ HTTP 入站复用 `robot-arm-messages` 请求类型校验；非法载荷在网�
 
 ## Next.js 抓放场景编排
 
-`web-perception` 的服务端 Route Handler 使用 AI SDK 将自然语言先约束为开放词汇提示词和放置
-角色，运行既有 `perception/request` 后，再根据实际 `WorldScene` 约束选择对象与放置区域 ID。
+`web-perception` 的服务端 Route Handler 先查询已保存的模型。提示词模式使用 AI SDK 将自然语言
+转换为开放词汇提示词和放置角色；自动模式保持该模型、跳过提示词配置。
+运行既有 `perception/request` 后，再根据实际 `WorldScene` 选择对象与放置区域 ID。
 任务解析为每个用户指代生成从具体描述到常见视觉类别的少量英文同义提示词，避免把单一语言
-翻译误当成模型固定词表；这些词仍全部由当前指令产生，不包含场景硬编码。
+翻译误当成模型固定词表；用户明确指定的匹配词原样保留，不再扩写。这些词不包含场景硬编码。
 本地校验实例、抓取候选和区域都存在后，才调用既有 `motion/mode` 与 `perception/pick-place`。
 它不是 Dora 节点，不新增消息，也不复制 scene、MTC、碰撞或执行逻辑；浏览器只收到编排结果，
 接触不到 API 密钥。

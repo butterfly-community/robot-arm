@@ -197,11 +197,18 @@ fn run() -> Result<()> {
         calibration_preview: None,
     };
     camera.set_simulation_calibration_active(camera.config.calibration_session.active);
-    // Persisted sources remain visible before the first explicit hardware
-    // refresh. They are unavailable until a driver confirms them.
+    // Show saved metadata immediately, then discover via the same worker used
+    // by the UI refresh button. Discovery does not select or open a camera.
     merge_saved_sources(&mut camera.sources, &camera.config);
     let (mut node, mut events) = DoraNode::init_from_env()?;
     camera.publish_state(&mut node)?;
+    camera
+        .capture_commands
+        .try_send(CaptureCommand::Discover {
+            request_id: "camera-startup-discovery".into(),
+            action: RequestAction::Discover,
+        })
+        .map_err(capture_command_error)?;
     while let Some(event) = events.recv() {
         match event {
             Event::Input { id, data, .. } => match id.as_str() {
@@ -1309,6 +1316,12 @@ impl CameraNode {
                 })
                 .collect(),
             streaming: self.streaming,
+            saved_calibrations: self
+                .config
+                .cameras
+                .values()
+                .filter_map(|camera| camera.calibration.clone())
+                .collect(),
             last_sequence: self.last_sequence,
             last_frame_time_ns: self.last_frame_time_ns,
             measured_frames_per_second: self.measured_frames_per_second,
@@ -1593,6 +1606,7 @@ mod tests {
             selected_depth_profile_key: None,
             output_frames_per_second: None,
             configurations: vec![],
+            saved_calibrations: vec![],
             streaming: false,
             last_sequence: None,
             last_frame_time_ns: None,
@@ -1615,6 +1629,41 @@ mod tests {
         let encoded = serde_json::to_string(&config).unwrap();
         assert!(!encoded.contains("selected_source"));
         assert!(!encoded.contains("calibration_session"));
+    }
+
+    #[test]
+    fn applied_calibration_survives_restart_without_the_pending_session() {
+        let result: CalibrationResult = serde_json::from_value(serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "camera_source_id": "test-camera",
+            "robot_model_revision": "fixture-v1",
+            "calibration_tool_id": "fixture-tool",
+            "board": {"pattern":"charuco", "dictionary":"DICT_4X4_50",
+                "squares_x":5, "squares_y":5, "square_size_m":0.015,
+                "marker_size_m":0.011, "measured_width_m":0.075, "measured_height_m":0.075},
+            "camera_in_base": {"position_m":[0.3,0.05,0.79], "orientation_xyzw":[0,0,0,1]},
+            "board_in_calibration_tool": {"position_m":[0,0,0], "orientation_xyzw":[0,0,0,1]},
+            "solver":"fixture", "solved_at_ns":123, "sample_count":2,
+            "translation_residuals_m":[0.003,0.004], "rotation_residuals_rad":[0.01,0.02]
+        }))
+        .unwrap();
+        let mut config = CameraConfigStore::default();
+        config.cameras.insert(
+            result.camera_source_id.clone(),
+            SavedCalibration {
+                calibration: Some(result.clone()),
+            },
+        );
+        config.calibration_session.active = true;
+        config.calibration_session.phase = CalibrationPhase::Moving;
+        let restored: CameraConfigStore =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            restored.cameras["test-camera"].calibration.as_ref(),
+            Some(&result)
+        );
+        assert!(!restored.calibration_session.active);
+        assert_eq!(restored.calibration_session.phase, CalibrationPhase::Idle);
     }
 
     #[test]

@@ -6,9 +6,15 @@ import type {
   TransformedControlFrame,
 } from "@robot/contracts";
 import { schemaVersion } from "@robot/contracts";
-import { patch, requestId, useGateway } from "@robot/gateway-client";
+import {
+  patch,
+  requestId,
+  useGateway,
+  useDraftValue,
+} from "@robot/gateway-client";
 import {
   Card,
+  Button,
   Field,
   Input,
   JsonView,
@@ -49,6 +55,45 @@ const neutralPose: PoseVisualization = {
   orientation_xyzw: [0, 0, 0, 1],
 };
 
+function ConfigNumber({
+  label,
+  value,
+  nullable = false,
+  disabled,
+  save,
+}: {
+  label: string;
+  value: unknown;
+  nullable?: boolean;
+  disabled: boolean;
+  save: (value: number | null) => Promise<boolean>;
+}) {
+  const saved = value == null ? "" : String(value);
+  const [draft, setDraft] = useDraftValue(saved);
+  return (
+    <>
+      <Input
+        aria-label={label}
+        type="number"
+        step="any"
+        required={!nullable}
+        disabled={disabled}
+        value={draft}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={(event) => {
+          if (draft === saved || !event.currentTarget.reportValidity()) return;
+          void save(draft === "" ? null : Number(draft)).then((accepted) => {
+            if (accepted) setDraft(draft === "" ? "" : String(Number(draft)));
+          });
+        }}
+      />
+      {draft !== saved && (
+        <span className="muted">有未同步修改（离开输入框保存）</span>
+      )}
+    </>
+  );
+}
+
 export default function Page() {
   const { snapshot, error, setError, connection } = useGateway("spatial");
   const values = snapshot?.values ?? {};
@@ -60,11 +105,14 @@ export default function Page() {
   const motion = values.transformed_control as unknown as
     TransformedControlFrame | undefined;
   const effectiveAxes = (config.base_from_tracking_axes ?? []) as number[][];
-  const [axesDraft, setAxesDraft] = useState<number[][]>();
-  const axes = axesDraft ?? effectiveAxes;
+  const [axes, setAxesDraft] = useDraftValue(
+    effectiveAxes.map((row) => row.map(String)),
+  );
+  const [saving, setSaving] = useState(false);
 
   async function update(patchValue: Record<string, Json>) {
     setError(undefined);
+    setSaving(true);
     try {
       await patch("/api/spatial/config", {
         schema_version: schemaVersion,
@@ -75,6 +123,8 @@ export default function Page() {
     } catch (reason) {
       setError(String(reason));
       return false;
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -161,156 +211,175 @@ export default function Page() {
           className="span-4 aligned-row-card"
           eyebrow="Transform configuration"
           title="空间配置"
+          action={
+            <StatusBadge tone={saving ? "cyan" : "neutral"}>
+              {saving ? "正在保存…" : "自动保存"}
+            </StatusBadge>
+          }
         >
-          <Field label="平移倍率">
-            <Input
-              key={String(config.translation_scale ?? "")}
-              type="number"
-              step="any"
-              defaultValue={
-                config.translation_scale == null
-                  ? ""
-                  : Number(config.translation_scale)
-              }
-              onBlur={(event) =>
-                update({ translation_scale: event.currentTarget.valueAsNumber })
-              }
-            />
-          </Field>
-          <Field label="输入坐标 → 前 / 左 / 上坐标映射">
-            <div className="matrix" aria-label="空间坐标映射矩阵">
-              {axes.flatMap((row, rowIndex) =>
-                row.map((value, columnIndex) => (
-                  <Input
-                    key={`${rowIndex}-${columnIndex}`}
-                    type="number"
-                    step="any"
-                    value={value}
-                    aria-label={`映射 ${rowIndex + 1},${columnIndex + 1}`}
-                    onChange={(event) => {
-                      const next = axes.map((item) => [...item]);
-                      next[rowIndex][columnIndex] =
-                        event.currentTarget.valueAsNumber;
-                      setAxesDraft(next);
-                    }}
-                    onBlur={() =>
-                      void update({ base_from_tracking_axes: axes }).then(
-                        (accepted) => {
-                          if (accepted) setAxesDraft(undefined);
-                        },
-                      )
-                    }
-                  />
-                )),
+          <fieldset className="config-fields" disabled={saving}>
+            <Field label="平移倍率">
+              <ConfigNumber
+                label="平移倍率"
+                value={config.translation_scale}
+                disabled={saving}
+                save={(value) => update({ translation_scale: value })}
+              />
+            </Field>
+            <Field label="输入坐标 → 前 / 左 / 上坐标映射">
+              <div className="matrix" aria-label="空间坐标映射矩阵">
+                {axes.flatMap((row, rowIndex) =>
+                  row.map((value, columnIndex) => (
+                    <Input
+                      key={`${rowIndex}-${columnIndex}`}
+                      type="number"
+                      required
+                      step="any"
+                      value={value}
+                      aria-label={`映射 ${rowIndex + 1},${columnIndex + 1}`}
+                      onChange={(event) => {
+                        const next = axes.map((item) => [...item]);
+                        next[rowIndex][columnIndex] = event.currentTarget.value;
+                        setAxesDraft(next);
+                      }}
+                      onBlur={(event) => {
+                        if (!event.currentTarget.reportValidity()) return;
+                        if (
+                          JSON.stringify(axes) ===
+                          JSON.stringify(
+                            effectiveAxes.map((row) => row.map(String)),
+                          )
+                        )
+                          return;
+                        if (
+                          axes.some((row) =>
+                            row.some(
+                              (value) =>
+                                value === "" || !Number.isFinite(Number(value)),
+                            ),
+                          )
+                        )
+                          return;
+                        void update({
+                          base_from_tracking_axes: axes.map((row) =>
+                            row.map(Number),
+                          ),
+                        }).then((accepted) => {
+                          if (accepted)
+                            setAxesDraft(
+                              axes.map((row) =>
+                                row.map((value) => String(Number(value))),
+                              ),
+                            );
+                        });
+                      }}
+                    />
+                  )),
+                )}
+              </div>
+              {JSON.stringify(axes) !==
+                JSON.stringify(effectiveAxes.map((row) => row.map(String))) && (
+                <Button
+                  variant="outline"
+                  onClick={() => setAxesDraft(undefined)}
+                >
+                  恢复已保存映射
+                </Button>
               )}
-            </div>
-          </Field>
-          <Field label="采集分量">
-            <div className="switch-stack">
-              {componentSwitches.map(([key, label]) => (
-                <label key={key} className="switch-row">
-                  <span>{label}</span>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(switches[key])}
-                    onChange={(event) =>
-                      update({
-                        switches: Object.fromEntries(
-                          componentSwitches.map(([switchKey]) => [
-                            switchKey,
-                            switchKey === key
-                              ? event.currentTarget.checked
-                              : Boolean(switches[switchKey]),
-                          ]),
-                        ),
-                      })
-                    }
-                  />
-                </label>
-              ))}
-            </div>
-          </Field>
-          <Field label="设备垂直姿态语义">
-            <select
-              aria-label="设备垂直姿态语义"
-              value={String(
-                (config.orientation_mapping as Record<string, unknown>)
-                  ?.vertical ?? "front_pitch",
-              )}
-              onChange={(event) =>
-                update({
-                  orientation_mapping: {
-                    vertical: event.currentTarget.value,
-                    horizontal: String(
-                      (config.orientation_mapping as Record<string, unknown>)
-                        ?.horizontal ?? "horizontal_arc",
-                    ),
-                  },
-                })
-              }
+            </Field>
+            <Field label="采集分量">
+              <div className="switch-stack">
+                {componentSwitches.map(([key, label]) => (
+                  <label key={key} className="switch-row">
+                    <span>{label}</span>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(switches[key])}
+                      onChange={(event) =>
+                        update({
+                          switches: Object.fromEntries(
+                            componentSwitches.map(([switchKey]) => [
+                              switchKey,
+                              switchKey === key
+                                ? event.currentTarget.checked
+                                : Boolean(switches[switchKey]),
+                            ]),
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+            </Field>
+            <Field label="设备垂直姿态语义">
+              <select
+                aria-label="设备垂直姿态语义"
+                value={String(
+                  (config.orientation_mapping as Record<string, unknown>)
+                    ?.vertical ?? "front_pitch",
+                )}
+                onChange={(event) =>
+                  update({
+                    orientation_mapping: {
+                      vertical: event.currentTarget.value,
+                      horizontal: String(
+                        (config.orientation_mapping as Record<string, unknown>)
+                          ?.horizontal ?? "horizontal_arc",
+                      ),
+                    },
+                  })
+                }
+              >
+                <option value="front_pitch">垂直圆弧</option>
+                <option value="tool_pitch">定点垂直旋转</option>
+              </select>
+            </Field>
+            <Field label="设备水平姿态语义">
+              <select
+                aria-label="设备水平姿态语义"
+                value={String(
+                  (config.orientation_mapping as Record<string, unknown>)
+                    ?.horizontal ?? "horizontal_arc",
+                )}
+                onChange={(event) =>
+                  update({
+                    orientation_mapping: {
+                      vertical: String(
+                        (config.orientation_mapping as Record<string, unknown>)
+                          ?.vertical ?? "front_pitch",
+                      ),
+                      horizontal: event.currentTarget.value,
+                    },
+                  })
+                }
+              >
+                <option value="horizontal_arc">水平圆弧</option>
+                <option value="tool_yaw">定点水平旋转</option>
+              </select>
+            </Field>
+            <Field
+              label="无绝对位置时的平移速度"
+              hint="默认 1 cm/s；配置单位为 m/s"
             >
-              <option value="front_pitch">垂直圆弧</option>
-              <option value="tool_pitch">定点垂直旋转</option>
-            </select>
-          </Field>
-          <Field label="设备水平姿态语义">
-            <select
-              aria-label="设备水平姿态语义"
-              value={String(
-                (config.orientation_mapping as Record<string, unknown>)
-                  ?.horizontal ?? "horizontal_arc",
-              )}
-              onChange={(event) =>
-                update({
-                  orientation_mapping: {
-                    vertical: String(
-                      (config.orientation_mapping as Record<string, unknown>)
-                        ?.vertical ?? "front_pitch",
-                    ),
-                    horizontal: event.currentTarget.value,
-                  },
-                })
-              }
-            >
-              <option value="horizontal_arc">水平圆弧</option>
-              <option value="tool_yaw">定点水平旋转</option>
-            </select>
-          </Field>
-          <Field
-            label="无绝对位置时的平移速度"
-            hint="默认 1 cm/s；配置单位为 m/s"
-          >
-            <Input
-              key={String(config.action_translation_m_per_s ?? "")}
-              type="number"
-              step="any"
-              defaultValue={String(config.action_translation_m_per_s ?? "")}
-              onBlur={(event) =>
-                update({
-                  action_translation_m_per_s:
-                    event.currentTarget.value === ""
-                      ? null
-                      : event.currentTarget.valueAsNumber,
-                })
-              }
-            />
-          </Field>
-          <Field label="无绝对姿态时的圆弧角速度" hint="默认 0.10 rad/s">
-            <Input
-              key={String(config.action_arc_rad_per_s ?? "")}
-              type="number"
-              step="any"
-              defaultValue={String(config.action_arc_rad_per_s ?? "")}
-              onBlur={(event) =>
-                update({
-                  action_arc_rad_per_s:
-                    event.currentTarget.value === ""
-                      ? null
-                      : event.currentTarget.valueAsNumber,
-                })
-              }
-            />
-          </Field>
+              <ConfigNumber
+                label="无绝对位置时的平移速度"
+                value={config.action_translation_m_per_s}
+                nullable
+                disabled={saving}
+                save={(value) => update({ action_translation_m_per_s: value })}
+              />
+            </Field>
+            <Field label="无绝对姿态时的圆弧角速度" hint="默认 0.10 rad/s">
+              <ConfigNumber
+                label="无绝对姿态时的圆弧角速度"
+                value={config.action_arc_rad_per_s}
+                nullable
+                disabled={saving}
+                save={(value) => update({ action_arc_rad_per_s: value })}
+              />
+            </Field>
+          </fieldset>
         </Card>
 
         <Card

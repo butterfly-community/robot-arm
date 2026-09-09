@@ -17,6 +17,7 @@ import {
   prepareRelativeControl,
   requestId,
   useGateway,
+  useDraftValue,
 } from "@robot/gateway-client";
 import {
   Button,
@@ -49,7 +50,6 @@ const simulationPhaseLabels: Record<string, string> = {
   complete: "演示完成",
 };
 type BindingDraft = {
-  configKey: string;
   paths: Record<string, string>;
   sourceIds: Record<string, string>;
   inverted: Record<string, boolean>;
@@ -66,7 +66,6 @@ function decodeBindingDraft(configKey: string): BindingDraft {
     SerializedFeedback[],
   ];
   return {
-    configKey,
     paths: Object.fromEntries(
       bindings.map(([action, , , , components]) => [
         action,
@@ -159,10 +158,10 @@ function DeviceNameEditor({
   onSave,
 }: {
   source: Record<string, unknown>;
-  onSave: (sourceId: string, customName: string) => Promise<void>;
+  onSave: (sourceId: string, customName: string) => Promise<boolean>;
 }) {
   const savedName = String(source.custom_name ?? "");
-  const [name, setName] = useState(savedName);
+  const [name, setName] = useDraftValue(savedName);
   const [saving, setSaving] = useState(false);
 
   return (
@@ -171,6 +170,7 @@ function DeviceNameEditor({
         aria-label={`${String(source.display_name ?? source.source_id)} 自定义名称`}
         placeholder="自定义设备名称"
         value={name}
+        disabled={saving}
         onChange={(event) => setName(event.currentTarget.value)}
       />
       <Button
@@ -179,7 +179,8 @@ function DeviceNameEditor({
         onClick={async () => {
           setSaving(true);
           try {
-            await onSave(String(source.source_id), name);
+            if (await onSave(String(source.source_id), name))
+              setName(name.trim());
           } finally {
             setSaving(false);
           }
@@ -234,8 +235,7 @@ export default function Page() {
     [configKey],
   );
   const [editedDraft, setEditedDraft] = useState<BindingDraft>();
-  const draft =
-    editedDraft?.configKey === configKey ? editedDraft : backendDraft;
+  const draft = editedDraft ?? backendDraft;
   const {
     paths,
     sourceIds,
@@ -254,7 +254,7 @@ export default function Page() {
     "idle" | "success" | "error"
   >("idle");
   const updateDraft = (patch: Partial<BindingDraft>) => {
-    setEditedDraft({ ...draft, ...patch, configKey });
+    setEditedDraft({ ...draft, ...patch });
     setBindingsResult("idle");
   };
 
@@ -320,8 +320,10 @@ export default function Page() {
         source_id: sourceId,
         custom_name: customName.trim() || null,
       });
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     }
   }
 
@@ -364,6 +366,7 @@ export default function Page() {
           }))
           .filter((binding) => binding.source_id && binding.capability_path),
       });
+      setEditedDraft(undefined);
       setBindingsResult("success");
     } catch (reason) {
       setBindingsResult("error");
@@ -654,7 +657,7 @@ export default function Page() {
                     </div>
                   </div>
                   <DeviceNameEditor
-                    key={`${String(source.source_id)}:${String(source.custom_name ?? "")}`}
+                    key={String(source.source_id)}
                     source={source}
                     onSave={renameSource}
                   />
@@ -795,7 +798,10 @@ export default function Page() {
             </div>
           </div>
 
-          <div className="action-groups">
+          <fieldset
+            className="action-groups config-fields"
+            disabled={bindingsApplying}
+          >
             {actionGroupOrder.map((group) => {
               const definitions = inputActionCatalog.filter(
                 (definition) => definition.group === group,
@@ -1041,7 +1047,7 @@ export default function Page() {
                 </section>
               );
             })}
-          </div>
+          </fieldset>
 
           <div className="card-actions binding-submit">
             <Button
@@ -1056,6 +1062,18 @@ export default function Page() {
                     ? "应用失败，重试"
                     : "应用绑定"}
             </Button>
+            {editedDraft && (
+              <Button
+                variant="outline"
+                disabled={bindingsApplying}
+                onClick={() => {
+                  setEditedDraft(undefined);
+                  setBindingsResult("idle");
+                }}
+              >
+                恢复已保存绑定
+              </Button>
+            )}
             {bindingsResult !== "idle" && (
               <StatusBadge
                 tone={bindingsResult === "success" ? "good" : "warning"}

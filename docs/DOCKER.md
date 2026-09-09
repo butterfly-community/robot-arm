@@ -92,6 +92,8 @@ Rust 构建目标中的测试复用该服务环境，Python 运行测试用计�
 Compose 只把 `temp/recordings` 作为录制输出，以及测试 profile 的结果目录；缺失时挂载会创建目录。
 正式配置在 `backend/config/runtime`，相机资产在 `backend/nodes/camera/assets`，
 模型在计算服务所属目录并打入镜像，均不依赖 `temp/`。不要求服务运行中清理的容错。
+自动分割权重 `yoloe-26x-seg-pf.pt` 由计算服务应用 Dockerfile 从 Ultralytics 官方资产下载，
+固定 SHA256 并打入该服务镜像；新增它不要求重建全局基础镜像或其他服务的环境。
 
 controller-input、camera 和 execution 只挂载各自需要的 `/dev`、udev/sysfs 和 cgroup 规则。
 相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D

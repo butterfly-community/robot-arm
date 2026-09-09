@@ -34,6 +34,7 @@ class SegmentRequest(BaseModel):
     image_base64: str
     classes: list[str]
     prompt: SegmentationPrompt = Field(default_factory=TextPrompt)
+    model: str | None = None
 
     @model_validator(mode="after")
     def visual_class_mapping(self):
@@ -56,6 +57,7 @@ class Instance(BaseModel):
 
 
 class SegmentResponse(BaseModel):
+    model: str
     image_width: int
     image_height: int
     instances: list[Instance]
@@ -87,6 +89,7 @@ class GraspResponse(BaseModel):
 class ModelBackend(Protocol):
     model_name: str
     device: str
+    prompt_free: bool
 
     def segment(self, image: Image.Image, classes: list[str],
                 prompt: SegmentationPrompt | None = None) -> list[Instance]: ...
@@ -201,6 +204,7 @@ class GraspGenXBackend:
 class YoloeBackend:
     model_name: str
     device: str
+    prompt_free: bool = False
 
     def __post_init__(self) -> None:
         from ultralytics import YOLOE
@@ -211,7 +215,7 @@ class YoloeBackend:
 
     def segment(self, image: Image.Image, classes: list[str],
                 prompt: SegmentationPrompt | None = None) -> list[Instance]:
-        if not classes:
+        if not classes and not self.prompt_free:
             return []
         # FastAPI runs synchronous endpoints concurrently. Prompt mutation and
         # inference must share the lock, not only predict's internal lock.
@@ -222,7 +226,10 @@ class YoloeBackend:
                  prompt: SegmentationPrompt | None = None) -> list[Instance]:
         requested = tuple(classes)
         options: dict[str, Any] = {}
-        if isinstance(prompt, VisualPrompt):
+        if self.prompt_free:
+            if isinstance(prompt, VisualPrompt):
+                raise ValueError("免提示词模型不支持视觉提示")
+        elif isinstance(prompt, VisualPrompt):
             from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
 
             reference = Image.open(io.BytesIO(base64.b64decode(
@@ -266,7 +273,7 @@ class YoloeBackend:
         ):
             # Official visual outputs are object0/object1; class IDs refer
             # to the caller's configured labels, not a fixed model vocabulary.
-            label = classes[class_id]
+            label = result.names[class_id] if self.prompt_free else classes[class_id]
             mask_image = Image.fromarray((mask * 255).astype(np.uint8))
             encoded = io.BytesIO()
             mask_image.save(encoded, format="PNG")
@@ -284,11 +291,16 @@ class YoloeBackend:
         return instances
 
 
-def default_backend() -> ModelBackend:
-    return YoloeBackend(
+def default_backends() -> list[ModelBackend]:
+    device = os.getenv("PERCEPTION_DEVICE", "cpu")
+    return [YoloeBackend(
         model_name=os.getenv("PERCEPTION_MODEL", "yoloe-26x-seg.pt"),
-        device=os.getenv("PERCEPTION_DEVICE", "cpu"),
-    )
+        device=device,
+    ), YoloeBackend(
+        model_name=os.getenv("PERCEPTION_AUTOMATIC_MODEL", "/models/yoloe-26x-seg-pf.pt"),
+        device=device,
+        prompt_free=True,
+    )]
 
 
 def default_grasp_backend() -> GraspBackend:
@@ -302,16 +314,16 @@ def default_grasp_backend() -> GraspBackend:
 
 
 def create_app(
-    backend_factory: Callable[[], ModelBackend] = default_backend,
+    backend_factory: Callable[[], list[ModelBackend]] = default_backends,
     grasp_backend_factory: Callable[[], GraspBackend] = default_grasp_backend,
 ) -> FastAPI:
-    backend: ModelBackend | None = None
+    backends: list[ModelBackend] = []
     grasp_backend: GraspBackend | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal backend, grasp_backend
-        backend = backend_factory()
+        nonlocal backends, grasp_backend
+        backends = backend_factory()
         grasp_backend = grasp_backend_factory()
         yield
 
@@ -319,7 +331,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        assert backend is not None
+        backend = backends[0]
         return {
             "status": "ready",
             "model": backend.model_name,
@@ -329,20 +341,30 @@ def create_app(
         }
 
     @app.get("/v1/model")
-    def model() -> dict[str, str]:
-        assert backend is not None
+    def model() -> dict[str, Any]:
+        backend = backends[0]
         return {
             "model": backend.model_name,
             "device": backend.device,
             "license": "Ultralytics AGPL-3.0 or Enterprise",
+            "models": [{"id": item.model_name,
+                        "label": os.path.basename(item.model_name),
+                        "prompt_free": item.prompt_free} for item in backends],
         }
 
     @app.post("/v1/segment")
     def segment(request: SegmentRequest) -> SegmentResponse:
-        assert backend is not None
+        backend = next((item for item in backends
+                        if item.model_name == (request.model or backends[0].model_name)), None)
+        if backend is None:
+            raise HTTPException(status_code=400, detail="未知分割模型")
         image = Image.open(io.BytesIO(base64.b64decode(request.image_base64, validate=True)))
-        instances = backend.segment(image, request.classes, request.prompt)
+        try:
+            instances = backend.segment(image, request.classes, request.prompt)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         return SegmentResponse(
+            model=backend.model_name,
             image_width=image.width,
             image_height=image.height,
             instances=instances,

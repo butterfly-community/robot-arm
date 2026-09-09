@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from fastapi import HTTPException
 from PIL import Image
 
 from perception_compute.app import (
@@ -25,6 +27,7 @@ from perception_compute.app import (
 class FakeBackend:
     model_name = "fixture-seg"
     device = "cpu"
+    prompt_free = False
 
     def segment(self, image: Image.Image, classes: list[str], prompt=None) -> list[Instance]:
         mask = Image.new("L", image.size, 255)
@@ -103,7 +106,7 @@ class FakeYoloeModel:
             cls=FakeTensor([0]),
         )
         masks = SimpleNamespace(data=FakeTensor([np.ones((6, 8))]))
-        name = "object0" if "visual_prompts" in options else self.classes[0]
+        name = "object0" if "visual_prompts" in options else (self.classes[0] if self.classes else "pager")
         return [SimpleNamespace(boxes=boxes, masks=masks, names={0: name})]
 
 
@@ -137,6 +140,47 @@ def test_yoloe_uses_official_image_and_native_mask_contract() -> None:
     assert instances[0].label == "red cube"
     mask = Image.open(io.BytesIO(base64.b64decode(instances[0].mask_png_base64)))
     assert mask.size == image.size
+
+
+def test_prompt_free_uses_builtin_names_without_setting_classes():
+    backend = YoloeBackend.__new__(YoloeBackend)
+    backend.device = "cpu"
+    backend.prompt_free = True
+    backend._model = FakeYoloeModel()
+    backend._classes = ()
+    backend._lock = threading.Lock()
+    for classes in ([], ["irrelevant old text"]):
+        result = backend.segment(Image.new("RGB", (8, 6)), classes)
+        assert result[0].label == "pager"
+        assert backend._model.classes == []
+        assert "classes" not in backend._model.predict_options[-1]
+        assert "imgsz" not in backend._model.predict_options[-1]
+    with pytest.raises(ValueError, match="不支持视觉提示"):
+        backend.segment(Image.new("RGB", (8, 6)), ["label"], VisualPrompt(
+            reference_image_base64=encoded_image(), bboxes=[(1, 1, 3, 3)], class_ids=[0]))
+
+
+def test_catalog_and_model_selection_are_per_request():
+    async def exercise():
+        prompted = FakeBackend()
+        automatic = FakeBackend()
+        automatic.model_name = "automatic-fixture"
+        automatic.prompt_free = True
+        app = create_app(lambda: [prompted, automatic], FakeGraspBackend)
+        async with app.router.lifespan_context(app):
+            endpoints = {route.path: route.endpoint for route in app.routes
+                         if hasattr(route, "endpoint")}
+            catalog = endpoints["/v1/model"]()["models"]
+            assert [item["prompt_free"] for item in catalog] == [False, True]
+            for selected in ("automatic-fixture", "fixture-seg", "automatic-fixture"):
+                result = endpoints["/v1/segment"](SegmentRequest(
+                    image_base64=encoded_image(), classes=["test"], model=selected))
+                assert result.model == selected
+            with pytest.raises(HTTPException) as error:
+                endpoints["/v1/segment"](SegmentRequest(
+                    image_base64=encoded_image(), classes=[], model="unknown"))
+            assert error.value.status_code == 400
+    asyncio.run(exercise())
 
 
 def test_official_yoloe_loader_and_predictor_preserve_rgb() -> None:
@@ -331,7 +375,7 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
 
 
 async def exercise_contract() -> None:
-    app = create_app(FakeBackend, FakeGraspBackend)
+    app = create_app(lambda: [FakeBackend()], FakeGraspBackend)
     async with app.router.lifespan_context(app):
         endpoints = {
             route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")
@@ -350,6 +394,7 @@ async def exercise_contract() -> None:
             )
         )
         assert response.image_width == 8
+        assert response.model == "fixture-seg"
         assert response.image_height == 6
         assert response.instances[0].label == "red cube"
         assert Image.open(

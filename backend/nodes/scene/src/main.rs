@@ -14,10 +14,10 @@ use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use robot_arm_messages::{
     AlignedDepthFrame, CameraCaptureState, CameraFrameBundle, CameraImagePlane,
     DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo,
-    PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary, PerceptionRequest,
-    PerceptionState, Pose3, RequestAction, RequestResult, RequestState, RobotModelInfo,
-    SCHEMA_VERSION, SegmentationPrompt, ServiceState, WorldScene, camera_frame_from_arrow,
-    from_arrow, to_arrow,
+    PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary,
+    PerceptionModelInfo, PerceptionRequest, PerceptionState, Pose3, RequestAction, RequestResult,
+    RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt, ServiceState, WorldScene,
+    camera_frame_from_arrow, from_arrow, to_arrow,
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,8 @@ struct SceneConfig {
     #[serde(skip)]
     source_id: Option<String>,
     compute_service_url: String,
+    #[serde(default)]
+    model: Option<String>,
     classes: Vec<String>,
     #[serde(default)]
     prompt: SegmentationPrompt,
@@ -51,6 +53,7 @@ impl Default for SceneConfig {
             enabled: false,
             source_id: None,
             compute_service_url: "http://perception-compute:8000".into(),
+            model: None,
             classes: Vec::new(),
             prompt: SegmentationPrompt::Text,
             placement_labels: Vec::new(),
@@ -64,6 +67,8 @@ struct SceneNode {
     config: SceneConfig,
     http: reqwest::Client,
     model: String,
+    models: Vec<PerceptionModelInfo>,
+    catalog_updates: tokio::sync::watch::Receiver<Option<Result<ModelResponse, String>>>,
     latest_bundle: Option<CameraFrameBundle>,
     camera_state: Option<CameraCaptureState>,
     sequence: u64,
@@ -85,6 +90,7 @@ struct SceneNode {
 
 struct ProcessedScene {
     model: String,
+    models: Vec<PerceptionModelInfo>,
     color: CameraImagePlane,
     scene: WorldScene,
     aligned_depth: AlignedDepthFrame,
@@ -102,6 +108,7 @@ struct SceneTaskResult {
 
 #[derive(Serialize)]
 struct SegmentRequest<'a> {
+    model: &'a str,
     image_base64: String,
     classes: &'a [String],
     prompt: &'a SegmentationPrompt,
@@ -112,9 +119,10 @@ struct SegmentResponse {
     instances: Vec<SegmentInstance>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ModelResponse {
     model: String,
+    models: Vec<PerceptionModelInfo>,
 }
 
 #[derive(Deserialize)]
@@ -164,12 +172,23 @@ fn run() -> Result<()> {
         .build()
         .context("创建 scene-node Tokio runtime")?;
     let http = reqwest::Client::new();
+    let (catalog_sender, catalog_updates) = tokio::sync::watch::channel(None);
+    let catalog_http = http.clone();
+    let catalog_url = config.compute_service_url.clone();
+    runtime.spawn(async move {
+        let result = model_catalog(&catalog_http, &catalog_url)
+            .await
+            .map_err(|error| format!("{error:#}"));
+        catalog_sender.send_replace(Some(result));
+    });
     let (task_sender, task_results) = tokio::sync::mpsc::channel(1);
     let mut scene_node = SceneNode {
         config_path,
         config,
         http,
         model: "尚未查询".into(),
+        models: vec![],
+        catalog_updates,
         latest_bundle: None,
         camera_state: None,
         sequence: 0,
@@ -312,6 +331,13 @@ impl SceneNode {
     }
 
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
+        let catalog = self.catalog_updates.borrow_and_update().clone();
+        if let Some(Ok(catalog)) = catalog {
+            self.models = catalog.models;
+            if self.config.model.is_none() {
+                self.model = catalog.model;
+            }
+        }
         while let Ok(completed) = self.task_results.try_recv() {
             self.finish_scene_task(node, completed)?;
         }
@@ -398,6 +424,7 @@ impl SceneNode {
         let error = match result {
             Ok(processed) => {
                 self.model = processed.model.clone();
+                self.models = processed.models.clone();
                 self.sequence = processed.scene.sequence;
                 self.point_count = Some(processed.point_count);
                 self.store_frame_details(
@@ -527,6 +554,12 @@ impl SceneNode {
         let mut next = self.config.clone();
         let result = (|| match request.action {
             RequestAction::Apply => {
+                if let Some(model) = request.model {
+                    if !self.models.iter().any(|item| item.id == model) {
+                        return Err(eyre!("未知分割模型 {model}"));
+                    }
+                    next.model = Some(model);
+                }
                 if let Some(classes) = request.classes {
                     next.classes = classes;
                     // Editing text classes explicitly restores text prompting.
@@ -614,7 +647,12 @@ impl SceneNode {
             enabled: self.config.enabled,
             source_id: self.config.source_id.clone(),
             compute_service_url: self.config.compute_service_url.clone(),
-            model: self.model.clone(),
+            model: self
+                .config
+                .model
+                .clone()
+                .unwrap_or_else(|| self.model.clone()),
+            available_models: self.models.clone(),
             classes: self.config.classes.clone(),
             visual_prompt_active: matches!(self.config.prompt, SegmentationPrompt::Visual { .. }),
             placement_labels: self.config.placement_labels.clone(),
@@ -669,31 +707,40 @@ async fn process_scene(
     frame: CameraFrameBundle,
     sequence: u64,
 ) -> Result<ProcessedScene> {
-    let model = http
-        .get(format!(
-            "{}/v1/model",
-            config.compute_service_url.trim_end_matches('/')
-        ))
-        .send()
-        .await
-        .context("读取 perception-compute-service 模型")?
-        .error_for_status()
-        .context("perception-compute-service 模型接口返回错误")?
-        .json::<ModelResponse>()
-        .await?
-        .model;
+    let catalog = model_catalog(&http, &config.compute_service_url).await?;
+    let model = config.model.as_deref().unwrap_or(&catalog.model).to_owned();
+    let prompt_free = catalog
+        .models
+        .iter()
+        .find(|item| item.id == model)
+        .ok_or_else(|| eyre!("未知分割模型 {model}"))?
+        .prompt_free;
     let color = frame.color.clone();
     let instances = segment(
         &http,
         &config.compute_service_url,
-        &config.classes,
-        &config.prompt,
+        &model,
+        if prompt_free { &[] } else { &config.classes },
+        if prompt_free {
+            &SegmentationPrompt::Text
+        } else {
+            &config.prompt
+        },
         &color,
     )
     .await?;
     let processing_color = color.clone();
     let processing_instances = instances.clone();
-    let processing_placement_labels = config.placement_labels.clone();
+    // An automatic model names the instances itself. Any observed instance can
+    // be selected as a destination; no text aliases are fed back into inference.
+    let processing_placement_labels = if prompt_free {
+        instances
+            .iter()
+            .map(|instance| instance.label.clone())
+            .collect()
+    } else {
+        config.placement_labels.clone()
+    };
     let (aligned_depth, calibration, assets, mut scene, instance_clouds) =
         tokio::task::spawn_blocking(move || {
             let mut aligned_depth = decode_depth(&frame)?;
@@ -738,12 +785,18 @@ async fn process_scene(
         &config.compute_service_url,
         gripper_asset_id.as_deref(),
         config.grasp_collision_distance_m,
+        if prompt_free {
+            &[]
+        } else {
+            &config.placement_labels
+        },
         &mut scene,
         &instance_clouds,
     )
     .await?;
     Ok(ProcessedScene {
         model,
+        models: catalog.models,
         color,
         scene,
         aligned_depth,
@@ -754,9 +807,22 @@ async fn process_scene(
     })
 }
 
+async fn model_catalog(http: &reqwest::Client, url: &str) -> Result<ModelResponse> {
+    http.get(format!("{}/v1/model", url.trim_end_matches('/')))
+        .send()
+        .await
+        .context("读取分割模型目录")?
+        .error_for_status()
+        .context("分割模型目录接口返回错误")?
+        .json()
+        .await
+        .context("解析分割模型目录")
+}
+
 async fn segment(
     http: &reqwest::Client,
     compute_service_url: &str,
+    model: &str,
     classes: &[String],
     prompt: &SegmentationPrompt,
     color: &CameraImagePlane,
@@ -772,6 +838,7 @@ async fn segment(
             compute_service_url.trim_end_matches('/')
         ))
         .json(&SegmentRequest {
+            model,
             image_base64,
             classes,
             prompt,
@@ -805,19 +872,15 @@ async fn attach_grasp_candidates(
     compute_service_url: &str,
     gripper_asset_id: Option<&str>,
     collision_threshold_m: f64,
+    placement_only_labels: &[String],
     scene: &mut WorldScene,
     instance_clouds: &[InstancePointCloud],
 ) -> Result<()> {
     let Some(gripper_asset_id) = gripper_asset_id else {
         return Ok(());
     };
-    let placement_sources = scene
-        .placement_regions
-        .iter()
-        .filter_map(|region| region.source_object_id.as_deref())
-        .collect::<std::collections::BTreeSet<_>>();
     for object in &mut scene.objects {
-        if placement_sources.contains(object.object_id.as_str()) {
+        if placement_only_labels.contains(&object.label) {
             continue;
         }
         let cloud = instance_clouds
@@ -1065,16 +1128,19 @@ mod tests {
         ));
         let config = SceneConfig {
             enabled: true,
+            model: Some("automatic-fixture".into()),
+            classes: vec!["saved text".into()],
             source_id: Some("simulation:pick-place-scene".into()),
             ..Default::default()
         };
-        assert!(config.classes.is_empty());
         assert!(config.placement_labels.is_empty());
         save(&path, &config).unwrap();
         let serialized = std::fs::read_to_string(&path).unwrap();
         assert!(!serialized.contains("camera_source_id"));
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.source_id, None);
+        assert_eq!(loaded.model, config.model);
+        assert_eq!(loaded.classes, config.classes);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -281,6 +281,9 @@ test("robot asset failure is visible and page reload recovers the preview", asyn
   await expect(page.getByLabel("机械臂三维反馈与目标预览")).toHaveAttribute(
     "data-models-loaded",
     "2",
+    // Full-size meshes can take longer than the default 5s on a cold load.
+    // Require both loaded models, using the same budget as the live GUI audit.
+    { timeout: 30000 },
   );
   await expect(page.locator(".robot-load-status")).toHaveCount(0);
 });

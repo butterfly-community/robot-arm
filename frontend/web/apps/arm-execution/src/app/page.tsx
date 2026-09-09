@@ -10,7 +10,12 @@ import type {
   RobotModelInfo,
 } from "@robot/contracts";
 import { schemaVersion } from "@robot/contracts";
-import { post, requestId, useGateway } from "@robot/gateway-client";
+import {
+  post,
+  requestId,
+  useGateway,
+  useDraftValue,
+} from "@robot/gateway-client";
 import {
   Button,
   Card,
@@ -59,15 +64,18 @@ export default function Page() {
     Record<string, string>
   >({});
   const [showLabels, setShowLabels] = useState(false);
-  const [feedbackIntervalOverride, setFeedbackIntervalOverride] = useState<
-    string | undefined
-  >();
+  const [feedbackIntervalOverride, setFeedbackIntervalOverride] = useDraftValue(
+    String(transport.feedback_interval_ms ?? ""),
+  );
   const [pendingAction, setPendingAction] = useState<ExecutionAction>();
-  const [strengthOverride, setStrengthOverride] = useState<string>();
+  const [strengthOverride, setStrengthOverride] = useDraftValue(
+    String(transport.gripper_strength_percent ?? ""),
+  );
   const strengthTarget =
     strengthOverride ?? String(transport.gripper_strength_percent ?? "");
   const configChanged =
-    feedbackIntervalOverride !== undefined || strengthOverride !== undefined;
+    feedbackIntervalOverride !== String(transport.feedback_interval_ms ?? "") ||
+    strengthOverride !== String(transport.gripper_strength_percent ?? "");
   const feedbackIntervalMs =
     feedbackIntervalOverride ?? String(transport.feedback_interval_ms ?? "");
 
@@ -109,8 +117,8 @@ export default function Page() {
           gripper_strength_percent: strengthTarget,
         },
       });
-      setFeedbackIntervalOverride(undefined);
-      setStrengthOverride(undefined);
+      setFeedbackIntervalOverride(String(Number(feedbackIntervalMs)));
+      setStrengthOverride(String(Number(strengthTarget)));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -141,7 +149,14 @@ export default function Page() {
     new Map(
       parameters.map((item) => [
         item.field_key,
-        { key: item.field_key, unit: item.unit },
+        {
+          key: item.field_key,
+          unit: item.unit,
+          label:
+            execution?.parameter_fields.find(
+              (field) => field.key === item.field_key,
+            )?.label ?? item.field_key,
+        },
       ]),
     ).values(),
   );
@@ -309,6 +324,7 @@ export default function Page() {
                     {field.field_type === "endpoint" ? (
                       <>
                         <Input
+                          aria-label={field.label}
                           required={field.required}
                           list={`connection-${field.key}`}
                           value={connectionFields[field.key] ?? ""}
@@ -341,6 +357,7 @@ export default function Page() {
                       </>
                     ) : (
                       <Input
+                        aria-label={field.label}
                         required={field.required}
                         value={connectionFields[field.key] ?? ""}
                         onChange={(event) =>
@@ -357,6 +374,8 @@ export default function Page() {
             )}
             <Field label="真机反馈周期（ms）">
               <Input
+                aria-label="真机反馈周期（ms）"
+                disabled={Boolean(pendingAction)}
                 type="number"
                 value={feedbackIntervalMs}
                 onChange={(event) =>
@@ -366,6 +385,8 @@ export default function Page() {
             </Field>
             <Field label="夹持反馈目标（0–100）">
               <Input
+                aria-label="夹持反馈目标（0–100）"
+                disabled={Boolean(pendingAction)}
                 type="number"
                 min={0}
                 max={100}
@@ -449,6 +470,18 @@ export default function Page() {
                     ? "执行配置已保存"
                     : "保存执行配置"}
               </Button>
+              {configChanged && (
+                <Button
+                  variant="outline"
+                  disabled={Boolean(pendingAction)}
+                  onClick={() => {
+                    setFeedbackIntervalOverride(undefined);
+                    setStrengthOverride(undefined);
+                  }}
+                >
+                  恢复执行配置
+                </Button>
+              )}
             </div>
             {transport.last_error != null && (
               <p className="error">{String(transport.last_error)}</p>
@@ -498,7 +531,10 @@ export default function Page() {
                     {parameterColumns.map((column) => (
                       <th key={column.key}>
                         <span className="parameter-heading">
-                          {column.key}
+                          <LocalizedLabel
+                            text={column.label}
+                            english={column.key}
+                          />
                           {column.unit && <small>{column.unit}</small>}
                         </span>
                       </th>

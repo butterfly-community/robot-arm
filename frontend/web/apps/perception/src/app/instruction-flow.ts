@@ -1,4 +1,8 @@
-import { schemaVersion, type WorldScene } from "@robot/contracts";
+import {
+  schemaVersion,
+  type PerceptionModelInfo,
+  type WorldScene,
+} from "@robot/contracts";
 import { z } from "zod";
 
 export const instructionSchema = z.object({
@@ -28,14 +32,20 @@ export type InstructionResult = PerceptionPlan &
   SceneSelection & {
     request_id: string;
     accepted: true;
+    model: string;
+    prompt_free: boolean;
   };
 
 export interface InstructionPlanner {
-  plan(instruction: string): Promise<PerceptionPlan>;
+  plan(
+    instruction: string,
+    model: PerceptionModelInfo,
+  ): Promise<PerceptionPlan>;
   select(instruction: string, scene: WorldScene): Promise<SceneSelection>;
 }
 
 export interface RobotGateway {
+  model(): Promise<PerceptionModelInfo>;
   post(path: string, body: Record<string, unknown>): Promise<unknown>;
   scene(): Promise<WorldScene>;
 }
@@ -46,18 +56,22 @@ export async function executeInstruction(
   gateway: RobotGateway,
   makeRequestId: () => string = () => crypto.randomUUID(),
 ): Promise<InstructionResult> {
-  const plan = await planner.plan(instruction);
+  const model = await gateway.model();
+  const plan = await planner.plan(instruction, model);
   if (plan.action !== "pick_place") {
     throw new Error(plan.reason || "当前自然语言入口只执行抓放任务");
   }
   if (
-    plan.perception_prompts.length === 0 ||
-    plan.placement_labels.length === 0
+    !model.prompt_free &&
+    (plan.perception_prompts.length === 0 || plan.placement_labels.length === 0)
   ) {
     throw new Error("AI 没有返回抓取目标和放置区域所需的识别提示词");
   }
   const promptSet = new Set(plan.perception_prompts);
-  if (plan.placement_labels.some((label) => !promptSet.has(label))) {
+  if (
+    !model.prompt_free &&
+    plan.placement_labels.some((label) => !promptSet.has(label))
+  ) {
     throw new Error("AI 返回的放置区域角色不在识别提示词中");
   }
 
@@ -65,8 +79,9 @@ export async function executeInstruction(
     schema_version: schemaVersion,
     request_id: makeRequestId(),
     action: "apply",
-    classes: plan.perception_prompts,
-    placement_labels: plan.placement_labels,
+    model: model.id,
+    classes: model.prompt_free ? null : plan.perception_prompts,
+    placement_labels: model.prompt_free ? null : plan.placement_labels,
   });
   await gateway.post("/api/perception/request", {
     schema_version: schemaVersion,
@@ -105,7 +120,16 @@ export async function executeInstruction(
     scene_sequence: scene.sequence,
     placement_region_id: selection.placement_region_id,
   });
-  return { request_id: requestId, accepted: true, ...plan, ...selection };
+  return {
+    request_id: requestId,
+    accepted: true,
+    ...plan,
+    ...selection,
+    model: model.id,
+    prompt_free: model.prompt_free,
+    perception_prompts: model.prompt_free ? [] : plan.perception_prompts,
+    placement_labels: model.prompt_free ? [] : plan.placement_labels,
+  };
 }
 
 export function compactScene(scene: WorldScene) {

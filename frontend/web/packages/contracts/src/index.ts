@@ -125,6 +125,7 @@ export interface ParameterValue {
 }
 
 export interface ExecutionInfo {
+  parameter_fields: FieldSchema[];
   connection_fields: Array<{
     key: string;
     label: string;
@@ -294,6 +295,7 @@ export interface CameraCaptureState {
   selected_depth_profile_key?: string | null;
   output_frames_per_second?: number | null;
   configurations: CameraSourceConfiguration[];
+  saved_calibrations: CalibrationResult[];
   streaming: boolean;
   last_sequence?: number | null;
   last_frame_time_ns?: number | null;
@@ -365,12 +367,19 @@ export interface PerceptionInstanceSummary {
 export type RequestState =
   "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
 
+export interface PerceptionModelInfo {
+  id: string;
+  label: string;
+  prompt_free: boolean;
+}
+
 export interface PerceptionState {
   schema_version: number;
   enabled: boolean;
   source_id?: string | null;
   compute_service_url: string;
   model: string;
+  available_models: PerceptionModelInfo[];
   classes: string[];
   visual_prompt_active?: boolean;
   placement_labels: string[];

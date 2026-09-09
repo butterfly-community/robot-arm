@@ -11,6 +11,22 @@ export function requestId(): string {
   return nanoid();
 }
 
+// A local edit is not live state. Once the server echoes it, release the draft
+// so later changes from another page/client remain visible. Failed saves keep it.
+export function useDraftValue<T>(saved: T) {
+  const [draft, setDraft] = useState<{ value: T }>();
+  const acknowledged =
+    draft !== undefined &&
+    JSON.stringify(draft.value) === JSON.stringify(saved);
+  if (acknowledged) setDraft(undefined);
+  const value = draft && !acknowledged ? draft.value : saved;
+  return [
+    value,
+    (next: T | undefined) =>
+      setDraft(next === undefined ? undefined : { value: next }),
+  ] as const;
+}
+
 export async function post<T extends Json>(
   path: string,
   value: T,

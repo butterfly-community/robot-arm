@@ -791,6 +791,9 @@ pub struct CameraCaptureState {
     pub selected_depth_profile_key: Option<String>,
     pub output_frames_per_second: Option<f64>,
     pub configurations: Vec<CameraSourceConfiguration>,
+    /// Applied results, available even before selecting or opening a camera.
+    #[serde(default)]
+    pub saved_calibrations: Vec<CalibrationResult>,
     pub streaming: bool,
     pub last_sequence: Option<u64>,
     pub last_frame_time_ns: Option<i64>,
@@ -834,12 +837,21 @@ pub enum SegmentationPrompt {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerceptionModelInfo {
+    pub id: String,
+    pub label: String,
+    pub prompt_free: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PerceptionState {
     pub schema_version: u32,
     pub enabled: bool,
     pub source_id: Option<String>,
     pub compute_service_url: String,
     pub model: String,
+    #[serde(default)]
+    pub available_models: Vec<PerceptionModelInfo>,
     pub classes: Vec<String>,
     #[serde(default)]
     pub visual_prompt_active: bool,
@@ -884,6 +896,8 @@ pub struct PerceptionRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub action: RequestAction,
+    #[serde(default)]
+    pub model: Option<String>,
     pub classes: Option<Vec<String>>,
     #[serde(default)]
     pub prompt: Option<SegmentationPrompt>,
@@ -2090,6 +2104,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             request_id: "reset-model-1".into(),
             action: RequestAction::Reset,
+            model: None,
             classes: None,
             prompt: None,
             placement_labels: None,

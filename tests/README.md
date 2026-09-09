@@ -11,11 +11,29 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`node --test tests/tools/check-ui-css.test.mjs` 检查共享 CSS 不引用未定义的旧变量；
+属于源码检查，不依赖服务。实际控件间距另由下面的浏览器回归验证。
+
+`form-sync.spec.ts` 覆盖网页编辑值与已生效配置的区分、保存失败不继续运行、保存后的实时回显、
+未保存编辑保留（包括控制绑定），以及切换相机 profile 后低频上送保持、首次深度预览更新。
+它拦截所有业务写请求，不触发真机动作。
+布局审查从实际网页开始，使用 [网页审查脚本](../tools/diagnostics/audit-web-layout.mjs)；
+状态注入只用于故障和交互回归，不能代替真实页面连接、预览与跨窗口同步检查。
+
+`calibration-persistence.spec.ts` 在真实页面拦截标定 POST，覆盖历史数值、刷新保留、已标定按钮锁定、
+重新标定/取消保留旧结果及确认后替换；不会控制机械臂。部署后另从未连接状态打开网页，检查来源
+自动可选、历史标定可见，再连接实际相机并刷新验证。不要把这项界面回归当作重新完成真机标定。
+
 在 `frontend` 执行 `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`。
 `lint` 覆盖 `web/apps` 和 `web/packages`，不能只检查有独立脚本的应用而遗漏共享库。
 服务启动后执行 `pnpm test:e2e`，使用正式页面、模型与软件反馈；部分测试会断开执行器、
 运行模型、切换相机和改变模拟姿态，不能和人工操作并行。测试中的拦截只用于浏览器故障回归，
 不会进入生产链路。截图在 `temp/playwright/`。
+
+只验证分割模型配置切换可执行
+`pnpm --dir frontend exec playwright test tests/browser/segmentation-models.spec.ts`。
+该测试截获全部 POST，验证自动模式隐藏提示词输入/视觉状态、切换不自动运行、保存不发送隐藏
+配置、切回保留提示词以及页面无横向溢出；不操作真机。
 
 ## 正式软件调用链
 

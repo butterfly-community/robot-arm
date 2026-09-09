@@ -3,13 +3,19 @@
 import {
   schemaVersion,
   type CameraCaptureState,
+  type CalibrationResult,
   type CalibrationSessionState,
   type ManipulationTaskState,
   type PerceptionState,
   type RobotModelInfo,
   type WorldScene,
 } from "@robot/contracts";
-import { post, requestId, useGateway } from "@robot/gateway-client";
+import {
+  post,
+  requestId,
+  useGateway,
+  useDraftValue,
+} from "@robot/gateway-client";
 import Image from "next/image";
 import {
   Button,
@@ -133,6 +139,64 @@ function PerceptionAssetImage({
   );
 }
 
+function CalibrationResultValues({ result }: { result: CalibrationResult }) {
+  const residuals = result.translation_residuals_m;
+  const rms = residuals.length
+    ? Math.sqrt(
+        residuals.reduce((sum, value) => sum + value * value, 0) /
+          residuals.length,
+      ) * 1000
+    : undefined;
+  return (
+    <>
+      <KeyValue
+        label="求解时间 / 样本数"
+        value={`${new Date(result.solved_at_ns / 1e6).toLocaleString("zh-CN")} / ${result.sample_count}`}
+      />
+      <KeyValue
+        label="平移拟合 RMS / 最大残差 · mm"
+        value={
+          rms === undefined
+            ? "—"
+            : `${rms.toFixed(2)} / ${(Math.max(...residuals) * 1000).toFixed(2)}`
+        }
+        hint="各样本拟合平移残差的均方根与最大值，不代表独立测量的绝对定位精度。"
+      />
+      <KeyValue
+        label="相机在底座中：位置 · m"
+        value={numbers(result.camera_in_base.position_m, 6)}
+      />
+      <KeyValue
+        label="相机朝向：四元数 x/y/z/w"
+        value={numbers(result.camera_in_base.orientation_xyzw, 6)}
+      />
+      <details className="calibration-board-parameters">
+        <summary>标定详细数值</summary>
+        <KeyValue label="求解器" value={result.solver} />
+        <KeyValue
+          label="标定板在夹具中：位置 · m / 四元数"
+          value={`${numbers(result.board_in_calibration_tool.position_m, 6)} / ${numbers(result.board_in_calibration_tool.orientation_xyzw, 6)}`}
+        />
+        <KeyValue
+          label="各样本平移残差 · mm"
+          value={numbers(
+            residuals.map((value) => value * 1000),
+            2,
+          )}
+        />
+        <KeyValue
+          label="各样本旋转残差 · °"
+          value={degrees(result.rotation_residuals_rad)}
+        />
+        <KeyValue
+          label="标定板格数 / 单格 / Marker · mm"
+          value={`${result.board.squares_x} × ${result.board.squares_y} / ${result.board.square_size_m * 1000} / ${result.board.marker_size_m * 1000}`}
+        />
+      </details>
+    </>
+  );
+}
+
 export default function Page() {
   const { snapshot, error, setError, connection } = useGateway("perception");
   const values = snapshot?.values ?? {};
@@ -157,10 +221,18 @@ export default function Page() {
   const [objectId, setObjectId] = useState<string>();
   const [regionId, setRegionId] = useState<string>();
   const [board, setBoard] = useState(initialBoard);
-  const [promptText, setPromptText] = useState<string>();
-  const [placementLabels, setPlacementLabels] = useState<string>();
-  const [graspCollisionDistance, setGraspCollisionDistance] =
-    useState<string>();
+  const [promptText, setPromptText] = useDraftValue(
+    perception?.classes.join(", ") ?? "",
+  );
+  const [segmentationModel, setSegmentationModel] = useDraftValue(
+    perception?.model ?? "",
+  );
+  const [placementLabels, setPlacementLabels] = useDraftValue(
+    perception?.placement_labels.join(", ") ?? "",
+  );
+  const [graspCollisionDistance, setGraspCollisionDistance] = useDraftValue(
+    perception ? String(perception.grasp_collision_distance_m * 1000) : "",
+  );
   const [instruction, setInstruction] = useState("");
   const [instructionPending, setInstructionPending] = useState(false);
   const [instructionResult, setInstructionResult] =
@@ -177,7 +249,21 @@ export default function Page() {
     instructionPending;
 
   const selectedSourceId = sourceId ?? camera?.selected_source_id ?? "";
+  const savedCalibrations = camera?.saved_calibrations ?? [];
+  const savedCalibration = savedCalibrations.find(
+    (result) => result.camera_source_id === selectedSourceId,
+  );
+  const visibleSavedCalibrations = selectedSourceId
+    ? savedCalibrations.filter(
+        (result) => result.camera_source_id === selectedSourceId,
+      )
+    : savedCalibrations;
   const selectedPrompts = promptText ?? perception?.classes.join(", ") ?? "";
+  const selectedModelId = segmentationModel ?? perception?.model ?? "";
+  const selectedSegmentationModel = perception?.available_models?.find(
+    (item) => item.id === selectedModelId,
+  );
+  const promptFree = selectedSegmentationModel?.prompt_free ?? false;
   const selectedPlacementLabels =
     placementLabels ?? perception?.placement_labels.join(", ") ?? "";
   const selectedGraspCollisionDistance =
@@ -288,6 +374,28 @@ export default function Page() {
       (sum, item) => sum + item.grasp_candidates.length,
       0,
     ) ?? 0;
+  const modelDirty =
+    Boolean(perception) &&
+    (selectedModelId !== perception?.model ||
+      (!promptFree &&
+        (selectedPrompts !== perception?.classes.join(", ") ||
+          selectedPlacementLabels !==
+            perception?.placement_labels.join(", "))) ||
+      Number(selectedGraspCollisionDistance) !==
+        (perception?.grasp_collision_distance_m ?? 0) * 1000);
+  function restoreModelConfig() {
+    setPromptText(undefined);
+    setSegmentationModel(undefined);
+    setPlacementLabels(undefined);
+    setGraspCollisionDistance(undefined);
+  }
+  function restoreCameraConfig() {
+    setSourceId(undefined);
+    setColorProfileKey(undefined);
+    setDepthProfileKey(undefined);
+    setOutputFps(undefined);
+    setDriverParameterChanges({});
+  }
 
   async function send(path: string, body: Record<string, unknown>) {
     setPending(true);
@@ -313,14 +421,13 @@ export default function Page() {
     try {
       if (target === "camera") {
         if (action === "snapshot") {
-          await send("/api/perception/request", {
+          return await send("/api/perception/request", {
             schema_version: schemaVersion,
             request_id: requestId(),
             action: "snapshot",
             classes: null,
             placement_labels: null,
           });
-          return;
         }
         const cameraAction = action === "apply" ? "select" : action;
         const accepted = await send("/api/perception/camera", {
@@ -355,7 +462,7 @@ export default function Page() {
                 )
               : null,
         });
-        if (!accepted) return;
+        if (!accepted) return false;
         if (action === "apply") {
           const connected = await send("/api/perception/camera", {
             schema_version: schemaVersion,
@@ -367,35 +474,71 @@ export default function Page() {
             output_frames_per_second: null,
             driver_parameters: null,
           });
-          if (connected) setDriverParameterChanges({});
+          if (connected) restoreCameraConfig();
+          return connected;
         }
-        return;
+        if (
+          action === "reset" ||
+          action === "unselect" ||
+          action === "disconnect"
+        )
+          restoreCameraConfig();
+        return true;
       }
-      await send("/api/perception/request", {
+      const accepted = await send("/api/perception/request", {
         schema_version: schemaVersion,
         request_id: requestId(),
         action,
-        classes: appliesModel
-          ? selectedPrompts
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean)
-          : null,
-        placement_labels: appliesModel
-          ? selectedPlacementLabels
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean)
-          : null,
+        model: appliesModel ? selectedModelId : null,
+        classes:
+          appliesModel && !promptFree
+            ? selectedPrompts
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean)
+            : null,
+        placement_labels:
+          appliesModel && !promptFree
+            ? selectedPlacementLabels
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean)
+            : null,
         grasp_collision_distance_m:
           appliesModel && selectedGraspCollisionDistance !== ""
             ? Number(selectedGraspCollisionDistance) / 1000
             : null,
       });
-      if (action === "disconnect") setSourceId("");
+      if (accepted && appliesModel) {
+        if (!promptFree) {
+          setPromptText(
+            selectedPrompts
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+              .join(", "),
+          );
+          setPlacementLabels(
+            selectedPlacementLabels
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+              .join(", "),
+          );
+        }
+        setGraspCollisionDistance(
+          String(Number(selectedGraspCollisionDistance)),
+        );
+      }
+      return accepted;
     } finally {
       setPendingPerceptionAction(undefined);
     }
+  }
+
+  async function runPerception() {
+    if (modelDirty && !(await perceptionRequest("apply", "model"))) return;
+    await perceptionRequest("refresh", "model");
   }
 
   async function selectCamera(nextSourceId: string) {
@@ -446,7 +589,8 @@ export default function Page() {
     );
     setDriverParameterChanges({});
     if (!nextSourceId && camera?.selected_source_id) {
-      await perceptionRequest("unselect", "camera");
+      if (!(await perceptionRequest("unselect", "camera")))
+        restoreCameraConfig();
     }
   }
 
@@ -462,7 +606,13 @@ export default function Page() {
       changed?.frames_per_second ?? 0,
       other?.frames_per_second ?? 0,
     );
-    setOutputFps(String(commonFps || ""));
+    setOutputFps(
+      String(
+        commonFps
+          ? Math.min(Number(selectedOutputFps) || commonFps, commonFps)
+          : "",
+      ),
+    );
   }
 
   function driverParameterValue(
@@ -536,8 +686,11 @@ export default function Page() {
       }
       const result = value as InstructionResult;
       setInstructionResult(result);
-      setPromptText(result.perception_prompts.join(", "));
-      setPlacementLabels(result.placement_labels.join(", "));
+      setSegmentationModel(result.model);
+      if (!result.prompt_free) {
+        setPromptText(result.perception_prompts.join(", "));
+        setPlacementLabels(result.placement_labels.join(", "));
+      }
       setObjectId(result.object_id);
       setRegionId(result.placement_region_id);
     } catch (reason) {
@@ -642,7 +795,9 @@ export default function Page() {
                       : "neutral"
                 }
               >
-                {manipulationStateLabels[manipulation?.state ?? "idle"]}
+                {perception?.task_state === "executing"
+                  ? "正在识别并生成抓取候选"
+                  : manipulationStateLabels[manipulation?.state ?? "idle"]}
               </StatusBadge>
             }
           >
@@ -652,7 +807,7 @@ export default function Page() {
                   <h3>AI 自然语言抓放</h3>
                   <p>
                     描述要抓取的物体和放置位置；AI
-                    会配置开放词汇感知、选择真实场景实例，再调用现有 MTC
+                    会使用已保存的分割模型、选择真实场景实例，再调用现有 MTC
                     抓放流程。
                   </p>
                 </div>
@@ -661,7 +816,7 @@ export default function Page() {
               <div className="instruction-task">
                 <Field
                   label="自然语言任务"
-                  hint="AI 只把文字转换为已有的提示词、场景实例和抓放请求；感知、MTC 规划、碰撞检查与执行仍走同一条手动链路。"
+                  hint="AI 使用已保存的模型：提示词模式生成识别提示词，自动模式直接识别。之后选择真实场景实例，沿同一条手动链路完成规划和执行。"
                 >
                   <Input
                     aria-label="自然语言任务"
@@ -693,7 +848,7 @@ export default function Page() {
                 <KeyValue
                   label="最近一次 AI 编排"
                   value={`${instructionResult.object_id} → ${instructionResult.placement_region_id}`}
-                  hint={`已使用提示词 ${instructionResult.perception_prompts.join(", ")} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
+                  hint={`${instructionResult.prompt_free ? "已使用自动分割" : `已使用提示词 ${instructionResult.perception_prompts.join(", ")}`} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
                 />
               )}
             </div>
@@ -702,6 +857,29 @@ export default function Page() {
               title="抓放详细配置"
               englishTitle="Pick and place details"
             >
+              <KeyValue
+                label="已生效模型"
+                value={
+                  perception?.available_models?.find(
+                    (item) => item.id === perception.model,
+                  )?.label ??
+                  perception?.model ??
+                  "等待配置"
+                }
+              />
+              <KeyValue
+                label="感知任务状态"
+                value={
+                  perception
+                    ? manipulationStateLabels[perception.task_state]
+                    : "等待状态"
+                }
+                hint={
+                  perception?.task_request_id
+                    ? `当前请求：${perception.task_request_id}。感知包括图像分割与抓取候选计算，完成前不代表卡住。`
+                    : "尚未运行感知"
+                }
+              />
               <div className="perception-task-summary">
                 <div>
                   <span>当前相机</span>
@@ -726,50 +904,62 @@ export default function Page() {
               </div>
               <div className="perception-model-settings">
                 <Field
-                  label="提示词模型"
-                  hint="来自感知计算服务实际加载的开放词汇模型；模型按提示词识别和分割画面，不预设抓放场景。"
+                  label="识别与分割模型"
+                  hint="模型及配置能力来自计算服务。切换只修改待保存配置；保存后仍需点击运行，不会自动执行识别或抓放。"
                 >
                   <select
-                    key={perception?.model ?? "waiting"}
-                    aria-label="提示词模型"
-                    defaultValue={perception?.model ?? ""}
+                    aria-label="识别与分割模型"
+                    value={selectedModelId}
+                    disabled={pending}
+                    onChange={(event) =>
+                      setSegmentationModel(event.currentTarget.value)
+                    }
                   >
-                    {!perception?.model && <option value="">等待模型</option>}
-                    {perception?.model && (
-                      <option value={perception.model}>
-                        {perception.model}
-                      </option>
+                    {!perception?.available_models?.length && (
+                      <option value={selectedModelId}>等待模型目录</option>
                     )}
+                    {perception?.available_models?.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.prompt_free ? "自动分割" : "提示词分割"} ·{" "}
+                        {item.label}
+                      </option>
+                    ))}
                   </select>
                 </Field>
-                <Field
-                  label="识别与分割提示词"
-                  hint={
-                    perception?.visual_prompt_active
-                      ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行一次感知会继续使用视觉示例。"
-                      : "逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
-                  }
-                >
-                  <Input
-                    aria-label="识别与分割提示词"
-                    value={selectedPrompts}
-                    onChange={(event) =>
-                      setPromptText(event.currentTarget.value)
+                {!promptFree && (
+                  <Field
+                    label="识别与分割提示词"
+                    hint={
+                      perception?.visual_prompt_active
+                        ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行一次感知会继续使用视觉示例。"
+                        : "逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
                     }
-                  />
-                </Field>
-                <Field
-                  label="放置区域角色"
-                  hint="可选的下游场景角色。填写已识别实例的提示词后，这些实例可作为放置区域；它不参与模型推理，也不是模型类别。"
-                >
-                  <Input
-                    aria-label="放置区域角色"
-                    value={selectedPlacementLabels}
-                    onChange={(event) =>
-                      setPlacementLabels(event.currentTarget.value)
-                    }
-                  />
-                </Field>
+                  >
+                    <Input
+                      aria-label="识别与分割提示词"
+                      disabled={pending}
+                      value={selectedPrompts}
+                      onChange={(event) =>
+                        setPromptText(event.currentTarget.value)
+                      }
+                    />
+                  </Field>
+                )}
+                {!promptFree && (
+                  <Field
+                    label="放置区域角色"
+                    hint="可选的下游场景角色。填写已识别实例的提示词后，这些实例可作为放置区域；它不参与模型推理，也不是模型类别。"
+                  >
+                    <Input
+                      aria-label="放置区域角色"
+                      disabled={pending}
+                      value={selectedPlacementLabels}
+                      onChange={(event) =>
+                        setPlacementLabels(event.currentTarget.value)
+                      }
+                    />
+                  </Field>
+                )}
                 <Field
                   label="抓取点云邻近距离 · mm"
                   hint="GraspGenX 官方场景筛选参数：张开夹爪表面采样点与环境点云小于此距离时排除候选。它不是实体碰撞或 MoveIt 膨胀量；过大会排除实际离地的姿态。保存于后端，与模拟或真机来源无关。"
@@ -777,6 +967,7 @@ export default function Page() {
                   <Input
                     type="number"
                     aria-label="抓取点云邻近距离"
+                    disabled={pending}
                     min={0}
                     step="any"
                     value={selectedGraspCollisionDistance}
@@ -786,10 +977,22 @@ export default function Page() {
                   />
                 </Field>
               </div>
-              {perception?.visual_prompt_active && (
+              {!promptFree && perception?.visual_prompt_active && (
                 <StatusBadge tone="cyan">已启用视觉示例提示</StatusBadge>
               )}
               <div className="card-actions perception-task-actions">
+                {modelDirty && (
+                  <StatusBadge tone="warning">有待保存修改</StatusBadge>
+                )}
+                {modelDirty && (
+                  <Button
+                    variant="outline"
+                    disabled={pending}
+                    onClick={restoreModelConfig}
+                  >
+                    恢复已保存配置
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   disabled={pending}
@@ -809,12 +1012,14 @@ export default function Page() {
                     !perception?.depth_frame ||
                     !perception?.calibrated
                   }
-                  onClick={() => perceptionRequest("refresh", "model")}
+                  onClick={runPerception}
                 >
                   {pendingPerceptionAction === "model:refresh" ||
                   perception?.task_state === "executing"
                     ? "正在运行…"
-                    : "运行一次感知"}
+                    : modelDirty
+                      ? "保存并运行感知"
+                      : "运行一次感知"}
                 </Button>
               </div>
               <div className="perception-task-grid">
@@ -905,6 +1110,7 @@ export default function Page() {
             >
               <select
                 aria-label="相机来源"
+                disabled={pending}
                 value={selectedSourceId}
                 onChange={(event) => {
                   void selectCamera(event.currentTarget.value);
@@ -954,7 +1160,14 @@ export default function Page() {
             />
             <KeyValue
               label="参数与标定"
-              value={perception?.calibrated ? "已配置" : "未配置"}
+              value={
+                savedCalibration
+                  ? "已有保存的标定"
+                  : selectedSourceId === perception?.source_id &&
+                      perception.calibrated
+                    ? "已有输入外参"
+                    : "未标定"
+              }
             />
             <Field
               label="彩色流"
@@ -962,6 +1175,7 @@ export default function Page() {
             >
               <select
                 aria-label="彩色流"
+                disabled={pending}
                 value={selectedColorProfileKey}
                 onChange={(event) =>
                   changeProfile("color", event.currentTarget.value)
@@ -991,6 +1205,7 @@ export default function Page() {
             >
               <select
                 aria-label="深度流"
+                disabled={pending}
                 value={selectedDepthProfileKey}
                 onChange={(event) =>
                   changeProfile("depth", event.currentTarget.value)
@@ -1020,6 +1235,7 @@ export default function Page() {
             >
               <Input
                 aria-label="上送频率"
+                disabled={pending}
                 type="number"
                 min="0"
                 max={maximumOutputFps || undefined}
@@ -1049,6 +1265,7 @@ export default function Page() {
                       {parameter.kind === "boolean" && !parameter.read_only ? (
                         <select
                           aria-label={`${parameter.sensor_name} · ${parameter.display_name}`}
+                          disabled={pending}
                           value={driverParameterValue(
                             extension.namespace,
                             parameter.key,
@@ -1073,6 +1290,7 @@ export default function Page() {
                           max={parameter.maximum}
                           step={parameter.step || "any"}
                           readOnly={parameter.read_only}
+                          disabled={pending}
                           value={driverParameterValue(
                             extension.namespace,
                             parameter.key,
@@ -1159,12 +1377,26 @@ export default function Page() {
               <Button
                 variant="outline"
                 disabled={pending || !selectedSourceId}
+                title="删除当前相机已保存的配置与标定；不是撤销未保存编辑"
                 onClick={() => perceptionRequest("reset")}
               >
                 {pendingPerceptionAction === "camera:reset"
                   ? "正在重置…"
                   : "重置当前相机"}
               </Button>
+              {(sourceId !== undefined ||
+                colorProfileKey !== undefined ||
+                depthProfileKey !== undefined ||
+                outputFps !== undefined ||
+                Object.keys(driverParameterChanges).length > 0) && (
+                <Button
+                  variant="outline"
+                  disabled={pending}
+                  onClick={restoreCameraConfig}
+                >
+                  撤销相机编辑
+                </Button>
+              )}
               <Button
                 variant="outline"
                 disabled={pending || !camera?.streaming}
@@ -1265,14 +1497,39 @@ export default function Page() {
             eyebrow="Camera extrinsic calibration"
             title="相机外参标定"
             action={
-              <StatusBadge tone={perception?.calibrated ? "good" : "neutral"}>
-                {perception?.calibrated ? "当前相机已有外参" : "当前相机未标定"}
+              <StatusBadge
+                tone={visibleSavedCalibrations.length ? "good" : "neutral"}
+              >
+                {savedCalibration
+                  ? "当前相机已有外参"
+                  : !selectedSourceId
+                    ? savedCalibrations.length
+                      ? "已有保存的标定"
+                      : "未选择相机"
+                    : "当前相机未标定"}
               </StatusBadge>
             }
           >
+            {visibleSavedCalibrations.map((result) => (
+              <section
+                key={result.camera_source_id}
+                aria-label="上次已保存标定"
+              >
+                <h3>上次已保存标定</h3>
+                <KeyValue
+                  label="所属相机"
+                  value={
+                    camera?.available_sources.find(
+                      (source) => source.source_id === result.camera_source_id,
+                    )?.display_name ?? result.camera_source_id
+                  }
+                />
+                <CalibrationResultValues result={result} />
+              </section>
+            ))}
             <div className="calibration-context">
               <KeyValue
-                label="当前阶段"
+                label="本轮阶段"
                 value={calibrationPhaseLabels[calibration?.phase ?? "idle"]}
               />
               <KeyValue
@@ -1451,17 +1708,26 @@ export default function Page() {
                       variant="outline"
                       disabled={
                         pending ||
+                        Boolean(savedCalibration) ||
+                        Boolean(calibration?.active) ||
                         !camera?.selected_source_id ||
+                        selectedSourceId !== camera.selected_source_id ||
                         !model?.calibration_targets?.length
                       }
-                      title="自动切换到手动关节控制，依次执行型号声明的标定姿态"
+                      title={
+                        savedCalibration
+                          ? "已有保存的外参；需要更新时使用下方的重新标定"
+                          : "自动切换到手动关节控制，依次执行型号声明的标定姿态"
+                      }
                       onClick={() => calibrate("start")}
                     >
                       {pendingCalibrationAction === "start"
                         ? "正在启动…"
                         : calibration?.active
-                          ? "重新开始自动标定"
-                          : "开始自动标定"}
+                          ? "正在自动标定"
+                          : savedCalibration
+                            ? "已标定"
+                            : "开始自动标定"}
                     </Button>
                   </div>
                 </div>
@@ -1505,6 +1771,19 @@ export default function Page() {
                     label="已记录样本"
                     value={String(calibration?.observations.length ?? 0)}
                   />
+                  {(calibration?.observations.length ?? 0) > 0 &&
+                    perception?.color_frame && (
+                      <details className="calibration-board-parameters">
+                        <summary>本轮 ChArUco 识别叠加图</summary>
+                        <PerceptionAssetImage
+                          src={`/api/perception/assets/calibration.png?v=${calibration?.run_id}-${calibration?.observations.length}`}
+                          alt="本轮 ChArUco 识别叠加图"
+                          width={perception.color_frame.width}
+                          height={perception.color_frame.height}
+                          empty="等待本轮标定图像"
+                        />
+                      </details>
+                    )}
                 </div>
               </section>
 
@@ -1521,39 +1800,23 @@ export default function Page() {
                     <StatusBadge
                       tone={calibration?.solved_result ? "good" : "neutral"}
                     >
-                      {calibration?.solved_result ? "可以确认" : "等待求解"}
+                      {calibration?.phase === "applied"
+                        ? "本轮已保存"
+                        : calibration?.solved_result
+                          ? "可以确认"
+                          : "等待本轮求解"}
                     </StatusBadge>
                   </div>
-                  <KeyValue
-                    label="求解器"
-                    value={calibration?.solved_result?.solver ?? "—"}
-                  />
-                  <KeyValue
-                    label="相机在底座中：位置 / 四元数"
-                    value={
-                      calibration?.solved_result
-                        ? `${numbers(calibration.solved_result.camera_in_base.position_m)} / ${numbers(calibration.solved_result.camera_in_base.orientation_xyzw)}`
-                        : "—"
-                    }
-                  />
-                  <KeyValue
-                    label="标定板在夹具中：位置 / 四元数"
-                    value={
-                      calibration?.solved_result
-                        ? `${numbers(calibration.solved_result.board_in_calibration_tool.position_m)} / ${numbers(calibration.solved_result.board_in_calibration_tool.orientation_xyzw)}`
-                        : "—"
-                    }
-                  />
-                  <KeyValue
-                    label="各样本平移残差 · m"
-                    value={numbers(
-                      calibration?.solved_result?.translation_residuals_m,
-                    )}
-                  />
-                  <KeyValue
-                    label="各样本旋转残差 · rad / °"
-                    value={`${numbers(calibration?.solved_result?.rotation_residuals_rad)} / ${degrees(calibration?.solved_result?.rotation_residuals_rad)}`}
-                  />
+                  {calibration?.solved_result ? (
+                    <CalibrationResultValues
+                      result={calibration.solved_result}
+                    />
+                  ) : (
+                    <p className="status">
+                      尚无本轮求解结果
+                      {savedCalibration ? "；上方已保存的标定仍然有效" : ""}。
+                    </p>
+                  )}
                   <div className="calibration-step-actions">
                     <Button
                       variant="outline"
@@ -1568,6 +1831,24 @@ export default function Page() {
                         ? "正在保存…"
                         : "确认并应用标定"}
                     </Button>
+                    {savedCalibration && (
+                      <Button
+                        variant="outline"
+                        disabled={
+                          pending ||
+                          Boolean(calibration?.active) ||
+                          !camera?.streaming ||
+                          selectedSourceId !== camera.selected_source_id ||
+                          !model?.calibration_targets?.length
+                        }
+                        title="开始新一轮标定；旧外参保持生效，确认应用新结果后才替换"
+                        onClick={() => calibrate("start")}
+                      >
+                        {pendingCalibrationAction === "start"
+                          ? "正在启动…"
+                          : "重新标定"}
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       disabled={pending || !calibration?.active}
@@ -1600,6 +1881,15 @@ export default function Page() {
             className="span-6 aligned-row-card"
             eyebrow="Depth frame"
             title="深度图"
+            action={
+              <Button
+                variant="outline"
+                disabled={pending || !camera?.streaming}
+                onClick={() => perceptionRequest("snapshot")}
+              >
+                更新深度预览
+              </Button>
+            }
           >
             {perception?.depth_frame ? (
               <PerceptionAssetImage
@@ -1607,7 +1897,7 @@ export default function Page() {
                 alt="深度图"
                 width={perception.depth_frame.width}
                 height={perception.depth_frame.height}
-                empty="等待图像"
+                empty="尚未生成预览，点击更新深度预览"
               />
             ) : (
               <div className="visual-empty">等待图像</div>

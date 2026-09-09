@@ -426,6 +426,9 @@ export default function Page() {
                 min={option.minimum ?? undefined}
                 max={option.maximum ?? undefined}
                 value={options[option.key] ?? ""}
+                aria-label={option.label}
+                placeholder="留空使用服务默认值"
+                title="仅覆盖下一次普通运动请求；留空不覆盖服务默认值，不是当前实测速度。"
                 onChange={(event) =>
                   setOptions({
                     ...options,
@@ -438,6 +441,13 @@ export default function Page() {
               />
             </Field>
           ))}
+          {Object.values(options).some((value) => value !== undefined) && (
+            <div className="card-actions">
+              <Button variant="outline" onClick={() => setOptions({})}>
+                恢复服务默认参数
+              </Button>
+            </div>
+          )}
           <div className="target-list">
             <Button
               disabled={motionBusy || Boolean(pendingAction)}

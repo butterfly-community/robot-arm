@@ -15,6 +15,7 @@
   --red: #ec6a72;
   --blue: #78a9ff;
   --radius: 9px;
+  --radius-control: 7px;
   --text-body: 14px;
   --text-nav: 13px;
   --text-page-title: clamp(26px, 2.6vw, 32px);
@@ -492,6 +493,7 @@ nav a > span:first-child {
 }
 
 .button {
+  white-space: nowrap;
   min-height: 36px;
   display: inline-flex;
   align-items: center;
@@ -696,7 +698,21 @@ datalist option {
   font-size: var(--text-control);
 }
 .key-value > span {
+  min-width: 0;
   color: var(--muted);
+}
+.key-value > span .label-with-help {
+  display: flex;
+  min-width: 0;
+}
+.key-value > span .localized-label > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-value:last-child,
+.calibration-context > .key-value {
+  border-bottom: 0;
 }
 .key-value strong {
   min-width: 0;
@@ -741,6 +757,25 @@ datalist option {
 .card-actions-leading {
   margin-top: 0;
   margin-bottom: 22px;
+}
+.field > .card-actions {
+  margin-top: 0;
+}
+:is(.card-actions, .calibration-step-actions, .row) + .key-value {
+  margin-top: 16px;
+}
+.key-value
+  + :is(.perception-task-summary, .row, .calibration-board-parameters) {
+  margin-top: 20px;
+}
+.config-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.config-fields > :last-child {
+  margin-bottom: 0;
 }
 .source-list + .card-actions,
 .binding-grid + .card-actions {
@@ -960,7 +995,7 @@ input[type="range"] {
 .pose-view-button:hover,
 .pose-view-button[aria-pressed="true"] {
   background: #1b2733;
-  color: var(--text);
+  color: var(--foreground);
 }
 .pose-viewer-inset-label {
   right: 25px;
@@ -1101,7 +1136,7 @@ input[type="range"] {
   right: 12px;
   bottom: 10px;
   left: 12px;
-  color: var(--danger);
+  color: var(--red);
   font-size: var(--text-caption);
   text-align: center;
 }
@@ -1112,9 +1147,9 @@ input[type="range"] {
   z-index: 90;
   width: min(420px, calc(100vw - 32px));
   overflow: hidden;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line-bright);
   border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
   box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
   backdrop-filter: blur(12px);
   pointer-events: none;
@@ -1325,7 +1360,7 @@ input[type="range"] {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  gap: var(--space-3);
+  gap: 12px;
 }
 
 .instruction-task .field {
@@ -1416,7 +1451,9 @@ input[type="range"] {
   font-size: var(--text-caption);
 }
 .perception-task-summary strong {
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-control);
   font-weight: 650;
   font-variant-numeric: tabular-nums;
@@ -1473,7 +1510,7 @@ input[type="range"] {
   border-bottom: 0;
 }
 .camera-profile-table strong {
-  color: var(--text);
+  color: var(--foreground);
   font-weight: 550;
   font-variant-numeric: tabular-nums;
 }
@@ -1497,9 +1534,9 @@ input[type="range"] {
   display: grid;
   min-height: 14rem;
   place-items: center;
-  border: 1px dashed var(--line-strong);
+  border: 1px dashed var(--line-bright);
   border-radius: var(--radius-control);
-  color: var(--text-muted);
+  color: var(--muted);
 }
 
 .data-table {
@@ -1517,15 +1554,15 @@ input[type="range"] {
 }
 
 .data-table th {
-  color: var(--text-muted);
-  font-size: var(--font-label);
+  color: var(--muted);
+  font-size: var(--text-label);
   font-weight: 600;
 }
 
 .data-table td small {
   display: block;
   margin-top: 0.25rem;
-  color: var(--text-muted);
+  color: var(--muted);
 }
 .parameter-table {
   width: max-content;

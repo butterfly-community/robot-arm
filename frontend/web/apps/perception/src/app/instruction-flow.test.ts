@@ -47,6 +47,44 @@ const scene: WorldScene = {
 };
 
 describe("executeInstruction", () => {
+  it("uses the selected automatic model without applying hidden prompts", async () => {
+    const model = { id: "automatic", label: "Automatic", prompt_free: true };
+    const gateway: RobotGateway = {
+      model: vi.fn(async () => model),
+      post: vi.fn(async () => ({})),
+      scene: vi.fn(async () => scene),
+    };
+    const planner: InstructionPlanner = {
+      plan: vi.fn().mockResolvedValue({
+        action: "pick_place",
+        reason: "",
+        perception_prompts: [],
+        placement_labels: [],
+      }),
+      select: vi.fn().mockResolvedValue({
+        object_id: "red-cube-0",
+        placement_region_id: "gray-bin-interior",
+      }),
+    };
+    const result = await executeInstruction("把方块放进筐", planner, gateway);
+    expect(planner.plan).toHaveBeenCalledWith("把方块放进筐", model);
+    expect(gateway.post).toHaveBeenNthCalledWith(
+      1,
+      "/api/perception/request",
+      expect.objectContaining({
+        action: "apply",
+        model: "automatic",
+        classes: null,
+        placement_labels: null,
+      }),
+    );
+    expect(result).toMatchObject({
+      model: "automatic",
+      prompt_free: true,
+      perception_prompts: [],
+    });
+  });
+
   it("wraps the existing manual perception and pick-place calls in order", async () => {
     const planner: InstructionPlanner = {
       plan: vi.fn().mockResolvedValue({
@@ -62,6 +100,11 @@ describe("executeInstruction", () => {
     };
     const calls: string[] = [];
     const gateway: RobotGateway = {
+      model: vi.fn(async () => ({
+        id: "prompted",
+        label: "Prompted",
+        prompt_free: false,
+      })),
       post: vi.fn(async (path) => {
         calls.push(path);
         return {};
@@ -101,6 +144,11 @@ describe("executeInstruction", () => {
 
   it("never forwards a hallucinated scene id to motion", async () => {
     const gateway: RobotGateway = {
+      model: vi.fn(async () => ({
+        id: "prompted",
+        label: "Prompted",
+        prompt_free: false,
+      })),
       post: vi.fn(async () => ({})),
       scene: vi.fn(async () => scene),
     };
@@ -125,6 +173,11 @@ describe("executeInstruction", () => {
 
   it("rejects unsupported instructions before touching robot services", async () => {
     const gateway: RobotGateway = {
+      model: vi.fn(async () => ({
+        id: "prompted",
+        label: "Prompted",
+        prompt_free: false,
+      })),
       post: vi.fn(async () => ({})),
       scene: vi.fn(async () => scene),
     };

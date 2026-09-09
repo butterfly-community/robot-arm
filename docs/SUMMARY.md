@@ -11,7 +11,7 @@
 | `spatial-transform-node` | 输入换基、接管原点、相对位姿与无绝对来源分量的积分 | 设备枚举、MoveIt |
 | `camera-node` | 相机能力与配置、采集、SDK 深度对齐、外参标定、原子 RGB-D 发布 | 点云、AI、ROS |
 | `scene-node` | 异步计算服务编排、结构化三维场景与抓取候选 | 相机 SDK/配置、轨迹规划、硬件执行 |
-| `perception-compute` | YOLOE 提示词识别/分割与 GraspGenX 抓取姿态推理 | 相机、Dora、ROS、动作编排 |
+| `perception-compute` | YOLOE 提示词/自动分割与 GraspGenX 抓取姿态推理 | 相机、Dora、ROS、动作编排 |
 | `stararm-102-motion-node` | 控制模式、普通规划、Servo、MTC 抓放与结构化场景到 MoveIt 的映射 | 串口协议、相机原始数据 |
 | `stararm-102-execution-node` | FashionStar 总线、执行反馈、模拟执行和型号元数据 | IK、感知、目标语义 |
 | `service-status-node` | 按依赖图聚合服务就绪状态 | 业务恢复策略 |
@@ -178,9 +178,11 @@ execution 把唯一 `ArmCommand` 映射为真机总线或软件反馈。选择�
 
 自然语言抓放使用 Next.js Route Handler 和 Vercel AI SDK 的 OpenAI-compatible provider。API
 密钥只从容器运行环境读取，不进入浏览器 bundle、Dora 消息或后端应用镜像；Compose 从根目录
-未跟踪的 `.env` 注入配置。任务解析为每个指代生成从具体描述到常见视觉类别的少量同义提示词，
-再以本次实际场景 ID 完成选择；长推理的代理等待只对该 Route Handler 生效，不改变其他 API 的
-时序。
+未跟踪的 `.env` 注入配置。使用已保存的分割模型：提示词模式解析任务生成少量视觉匹配词，
+自动模式不使用提示词。网页按模型隐藏提示词专属输入与状态，切回不丢弃原配置。
+随后以本次实际场景 ID 完成选择；该 Route Handler 和手动 `/api/perception/request` 的代理等待
+统一为 600 秒。实际 GraspGenX 场景推理曾超过默认 60 秒而让网页收到 504，后台仍成功完成；
+其余 API 不扩大等待时间，不因超时自动重发推理或运动。
 
 ## 部署
 

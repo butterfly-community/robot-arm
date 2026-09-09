@@ -1,5 +1,5 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import type { WorldScene } from "@robot/contracts";
+import type { PerceptionState, WorldScene } from "@robot/contracts";
 import { Output, generateText } from "ai";
 import { NextResponse } from "next/server";
 
@@ -36,12 +36,15 @@ function planner(): InstructionPlanner {
   });
   const model = provider.chatModel(modelId);
   return {
-    async plan(instruction) {
+    async plan(instruction, segmentationModel) {
       const { output } = await generateText({
         model,
         output: Output.object({ schema: perceptionPlanSchema }),
         system:
-          "你是机器人视觉任务解析器。只支持从当前场景抓取一个对象并放入或放到一个区域。不要输出实例 ID、坐标、姿态或运动参数。为用户提到的每个实体生成 2 到 4 个简短英文视觉提示词：从保留颜色或形状的具体描述，扩展到常见开放词汇检测器使用的实体类别和同义词；不要只给用途名称，也不要添加用户没有提到的实体。perception_prompts 必须完整覆盖抓取物体和目标区域并去重；placement_labels 必须逐字取自 perception_prompts，并包含为放置目标生成的全部提示词。可执行时 action 为 pick_place、reason 为空字符串；其他任务 action 为 unsupported 并用中文说明原因。",
+          "你是机器人视觉任务解析器。只支持从当前场景抓取一个对象并放入或放到一个区域。不要输出实例 ID、坐标、姿态或运动参数。可执行时 action 为 pick_place、reason 为空字符串；其他任务 action 为 unsupported 并用中文说明原因。" +
+          (segmentationModel.prompt_free
+            ? "此模型自动分割，不接收提示词；perception_prompts 和 placement_labels 返回空数组。只判断任务是否属于抓放，稍后从真实识别场景选择对象。"
+            : "为用户提到的每个实体生成 2 到 4 个简短英文视觉提示词：从颜色、形状描述扩展到常见类别；不要只给用途名称，不添加用户没有提到的实体。用户明确指定视觉标签时例外，逐字保留这些标签，不重写或扩展。perception_prompts 必须覆盖抓取物体和目标区域并去重；placement_labels 必须逐字取自 perception_prompts，包含为放置目标生成的全部提示词。"),
         prompt: instruction,
       });
       return output;
@@ -79,6 +82,17 @@ function gateway(): RobotGateway {
     return value;
   };
   return {
+    async model() {
+      const snapshot = (await request("/api/perception/state")) as {
+        values: { perception_state: PerceptionState };
+      };
+      const state = snapshot.values.perception_state;
+      const model = state.available_models.find(
+        (item) => item.id === state.model,
+      );
+      if (!model) throw new Error("分割模型目录尚未就绪");
+      return model;
+    },
     post(path, body) {
       return request(path, {
         method: "POST",
