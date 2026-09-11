@@ -33,6 +33,7 @@ import {
 import { useState } from "react";
 
 import { FloatingCameraVideo } from "./camera-video";
+import { VisualPromptEditor, type VisualPrompt } from "./visual-prompt";
 import type { InstructionResult } from "./instruction-flow";
 
 const initialBoard = {
@@ -218,8 +219,14 @@ export default function Page() {
   const [driverParameterChanges, setDriverParameterChanges] = useState<
     Record<string, string>
   >({});
-  const [objectId, setObjectId] = useState<string>();
-  const [regionId, setRegionId] = useState<string>();
+  // A pregrasp observation can assign new detector IDs to the same physical
+  // objects. After the task acknowledges a draft, follow its actual selection.
+  const [objectId, setObjectId] = useDraftValue<string | undefined>(
+    manipulation?.object_id ?? undefined,
+  );
+  const [regionId, setRegionId] = useDraftValue<string | undefined>(
+    manipulation?.placement_region_id ?? undefined,
+  );
   const [board, setBoard] = useState(initialBoard);
   const [promptText, setPromptText] = useDraftValue(
     perception?.classes.join(", ") ?? "",
@@ -415,6 +422,7 @@ export default function Page() {
     action:
       "apply" | "disconnect" | "unselect" | "refresh" | "snapshot" | "reset",
     target: "camera" | "model" = "camera",
+    visualPrompt?: VisualPrompt,
   ) {
     const appliesModel = action === "apply" && target === "model";
     setPendingPerceptionAction(`${target}:${action}`);
@@ -490,6 +498,9 @@ export default function Page() {
         request_id: requestId(),
         action,
         model: appliesModel ? selectedModelId : null,
+        ...(visualPrompt && appliesModel && !promptFree
+          ? { prompt: visualPrompt }
+          : {}),
         classes:
           appliesModel && !promptFree
             ? selectedPrompts
@@ -979,6 +990,20 @@ export default function Page() {
               </div>
               {!promptFree && perception?.visual_prompt_active && (
                 <StatusBadge tone="cyan">已启用视觉示例提示</StatusBadge>
+              )}
+              {!promptFree && (
+                <VisualPromptEditor
+                  key={`${selectedSourceId}:${selectedModelId}:${selectedPrompts}`}
+                  imageUrl={asset("color.png")}
+                  classes={selectedPrompts
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean)}
+                  disabled={pending}
+                  onSave={(prompt) =>
+                    perceptionRequest("apply", "model", prompt)
+                  }
+                />
               )}
               <div className="card-actions perception-task-actions">
                 {modelDirty && (

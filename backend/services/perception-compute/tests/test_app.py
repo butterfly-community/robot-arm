@@ -283,6 +283,14 @@ def test_visual_prompt_class_ids_follow_official_sequential_contract():
 
 def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monkeypatch):
     import trimesh
+    from perception_compute import gripper_sampling
+
+    offsets = (-2.0, 0.0, 2.69)
+    sampling_assets = []
+    def sampling_geometry(asset):
+        sampling_assets.append(asset)
+        return offsets
+    monkeypatch.setattr(gripper_sampling, "obb_z_offsets_cm", sampling_geometry)
 
     backend = GraspGenXBackend.__new__(GraspGenXBackend)
     backend.seed = 0
@@ -323,20 +331,19 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
         assert options == {
             "planner": "graspmoe",
             "moe_obb_density": "dense-topandside",
-            "moe_z_offsets_cm": (-2, 0),
-            "grasp_threshold": 0.7,
+            "moe_z_offsets_cm": offsets,
+            "grasp_threshold": -1.0,
             "num_grasps": backend.num_grasps,
             "topk_num_grasps": -1,
         }
         return [
-            (poses, np.array([0.8, 0.7, 0.9]), ["diff", "obb", "obb"], None)
+            (poses, np.array([0.6, 0.7, 0.9]), ["diff", "obb", "obb"], None)
         ]
 
     def filter_scene(**options):
         np.testing.assert_allclose(options["scene_pc"], [[0.0, 0.0, 0.0]])
         assert options["gripper_surface_points"] is surface
         assert options["collision_threshold"] == 0.01
-        assert options["device"] == "cpu"
         np.testing.assert_allclose(options["grasp_poses"], poses)
         assert len(options["grasp_poses"]) == 3
         return np.array([True, False, True])
@@ -346,7 +353,7 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
     )
     monkeypatch.setitem(
         sys.modules,
-        "graspgenx.utils.collision_filter",
+        "perception_compute.scene_collision",
         SimpleNamespace(filter_colliding_grasps=filter_scene),
     )
     result = backend.infer(
@@ -354,12 +361,14 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
             points_xyz_m=[(0.1, 0.2, 0.3)],
             scene_points_xyz_m=[(0.0, 0.0, 0.0)],
             gripper_asset_id="test-tool",
+            observed_gripper=None,
             collision_threshold_m=0.01,
         )
     )
     assert len(result.candidates) == 2
     np.testing.assert_allclose(result.candidates[0].transform, tool)
     assert result.candidates[0].branch == "diff"
+    assert result.candidates[0].confidence == 0.6
     np.testing.assert_allclose(result.candidates[1].transform, poses[2] @ tool)
     assert result.candidates[1].branch == "obb"
     backend.num_grasps = 1000
@@ -368,10 +377,12 @@ def test_graspgenx_scene_workflow_filters_base_poses_before_tcp_conversion(monke
             points_xyz_m=[(0.1, 0.2, 0.3)],
             scene_points_xyz_m=[(0.0, 0.0, 0.0)],
             gripper_asset_id="test-tool",
+            observed_gripper=None,
             collision_threshold_m=0.01,
         )
     )
     assert surface_calls == [2000]
+    assert sampling_assets == ["test-assets/x_grippers/test-tool"]
 
 
 async def exercise_contract() -> None:
@@ -405,6 +416,7 @@ async def exercise_contract() -> None:
                 points_xyz_m=[(0.1, 0.2, 0.3)],
                 scene_points_xyz_m=[(0.0, 0.0, 0.0)],
                 gripper_asset_id="fixture-gripper",
+                observed_gripper=None,
                 collision_threshold_m=0.01,
             )
         )
@@ -414,6 +426,7 @@ async def exercise_contract() -> None:
                 points_xyz_m=[(0.1, 0.2, 0.3)],
                 scene_points_xyz_m=[(0.0, 0.0, 0.0)],
                 gripper_asset_id="second-fixture-gripper",
+                observed_gripper=None,
                 collision_threshold_m=0.01,
             )
         )

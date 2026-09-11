@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -14,6 +15,8 @@ def generate_launch_description() -> LaunchDescription:
     )
     move_group = moveit.to_dict()
     move_group.update(ParameterBuilder("stararm_102_motion_node").yaml("config/sensors_3d.yaml").to_dict())
+    self_filter = json.loads(Path("/config/robot-self-filter.json").read_text())
+    move_group["depth"]["mesh_padding_offset"] = self_filter["mesh_padding_offset_m"]
     # Filter duplicate samples around known geometry before voxelization. This
     # does not pad collision objects or lower the physical ground. Zero padding
     # left quantized ground samples in the 0..5 mm voxel layer, blocking closure.
@@ -89,7 +92,8 @@ def generate_launch_description() -> LaunchDescription:
             package="stararm_102_mtc",
             executable="pick_place_server",
             parameters=[
-                {"octomap_resolution": move_group["octomap_resolution"]},
+                {"octomap_resolution": move_group["octomap_resolution"],
+                 "mesh_padding_offset": self_filter["mesh_padding_offset_m"]},
                 moveit.robot_description,
                 moveit.robot_description_semantic,
                 moveit.robot_description_kinematics,

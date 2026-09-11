@@ -73,6 +73,7 @@ pub struct ManipulationResult {
     pub message: String,
     pub solution_count: u32,
     pub selected_cost: f64,
+    pub pregrasp_reached: bool,
 }
 
 #[derive(Clone)]
@@ -104,6 +105,7 @@ pub struct RosInterface {
     pose_publisher: PublisherUntyped,
     hand_publisher: PublisherUntyped,
     state_publisher: PublisherUntyped,
+    feedback_velocity: Arc<Mutex<crate::feedback_velocity::FeedbackVelocity>>,
     command_type: Arc<ClientUntyped>,
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
@@ -205,6 +207,7 @@ impl RosInterface {
             pose_publisher,
             hand_publisher,
             state_publisher,
+            feedback_velocity: Default::default(),
             command_type: Arc::new(command_type),
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
@@ -221,12 +224,26 @@ impl RosInterface {
         Ok(interface)
     }
 
-    pub fn publish_state(&self, joints: &[f64], actuator: f64) -> EyreResult<()> {
+    pub fn publish_state(
+        &self,
+        joints: &[f64],
+        actuator: f64,
+        feedback: &ArmState,
+    ) -> EyreResult<()> {
         let names = [JOINTS.as_slice(), &[GRIPPER_JOINT]].concat();
         let positions = [joints, &[actuator]].concat();
+        let mut velocity = self
+            .feedback_velocity
+            .lock()
+            .expect("feedback velocity mutex poisoned");
         self.state_publisher.publish(json!({
+            "header": {"stamp": {
+                "sec": feedback.sample_time_ns.div_euclid(1_000_000_000),
+                "nanosec": feedback.sample_time_ns.rem_euclid(1_000_000_000),
+            }},
             "name": names,
             "position": positions,
+            "velocity": velocity.update(feedback),
         }))?;
         Ok(())
     }
@@ -745,6 +762,7 @@ impl MotionActions {
                 message: value.message,
                 solution_count: value.solution_count,
                 selected_cost: value.selected_cost,
+                pregrasp_reached: value.pregrasp_reached,
             });
         }
     }

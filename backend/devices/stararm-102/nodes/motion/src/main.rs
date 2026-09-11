@@ -1,5 +1,7 @@
 mod core;
+mod feedback_velocity;
 mod ros;
+mod visual_guidance;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -16,8 +18,8 @@ use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::Data
 use eyre::Result;
 use robot_arm_messages::{
     ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationTaskState,
-    MotionRequest, MotionState, MotionStatus, PerceptionState, PickPlaceRequest, RequestAction,
-    RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
+    MotionRequest, MotionState, MotionStatus, PerceptionRequest, PerceptionState, PickPlaceRequest,
+    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
     SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose, ToolPoseFeedback,
     TransformedControlFrame, WorldScene, from_arrow, to_arrow,
 };
@@ -50,6 +52,13 @@ struct PendingMotion {
 struct PendingManipulation {
     job: ManipulationJob,
     state: ManipulationTaskState,
+    target: visual_guidance::ObservationTarget,
+}
+
+struct VisualGuidance {
+    target: visual_guidance::ObservationTarget,
+    request_id: Option<String>,
+    scene_sequence: Option<u64>,
 }
 
 enum WorkItem {
@@ -87,6 +96,7 @@ struct MotionNode {
     last_error: Option<String>,
     latest_scene: Option<WorldScene>,
     active_manipulation: Option<String>,
+    visual_guidance: Option<VisualGuidance>,
     manipulation_state: ManipulationTaskState,
 }
 
@@ -152,6 +162,7 @@ fn run() -> Result<()> {
         last_error: None,
         latest_scene: None,
         active_manipulation: None,
+        visual_guidance: None,
         manipulation_state: idle_manipulation_state(),
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
@@ -204,6 +215,10 @@ fn run() -> Result<()> {
                     "world_scene" => {
                         let scene = robot_arm_messages::world_scene_from_arrow(data.as_array())?;
                         motion.latest_scene = Some(scene);
+                        motion.try_visual_replan(&mut node)?;
+                    }
+                    "observation_result" => {
+                        motion.observation_result(&mut node, from_arrow(data.as_array())?)?;
                     }
                     "perception_state" => {
                         let state: PerceptionState = from_arrow(data.as_array())?;
@@ -251,7 +266,7 @@ impl MotionNode {
         }
         let (planning_joints, planning_actuator) = planning_state(&state);
         self.ros
-            .publish_state(&planning_joints, planning_actuator)?;
+            .publish_state(&planning_joints, planning_actuator, &state)?;
         if !self.fk_pending {
             self.fk_pending = true;
             // FK measures reality; planning-only limit projection must not alter it.
@@ -492,6 +507,11 @@ impl MotionNode {
             }
             WorkItem::Manipulation(pending) => {
                 self.manipulation_state = pending.state;
+                self.visual_guidance = Some(VisualGuidance {
+                    target: pending.target,
+                    request_id: None,
+                    scene_sequence: None,
+                });
                 self.active_manipulation = Some(pending.job.request_id.clone());
                 send(node, "manipulation_state", &self.manipulation_state)?;
                 self.controller_output_armed = true;
@@ -593,6 +613,96 @@ impl MotionNode {
             }
             Err(error) => self.fail_manipulation(node, request_id, error.to_string()),
         }
+    }
+
+    fn request_visual_observation(&mut self, node: &mut DoraNode) -> Result<()> {
+        let request_id = format!(
+            "{}:pregrasp-observation",
+            self.manipulation_state.request_id
+        );
+        let guidance = self
+            .visual_guidance
+            .as_mut()
+            .expect("active task retains its selection");
+        guidance.request_id = Some(request_id.clone());
+        self.manipulation_state.state = RequestState::Executing;
+        self.manipulation_state.stage =
+            Some("预抓取位已到达：等待新 RGB-D 帧，重新识别与生成抓取姿态".into());
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        send(
+            node,
+            "observation_request",
+            &PerceptionRequest {
+                schema_version: SCHEMA_VERSION,
+                request_id,
+                action: RequestAction::Refresh,
+                model: None,
+                classes: None,
+                prompt: None,
+                placement_labels: None,
+                grasp_collision_distance_m: None,
+            },
+        )
+    }
+
+    fn observation_result(
+        &mut self,
+        node: &mut DoraNode,
+        result: RequestResult<PerceptionState>,
+    ) -> Result<()> {
+        if self
+            .visual_guidance
+            .as_ref()
+            .and_then(|g| g.request_id.as_deref())
+            != Some(result.request_id.as_str())
+        {
+            return Ok(());
+        }
+        if let Some(error) = result.original_error {
+            return self.fail_visual_replan(node, format!("预抓取二次观测失败：{error}"));
+        }
+        let sequence = result.value.and_then(|value| value.last_scene_sequence);
+        let Some(sequence) = sequence else {
+            return self.fail_visual_replan(node, "预抓取二次观测没有场景序号".into());
+        };
+        self.visual_guidance.as_mut().unwrap().scene_sequence = Some(sequence);
+        self.try_visual_replan(node)
+    }
+
+    fn try_visual_replan(&mut self, node: &mut DoraNode) -> Result<()> {
+        let (Some(guidance), Some(scene)) = (&self.visual_guidance, &self.latest_scene) else {
+            return Ok(());
+        };
+        // Dora outputs can arrive in either order. Wait for exactly the scene
+        // named in our observation result, never an unrelated UI refresh.
+        if guidance.scene_sequence != Some(scene.sequence) {
+            return Ok(());
+        }
+        let pending = guidance
+            .target
+            .rebind(scene, self.manipulation_state.request_id.clone())
+            .and_then(|request| build_manipulation_job(scene, request, &guidance.target.placement));
+        let mut pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => return self.fail_visual_replan(node, error.to_string()),
+        };
+        pending.job.goal["stop_at_pregrasp"] = json!(false);
+        pending.state.stage = Some("二次观测已更新：从实际关节状态重新规划完整抓放".into());
+        self.visual_guidance = None;
+        self.manipulation_state = pending.state;
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        self.ros.run_manipulation(pending.job);
+        Ok(())
+    }
+
+    fn fail_visual_replan(&mut self, node: &mut DoraNode, message: String) -> Result<()> {
+        self.visual_guidance = None;
+        self.active_manipulation = None;
+        self.manipulation_state.state = RequestState::Failed;
+        self.manipulation_state.original_error = Some(message);
+        send(node, "manipulation_state", &self.manipulation_state)?;
+        Self::send_manipulation_result(node, &self.manipulation_state)?;
+        self.start_next_work(node)
     }
 
     fn fail_manipulation(
@@ -793,7 +903,12 @@ impl MotionNode {
                     if self.active_manipulation.as_deref() != Some(request_id.as_str()) {
                         continue;
                     }
+                    if result.as_ref().is_ok_and(|result| result.pregrasp_reached) {
+                        self.request_visual_observation(node)?;
+                        continue;
+                    }
                     self.active_manipulation = None;
+                    self.visual_guidance = None;
                     match result {
                         Ok(result) => {
                             self.manipulation_state.state = RequestState::Succeeded;
@@ -1054,6 +1169,19 @@ fn idle_manipulation_state() -> ManipulationTaskState {
 }
 
 fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<PendingManipulation> {
+    let placement = scene
+        .placement_regions
+        .iter()
+        .find(|region| region.region_id == request.placement_region_id)
+        .ok_or_else(|| eyre::eyre!("场景中没有放置区 {}", request.placement_region_id))?;
+    build_manipulation_job(scene, request, placement)
+}
+
+fn build_manipulation_job(
+    scene: &WorldScene,
+    request: PickPlaceRequest,
+    placement: &robot_arm_messages::PlacementRegion,
+) -> Result<PendingManipulation> {
     eyre::ensure!(
         scene.sequence == request.scene_sequence,
         "感知场景已改变，请从当前场景重新选择目标"
@@ -1063,11 +1191,6 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         .iter()
         .find(|object| object.object_id == request.object_id)
         .ok_or_else(|| eyre::eyre!("场景中没有抓取对象 {}", request.object_id))?;
-    let placement = scene
-        .placement_regions
-        .iter()
-        .find(|region| region.region_id == request.placement_region_id)
-        .ok_or_else(|| eyre::eyre!("场景中没有放置区 {}", request.placement_region_id))?;
     if object.grasp_candidates.is_empty() {
         return Err(eyre::eyre!("抓取对象 {} 没有抓取候选", object.object_id));
     }
@@ -1086,6 +1209,7 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
     placement_pose.position_m[2] = placement_pose.position_m[2].max(0.10);
     let goal = json!({
         "request_id": request.request_id,
+        "stop_at_pregrasp": true,
         "frame_id": scene.frame_id,
         "object_id": object.object_id,
         "object_pose": pose(&object.pose),
@@ -1097,6 +1221,7 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         "placement_size": size(placement.size_m),
     });
     Ok(PendingManipulation {
+        target: visual_guidance::ObservationTarget::new(scene, &request, placement)?,
         job: ManipulationJob {
             request_id: request.request_id.clone(),
             goal,
@@ -1306,6 +1431,35 @@ mod tests {
         );
         assert_eq!(pending.job.goal["object_pose"]["position"]["z"], 0.02);
         assert_eq!(pending.job.goal["grasp_confidences"], json!([0.87]));
+        assert_eq!(pending.job.goal["stop_at_pregrasp"], true);
+        assert!(pending.target.rebind(&scene, "repeat".into()).is_err());
+        let mut fresh = scene.clone();
+        fresh.sequence += 1;
+        fresh.objects[0].object_id = "new-detection-id".into();
+        fresh.objects[0].pose.position_m[0] += 0.003;
+        fresh.placement_regions[0].region_id = "new-destination-id".into();
+        let mut decoy = fresh.placement_regions[0].clone();
+        decoy.region_id = "other-same-label-pad".into();
+        decoy.pose.position_m[0] += 0.3;
+        fresh.placement_regions.insert(0, decoy);
+        let rebound = pending.target.rebind(&fresh, "repeat".into()).unwrap();
+        assert_eq!(rebound.object_id, "new-detection-id");
+        assert_eq!(rebound.placement_region_id, "destination");
+        assert_eq!(rebound.scene_sequence, fresh.sequence);
+        // The accepted destination is a task goal, not an instance that must
+        // be detected again. Refresh the object/cloud even if the pad is missed.
+        fresh.placement_regions.clear();
+        fresh.point_cloud.as_mut().unwrap().xyz_le = vec![1; 12];
+        let rebound = pending.target.rebind(&fresh, "repeat".into()).unwrap();
+        let corrected = build_manipulation_job(&fresh, rebound, &pending.target.placement).unwrap();
+        assert_eq!(corrected.job.goal["placement_pose"], pending.job.goal["placement_pose"]);
+        assert_eq!(corrected.job.goal["placement_size"], pending.job.goal["placement_size"]);
+        assert_eq!(corrected.job.goal["object_id"], "new-detection-id");
+        assert_eq!(corrected.job.point_cloud.xyz_le, vec![1; 12]);
+        fresh.objects[0].label = "not the selected class".into();
+        assert!(pending.target.rebind(&fresh, "repeat".into()).is_err());
+        fresh.frame_id = "different camera frame".into();
+        assert!(pending.target.rebind(&fresh, "repeat".into()).is_err());
         #[cfg(feature = "ros-runtime")]
         {
             let native_goal: r2r::stararm_102_mtc::action::PickPlace::Goal =

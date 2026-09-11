@@ -78,6 +78,11 @@ nodes:
         queue_size: 1
         queue_policy: drop_oldest
       request: web-gateway-node/perception_request
+      manipulation_observation: stararm-102-motion-node/observation_request
+      motion_state:
+        source: stararm-102-motion-node/motion_state
+        queue_size: 1
+        queue_policy: drop_oldest
       asset_request: web-gateway-node/perception_asset_request
       snapshot: web-gateway-node/perception_snapshot
       robot_model_info: stararm-102-execution-node/robot_model_info
@@ -131,6 +136,7 @@ nodes:
         source: scene-node/perception_state
         queue_size: 1
         queue_policy: drop_oldest
+      observation_result: scene-node/request_result
       robot_model_info: stararm-102-execution-node/robot_model_info
       set_control_mode: web-gateway-node/set_control_mode_request
       calibration_control_mode: camera-node/calibration_control_mode
@@ -155,6 +161,7 @@ nodes:
       - motion_request_result
       - manipulation_state
       - manipulation_request_result
+      - observation_request
 
   - id: stararm-102-execution-node
     path: /usr/local/bin/stararm-102-execution-node

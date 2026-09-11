@@ -16,12 +16,13 @@ find_package(tf2_ros REQUIRED)
 find_package(moveit_ros_perception REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(geometric_shapes REQUIRED)
+find_package(fcl REQUIRED)
 
 add_library(stararm_mesh_self_filter SHARED src/mesh_self_filter.cpp)
 target_compile_features(stararm_mesh_self_filter PUBLIC cxx_std_17)
 target_link_libraries(stararm_mesh_self_filter PUBLIC
   moveit_ros_perception::moveit_pointcloud_octomap_updater_core
-  pluginlib::pluginlib ${geometric_shapes_TARGETS})
+  pluginlib::pluginlib ${geometric_shapes_TARGETS} fcl)
 pluginlib_export_plugin_description_file(moveit_ros_occupancy_map_monitor octomap_plugins.xml)
 install(TARGETS stararm_mesh_self_filter LIBRARY DESTINATION lib)
 
@@ -43,6 +44,8 @@ target_link_libraries(pick_place_server PUBLIC
   ${sensor_msgs_TARGETS}
   ${std_srvs_TARGETS}
   tf2_ros::tf2_ros
+  ${geometric_shapes_TARGETS}
+  fcl
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 target_link_libraries(pick_place_server PRIVATE "${cpp_typesupport_target}")

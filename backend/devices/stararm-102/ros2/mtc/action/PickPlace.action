@@ -1,4 +1,7 @@
 string request_id
+# Internal phase of the same webpage task: execute only the validated prefix,
+# obtain a new observation, then plan/execute the remaining pick and place.
+bool stop_at_pregrasp
 string frame_id
 # Same-frame observation, encoded as native ROS binary data rather than JSON.
 sensor_msgs/PointCloud2 scene_cloud
@@ -10,7 +13,7 @@ geometry_msgs/Pose[] grasp_poses
 # One original model score per pose, same order; never reconstructed from rank.
 float64[] grasp_confidences
 string placement_region_id
-# TCP release position with minimum Z; orientation is ignored (unconstrained).
+# Held-object centre release position with minimum Z; orientation is ignored.
 geometry_msgs/Pose placement_pose
 geometry_msgs/Vector3 placement_size
 ---
@@ -18,6 +21,7 @@ int32 error_code
 string message
 uint32 solution_count
 float64 selected_cost
+bool pregrasp_reached
 ---
 string state
 string stage

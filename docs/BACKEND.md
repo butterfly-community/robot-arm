@@ -149,7 +149,12 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 
 `GRASPGENX_NUM_GRASPS` 透传官方 `num_grasps`，默认 200；Compose 从 `.env` 读取。
 它只增加同一模型的候选探索数量，不修改分数门限、候选位姿、关节范围或碰撞规则。
-真实长方体任务最终使用 4000 个原始采样，得到 209 个有效候选；不能把采样数当作有效候选数或成功证明。
+历史长方体验收曾使用 4000 个原始采样；延迟优化恢复官方默认 200，同输入三轮均找到完整抓放解。
+随后真实网页复测出现姿态覆盖不足，本地 `.env` 已恢复 4000。正式模型调用使用
+`grasp_threshold=-1.0` 和 `topk_num_grasps=-1` 保留评分候选，不再按示例 0.7 分截断；
+分数继续用于完整方案排名。这项修正待连续实物抓放验收，不等于保证低分候选能夹住物体。
+不能把采样数当作有效候选数或成功证明。环境筛选保留官方场景流程的取样与距离判据，
+使用 SciPy `cKDTree.query(eps=0)` 计算最近距离，避免 CPU 上构造全距离矩阵。
 
 FastAPI lifespan 加载提示词 `yoloe-26x-seg.pt`、自动分割 `yoloe-26x-seg-pf.pt` 和
 共用的 `GraspGenXBackend`。`/v1/model` 返回模型目录和 `prompt_free` 能力；网页据此隐藏
@@ -157,6 +162,11 @@ FastAPI lifespan 加载提示词 `yoloe-26x-seg.pt`、自动分割 `yoloe-26x-se
 解码同一 RGB 图并返回模型 ID、类别、置信度、二维框和 PNG mask；`/v1/grasps` 接收一个
 实例点云、排除该实例的环境点云和 `gripper_asset_id`，返回该资产 TCP 的 SE(3) 候选、分数与分支。
 YOLOE 的提示词更新和推理共用一把实例锁，避免并发请求混用类别；GraspGenX 也串行访问共享 sampler。
+`/v1/grasps` 同时接收 `observed_gripper`：实际 TCP 位姿、夹爪关节映射和反馈时间。
+scene-node 从 motion_state 配对新图像之后的真实 FK/电机反馈；计算侧以现有夹爪资产和
+FCL 从环境点中剔除末端自体点，目标点不变。显式 `null` 表示该输入没有观测机器人
+（例如官方静态测试场景），不是生产故障时跳过自过滤的降级。设备 `self-filter.json`
+与 ROS 共用原有网格自过滤距离，不添加新的抓取碰撞门限。
 文字与视觉提示使用同一 YOLOE 检查点、同一 `/v1/segment` 返回契约。
 视觉提示直接调用官方 `refer_image`/`YOLOEVPSegPredictor`，框属于保存的参考图，
 新帧掩膜由模型生成，官方 object0/object1 输出按 class ID 映射调用方名称。

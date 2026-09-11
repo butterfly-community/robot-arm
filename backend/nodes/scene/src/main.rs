@@ -13,11 +13,11 @@ use json_config_store::{load_or_default, save};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use robot_arm_messages::{
     AlignedDepthFrame, CameraCaptureState, CameraFrameBundle, CameraImagePlane,
-    DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo,
+    DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo, MotionState,
     PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary,
     PerceptionModelInfo, PerceptionRequest, PerceptionState, Pose3, RequestAction, RequestResult,
-    RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt, ServiceState, WorldScene,
-    camera_frame_from_arrow, from_arrow, to_arrow,
+    RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt, ServiceState,
+    ToolPoseFeedback, WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,8 @@ struct SceneNode {
     models: Vec<PerceptionModelInfo>,
     catalog_updates: tokio::sync::watch::Receiver<Option<Result<ModelResponse, String>>>,
     latest_bundle: Option<CameraFrameBundle>,
+    frame_updates: tokio::sync::watch::Sender<Option<CameraFrameBundle>>,
+    tool_updates: tokio::sync::watch::Sender<Option<ToolPoseFeedback>>,
     camera_state: Option<CameraCaptureState>,
     sequence: u64,
     last_frame_time_ns: Option<i64>,
@@ -104,6 +106,72 @@ struct SceneTaskResult {
     request_id: String,
     input_sequence: u64,
     result: Result<ProcessedScene, String>,
+}
+
+async fn next_observation_frame(
+    frames: &mut tokio::sync::watch::Receiver<Option<CameraFrameBundle>>,
+    requested_at: i64,
+) -> Result<CameraFrameBundle> {
+    loop {
+        frames.changed().await.context("相机帧通道已关闭")?;
+        let frame = frames
+            .borrow_and_update()
+            .clone()
+            .ok_or_else(|| eyre!("等待新帧期间相机输入已清除"))?;
+        if frame.received_time_ns > requested_at {
+            return Ok(frame);
+        }
+    }
+}
+
+async fn feedback_after_frame(
+    tools: &mut tokio::sync::watch::Receiver<Option<ToolPoseFeedback>>,
+    received_time_ns: i64,
+) -> Result<ToolPoseFeedback> {
+    loop {
+        if let Some(tool) = tools.borrow_and_update().clone()
+            && tool.arm_state.sample_time_ns >= received_time_ns
+        {
+            return Ok(tool);
+        }
+        tools.changed().await.context("实际 TCP 反馈通道已关闭")?;
+    }
+}
+
+#[derive(Serialize)]
+struct ObservedGripper {
+    tcp_pose: Pose3,
+    joint_positions_rad: BTreeMap<String, f64>,
+    feedback_time_ns: i64,
+}
+
+fn observed_gripper(
+    model: &RobotModelInfo,
+    tool: &ToolPoseFeedback,
+    frame: &str,
+) -> Result<ObservedGripper> {
+    if tool.pose.frame != frame || tool.arm_state.model_revision != model.model_revision {
+        bail!("实际夹爪反馈坐标系或模型版本与场景不一致");
+    }
+    let mut joints = BTreeMap::new();
+    for (index, actuator) in model.tool_actuators.iter().enumerate() {
+        if let Some(key) = &actuator.visualization_joint_key {
+            let value = tool
+                .arm_state
+                .actuators_rad
+                .get(index)
+                .ok_or_else(|| eyre!("夹爪实际关节反馈缺失"))?;
+            joints.insert(key.clone(), *value);
+        }
+    }
+    Ok(ObservedGripper {
+        tcp_pose: Pose3 {
+            position_m: tool.pose.position_m,
+            orientation_xyzw: tool.pose.orientation_xyzw,
+        },
+        joint_positions_rad: joints,
+        feedback_time_ns: tool.arm_state.sample_time_ns,
+    })
 }
 
 #[derive(Serialize)]
@@ -142,6 +210,7 @@ struct GraspRequest<'a> {
     scene_points_xyz_m: &'a [[f32; 3]],
     gripper_asset_id: &'a str,
     collision_threshold_m: f64,
+    observed_gripper: Option<&'a ObservedGripper>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +259,8 @@ fn run() -> Result<()> {
         models: vec![],
         catalog_updates,
         latest_bundle: None,
+        frame_updates: tokio::sync::watch::channel(None).0,
+        tool_updates: tokio::sync::watch::channel(None).0,
         camera_state: None,
         sequence: 0,
         last_frame_time_ns: None,
@@ -212,7 +283,7 @@ fn run() -> Result<()> {
     while let Some(event) = events.recv() {
         match event {
             Event::Input { id, data, .. } => match id.as_str() {
-                "request" => {
+                "request" | "manipulation_observation" => {
                     scene_node.apply_request(&runtime, &mut node, from_arrow(data.as_array())?)?
                 }
                 "asset_request" => {
@@ -250,6 +321,12 @@ fn run() -> Result<()> {
                     }
                     scene_node.robot_model = Some(model);
                 }
+                "motion_state" => {
+                    let state: MotionState = from_arrow(data.as_array())?;
+                    scene_node
+                        .tool_updates
+                        .send_replace(state.current_tool_pose);
+                }
                 "snapshot" => scene_node.publish_snapshot(&mut node)?,
                 "tick" => scene_node.tick(&mut node)?,
                 _ => {}
@@ -273,6 +350,7 @@ impl SceneNode {
             .map(|scene| scene.frame_id.clone())
             .unwrap_or_default();
         self.latest_bundle = None;
+        self.frame_updates.send_replace(None);
         self.last_scene = None;
         self.color_frame = None;
         self.depth_frame = None;
@@ -360,6 +438,7 @@ impl SceneNode {
         self.last_frame_time_ns = Some(frame.received_time_ns);
         self.latest_bundle = Some(frame.clone());
         self.camera_calibration = frame.calibration.clone();
+        self.frame_updates.send_replace(Some(frame));
         Ok(())
     }
 
@@ -371,13 +450,16 @@ impl SceneNode {
         if self.task_state == RequestState::Executing {
             bail!("感知任务正在执行");
         }
-        let frame = self
+        let current = self
             .latest_bundle
-            .clone()
+            .as_ref()
             .ok_or_else(|| eyre!("尚未收到相机帧"))?;
-        if frame.calibration.is_none() {
+        if current.calibration.is_none() {
             bail!("当前相机尚未配置外参");
         }
+        let mut frames = self.frame_updates.subscribe();
+        let mut tools = self.tool_updates.subscribe();
+        let requested_at = now_ns();
         if !self.config.enabled {
             let mut next = self.config.clone();
             next.enabled = true;
@@ -387,18 +469,29 @@ impl SceneNode {
         }
         let http = self.http.clone();
         let config = self.config.clone();
-        let gripper_asset_id = self
-            .robot_model
-            .as_ref()
-            .and_then(|model| model.gripper_asset_id.clone());
+        let robot_model = self.robot_model.clone();
         let sequence = self.sequence + 1;
         let sender = self.task_sender.clone();
         let completed_request_id = request_id.clone();
         let input_sequence = self.sequence;
         runtime.spawn(async move {
-            let result = process_scene(http, config, gripper_asset_id, frame, sequence)
-                .await
-                .map_err(|error| format!("{error:#}"));
+            // Refresh waits for a newly received frame after the request, including a
+            // request issued when the arm has just reached its pregrasp pose.
+            // Waiting is asynchronous; the camera/event thread keeps running.
+            let result = async {
+                let frame = next_observation_frame(&mut frames, requested_at).await?;
+                let tool = if robot_model
+                    .as_ref()
+                    .is_some_and(|model| model.gripper_asset_id.is_some())
+                {
+                    Some(feedback_after_frame(&mut tools, frame.received_time_ns).await?)
+                } else {
+                    None
+                };
+                process_scene(http, config, robot_model, tool, frame, sequence).await
+            }
+            .await
+            .map_err(|error: eyre::Report| format!("{error:#}"));
             let _ = sender
                 .send(SceneTaskResult {
                     request_id: completed_request_id,
@@ -703,7 +796,8 @@ impl SceneNode {
 async fn process_scene(
     http: reqwest::Client,
     config: SceneConfig,
-    gripper_asset_id: Option<String>,
+    robot_model: Option<RobotModelInfo>,
+    tool: Option<ToolPoseFeedback>,
     frame: CameraFrameBundle,
     sequence: u64,
 ) -> Result<ProcessedScene> {
@@ -780,10 +874,17 @@ async fn process_scene(
         .iter()
         .map(|cloud| cloud.points_xyz_m.len() as u64)
         .sum();
+    let gripper = match (&robot_model, &tool) {
+        (Some(model), Some(tool)) => Some(observed_gripper(model, tool, &scene.frame_id)?),
+        _ => None,
+    };
     attach_grasp_candidates(
         &http,
         &config.compute_service_url,
-        gripper_asset_id.as_deref(),
+        robot_model
+            .as_ref()
+            .and_then(|model| model.gripper_asset_id.as_deref()),
+        gripper.as_ref(),
         config.grasp_collision_distance_m,
         if prompt_free {
             &[]
@@ -871,6 +972,7 @@ async fn attach_grasp_candidates(
     http: &reqwest::Client,
     compute_service_url: &str,
     gripper_asset_id: Option<&str>,
+    observed_gripper: Option<&ObservedGripper>,
     collision_threshold_m: f64,
     placement_only_labels: &[String],
     scene: &mut WorldScene,
@@ -897,6 +999,7 @@ async fn attach_grasp_candidates(
                 scene_points_xyz_m: &cloud.scene_points_xyz_m,
                 gripper_asset_id,
                 collision_threshold_m,
+                observed_gripper,
             })
             .send()
             .await
@@ -1097,6 +1200,92 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn self_filter_waits_for_real_feedback_after_the_image() {
+        let tool = ToolPoseFeedback {
+            pose: robot_arm_messages::ToolPose {
+                frame: "base".into(),
+                position_m: [1., 2., 3.],
+                orientation_xyzw: [0., 0., 0., 1.],
+            },
+            arm_state: robot_arm_messages::ArmState {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                sample_time_ns: 100,
+                model_revision: "fixture".into(),
+                joints_rad: vec![0.1234],
+                actuators_rad: vec![0.4321],
+                feedback_source: robot_arm_messages::FeedbackSource::Hardware,
+            },
+        };
+        let (sender, mut receiver) = tokio::sync::watch::channel(Some(tool.clone()));
+        let pending = tokio::spawn(async move { feedback_after_frame(&mut receiver, 101).await });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        let mut next = tool;
+        next.arm_state.sample_time_ns = 102;
+        next.arm_state.sequence = 2;
+        sender.send_replace(Some(next.clone()));
+        let paired = pending.await.unwrap().unwrap();
+        assert_eq!(paired, next);
+    }
+
+    #[tokio::test]
+    async fn refresh_waits_for_a_new_frame_without_blocking_the_producer() {
+        let image = CameraImagePlane {
+            width: 1,
+            height: 1,
+            stride_bytes: 3,
+            pixel_format: "rgb8".into(),
+            frame_id: "camera".into(),
+            data: vec![1, 2, 3],
+        };
+        let frame = CameraFrameBundle {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            source_id: "test".into(),
+            device_time_ns: 1,
+            device_time_domain: "test".into(),
+            received_time_ns: 100,
+            color: image.clone(),
+            aligned_depth: CameraImagePlane {
+                pixel_format: "z16le".into(),
+                stride_bytes: 2,
+                data: vec![1, 0],
+                ..image
+            },
+            intrinsics: robot_arm_messages::CameraIntrinsics {
+                width: 1,
+                height: 1,
+                focal_length_px: [1.0; 2],
+                principal_point_px: [0.0; 2],
+                distortion_model: "none".into(),
+                distortion: vec![],
+            },
+            depth_scale_m: 0.001,
+            calibration: None,
+        };
+        let (sender, mut receiver) = tokio::sync::watch::channel(Some(frame.clone()));
+        let waiting = tokio::spawn(async move { next_observation_frame(&mut receiver, 200).await });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        sender.send_replace(Some(frame.clone()));
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "queued pre-motion frame was accepted"
+        );
+        let mut fresh = frame;
+        fresh.sequence = 2;
+        fresh.received_time_ns = 201;
+        sender.send_replace(Some(fresh));
+        assert_eq!(waiting.await.unwrap().unwrap().sequence, 2);
+
+        let mut receiver = sender.subscribe();
+        sender.send_replace(None);
+        assert!(next_observation_frame(&mut receiver, 200).await.is_err());
+    }
 
     #[test]
     fn default_configuration_has_no_selected_camera() {

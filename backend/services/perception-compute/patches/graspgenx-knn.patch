@@ -1,0 +1,32 @@
+diff --git a/graspgenx/utils/point_cloud.py b/graspgenx/utils/point_cloud.py
+--- a/graspgenx/utils/point_cloud.py
++++ b/graspgenx/utils/point_cloud.py
+@@ -32,13 +32,19 @@ def knn_points(X: torch.Tensor, K: int, norm: int):
+     N, _ = X.shape
+ 
+-    # Compute pairwise squared Euclidean distances
+-    dist_matrix = torch.cdist(X, X, p=norm)  # (N, N)
+-
+-    # Ignore self-distance (optional, but avoids trivial zero distance)
+-    self_mask = torch.eye(N, device=X.device, dtype=torch.bool)
+-    dist_matrix.masked_fill_(self_mask, float("inf"))  # Set self-distances to inf
+-
+-    # Get the indices of the K-nearest neighbors
+-    dists, idxs = torch.topk(dist_matrix, K, dim=1, largest=False)
++    # Exact neighbour search without allocating N*N distances for dense RGB-D
++    # masks. Keep the official metric, K, self exclusion and downstream mean
++    # threshold. Duplicate points remain neighbours (only this index is self).
++    from scipy.spatial import cKDTree
++
++    points = X.detach().cpu().numpy()
++    distances, indices = cKDTree(points).query(points, k=K + 1, p=norm, eps=0)
++    distances[indices == np.arange(N)[:, None]] = np.inf
++    order = np.argsort(distances, axis=1, kind="stable")[:, :K]
++    indices = np.take_along_axis(indices, order, axis=1)
++    idxs = torch.as_tensor(indices, device=X.device, dtype=torch.long)
++    # Re-evaluate the selected distances in the input tensor's dtype/device,
++    # as torch.cdist did. Memory is N*K, not N*N. Tie index ordering is not
++    # part of the outlier predicate; only the K distances are used there.
++    dists = torch.linalg.vector_norm(X[idxs] - X[:, None, :], ord=norm, dim=-1)
+ 
+     return dists, idxs

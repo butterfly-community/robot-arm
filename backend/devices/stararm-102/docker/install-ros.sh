@@ -22,4 +22,4 @@ cd "$ros_workspace"
 colcon build --packages-select \
   stararm102_description stararm102_moveit_config \
   stararm_102_mtc stararm_102_motion_node \
-  --cmake-args -DBUILD_TESTING=OFF
+  --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release

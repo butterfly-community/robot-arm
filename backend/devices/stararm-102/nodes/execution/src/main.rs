@@ -541,8 +541,9 @@ impl StarArmExecution {
                 return;
             }
         };
-        self.gripper_feedback.request(gripper_angle);
-        self.transport.gripper_control_power_mw = self.gripper_feedback.regulated_power_mw;
+        self.gripper_feedback
+            .request(gripper_angle, self.config.gripper_strength_percent);
+        self.transport.gripper_control_power_mw = self.gripper_feedback.regulated_power_mw();
         if let Some(bus) = self.bus.as_mut() {
             self.transport.last_command = Some(command.clone());
             if let Err(error) = bus.write(&command, self.gripper_feedback.command_power_mw()) {
@@ -592,12 +593,15 @@ impl StarArmExecution {
                 self.transport.gripper_feedback_time_ns = Some(self.telemetry.sample_time_ns);
                 let strength = primary_tool_feedback(&self.telemetry).strength_percent;
                 self.transport.gripper_strength_feedback_percent = Some(strength);
-                if self
-                    .gripper_feedback
-                    .observe(strength, self.config.gripper_strength_percent)
+                if let Some(raw) = self.transport.gripper_feedback_telemetry.as_ref()
+                    && self.gripper_feedback.observe(
+                        raw.power_mw,
+                        self.config.gripper_strength_percent,
+                        self.telemetry.sample_time_ns,
+                    )
                 {
                     self.transport.gripper_control_power_mw =
-                        self.gripper_feedback.regulated_power_mw;
+                        self.gripper_feedback.regulated_power_mw();
                     if let (Some(bus), Some(requested)) =
                         (&mut self.bus, &self.transport.last_command)
                         && let Err(error) =
@@ -951,28 +955,28 @@ mod tests {
         let mut execution = StarArmExecution::new();
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 1.0));
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.0));
-        let holding = execution.gripper_feedback.regulated_power_mw;
+        let holding = execution.gripper_feedback.regulated_power_mw();
         assert!(holding.is_some());
         // Native trajectory endpoint seen in execution 9; it encodes to 0°.
         execution.apply_command(command(
             DEFAULT_JOINTS_RAD.to_vec(),
             6.811_975_009_831_89e-17,
         ));
-        assert_eq!(execution.gripper_feedback.regulated_power_mw, holding);
+        assert_eq!(execution.gripper_feedback.regulated_power_mw(), holding);
         execution.apply_command(command(DEFAULT_JOINTS_RAD.to_vec(), 0.1_f64.to_radians()));
-        assert_eq!(execution.gripper_feedback.regulated_power_mw, None);
+        assert_eq!(execution.gripper_feedback.regulated_power_mw(), None);
     }
 
     #[test]
     fn disconnect_removes_regulation_and_stale_strength() {
         let mut execution = StarArmExecution::new();
-        execution.gripper_feedback.request(10);
-        execution.gripper_feedback.request(0);
-        execution.gripper_feedback.observe(50.0, 50.0);
+        execution.gripper_feedback.request(10, 50.0);
+        execution.gripper_feedback.request(0, 50.0);
+        execution.gripper_feedback.observe(1200, 50.0, 100_000_000);
         execution.transport.gripper_strength_feedback_percent = Some(50.0);
         execution.disconnect();
-        assert!(!execution.gripper_feedback.observe(20.0, 50.0));
-        assert_eq!(execution.gripper_feedback.regulated_power_mw, None);
+        assert!(!execution.gripper_feedback.observe(720, 50.0, 200_000_000));
+        assert_eq!(execution.gripper_feedback.regulated_power_mw(), None);
         assert_eq!(execution.transport.gripper_strength_feedback_percent, None);
     }
     #[test]

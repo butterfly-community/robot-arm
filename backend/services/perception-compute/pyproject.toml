@@ -10,9 +10,13 @@ dependencies = [
   "numpy==2.4.6",
   "pillow==12.3.0",
   "pydantic==2.13.5",
+  "python-fcl==0.7.0.11",
+  "scipy==1.17.1",
   "transformers==4.48.3",
+  "trimesh==4.5.3",
   "ultralytics==8.4.135",
   "urdfpy==0.0.4",
+  "yourdfpy==0.0.60",
   "uvicorn==0.52.4",
 ]
 

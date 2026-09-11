@@ -9,11 +9,13 @@
 #include <moveit/task_constructor/stages/connect.h>
 #include <moveit/task_constructor/stages/current_state.h>
 #include <moveit/task_constructor/stages/generate_pose.h>
+#include <moveit/task_constructor/stages/fixed_state.h>
 #include <moveit/task_constructor/stages/modify_planning_scene.h>
 #include <moveit/task_constructor/stages/move_relative.h>
 #include <moveit/task_constructor/stages/move_to.h>
 #include <moveit/task_constructor/task.h>
 #include <moveit/task_constructor/cost_terms.h>
+#include <moveit/trajectory_processing/time_optimal_trajectory_generation.hpp>
 #include <moveit_msgs/msg/attached_collision_object.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
@@ -33,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -41,6 +44,8 @@
 #include <vector>
 
 #include "stararm_102_mtc/action/pick_place.hpp"
+#include "collision_workspace.hpp"
+#include "observation_visibility.hpp"
 
 namespace mtc = moveit::task_constructor;
 using PickPlace = stararm_102_mtc::action::PickPlace;
@@ -60,7 +65,65 @@ constexpr std::array<const char *, 2> kSupportIds{kGroundId, "<octomap>"};
 constexpr std::array<const char *, 2> kFingerLinks{"link7_left", "link7_right"};
 constexpr double kGroundSize = 2.0;
 constexpr double kGroundDepth = 1.0;
-constexpr double kDefaultVelocityScaling = 0.25; // User default; physical limits unchanged.
+constexpr double kDefaultVelocityScaling = 0.125; // User halved grasp/place speed; physical limits unchanged.
+constexpr double kClosingVelocityScaling = kDefaultVelocityScaling / 2.0;
+
+// Preserve the official MTC sub-trajectories AND their scene diffs. Never
+// reconstruct a joint path or execute any approach/closure before observing.
+mtc::SolutionSequence::container_type pregrasp_prefix(const mtc::SolutionBase &solution) {
+  if (const auto *wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution))
+    return pregrasp_prefix(*wrapped->wrapped());
+  const auto *sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution);
+  if (!sequence)
+    throw std::runtime_error("Complete MTC solution is not a sequence");
+  mtc::SolutionSequence::container_type prefix;
+  for (const auto *part : sequence->solutions()) {
+    prefix.push_back(part);
+    if (part->creator() && part->creator()->name() == "move to pregrasp")
+      return prefix;
+  }
+  throw std::runtime_error("Complete MTC solution has no pregrasp boundary");
+}
+
+const mtc::SubTrajectory& connect_trajectory(const mtc::SolutionBase& solution) {
+  if (const auto* wrapped = dynamic_cast<const mtc::WrappedSolution*>(&solution))
+    return connect_trajectory(*wrapped->wrapped());
+  if (const auto* sequence = dynamic_cast<const mtc::SolutionSequence*>(&solution)) {
+    if (sequence->solutions().size() == 1)
+      return connect_trajectory(*sequence->solutions().front());
+  }
+  if (const auto* trajectory = dynamic_cast<const mtc::SubTrajectory*>(&solution))
+    if (trajectory->trajectory()) return *trajectory;
+  throw std::runtime_error("Expected native single-arm connect trajectory");
+}
+
+Eigen::Isometry3d pose_transform(const geometry_msgs::msg::Pose& pose) {
+  Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
+  result.translation() = Eigen::Vector3d(pose.position.x, pose.position.y, pose.position.z);
+  result.linear() = Eigen::Quaterniond(pose.orientation.w, pose.orientation.x,
+                                     pose.orientation.y, pose.orientation.z).toRotationMatrix();
+  return result;
+}
+
+// Reuse all observed surface points inside the same target geometry MTC plans
+// with. Camera rays and link FK must both be in the robot model frame.
+EigenSTL::vector_Vector3d observation_target_points(
+    const PickPlace::Goal& goal, const Eigen::Isometry3d& model_from_scene) {
+  shapes::Box shape(goal.object_size.x, goal.object_size.y, goal.object_size.z);
+  bodies::Box target(&shape);
+  target.setPose(pose_transform(goal.object_pose));
+  const auto scene_from_sensor = pose_transform(goal.sensor_in_scene);
+  EigenSTL::vector_Vector3d points;
+  sensor_msgs::PointCloud2ConstIterator<float> x(goal.scene_cloud, "x"),
+      y(goal.scene_cloud, "y"), z(goal.scene_cloud, "z");
+  for (; x != x.end(); ++x, ++y, ++z) {
+    const Eigen::Vector3d optical(*x, *y, *z);
+    if (!optical.allFinite() || optical.z() <= 0) continue;
+    const Eigen::Vector3d point = scene_from_sensor * optical;
+    if (target.containsPoint(point)) points.push_back(model_from_scene * point);
+  }
+  return points;
+}
 
 // Upstream checks coarse joint interpolation BEFORE time parameterization.
 // Retiming introduces different waypoints: real replay had a narrow collision
@@ -181,13 +244,31 @@ struct DepthPose {
   geometry_msgs::msg::PoseStamped pose;
   std::size_t candidate_index;
   double depth_m;
+  bool planar_centered = false;
 };
 
-// Search only the one-dimensional insertion coordinate, not a new orientation
-// or a model-side offset. Bound insertion by the observed object's far face
+// Preserve the model orientation and height. The second translation proposal
+// aligns with the observed centre in the SAME ground plane used by this task.
+// Slanted insertion alone couples forward engagement to moving below ground.
+// Both proposals still require the complete native IK/collision/transport path;
+// this is not a target correction, new force threshold or model rescore.
+geometry_msgs::msg::Pose grasp_origin(const PickPlace::Goal &goal, std::size_t index,
+                                     bool planar_centered) {
+  auto pose = goal.grasp_poses.at(index);
+  if (planar_centered) {
+    pose.position.x = goal.object_pose.position.x;
+    pose.position.y = goal.object_pose.position.y;
+  }
+  return pose;
+}
+
+// Search insertion from both original and planar-centred origins, without an
+// orientation restriction. Bound insertion by the observed object's far face
 // projected onto TCP +Z. Use the existing scene resolution, including both
 // endpoints; this is a discrete search, not a claim of an exact global optimum.
-std::vector<DepthPose> grasp_depth_poses(const PickPlace::Goal &goal, double resolution) {
+std::vector<DepthPose> grasp_depth_poses(const PickPlace::Goal &goal, double resolution,
+                                      std::optional<std::size_t> selected = std::nullopt,
+                                      bool all_planar_origins = false) {
   std::vector<DepthPose> result;
   const auto &object = goal.object_pose;
   const Eigen::Vector3d center(object.position.x, object.position.y, object.position.z);
@@ -195,29 +276,60 @@ std::vector<DepthPose> grasp_depth_poses(const PickPlace::Goal &goal, double res
                                           object.orientation.y, object.orientation.z);
   const Eigen::Vector3d size(goal.object_size.x, goal.object_size.y, goal.object_size.z);
   for (std::size_t index = 0; index < goal.grasp_poses.size(); ++index) {
-    const auto &pose = goal.grasp_poses[index];
-    const Eigen::Quaterniond rotation(pose.orientation.w, pose.orientation.x,
-                                      pose.orientation.y, pose.orientation.z);
-    const Eigen::Vector3d axis = rotation * Eigen::Vector3d::UnitZ();
-    const Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
-    const Eigen::Vector3d object_axis = object_rotation.conjugate() * axis;
-    const double far_face = axis.dot(center - position) + 0.5 * object_axis.cwiseAbs().dot(size);
-    const double maximum = std::max(0.0, far_face);
-    const std::size_t steps = static_cast<std::size_t>(std::ceil(maximum / resolution));
-    for (std::size_t step = 0; step <= steps; ++step) {
-      const double depth = std::min(step * resolution, maximum);
-      DepthPose variant;
-      variant.pose.header.frame_id = goal.frame_id;
-      variant.pose.pose = pose;
-      variant.pose.pose.position.x += axis.x() * depth;
-      variant.pose.pose.position.y += axis.y() * depth;
-      variant.pose.pose.position.z += axis.z() * depth;
-      variant.candidate_index = index;
-      variant.depth_m = depth;
-      result.push_back(std::move(variant));
+    if (selected && index != *selected)
+      continue;
+    for (const bool planar_centered : {false, true}) {
+      // Coarse complete-plan search stays on original model poses. The existing
+      // finite single-candidate refinement explores both origins afterwards.
+      // all_planar_origins only computes a conservative collision-map extent.
+      if (planar_centered && !selected && !all_planar_origins) continue;
+      const auto pose = grasp_origin(goal, index, planar_centered);
+      const auto &original = goal.grasp_poses[index];
+      if (planar_centered && pose.position.x == original.position.x &&
+          pose.position.y == original.position.y)
+        continue; // Identical proposal, not another search path.
+      const Eigen::Quaterniond rotation(pose.orientation.w, pose.orientation.x,
+                                        pose.orientation.y, pose.orientation.z);
+      const Eigen::Vector3d axis = rotation * Eigen::Vector3d::UnitZ();
+      const Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
+      const Eigen::Vector3d object_axis = object_rotation.conjugate() * axis;
+      const double far_face = axis.dot(center - position) + 0.5 * object_axis.cwiseAbs().dot(size);
+      const double maximum = std::max(0.0, far_face);
+      const std::size_t steps = static_cast<std::size_t>(std::ceil(maximum / resolution));
+      for (std::size_t remaining = steps + 1; remaining > 0; --remaining) {
+        const auto step = remaining - 1; // Deepest first; still retain the complete grid.
+        const double depth = std::min(step * resolution, maximum);
+        DepthPose variant;
+        variant.pose.header.frame_id = goal.frame_id;
+        variant.pose.pose = pose;
+        variant.pose.pose.position.x += axis.x() * depth;
+        variant.pose.pose.position.y += axis.y() * depth;
+        variant.pose.pose.position.z += axis.z() * depth;
+        variant.candidate_index = index;
+        variant.depth_m = depth;
+        variant.planar_centered = planar_centered;
+        result.push_back(std::move(variant));
+      }
     }
   }
   return result;
+}
+
+double collision_workspace_radius(const moveit::core::RobotModel& model,
+                                  const PickPlace::Goal& goal, double resolution) {
+  const Eigen::Vector3d center(goal.object_pose.position.x, goal.object_pose.position.y,
+                               goal.object_pose.position.z);
+  const double half_diagonal = 0.5 * Eigen::Vector3d(
+      goal.object_size.x, goal.object_size.y, goal.object_size.z).norm();
+  double attached_extent = 0.0;
+  for (const auto& variant : grasp_depth_poses(goal, resolution, std::nullopt, true)) {
+    const auto& p = variant.pose.pose.position;
+    attached_extent = std::max(attached_extent,
+        (Eigen::Vector3d(p.x, p.y, p.z) - center).norm() + half_diagonal);
+  }
+  // Include held geometry at ANY generated insertion and an entire voxel
+  // diagonal at the boundary. This is a conservative map crop, not an IK limit.
+  return collision_reach(model) + attached_extent + std::sqrt(3.0) * resolution;
 }
 
 class GeneratePoses final : public mtc::stages::GeneratePose {
@@ -240,9 +352,11 @@ public:
       state.properties().set("target_pose", variant.pose);
       state.properties().set("grasp_candidate_index", variant.candidate_index);
       state.properties().set("grasp_depth_m", variant.depth_m);
+      state.properties().set("grasp_planar_centered", variant.planar_centered);
       mtc::SubTrajectory trajectory;
       trajectory.setComment("candidate " + std::to_string(variant.candidate_index) +
-                            " depth +" + std::to_string(variant.depth_m * 1000.0) + " mm");
+                            " depth +" + std::to_string(variant.depth_m * 1000.0) + " mm" +
+                            (variant.planar_centered ? " planar-centred" : " original"));
       spawn(std::move(state), std::move(trajectory));
     }
   }
@@ -278,6 +392,17 @@ double grasp_depth(const mtc::SolutionBase &solution) {
   return depth;
 }
 
+bool grasp_planar_centered(const mtc::SolutionBase &solution) {
+  if (solution.end() && solution.end()->properties().hasProperty("grasp_planar_centered"))
+    return solution.end()->properties().get<bool>("grasp_planar_centered");
+  if (const auto *wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution))
+    return grasp_planar_centered(*wrapped->wrapped());
+  if (const auto *sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution))
+    for (const auto *child : sequence->solutions())
+      if (grasp_planar_centered(*child)) return true;
+  return false;
+}
+
 // Dimensionless mean fraction of the arm's existing joint travel. Native MTC
 // computes joint distances along every waypoint (including reversals), not
 // merely endpoint distance. No gripper travel or hard-coded joint IDs/weights.
@@ -295,34 +420,181 @@ struct RankedGrasp {
   double depth_m;
   double confidence;
   double motion_cost;
+  double closing_span_m;
+  double normalized_span;
+  double center_distance_m;
+  double normalized_center_distance;
+  double engagement_distance_m;
+  double normalized_engagement_distance;
+  double remaining_standoff_m;
+  double geometry_cost;
+  bool planar_centered = false;
 
-  double cost() const { return (1.0 - confidence) + motion_cost; }
+  double cost() const {
+    return (1.0 - confidence) + normalized_span + normalized_engagement_distance;
+  }
+
+  auto rank_key() const {
+    return std::make_tuple(cost(), motion_cost, closing_span_m,
+                           -confidence, candidate_index, planar_centered);
+  }
 };
 
+// Compare the FINAL insertion-adjusted TCP with the observed object centre.
+// Path length only measures arm motion; it does not measure grasp engagement.
+// This is a soft geometric preference, not a contact/COM estimate or rejection.
+double grasp_center_distance(const PickPlace::Goal &goal, std::size_t index, double depth_m,
+                             bool planar_centered = false) {
+  const auto tcp = pose_transform(grasp_origin(goal, index, planar_centered));
+  const auto center = pose_transform(goal.object_pose).translation().eval();
+  return (tcp.translation() + tcp.linear().col(2) * depth_m - center).norm();
+}
+
+// This arm's TCP is the closed fingertip, not the centre of the finger pads.
+// The object should enter behind that tip along TCP -Z. Euclidean distance to
+// the tip incorrectly penalized useful insertion as much as stopping short:
+// real run 009 ranked a shallow miss above a narrower .965-score complete grasp.
+// Distance to the inward approach ray preserves transverse centering and
+// penalizes remaining stand-off, without penalizing already achieved depth.
+// This is a soft rank, NOT a contact assertion, rejection or pose modification.
+double grasp_engagement_distance(const PickPlace::Goal &goal, std::size_t index, double depth_m,
+                                 bool planar_centered = false) {
+  const auto tcp = pose_transform(grasp_origin(goal, index, planar_centered));
+  const auto center = pose_transform(goal.object_pose).translation().eval();
+  Eigen::Vector3d relative = tcp.linear().transpose() * (center - tcp.translation());
+  relative.z() = std::max(0.0, relative.z() - depth_m);
+  return relative.norm();
+}
+
+// A transverse miss and a tip still in front of the object are different:
+// recorded successful runs 021-023 had 8-17 mm transverse error but the centre
+// was already behind the closed tip. Empty runs 024-025 had 12-14 mm of actual
+// stand-off. Keep this directional diagnostic separate from transverse error.
+// It is not a gate or a forced world direction.
+double grasp_remaining_standoff(const PickPlace::Goal &goal, std::size_t index, double depth_m,
+                                bool planar_centered = false) {
+  const auto tcp = pose_transform(grasp_origin(goal, index, planar_centered));
+  const auto center = pose_transform(goal.object_pose).translation().eval();
+  return std::max(0.0, tcp.linear().col(2).dot(center - tcp.translation()) - depth_m);
+}
+
+// Scale displacement by the observed envelope projected onto each TCP axis.
+// A centimetre of stand-off on a thin object is not the same as a centimetre
+// across a broad face. Unlike absolute axial priority, this also penalizes
+// moving completely off the object's side. No tuned weights, class-specific
+// dimensions, rejection threshold, contact assertion or world-up constraint.
+double grasp_geometry_cost(const PickPlace::Goal &goal, std::size_t index, double depth_m,
+                           bool planar_centered = false) {
+  const auto tcp = pose_transform(grasp_origin(goal, index, planar_centered));
+  const auto object = pose_transform(goal.object_pose);
+  Eigen::Vector3d local = tcp.linear().transpose() * (object.translation() - tcp.translation());
+  local.z() = std::max(0.0, local.z() - depth_m);
+  const Eigen::Vector3d size(goal.object_size.x, goal.object_size.y, goal.object_size.z);
+  const Eigen::Vector3d extents = (tcp.linear().transpose() * object.linear()).cwiseAbs() * size;
+  return local.cwiseQuotient(extents).norm();
+}
+
+// Width of the observed envelope along the fingers' closing direction. The
+// StarArm descriptor declares canonical X, and its canonical-base -> TCP
+// rotation is identity (only translation). Thus returned TCP X is closing X.
+// This is a projection, NOT solid-object contact or force-closure evidence.
+// No object class, world-axis preference, nominal size or acceptance threshold.
+double grasp_closing_span(const PickPlace::Goal &goal, std::size_t index) {
+  const auto object_rotation = pose_transform(goal.object_pose).linear().eval();
+  const auto closing_axis = pose_transform(goal.grasp_poses.at(index)).linear().col(0).eval();
+  const Eigen::Vector3d size(goal.object_size.x, goal.object_size.y, goal.object_size.z);
+  return (object_rotation.transpose() * closing_axis).cwiseAbs().dot(size);
+}
+
+double grasp_quality_cost(const PickPlace::Goal &goal, std::size_t index, double depth_m,
+                          bool planar_centered = false) {
+  const double diagonal = Eigen::Vector3d(goal.object_size.x, goal.object_size.y,
+                                         goal.object_size.z).norm();
+  return 1.0 - goal.grasp_confidences.at(index) +
+    (grasp_closing_span(goal, index) +
+     grasp_engagement_distance(goal, index, depth_m, planar_centered)) / diagonal;
+}
+
+// Use the same grasp objective while SEARCHING as when ranking complete paths.
+// Native defaults add distance-to-default-joints in ComputeIK and path length
+// in motion stages. With a bounded complete pool that selects short/easy paths
+// before our final grasp comparator ever sees the other candidates.
+// MTC's public cost-term interface changes search preference only: failure
+// status, IK, trajectories, collision checking and execution stay native.
+void configure_grasp_search_cost(mtc::Task &task, const PickPlace::Goal &goal) {
+  PickPlace::Goal geometry;
+  geometry.grasp_poses = goal.grasp_poses;
+  geometry.grasp_confidences = goal.grasp_confidences;
+  geometry.object_pose = goal.object_pose;
+  geometry.object_size = goal.object_size;
+  const auto insertion = std::make_shared<mtc::LambdaCostTerm>(
+      [geometry = std::move(geometry)](const mtc::SubTrajectory &solution) {
+        const auto index = grasp_candidate_index(solution);
+        const auto depth = grasp_depth(solution);
+        return grasp_quality_cost(geometry, index, depth, grasp_planar_centered(solution));
+      });
+  const auto zero = std::make_shared<mtc::cost::Constant>(0.0);
+  task.stages()->traverseRecursively([&](const mtc::Stage &stage, unsigned int) {
+    // Traversal exposes a const stage even while constructing a mutable task.
+    auto &configured = const_cast<mtc::Stage &>(stage);
+    if (dynamic_cast<const GeneratePoses *>(&stage) ||
+        dynamic_cast<const mtc::stages::ComputeIK *>(&stage))
+      configured.setCostTerm(insertion);
+    else if (!dynamic_cast<const mtc::ContainerBase *>(&stage))
+      configured.setCostTerm(zero);
+    // Containers retain the native sum. Arm travel remains the final secondary
+    // comparator, computed from actual trajectories, not lost or hard-limited.
+    return true;
+  });
+}
+
 // First keep each candidate's DEEPEST complete solution, even if a shallower
-// variant is cheaper. Then balance original model quality and native arm
-// travel. Extra insertion is NOT comparable across different original poses.
+// variant is cheaper. Closing span is a dimensionless SOFT term, normalized by
+// the observed diagonal, alongside original model quality.
+// Fingertip engagement distance uses the same diagonal, without a tuned weight.
+// Geometry remains a SOFT part of grasp quality, not an absolute priority.
+// Recorded 033 picked a .488-score / 102 mm span grasp solely for a smaller
+// centering proxy, despite a complete .906-score / 59 mm span alternative.
+// Rank combined quality before arm travel; retain geometry as a diagnostic.
+// Recorded real run 020 chose a
+// lower-model-quality, wider and shallower miss just to save joint travel.
+// All entries already have complete collision-checked paths; a short path is
+// a secondary preference, not compensation for poorer grasp engagement.
+// Absolute span priority selected a shallow .602-score grasp over a .806-score
+// deeper complete plan for only 3 mm less span in a real trial. No tuned weights,
+// acceptance thresholds, object classes or world-axis preferences. Extra
+// insertion is NOT comparable across different original poses.
 std::vector<RankedGrasp> rank_complete_grasps(
     const std::vector<const mtc::SolutionBase *> &solutions,
-    const std::vector<double> &confidences, const mtc::cost::PathLength &motion_cost) {
-  std::map<std::size_t, RankedGrasp> deepest;
+    const PickPlace::Goal &goal, const mtc::cost::PathLength &motion_cost) {
+  std::map<std::pair<std::size_t, bool>, RankedGrasp> deepest;
+  const double diagonal = Eigen::Vector3d(goal.object_size.x, goal.object_size.y,
+                                          goal.object_size.z).norm();
   for (const auto *solution : solutions) {
     const auto index = grasp_candidate_index(*solution);
     std::string comment;
-    RankedGrasp candidate{solution, index, grasp_depth(*solution), confidences.at(index),
-                          solution->computeCost(motion_cost, comment)};
-    auto previous = deepest.find(index);
+    const auto span = grasp_closing_span(goal, index);
+    const auto depth = grasp_depth(*solution);
+    const auto centered = grasp_planar_centered(*solution);
+    const auto key = std::make_pair(index, centered);
+    const auto distance = grasp_center_distance(goal, index, depth, centered);
+    const auto engagement = grasp_engagement_distance(goal, index, depth, centered);
+    RankedGrasp candidate{solution, index, depth, goal.grasp_confidences.at(index),
+                          solution->computeCost(motion_cost, comment), span, span / diagonal,
+                          distance, distance / diagonal, engagement, engagement / diagonal,
+                          grasp_remaining_standoff(goal, index, depth, centered),
+                          grasp_geometry_cost(goal, index, depth, centered), centered};
+    auto previous = deepest.find(key);
     if (previous == deepest.end() ||
         std::make_pair(-candidate.depth_m, candidate.motion_cost) <
             std::make_pair(-previous->second.depth_m, previous->second.motion_cost))
-      deepest.insert_or_assign(index, candidate);
+      deepest.insert_or_assign(key, candidate);
   }
   std::vector<RankedGrasp> ranked;
   for (const auto &[index, candidate] : deepest)
     ranked.push_back(candidate);
   std::sort(ranked.begin(), ranked.end(), [](const auto &left, const auto &right) {
-    return std::make_tuple(left.cost(), -left.confidence, left.motion_cost, left.candidate_index) <
-           std::make_tuple(right.cost(), -right.confidence, right.motion_cost, right.candidate_index);
+    return left.rank_key() < right.rank_key();
   });
   return ranked;
 }
@@ -395,6 +667,7 @@ class PickPlaceServer : public rclcpp::Node {
 public:
   PickPlaceServer() : Node("stararm_102_mtc") {
     octomap_resolution_ = declare_parameter<double>("octomap_resolution");
+    mesh_uncertainty_ = declare_parameter<double>("mesh_padding_offset");
     cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         "/perception/depth/points", rclcpp::SensorDataQoS());
     filtered_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -432,7 +705,7 @@ private:
     handle->publish_feedback(message);
   }
 
-  void apply_scene(const PickPlace::Goal &goal) {
+  void apply_scene(const PickPlace::Goal &goal, const moveit::core::RobotModelConstPtr& model) {
     std::vector<moveit_msgs::msg::CollisionObject> objects;
     objects.push_back(ground(goal.frame_id));
     objects.push_back(
@@ -452,7 +725,20 @@ private:
     // its duplicate points. One observation builds this task's frozen map.
     auto cleared = clear_octomap_->async_send_request(std::make_shared<std_srvs::srv::Empty::Request>());
     cleared.get();
-    auto cloud = goal.scene_cloud;
+    Eigen::Isometry3d sensor_in_scene = Eigen::Isometry3d::Identity();
+    const auto& sensor = goal.sensor_in_scene;
+    sensor_in_scene.translation() = Eigen::Vector3d(sensor.position.x, sensor.position.y, sensor.position.z);
+    sensor_in_scene.linear() = Eigen::Quaterniond(sensor.orientation.w, sensor.orientation.x,
+        sensor.orientation.y, sensor.orientation.z).toRotationMatrix();
+    moveit::core::RobotState reference(model);
+    reference.setToDefaultValues();
+    reference.update();
+    const auto scene_in_model = goal.frame_id == model->getModelFrame()
+        ? Eigen::Isometry3d::Identity() : reference.getGlobalLinkTransform(goal.frame_id);
+    const double radius = collision_workspace_radius(*model, goal, octomap_resolution_);
+    auto cloud = collision_workspace_cloud(goal.scene_cloud, scene_in_model * sensor_in_scene, radius);
+    RCLCPP_INFO(get_logger(), "collision workspace radius %.6f m: %u -> %u points",
+                radius, goal.scene_cloud.width * goal.scene_cloud.height, cloud.width * cloud.height);
     cloud.header.stamp = now();
     geometry_msgs::msg::TransformStamped transform;
     transform.header.frame_id = goal.frame_id;
@@ -492,7 +778,8 @@ private:
         std::make_shared<std_srvs::srv::Empty::Request>()).get();
   }
 
-  mtc::Task create_task(const PickPlace::Goal &goal) {
+  mtc::Task create_task(const PickPlace::Goal &goal,
+                        std::optional<std::size_t> candidate = std::nullopt) {
     mtc::Task task;
     task.setName("pick and place " + goal.request_id);
     task.loadRobotModel(shared_from_this());
@@ -509,6 +796,8 @@ private:
     pipeline->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
     cartesian->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
     joint_interpolation->setMaxVelocityScalingFactor(kDefaultVelocityScaling);
+    auto closing = std::make_shared<CheckedJointInterpolation>();
+    closing->setMaxVelocityScalingFactor(kClosingVelocityScaling);
 
     auto current = std::make_unique<mtc::stages::CurrentState>("current state");
     task.add(std::move(current));
@@ -554,7 +843,7 @@ private:
       pick->insert(std::move(approach));
 
       auto generator =
-          std::make_unique<GeneratePoses>("grasp candidates", grasp_depth_poses(goal, octomap_resolution_));
+          std::make_unique<GeneratePoses>("grasp candidates", grasp_depth_poses(goal, octomap_resolution_, candidate));
       generator->properties().configureInitFrom(mtc::Stage::PARENT);
       generator->setMonitoredStage(open_stage);
       auto grasp_ik = std::make_unique<mtc::stages::ComputeIK>(
@@ -562,7 +851,7 @@ private:
       grasp_ik->setGroup(kArmGroup);
       grasp_ik->setEndEffector(kEndEffector);
       grasp_ik->setMaxIKSolutions(8);
-      grasp_ik->setForwardedProperties({"grasp_candidate_index", "grasp_depth_m"});
+      grasp_ik->setForwardedProperties({"grasp_candidate_index", "grasp_depth_m", "grasp_planar_centered"});
       grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
       grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,
                                                {"target_pose"});
@@ -577,9 +866,12 @@ private:
       pick->insert(std::move(allow));
 
       auto close = std::make_unique<mtc::stages::MoveTo>("close gripper",
-                                                         joint_interpolation);
+                                                         closing);
       close->setGroup(kGripperGroup);
       close->setGoal(kClosedPose);
+      // As in the official MTC pick pipeline, allow finger/target contact and
+      // validate the closing path with the planner. A segmented OBB cannot
+      // reject rim grasps by pretending that an open object is a solid cuboid.
       pick->insert(std::move(close));
 
       auto attach =
@@ -615,7 +907,10 @@ private:
       auto release = std::make_unique<mtc::stages::MoveTo>(
           "transport to release point", std::make_shared<PositionOnlyPlanner>(shared_from_this()));
       release->setGroup(kArmGroup);
-      release->setIKFrame(kTcpFrame);
+      // Move the attached object's centre to the requested placement point.
+      // MTC resolves its candidate-specific offset from the attachment state;
+      // targeting TCP instead caused the observed far-edge placement drift.
+      release->setIKFrame(goal.object_id);
       release->setGoal(release_point);
       place->insert(std::move(release));
 
@@ -658,6 +953,7 @@ private:
       stage->setGoal(kClosedPose);
       task.add(std::move(stage));
     }
+    configure_grasp_search_cost(task, goal);
     return task;
   }
 
@@ -671,10 +967,16 @@ private:
                        [](double confidence) { return std::isfinite(confidence); }))
         throw std::runtime_error("Grasp poses require matching finite model confidences");
       feedback(handle, "planning", "build planning scene");
-      apply_scene(*goal);
       auto task = create_task(*goal);
+      apply_scene(*goal, task.getRobotModel());
+      // Publish the selected solution and search statistics once below, rather
+      // than streaming every iteration. Action feedback still reports progress.
+      task.enableIntrospection(false);
       feedback(handle, "planning", "search complete task solutions");
-      const auto plan_result = task.plan();
+      // Rank COMPLETE solutions, not individual IK successes. The tutorial's
+      // five-solution example does not provide the broader ranking pool
+      // requested by the user.
+      const auto plan_result = task.plan(20);
       result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
       if (!plan_result || task.solutions().empty()) {
         std::ostringstream explanation;
@@ -692,29 +994,121 @@ private:
       std::vector<const mtc::SolutionBase *> complete_solutions;
       for (const auto &complete : task.solutions())
         complete_solutions.push_back(complete.get());
-      const auto ranked = rank_complete_grasps(complete_solutions, goal->grasp_confidences,
-                                               arm_motion_cost(*task.getRobotModel()));
+      auto ranked = rank_complete_grasps(complete_solutions, *goal,
+                                        arm_motion_cost(*task.getRobotModel()));
+      if (!goal->stop_at_pregrasp) {
+        // A twenty-solution pool does NOT exhaust a candidate's insertion grid.
+        // Real replay: candidate 418 had a valid +25 mm complete plan, while
+        // the bounded search returned only +5 mm. Refine the selected candidate
+        // using the SAME factory, collision scene and full pick/place stages.
+        // No robot command or second perception is sent during this search.
+        const auto seed = ranked.front();
+        feedback(handle, "planning", "核对所选候选的最大可行夹取深度");
+        auto refinement = create_task(*goal, seed.candidate_index);
+        moveit_msgs::msg::PlanningScene frozen;
+        seed.solution->start()->scene()->getPlanningSceneMsg(frozen);
+        auto frozen_scene = std::make_shared<planning_scene::PlanningScene>(refinement.getRobotModel());
+        frozen_scene->setPlanningSceneMsg(frozen);
+        refinement.stages()->remove(0);
+        refinement.stages()->insert(std::make_unique<mtc::stages::FixedState>(
+            "current state", frozen_scene), 0);
+        refinement.enableIntrospection(false);
+        refinement.plan(0); // Exhaust this finite one-candidate grid, not all candidates.
+        std::vector<const mtc::SolutionBase *> refined_solutions;
+        for (const auto &complete : refinement.solutions())
+          refined_solutions.push_back(complete.get());
+        auto refined = rank_complete_grasps(refined_solutions, *goal,
+                                           arm_motion_cost(*refinement.getRobotModel()));
+        if (!refined.empty() &&
+            ((refined.front().planar_centered == seed.planar_centered &&
+              refined.front().depth_m > seed.depth_m) ||
+             refined.front().rank_key() < seed.rank_key())) {
+          RCLCPP_INFO(get_logger(), "candidate %zu complete-pose refinement: %.3f -> %.3f mm",
+                      seed.candidate_index, seed.depth_m * 1000, refined.front().depth_m * 1000);
+          task = std::move(refinement);
+          ranked = std::move(refined);
+        }
+        // No improvement keeps the already validated complete seed; it does
+        // not execute a failed IK or substitute an unchecked translated pose.
+        result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
+      }
       const auto &best = ranked.front();
       const auto *solution = best.solution;
       for (const auto &candidate : ranked)
         RCLCPP_INFO(get_logger(),
                     "deepest complete candidate %zu, insertion +%.3f mm, model %.6f, "
-                    "normalized arm travel %.6f, selection cost %.6f%s",
+                    "normalized arm travel %.6f, total cost %.6f, closing span %.3f mm, normalized span %.6f, "
+                    "TCP center distance %.3f mm, normalized center distance %.6f, engagement distance %.3f mm, remaining standoff %.3f mm, geometry cost %.6f, planar centered %s%s",
                     candidate.candidate_index, candidate.depth_m * 1000.0, candidate.confidence,
-                    candidate.motion_cost, candidate.cost(), candidate.solution == solution ? " (selected)" : "");
+                    candidate.motion_cost, candidate.cost(), candidate.closing_span_m * 1000.0, candidate.normalized_span,
+                    candidate.center_distance_m * 1000.0, candidate.normalized_center_distance,
+                    candidate.engagement_distance_m * 1000.0,
+                    candidate.remaining_standoff_m * 1000.0,
+                    candidate.geometry_cost,
+                    candidate.planar_centered ? "true" : "false",
+                    candidate.solution == solution ? " (selected)" : "");
       result->selected_cost = best.cost();
       std::ostringstream selection;
       selection << std::fixed << std::setprecision(3)
                 << "候选 " << best.candidate_index << " / 加深 " << best.depth_m * 1000.0
+                << " mm / 平面居中 " << (best.planar_centered ? "是" : "否")
+                << " / 夹持跨度 " << best.closing_span_m * 1000.0
+                << " mm / TCP距中心 " << best.center_distance_m * 1000.0
+                << " mm / 夹取偏差 " << best.engagement_distance_m * 1000.0
+                << " mm / 剩余接近 " << best.remaining_standoff_m * 1000.0
                 << " mm / 模型分 " << best.confidence << " / 关节行程代价 " << best.motion_cost;
       feedback(handle, "planned", selection.str(), task.numSolutions(), best.cost());
+      task.introspection().publishTaskDescription();
+      task.introspection().publishTaskState();
       task.introspection().publishSolution(*solution);
       feedback(handle, "executing", "执行：" + selection.str(),
                task.numSolutions(), best.cost());
-      const auto execute_result = task.execute(*solution);
+      auto execute_result = moveit::core::MoveItErrorCode(moveit_msgs::msg::MoveItErrorCodes::FAILURE);
+      if (goal->stop_at_pregrasp) {
+        auto parts = pregrasp_prefix(*solution);
+        const auto& connect = connect_trajectory(*parts.back());
+        const auto& original_path = *connect.trajectory();
+        const auto& reference = original_path.getFirstWayPoint();
+        const Eigen::Isometry3d model_from_scene = goal->frame_id == reference.getRobotModel()->getModelFrame()
+            ? Eigen::Isometry3d::Identity() : reference.getGlobalLinkTransform(goal->frame_id);
+        const Eigen::Vector3d camera = (model_from_scene * pose_transform(goal->sensor_in_scene)).translation();
+        const auto target_points = observation_target_points(*goal, model_from_scene);
+        stararm::ObservationVisibility visibility(*task.getRobotModel(), mesh_uncertainty_);
+        const auto [last, visible] = visibility.waypoint(original_path, camera, target_points);
+        auto path = std::make_shared<robot_trajectory::RobotTrajectory>(original_path, true);
+        while (path->getWayPointCount() > last + 1)
+          path->removeWayPoint(path->getWayPointCount() - 1);
+        // A prefix must end at rest, not retain the original through-velocity.
+        // Retiming is official MoveIt; check its actual outgoing path again.
+        if (!trajectory_processing::TimeOptimalTrajectoryGeneration().computeTimeStamps(
+                *path, kDefaultVelocityScaling, kDefaultVelocityScaling) ||
+            !connect.start()->scene()->isPathValid(*path, kArmGroup))
+          throw std::runtime_error("Observation prefix retiming or collision validation failed");
+        auto end_scene = connect.start()->scene()->diff();
+        end_scene->setCurrentState(path->getLastWayPoint());
+        mtc::InterfaceState cut_start(*connect.start()), cut_end(end_scene);
+        mtc::SubTrajectory observation(path, connect.cost());
+        observation.setCreator(const_cast<mtc::Stage*>(parts.back()->creator()));
+        observation.setStartState(cut_start);
+        observation.setEndState(cut_end);
+        parts.back() = &observation;
+        mtc::InterfaceState start(*parts.front()->start()), end(cut_end);
+        mtc::SolutionSequence prefix(std::move(parts), best.cost(), task.stages());
+        prefix.setStartState(start);
+        prefix.setEndState(end);
+        RCLCPP_INFO(get_logger(), "Observation waypoint %zu/%zu, visible target points %zu/%zu",
+                    last, original_path.getWayPointCount()-1, visible, target_points.size());
+        feedback(handle, "executing", "前往可观测预抓取位，随后重新观测",
+                 task.numSolutions(), best.cost());
+        execute_result = task.execute(prefix);
+        result->pregrasp_reached = bool(execute_result);
+      } else {
+        execute_result = task.execute(*solution);
+      }
       result->error_code = execute_result.val;
       result->message =
-          execute_result ? "pick and place complete" : "task execution failed";
+          execute_result ? (result->pregrasp_reached ? "预抓取位已到达" : "pick and place complete")
+                         : "task execution failed";
       cleanup_scene(temporary_ids);
       if (execute_result) {
         handle->succeed(result);
@@ -731,6 +1125,7 @@ private:
 
   moveit::planning_interface::PlanningSceneInterface scene_;
   double octomap_resolution_;
+  double mesh_uncertainty_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_subscription_;
   rclcpp::Client<std_srvs::srv::Empty>::SharedPtr clear_octomap_;

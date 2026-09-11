@@ -73,6 +73,8 @@ services:
       context: ./backend/services/perception-compute
       dockerfile: Dockerfile
     networks: [robot-services]
+    volumes:
+      - ./backend/devices/stararm-102/self-filter.json:/grippers/x_grippers/stararm-102-fl/self-filter.json:ro
     environment:
       GRASPGENX_SEED: ${GRASPGENX_SEED:-0}
       GRASPGENX_NUM_GRASPS: ${GRASPGENX_NUM_GRASPS:-200}
@@ -168,7 +170,9 @@ services:
       ROS_DOMAIN_ID: "42"
       STARARM_MOTION_CONFIG: /config/stararm-102-motion.json
     ports: ["192.168.100.10:6080:6080"]
-    volumes: ["./backend/config/runtime:/config"]
+    volumes:
+      - ./backend/config/runtime:/config
+      - ./backend/devices/stararm-102/self-filter.json:/config/robot-self-filter.json:ro
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/53291 && exec 4<>/dev/tcp/127.0.0.1/6080"]
 

@@ -63,11 +63,25 @@ class SegmentResponse(BaseModel):
     instances: list[Instance]
 
 
+class ObservedTcpPose(BaseModel):
+    position_m: tuple[float, float, float]
+    orientation_xyzw: tuple[float, float, float, float]
+
+
+class ObservedGripper(BaseModel):
+    tcp_pose: ObservedTcpPose
+    joint_positions_rad: dict[str, float]
+    feedback_time_ns: int
+
+
 class GraspRequest(BaseModel):
     points_xyz_m: list[tuple[float, float, float]]
     scene_points_xyz_m: list[tuple[float, float, float]]
     gripper_asset_id: str
     collision_threshold_m: float = Field(ge=0, allow_inf_nan=False)
+    # Null explicitly means no observed robot in this scene (e.g. official fixtures).
+    # Production scene-node supplies measured TCP + joints, never commanded targets.
+    observed_gripper: ObservedGripper | None
 
 
 class GraspCandidate(BaseModel):
@@ -123,7 +137,8 @@ class GraspGenXBackend:
             os.path.join(self.checkpoint_root, "dis"),
         )
         self._model = load_grasp_gen_model(self._config, device=self.device)
-        self._samplers: dict[str, tuple[Any, np.ndarray]] = {}
+        self._samplers: dict[str, tuple[Any, np.ndarray, tuple[float, ...]]] = {}
+        self._self_filters: dict[str, Any] = {}
         self._lock = threading.Lock()
         # Seed the service's sampling sequence, not every request. Repeated
         # explicit inference must explore new diffusion/environment samples.
@@ -133,7 +148,8 @@ class GraspGenXBackend:
     def infer(self, request: GraspRequest) -> GraspResponse:
         import trimesh
         from graspgenx.samplers import run_planner_on_batch
-        from graspgenx.utils.collision_filter import filter_colliding_grasps
+        from perception_compute.gripper_sampling import obb_z_offsets_cm
+        from perception_compute.scene_collision import filter_colliding_grasps
 
         key = request.gripper_asset_id
         with self._lock:
@@ -147,8 +163,9 @@ class GraspGenXBackend:
                 # demo_scene_pc samples the open mesh once per gripper and
                 # reuses those points across objects and scene requests.
                 surface, _ = trimesh.sample.sample_surface(sampler.gripper.collision_mesh, 2000)
-                self._samplers[key] = sampler, np.asarray(surface, dtype=np.float32)
-            sampler, surface = self._samplers[key]
+                offsets = obb_z_offsets_cm(os.path.join(self.gripper_assets, "x_grippers", key))
+                self._samplers[key] = sampler, np.asarray(surface, dtype=np.float32), offsets
+            sampler, surface, offsets = self._samplers[key]
             started = time.perf_counter()
             [(grasps, scores, branches, _)] = run_planner_on_batch(
                 [np.asarray(request.points_xyz_m, dtype=np.float32)],
@@ -158,16 +175,26 @@ class GraspGenXBackend:
                 # do not rewrite poses or impose a top-only preference.
                 planner="graspmoe",
                 moe_obb_density="dense-topandside",
-                moe_z_offsets_cm=(-2, 0),
-                # Match demo_scene_pc.py, not the lower-level library's -1
-                # default (which also returns rejected, low-quality grasps).
-                grasp_threshold=0.7,
+                # Preserve scene-demo offsets and cover measured axial finger
+                # extension during closing through the SAME official sampler.
+                moe_z_offsets_cm=offsets,
+                # Preserve scored proposals for complete-plan selection instead
+                # of rejecting alternatives solely by the demo's 0.7 cutoff.
+                # -1 is the official planner's no-score-cutoff option, not a
+                # collision bypass; environment filtering below stays enabled.
+                grasp_threshold=-1.0,
                 num_grasps=self.num_grasps,
                 topk_num_grasps=-1,
             )
             # Official demo_scene_pc pipeline. The environment excludes this
             # target, but retains the support surface and surrounding objects.
             scene = np.asarray(request.scene_points_xyz_m, dtype=np.float32).reshape(-1, 3)
+            if request.observed_gripper is not None:
+                from perception_compute.gripper_self_filter import GripperSelfFilter
+                if key not in self._self_filters:
+                    self._self_filters[key] = GripperSelfFilter(
+                        os.path.join(self.gripper_assets, "x_grippers", key))
+                scene = self._self_filters[key].filter(scene, request.observed_gripper)
             if len(scene) > 8192:  # Official demo's max_scene_points default.
                 scene = scene[np.random.choice(len(scene), 8192, replace=False)]
             keep = filter_colliding_grasps(
@@ -175,7 +202,6 @@ class GraspGenXBackend:
                 grasp_poses=grasps,
                 gripper_surface_points=surface,
                 collision_threshold=request.collision_threshold_m,
-                device=self.device,
             )
             grasps, scores = grasps[keep], scores[keep]
             branches = [branch for branch, valid in zip(branches, keep, strict=True) if valid]

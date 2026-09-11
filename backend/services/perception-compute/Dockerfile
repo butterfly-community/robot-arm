@@ -4,6 +4,9 @@ ADD --checksum=sha256:a361bcbd0b110daf0132d7939262577486d021961cda34428055494fc2
     /runtime-root/models/yoloe-26x-seg-pf.pt
 WORKDIR /service
 COPY . .
+RUN git -C /opt/graspgenx apply /service/patches/graspgenx-knn.patch \
+    && install -D /opt/graspgenx/graspgenx/utils/point_cloud.py \
+       /runtime-root/opt/compute-venv/lib/python3.11/site-packages/graspgenx/utils/point_cloud.py
 RUN uv pip install --python /opt/compute-venv/bin/python \
        --target /runtime-root/service-packages --no-deps .
 

@@ -59,6 +59,12 @@ Docker 内容缓存复用，不因此增加共享基础镜像或隐藏依赖。O
 motion 镜像；AI 环境与模型仅存在于 perception-compute 镜像。
 
 motion 还安装官方 `moveit-ros-perception`，处理显式抓放请求里的点云快照，不安装 ROS 相机驱动。
+该服务仅对同版本 MoveIt 2.15.0 构建已有 `moveit_servo` 边界停止 overlay；
+TOTG/moveit_core 与 JTC 均使用官方二进制，不构建自定义 JTC 完成判定。
+实验性 JTC/TOTG 补丁已撤出生产构建，历史对照仅在 tools，见
+[时间参数化复核](MOVEIT-TIMING-REVIEW.md)。运行镜像复制 Servo 成品并在入口加载 overlay，
+不拷贝研究源码树、不改厂商资产标签。修改这些依赖补丁才重编对应运动依赖层；
+核对时必须检查实际加载的共享库及原生回归，不能只看补丁文件存在。
 完整 1920×1080 XYZ 消息约 24.9 MB：该服务的 Fast DDS 配置为每个 participant 分配 128 MiB SHM
 segment，Compose `/dev/shm` 为 2 GiB，供 MoveGroup、MTC、Rust 桥和 RViz 共用；UDP 仍用于
 常规 ROS 发现和外部诊断。配置归 motion，不改全局 DDS 或其他服务。
@@ -85,6 +91,11 @@ Rust 构建目标中的测试复用该服务环境，Python 运行测试用计�
 不要把“精简运行镜像没有构建向导”或“构建镜像未安装显示运行库”错误地补成第二套运行环境。
 自然语言 API 的地址、模型和密钥只通过根目录
 `.env` 注入 `web-perception`；它们不进入镜像层或浏览器 bundle。
+
+本地感知、候选生成、MoveIt 规划和执行不依赖该外部自然语言入口。
+已有镜像和正式配置准备好后，离线验收用 `--no-build --pull never` 整套冷启动，
+清空可选 AI 环境并隔离服务出站；方法及恢复命令见
+[离线冷启动验收](../tools/diagnostics/offline/README.md)。首次构建下载依赖与离线运行是不同条件。
 
 ## 设备与存储
 

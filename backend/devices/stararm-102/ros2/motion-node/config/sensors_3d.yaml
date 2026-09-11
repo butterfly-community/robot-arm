@@ -13,6 +13,6 @@ depth:
   # points that blocked reachable grasps. 40 mm cleared candidate 52 while
   # preserving all 766 acrylic-region voxel coordinates/sizes unchanged.
   # Mesh envelopes only. Ground/primitive padding remains half a voxel.
-  mesh_padding_offset: 0.04
+  # mesh_padding_offset is read from the device's shared self-filter.json.
   max_update_rate: 0.0
   filtered_cloud_topic: /perception/depth/filtered
