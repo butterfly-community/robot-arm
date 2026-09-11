@@ -54,7 +54,7 @@ function planner(): InstructionPlanner {
         model,
         output: Output.object({ schema: sceneSelectionSchema }),
         system:
-          "你是机器人结构化场景选择器。object_id 和 placement_region_id 必须逐字选自输入场景；抓取对象必须有抓取候选。不要生成坐标、姿态、路径或不存在的 ID。",
+          "你是机器人结构化场景选择器。object_id 和 placement_region_id 必须逐字选自输入场景；系统将在选择后单独为选定目标生成抓取候选。不要生成坐标、姿态、路径或不存在的 ID。",
         prompt: `用户指令：${instruction}\n当前结构化场景：${JSON.stringify(compactScene(scene))}`,
       });
       return output;

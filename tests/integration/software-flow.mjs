@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { prepareSelectedGrasps } from "../../tools/diagnostics/perception-stages.mjs";
 
 const base = process.env.SERVICES_BASE_URL ?? "http://192.168.100.10:8765";
 const websocketBase = base.replace(/^http/, "ws");
@@ -352,6 +353,17 @@ const firstPerceptionRun = await request("/api/perception/request", {
   placement_labels: null,
 });
 assert.equal(firstPerceptionRun.original_error, null);
+assert.equal(firstPerceptionRun.value.last_scene_sequence, null);
+assert.ok(
+  firstPerceptionRun.value.instances.every(
+    (item) => item.position_m == null && item.grasp_candidate_count === 0,
+  ),
+);
+await prepareSelectedGrasps(
+  base,
+  firstPerceptionRun.value.last_segmentation_sequence,
+  pickPlaceFixture.cube.recognition_prompt,
+);
 const readyPerceptionSnapshot = await waitFor(
   () => snapshot("perception"),
   (state) =>
@@ -615,6 +627,11 @@ const calibratedPerceptionRun = await request("/api/perception/request", {
   placement_labels: null,
 });
 assert.equal(calibratedPerceptionRun.original_error, null);
+await prepareSelectedGrasps(
+  base,
+  calibratedPerceptionRun.value.last_segmentation_sequence,
+  pickPlaceFixture.cube.recognition_prompt,
+);
 const calibratedPerception = await waitFor(
   () => snapshot("perception"),
   (state) =>

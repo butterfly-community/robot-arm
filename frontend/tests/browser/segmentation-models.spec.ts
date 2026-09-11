@@ -1,5 +1,139 @@
 import { expect, test } from "@playwright/test";
 
+test("segmentation, reconstruction and selected-object grasps are separate clicks", async ({
+  page,
+  request,
+}) => {
+  const snapshot = await (await request.get("/api/perception/state")).json();
+  const state = snapshot.values.perception_state;
+  Object.assign(state, {
+    model: "auto",
+    available_models: [{ id: "auto", label: "Automatic", prompt_free: true }],
+    task_state: "idle",
+    calibrated: false,
+    color_frame: {
+      width: 1280,
+      height: 720,
+      encoding: "rgb8",
+      frame_id: "optical",
+    },
+    last_scene_sequence: null,
+    last_segmentation_sequence: null,
+    instances: [],
+  });
+  snapshot.values.camera_state.streaming = true;
+  snapshot.values.world_scene = {
+    schema_version: 3,
+    sequence: 1,
+    frame_id: "base_link",
+    sample_time_ns: 1,
+    objects: [],
+    placement_regions: [],
+    obstacles: [],
+  };
+  let publish = () => {};
+  await page.routeWebSocket("**/ws/perception", (socket) => {
+    publish = () => socket.send(JSON.stringify(snapshot));
+    publish();
+  });
+  const writes: Record<string, any>[] = [];
+  await page.route("**/api/**", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const body = route.request().postDataJSON();
+    writes.push(body);
+    expect(new URL(route.request().url()).pathname).toBe(
+      "/api/perception/request",
+    );
+    state.task_state = "succeeded";
+    state.task_action = body.action;
+    if (body.action === "refresh") {
+      state.last_segmentation_sequence = 10;
+      state.instances = [
+        {
+          instance_id: "one",
+          label: "one",
+          confidence: 0.9,
+          bounding_box_xyxy: [1, 2, 3, 4],
+          position_m: null,
+          size_m: null,
+          grasp_candidate_count: 0,
+        },
+      ];
+    } else if (body.action === "reconstruct") {
+      expect(body.input_sequence).toBe(10);
+      state.last_scene_sequence = 11;
+      const pose = { position_m: [0, 0, 0], orientation_xyzw: [0, 0, 0, 1] };
+      Object.assign(snapshot.values.world_scene, {
+        sequence: 11,
+        objects: ["one", "two"].map((id) => ({
+          object_id: id,
+          label: id,
+          confidence: 0.9,
+          pose,
+          size_m: [0.1, 0.1, 0.1],
+          grasp_candidates: [],
+        })),
+        placement_regions: [
+          { region_id: "pad", label: "pad", pose, size_m: [0.2, 0.2, 0.01] },
+        ],
+      });
+    } else if (body.action === "generate_grasps") {
+      expect(body.input_sequence).toBe(11);
+      expect(body.object_id).toBe("two");
+      snapshot.values.world_scene.objects[1].grasp_candidates = [
+        {
+          confidence: 0.9,
+          pose: { position_m: [0, 0, 0], orientation_xyzw: [0, 0, 0, 1] },
+        },
+      ];
+      state.last_scene_sequence = snapshot.values.world_scene.sequence = 12;
+    } else throw Error(`Unexpected action ${body.action}`);
+    publish();
+    await route.fulfill({ json: { original_error: null, value: state } });
+  });
+  await page.goto("/perception/");
+  await page.getByText("抓放详细配置", { exact: true }).click();
+  const segment = page.getByRole("button", { name: "运行分割", exact: true });
+  const reconstruct = page.getByRole("button", {
+    name: "三维定位",
+    exact: true,
+  });
+  const grasps = page.getByRole("button", {
+    name: "生成抓取候选",
+    exact: true,
+  });
+  const execute = page.getByRole("button", { name: "执行抓放", exact: true });
+  await expect(segment).toBeEnabled(); // No camera extrinsics required.
+  await expect(reconstruct).toBeDisabled();
+  await segment.click();
+  await expect(segment).toBeEnabled();
+  await expect(reconstruct).toBeDisabled();
+  await expect(grasps).toBeDisabled();
+  await expect(execute).toBeDisabled();
+  expect(writes.map((x) => x.action)).toEqual(["refresh"]);
+  state.calibrated = true;
+  publish();
+  await reconstruct.click();
+  await expect(grasps).toBeEnabled();
+  await expect(execute).toBeDisabled();
+  expect(writes.map((x) => x.action)).toEqual(["refresh", "reconstruct"]);
+  await page.getByLabel("抓取目标", { exact: true }).selectOption("two");
+  await grasps.click();
+  await expect(execute).toBeEnabled();
+  expect(writes.map((x) => x.action)).toEqual([
+    "refresh",
+    "reconstruct",
+    "generate_grasps",
+  ]);
+  await page.getByLabel("抓取目标", { exact: true }).selectOption("one");
+  await expect(execute).toBeDisabled(); // Another object's grasps do not count.
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
+});
+
 test("visual reference editor saves image-space prompts through the normal form without inference or motion", async ({
   page,
   request,

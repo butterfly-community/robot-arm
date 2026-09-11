@@ -3954,6 +3954,7 @@ dependencies = [
 name = "scene-node"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.23.1",
  "dora-node-api",
  "eyre",
@@ -3964,6 +3965,7 @@ dependencies = [
  "robot-arm-messages",
  "scene-core",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

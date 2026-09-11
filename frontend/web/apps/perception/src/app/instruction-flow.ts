@@ -1,6 +1,7 @@
 import {
   schemaVersion,
   type PerceptionModelInfo,
+  type PerceptionState,
   type WorldScene,
 } from "@robot/contracts";
 import { z } from "zod";
@@ -83,12 +84,18 @@ export async function executeInstruction(
     classes: model.prompt_free ? null : plan.perception_prompts,
     placement_labels: model.prompt_free ? null : plan.placement_labels,
   });
-  await gateway.post("/api/perception/request", {
+  const segmented = (await gateway.post("/api/perception/request", {
     schema_version: schemaVersion,
     request_id: makeRequestId(),
     action: "refresh",
     classes: null,
     placement_labels: null,
+  })) as { value: PerceptionState };
+  await gateway.post("/api/perception/request", {
+    schema_version: schemaVersion,
+    request_id: makeRequestId(),
+    action: "reconstruct",
+    input_sequence: segmented.value.last_segmentation_sequence,
   });
 
   const scene = await gateway.scene();
@@ -96,8 +103,23 @@ export async function executeInstruction(
   const object = scene.objects.find(
     (item) => item.object_id === selection.object_id,
   );
-  if (!object || object.grasp_candidates.length === 0) {
-    throw new Error("AI 选择的抓取目标不存在或没有抓取候选");
+  if (!object) {
+    throw new Error("AI 选择的抓取目标不存在");
+  }
+
+  await gateway.post("/api/perception/request", {
+    schema_version: schemaVersion,
+    request_id: makeRequestId(),
+    action: "generate_grasps",
+    input_sequence: scene.sequence,
+    object_id: selection.object_id,
+  });
+  const graspScene = await gateway.scene();
+  if (
+    !graspScene.objects.find((item) => item.object_id === selection.object_id)
+      ?.grasp_candidates.length
+  ) {
+    throw new Error("选定目标没有抓取候选");
   }
   if (
     !scene.placement_regions.some(
@@ -117,7 +139,7 @@ export async function executeInstruction(
     schema_version: schemaVersion,
     request_id: requestId,
     object_id: selection.object_id,
-    scene_sequence: scene.sequence,
+    scene_sequence: graspScene.sequence,
     placement_region_id: selection.placement_region_id,
   });
   return {

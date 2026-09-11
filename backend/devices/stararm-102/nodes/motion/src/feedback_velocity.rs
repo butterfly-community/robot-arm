@@ -15,23 +15,24 @@ impl FeedbackVelocity {
             .chain(&state.actuators_rad)
             .copied()
             .collect();
-        if let Some((time, source, previous)) = &self.previous {
-            if *source == state.feedback_source && previous.len() == positions.len() {
-                // Repeated snapshots do not mean the motor stopped. Preserve the
-                // last derivative until another encoder sample actually arrives.
-                if state.sample_time_ns == *time {
-                    return &self.velocity;
-                }
-                if state.sample_time_ns > *time {
-                    let seconds = (state.sample_time_ns - time) as f64 / 1e9;
-                    self.velocity = positions
-                        .iter()
-                        .zip(previous)
-                        .map(|(now, old)| (now - old) / seconds)
-                        .collect();
-                    self.previous = Some((state.sample_time_ns, state.feedback_source, positions));
-                    return &self.velocity;
-                }
+        if let Some((time, source, previous)) = &self.previous
+            && *source == state.feedback_source
+            && previous.len() == positions.len()
+        {
+            // Repeated snapshots do not mean the motor stopped. Preserve the
+            // last derivative until another encoder sample actually arrives.
+            if state.sample_time_ns == *time {
+                return &self.velocity;
+            }
+            if state.sample_time_ns > *time {
+                let seconds = (state.sample_time_ns - time) as f64 / 1e9;
+                self.velocity = positions
+                    .iter()
+                    .zip(previous)
+                    .map(|(now, old)| (now - old) / seconds)
+                    .collect();
+                self.previous = Some((state.sample_time_ns, state.feedback_source, positions));
+                return &self.velocity;
             }
         }
         // First sample / source or clock reset has no measurable derivative.

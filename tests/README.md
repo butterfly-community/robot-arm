@@ -50,7 +50,7 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 显式配置恢复步骤，若断言提前失败须核对最后状态再继续，不能假定它已复原。
 `SERVICES_BASE_URL` 可更改访问地址。
 
-Compose 的 `integration-test` profile 挂载测试、全部相机资产和 `temp/`，不只挂载一份几何 JSON：
+Compose 的 `integration-test` profile 挂载测试、分步请求辅助模块、全部相机资产和 `temp/`：
 
 ```bash
 docker compose run --rm integration-test

@@ -59,6 +59,7 @@ struct VisualGuidance {
     target: visual_guidance::ObservationTarget,
     request_id: Option<String>,
     scene_sequence: Option<u64>,
+    action: RequestAction,
 }
 
 enum WorkItem {
@@ -511,6 +512,7 @@ impl MotionNode {
                     target: pending.target,
                     request_id: None,
                     scene_sequence: None,
+                    action: RequestAction::Refresh,
                 });
                 self.active_manipulation = Some(pending.job.request_id.clone());
                 send(node, "manipulation_state", &self.manipulation_state)?;
@@ -616,8 +618,18 @@ impl MotionNode {
     }
 
     fn request_visual_observation(&mut self, node: &mut DoraNode) -> Result<()> {
+        self.request_observation_stage(node, RequestAction::Refresh, None, None)
+    }
+
+    fn request_observation_stage(
+        &mut self,
+        node: &mut DoraNode,
+        action: RequestAction,
+        input_sequence: Option<u64>,
+        object_id: Option<String>,
+    ) -> Result<()> {
         let request_id = format!(
-            "{}:pregrasp-observation",
+            "{}:pregrasp-observation:{action:?}",
             self.manipulation_state.request_id
         );
         let guidance = self
@@ -625,9 +637,18 @@ impl MotionNode {
             .as_mut()
             .expect("active task retains its selection");
         guidance.request_id = Some(request_id.clone());
+        guidance.scene_sequence = None;
+        guidance.action = action;
         self.manipulation_state.state = RequestState::Executing;
-        self.manipulation_state.stage =
-            Some("预抓取位已到达：等待新 RGB-D 帧，重新识别与生成抓取姿态".into());
+        self.manipulation_state.stage = Some(
+            match action {
+                RequestAction::Refresh => "预抓取二次观测：等待新帧并运行分割",
+                RequestAction::Reconstruct => "预抓取二次观测：使用分割帧进行三维定位",
+                RequestAction::GenerateGrasps => "预抓取二次观测：为匹配目标生成抓取候选",
+                _ => unreachable!(),
+            }
+            .into(),
+        );
         send(node, "manipulation_state", &self.manipulation_state)?;
         send(
             node,
@@ -635,7 +656,9 @@ impl MotionNode {
             &PerceptionRequest {
                 schema_version: SCHEMA_VERSION,
                 request_id,
-                action: RequestAction::Refresh,
+                action,
+                input_sequence,
+                object_id,
                 model: None,
                 classes: None,
                 prompt: None,
@@ -661,6 +684,20 @@ impl MotionNode {
         if let Some(error) = result.original_error {
             return self.fail_visual_replan(node, format!("预抓取二次观测失败：{error}"));
         }
+        if result.acknowledged_action == RequestAction::Refresh {
+            let sequence = result
+                .value
+                .and_then(|value| value.last_segmentation_sequence);
+            let Some(sequence) = sequence else {
+                return self.fail_visual_replan(node, "二次观测没有分割结果序号".into());
+            };
+            return self.request_observation_stage(
+                node,
+                RequestAction::Reconstruct,
+                Some(sequence),
+                None,
+            );
+        }
         let sequence = result.value.and_then(|value| value.last_scene_sequence);
         let Some(sequence) = sequence else {
             return self.fail_visual_replan(node, "预抓取二次观测没有场景序号".into());
@@ -677,6 +714,21 @@ impl MotionNode {
         // named in our observation result, never an unrelated UI refresh.
         if guidance.scene_sequence != Some(scene.sequence) {
             return Ok(());
+        }
+        if guidance.action == RequestAction::Reconstruct {
+            let request = match guidance
+                .target
+                .rebind(scene, self.manipulation_state.request_id.clone())
+            {
+                Ok(request) => request,
+                Err(error) => return self.fail_visual_replan(node, error.to_string()),
+            };
+            return self.request_observation_stage(
+                node,
+                RequestAction::GenerateGrasps,
+                Some(scene.sequence),
+                Some(request.object_id),
+            );
         }
         let pending = guidance
             .target
@@ -1452,8 +1504,14 @@ mod tests {
         fresh.point_cloud.as_mut().unwrap().xyz_le = vec![1; 12];
         let rebound = pending.target.rebind(&fresh, "repeat".into()).unwrap();
         let corrected = build_manipulation_job(&fresh, rebound, &pending.target.placement).unwrap();
-        assert_eq!(corrected.job.goal["placement_pose"], pending.job.goal["placement_pose"]);
-        assert_eq!(corrected.job.goal["placement_size"], pending.job.goal["placement_size"]);
+        assert_eq!(
+            corrected.job.goal["placement_pose"],
+            pending.job.goal["placement_pose"]
+        );
+        assert_eq!(
+            corrected.job.goal["placement_size"],
+            pending.job.goal["placement_size"]
+        );
         assert_eq!(corrected.job.goal["object_id"], "new-detection-id");
         assert_eq!(corrected.job.point_cloud.xyz_le, vec![1; 12]);
         fresh.objects[0].label = "not the selected class".into();

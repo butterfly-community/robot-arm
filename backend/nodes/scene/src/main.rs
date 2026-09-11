@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     io::Cursor,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,6 +22,9 @@ use robot_arm_messages::{
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod stage_tests;
 
 const CONFIG_SCHEMA_VERSION: u32 = 2;
 fn default_grasp_collision_distance_m() -> f64 {
@@ -76,6 +80,8 @@ struct SceneNode {
     sequence: u64,
     last_frame_time_ns: Option<i64>,
     last_scene: Option<WorldScene>,
+    segmented: Option<Arc<SegmentedFrame>>,
+    instance_clouds: Arc<Vec<InstancePointCloud>>,
     color_frame: Option<ImageFrameInfo>,
     depth_frame: Option<ImageFrameInfo>,
     camera_calibration: Option<DepthCameraCalibration>,
@@ -86,26 +92,33 @@ struct SceneNode {
     robot_model: Option<RobotModelInfo>,
     task_request_id: Option<String>,
     task_state: RequestState,
+    task_action: Option<RequestAction>,
     task_results: tokio::sync::mpsc::Receiver<SceneTaskResult>,
     task_sender: tokio::sync::mpsc::Sender<SceneTaskResult>,
 }
 
-struct ProcessedScene {
+struct SegmentedFrame {
+    sequence: u64,
     model: String,
     models: Vec<PerceptionModelInfo>,
-    color: CameraImagePlane,
-    scene: WorldScene,
-    aligned_depth: AlignedDepthFrame,
-    calibration: DepthCameraCalibration,
+    frame: CameraFrameBundle,
+    tool: Option<ToolPoseFeedback>,
     instances: Vec<DetectedInstance2D>,
+    placement_labels: Vec<String>,
     assets: BTreeMap<String, (String, Vec<u8>)>,
-    point_count: u64,
+}
+
+enum ProcessedStage {
+    Segmentation(Arc<SegmentedFrame>),
+    Reconstruction(WorldScene, Arc<Vec<InstancePointCloud>>),
+    Grasps(WorldScene),
 }
 
 struct SceneTaskResult {
     request_id: String,
     input_sequence: u64,
-    result: Result<ProcessedScene, String>,
+    action: RequestAction,
+    result: Result<ProcessedStage, String>,
 }
 
 async fn next_observation_frame(
@@ -265,6 +278,8 @@ fn run() -> Result<()> {
         sequence: 0,
         last_frame_time_ns: None,
         last_scene: None,
+        segmented: None,
+        instance_clouds: Arc::new(vec![]),
         color_frame: None,
         depth_frame: None,
         camera_calibration: None,
@@ -275,6 +290,7 @@ fn run() -> Result<()> {
         robot_model: None,
         task_request_id: None,
         task_state: RequestState::Idle,
+        task_action: None,
         task_results,
         task_sender,
     };
@@ -352,6 +368,8 @@ impl SceneNode {
         self.latest_bundle = None;
         self.frame_updates.send_replace(None);
         self.last_scene = None;
+        self.segmented = None;
+        self.instance_clouds = Arc::new(vec![]);
         self.color_frame = None;
         self.depth_frame = None;
         self.camera_calibration = None;
@@ -388,9 +406,12 @@ impl SceneNode {
             .map(|scene| scene.frame_id.clone())
             .unwrap_or_else(|| "base_link".into());
         self.last_scene = None;
+        self.segmented = None;
+        self.instance_clouds = Arc::new(vec![]);
         self.instances.clear();
         self.point_count = None;
-        self.assets.remove("overlay.png");
+        self.assets
+            .retain(|key, _| key != "overlay.png" && !key.starts_with("mask-"));
         self.sequence += 1;
         send(
             node,
@@ -445,17 +466,14 @@ impl SceneNode {
     fn start_scene_task(
         &mut self,
         runtime: &tokio::runtime::Runtime,
-        request_id: String,
+        request: &PerceptionRequest,
     ) -> Result<()> {
         if self.task_state == RequestState::Executing {
             bail!("感知任务正在执行");
         }
-        let current = self
-            .latest_bundle
-            .as_ref()
-            .ok_or_else(|| eyre!("尚未收到相机帧"))?;
-        if current.calibration.is_none() {
-            bail!("当前相机尚未配置外参");
+        validate_stage_input(request, self.segmented.as_deref(), self.last_scene.as_ref())?;
+        if request.action == RequestAction::Refresh && self.latest_bundle.is_none() {
+            bail!("尚未收到相机帧");
         }
         let mut frames = self.frame_updates.subscribe();
         let mut tools = self.tool_updates.subscribe();
@@ -472,23 +490,65 @@ impl SceneNode {
         let robot_model = self.robot_model.clone();
         let sequence = self.sequence + 1;
         let sender = self.task_sender.clone();
-        let completed_request_id = request_id.clone();
+        let completed_request_id = request.request_id.clone();
         let input_sequence = self.sequence;
+        let action = request.action;
+        let segmented = self.segmented.clone();
+        let scene = self.last_scene.clone();
+        let clouds = self.instance_clouds.clone();
+        let object_id = request.object_id.clone();
         runtime.spawn(async move {
-            // Refresh waits for a newly received frame after the request, including a
-            // request issued when the arm has just reached its pregrasp pose.
-            // Waiting is asynchronous; the camera/event thread keeps running.
             let result = async {
-                let frame = next_observation_frame(&mut frames, requested_at).await?;
-                let tool = if robot_model
-                    .as_ref()
-                    .is_some_and(|model| model.gripper_asset_id.is_some())
-                {
-                    Some(feedback_after_frame(&mut tools, frame.received_time_ns).await?)
-                } else {
-                    None
-                };
-                process_scene(http, config, robot_model, tool, frame, sequence).await
+                match action {
+                    RequestAction::Refresh => {
+                        let frame = next_observation_frame(&mut frames, requested_at).await?;
+                        // Pair feedback concurrently for later grasp self filtering.
+                        // The segmentation result is never delayed by missing feedback.
+                        let received_time = frame.received_time_ns;
+                        let mut work = Box::pin(segment_frame(http, config, frame, None, sequence));
+                        let segmented = tokio::select! {
+                            result = &mut work => result?,
+                            tool = feedback_after_frame(&mut tools, received_time) => {
+                                let mut result = work.await?;
+                                result.tool = tool.ok();
+                                result
+                            }
+                        };
+                        Ok(ProcessedStage::Segmentation(Arc::new(segmented)))
+                    }
+                    RequestAction::Reconstruct => {
+                        let segmented = segmented.expect("validated segmented input");
+                        tokio::task::spawn_blocking(move || reconstruct_frame(&segmented, sequence))
+                            .await
+                            .context("三维定位任务异常结束")?
+                    }
+                    RequestAction::GenerateGrasps => {
+                        let segmented = segmented.expect("validated segmented input");
+                        let mut scene = scene.expect("validated reconstructed input");
+                        let model = robot_model.ok_or_else(|| eyre!("尚未收到机械臂模型"))?;
+                        let asset = model
+                            .gripper_asset_id
+                            .as_deref()
+                            .ok_or_else(|| eyre!("机械臂未配置抓取模型夹爪资产"))?;
+                        let tool = segmented.tool.as_ref().ok_or_else(|| {
+                            eyre!("该分割帧缺少同步夹爪反馈，请连接机械臂后重新分割")
+                        })?;
+                        let gripper = observed_gripper(&model, tool, &scene.frame_id)?;
+                        attach_grasp_candidates(
+                            &http,
+                            &config,
+                            asset,
+                            Some(&gripper),
+                            object_id.as_deref().expect("validated selected object"),
+                            &mut scene,
+                            &clouds,
+                        )
+                        .await?;
+                        scene.sequence = sequence;
+                        Ok(ProcessedStage::Grasps(scene))
+                    }
+                    _ => unreachable!("validated stage"),
+                }
             }
             .await
             .map_err(|error: eyre::Report| format!("{error:#}"));
@@ -496,11 +556,13 @@ impl SceneNode {
                 .send(SceneTaskResult {
                     request_id: completed_request_id,
                     input_sequence,
+                    action,
                     result,
                 })
                 .await;
         });
-        self.task_request_id = Some(request_id);
+        self.task_request_id = Some(request.request_id.clone());
+        self.task_action = Some(action);
         self.task_state = RequestState::Executing;
         self.last_error = None;
         Ok(())
@@ -516,19 +578,32 @@ impl SceneNode {
         };
         let error = match result {
             Ok(processed) => {
-                self.model = processed.model.clone();
-                self.models = processed.models.clone();
-                self.sequence = processed.scene.sequence;
-                self.point_count = Some(processed.point_count);
-                self.store_frame_details(
-                    &processed.color,
-                    &processed.aligned_depth,
-                    &processed.calibration,
-                    &processed.instances,
-                    &processed.scene,
-                    processed.assets,
-                );
-                self.publish_scene(node, processed.scene)?;
+                match processed {
+                    ProcessedStage::Segmentation(segmented) => {
+                        self.clear_scene(node)?;
+                        self.sequence = segmented.sequence;
+                        self.model = segmented.model.clone();
+                        self.models = segmented.models.clone();
+                        self.assets = segmented.assets.clone();
+                        self.segmented = Some(segmented);
+                    }
+                    ProcessedStage::Reconstruction(scene, clouds) => {
+                        self.point_count = Some(
+                            clouds
+                                .iter()
+                                .map(|cloud| cloud.points_xyz_m.len() as u64)
+                                .sum(),
+                        );
+                        self.instance_clouds = clouds;
+                        self.sequence = scene.sequence;
+                        self.publish_scene(node, scene)?;
+                    }
+                    ProcessedStage::Grasps(scene) => {
+                        self.sequence = scene.sequence;
+                        self.publish_scene(node, scene)?;
+                    }
+                }
+                self.update_instance_summaries();
                 self.task_state = RequestState::Succeeded;
                 None
             }
@@ -545,7 +620,7 @@ impl SceneNode {
             &RequestResult {
                 schema_version: SCHEMA_VERSION,
                 request_id: completed.request_id,
-                acknowledged_action: RequestAction::Refresh,
+                acknowledged_action: completed.action,
                 value: Some(self.state()),
                 original_error: error,
             },
@@ -559,35 +634,27 @@ impl SceneNode {
         Ok(())
     }
 
-    fn store_frame_details(
-        &mut self,
-        color: &CameraImagePlane,
-        depth: &AlignedDepthFrame,
-        calibration: &DepthCameraCalibration,
-        instances: &[DetectedInstance2D],
-        scene: &WorldScene,
-        assets: BTreeMap<String, (String, Vec<u8>)>,
-    ) {
-        self.color_frame = Some(image_frame_info(color));
-        self.depth_frame = Some(ImageFrameInfo {
-            width: depth.width,
-            height: depth.height,
-            encoding: "z16le".into(),
-            frame_id: depth.frame_id.clone(),
-        });
-        self.camera_calibration = Some(calibration.clone());
-        self.instances = instances
+    fn update_instance_summaries(&mut self) {
+        let Some(segmented) = &self.segmented else {
+            return;
+        };
+        self.instances = segmented
+            .instances
             .iter()
-            .map(|instance| {
-                let object = scene
-                    .objects
-                    .iter()
+            .enumerate()
+            .map(|(index, instance)| {
+                let object = self
+                    .last_scene
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|scene| &scene.objects)
                     .find(|object| object.object_id == instance.instance_id);
                 PerceptionInstanceSummary {
                     instance_id: instance.instance_id.clone(),
                     label: instance.label.clone(),
                     confidence: instance.confidence,
                     bounding_box_xyxy: instance.bounding_box_xyxy,
+                    mask_asset_key: format!("mask-{index}.png"),
                     position_m: object.map(|object| object.pose.position_m),
                     size_m: object.map(|object| object.size_m),
                     grasp_candidate_count: object
@@ -596,7 +663,6 @@ impl SceneNode {
                 }
             })
             .collect();
-        self.assets = assets;
     }
 
     fn send_asset(&self, node: &mut DoraNode, request: PerceptionAssetRequest) -> Result<()> {
@@ -623,8 +689,11 @@ impl SceneNode {
         node: &mut DoraNode,
         request: PerceptionRequest,
     ) -> Result<()> {
-        if request.action == RequestAction::Refresh {
-            if let Err(error) = self.start_scene_task(runtime, request.request_id.clone()) {
+        if matches!(
+            request.action,
+            RequestAction::Refresh | RequestAction::Reconstruct | RequestAction::GenerateGrasps
+        ) {
+            if let Err(error) = self.start_scene_task(runtime, &request) {
                 let error = error.to_string();
                 if self.task_state != RequestState::Executing {
                     self.task_state = RequestState::Failed;
@@ -636,7 +705,7 @@ impl SceneNode {
                     &RequestResult {
                         schema_version: SCHEMA_VERSION,
                         request_id: request.request_id,
-                        acknowledged_action: RequestAction::Refresh,
+                        acknowledged_action: request.action,
                         value: Some(self.state()),
                         original_error: Some(error),
                     },
@@ -747,7 +816,11 @@ impl SceneNode {
                 .unwrap_or_else(|| self.model.clone()),
             available_models: self.models.clone(),
             classes: self.config.classes.clone(),
-            visual_prompt_active: matches!(self.config.prompt, SegmentationPrompt::Visual { .. }),
+            visual_prompt_active: !self
+                .models
+                .iter()
+                .any(|model| Some(&model.id) == self.config.model.as_ref() && model.prompt_free)
+                && matches!(self.config.prompt, SegmentationPrompt::Visual { .. }),
             placement_labels: self.config.placement_labels.clone(),
             grasp_collision_distance_m: self.config.grasp_collision_distance_m,
             color_frame: self.color_frame.clone(),
@@ -758,6 +831,8 @@ impl SceneNode {
             point_count: self.point_count,
             last_frame_time_ns: self.last_frame_time_ns,
             last_scene_sequence: self.last_scene.as_ref().map(|scene| scene.sequence),
+            last_segmentation_sequence: self.segmented.as_ref().map(|value| value.sequence),
+            task_action: self.task_action,
             task_request_id: self.task_request_id.clone(),
             task_state: self.task_state,
             calibrated: self.camera_calibration.is_some(),
@@ -773,7 +848,7 @@ impl SceneNode {
             config_version: self.config.config_version,
             running: true,
             has_input: self.last_frame_time_ns.is_some(),
-            has_output: self.last_scene.is_some(),
+            has_output: self.segmented.is_some(),
             last_error: self.last_error.clone(),
             updated_at_ns: now_ns(),
         }
@@ -793,14 +868,45 @@ impl SceneNode {
     }
 }
 
-async fn process_scene(
+fn validate_stage_input(
+    request: &PerceptionRequest,
+    segmented: Option<&SegmentedFrame>,
+    scene: Option<&WorldScene>,
+) -> Result<()> {
+    match request.action {
+        RequestAction::Refresh => Ok(()),
+        RequestAction::Reconstruct => {
+            let input = segmented.ok_or_else(|| eyre!("请先运行分割"))?;
+            if request.input_sequence != Some(input.sequence) {
+                bail!("分割结果已改变，请使用当前分割序号");
+            }
+            Ok(())
+        }
+        RequestAction::GenerateGrasps => {
+            let scene = scene.ok_or_else(|| eyre!("请先进行三维定位"))?;
+            if request.input_sequence != Some(scene.sequence) {
+                bail!("三维场景已改变，请使用当前场景序号");
+            }
+            if !scene
+                .objects
+                .iter()
+                .any(|object| Some(&object.object_id) == request.object_id.as_ref())
+            {
+                bail!("请选择当前场景中的一个抓取目标");
+            }
+            Ok(())
+        }
+        _ => bail!("不是感知计算动作"),
+    }
+}
+
+async fn segment_frame(
     http: reqwest::Client,
     config: SceneConfig,
-    robot_model: Option<RobotModelInfo>,
-    tool: Option<ToolPoseFeedback>,
     frame: CameraFrameBundle,
+    tool: Option<ToolPoseFeedback>,
     sequence: u64,
-) -> Result<ProcessedScene> {
+) -> Result<SegmentedFrame> {
     let catalog = model_catalog(&http, &config.compute_service_url).await?;
     let model = config.model.as_deref().unwrap_or(&catalog.model).to_owned();
     let prompt_free = catalog
@@ -823,11 +929,9 @@ async fn process_scene(
         &color,
     )
     .await?;
-    let processing_color = color.clone();
-    let processing_instances = instances.clone();
     // An automatic model names the instances itself. Any observed instance can
     // be selected as a destination; no text aliases are fed back into inference.
-    let processing_placement_labels = if prompt_free {
+    let placement_labels = if prompt_free {
         instances
             .iter()
             .map(|instance| instance.label.clone())
@@ -835,77 +939,52 @@ async fn process_scene(
     } else {
         config.placement_labels.clone()
     };
-    let (aligned_depth, calibration, assets, mut scene, instance_clouds) =
-        tokio::task::spawn_blocking(move || {
-            let mut aligned_depth = decode_depth(&frame)?;
-            let mut calibration = frame
-                .calibration
-                .clone()
-                .ok_or_else(|| eyre!("当前相机尚未配置外参"))?;
-            aligned_depth.sequence = sequence;
-            calibration.sequence = sequence;
-            let overlay = segmentation_debug_image(&processing_color, &processing_instances)?;
-            let (scene, instance_clouds) = world_scene_and_instance_clouds_from_aligned_depth(
-                sequence,
-                &aligned_depth,
-                &calibration,
-                &processing_instances,
-                &processing_placement_labels,
-            )?;
-            let assets = BTreeMap::from([
-                (
-                    "color.png".into(),
-                    ("image/png".into(), color_png(&processing_color)?),
-                ),
-                (
-                    "overlay.png".into(),
-                    ("image/png".into(), color_png(&overlay)?),
-                ),
-                (
-                    "depth.png".into(),
-                    ("image/png".into(), depth_preview_png(&aligned_depth)?),
-                ),
-            ]);
-            Ok::<_, eyre::Report>((aligned_depth, calibration, assets, scene, instance_clouds))
+    tokio::task::spawn_blocking(move || {
+        let overlay = segmentation_debug_image(&color, &instances)?;
+        let mut assets = BTreeMap::from([
+            ("color.png".into(), ("image/png".into(), color_png(&color)?)),
+            (
+                "overlay.png".into(),
+                ("image/png".into(), color_png(&overlay)?),
+            ),
+        ]);
+        for (index, instance) in instances.iter().enumerate() {
+            assets.insert(
+                format!("mask-{index}.png"),
+                ("image/png".into(), instance.mask_png.clone()),
+            );
+        }
+        Ok(SegmentedFrame {
+            sequence,
+            model,
+            models: catalog.models,
+            frame,
+            tool,
+            instances,
+            placement_labels,
+            assets,
         })
-        .await
-        .context("场景计算任务异常结束")??;
-    let point_count = instance_clouds
-        .iter()
-        .map(|cloud| cloud.points_xyz_m.len() as u64)
-        .sum();
-    let gripper = match (&robot_model, &tool) {
-        (Some(model), Some(tool)) => Some(observed_gripper(model, tool, &scene.frame_id)?),
-        _ => None,
-    };
-    attach_grasp_candidates(
-        &http,
-        &config.compute_service_url,
-        robot_model
-            .as_ref()
-            .and_then(|model| model.gripper_asset_id.as_deref()),
-        gripper.as_ref(),
-        config.grasp_collision_distance_m,
-        if prompt_free {
-            &[]
-        } else {
-            &config.placement_labels
-        },
-        &mut scene,
-        &instance_clouds,
-    )
-    .await?;
-    Ok(ProcessedScene {
-        model,
-        models: catalog.models,
-        color,
-        scene,
-        aligned_depth,
-        calibration,
-        instances,
-        assets,
-        point_count,
     })
+    .await
+    .context("分割图像编码任务异常结束")?
+}
+
+fn reconstruct_frame(input: &SegmentedFrame, sequence: u64) -> Result<ProcessedStage> {
+    // Never read latest_bundle here: masks, depth and calibration share one capture.
+    let depth = decode_depth(&input.frame)?;
+    let calibration = input
+        .frame
+        .calibration
+        .as_ref()
+        .ok_or_else(|| eyre!("分割时的相机帧未标定，请标定后重新分割"))?;
+    let (scene, clouds) = world_scene_and_instance_clouds_from_aligned_depth(
+        sequence,
+        &depth,
+        calibration,
+        &input.instances,
+        &input.placement_labels,
+    )?;
+    Ok(ProcessedStage::Reconstruction(scene, Arc::new(clouds)))
 }
 
 async fn model_catalog(http: &reqwest::Client, url: &str) -> Result<ModelResponse> {
@@ -970,54 +1049,50 @@ async fn segment(
 
 async fn attach_grasp_candidates(
     http: &reqwest::Client,
-    compute_service_url: &str,
-    gripper_asset_id: Option<&str>,
+    config: &SceneConfig,
+    gripper_asset_id: &str,
     observed_gripper: Option<&ObservedGripper>,
-    collision_threshold_m: f64,
-    placement_only_labels: &[String],
+    object_id: &str,
     scene: &mut WorldScene,
     instance_clouds: &[InstancePointCloud],
 ) -> Result<()> {
-    let Some(gripper_asset_id) = gripper_asset_id else {
-        return Ok(());
-    };
-    for object in &mut scene.objects {
-        if placement_only_labels.contains(&object.label) {
-            continue;
-        }
-        let cloud = instance_clouds
-            .iter()
-            .find(|cloud| cloud.instance_id == object.object_id)
-            .ok_or_else(|| eyre!("实例 {} 缺少点云", object.object_id))?;
-        let mut candidates = http
-            .post(format!(
-                "{}/v1/grasps",
-                compute_service_url.trim_end_matches('/')
-            ))
-            .json(&GraspRequest {
-                points_xyz_m: &cloud.points_xyz_m,
-                scene_points_xyz_m: &cloud.scene_points_xyz_m,
-                gripper_asset_id,
-                collision_threshold_m,
-                observed_gripper,
-            })
-            .send()
-            .await
-            .context("调用 GraspGenX")?
-            .error_for_status()
-            .context("GraspGenX 返回错误")?
-            .json::<GraspResponse>()
-            .await?
-            .candidates;
-        candidates.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
-        object.grasp_candidates = candidates
-            .iter()
-            .map(|candidate| GraspCandidate {
-                pose: candidate_tcp_pose_in_base(candidate.transform),
-                confidence: candidate.confidence,
-            })
-            .collect();
-    }
+    let object = scene
+        .objects
+        .iter_mut()
+        .find(|object| object.object_id == object_id)
+        .ok_or_else(|| eyre!("场景中没有选定目标 {object_id}"))?;
+    let cloud = instance_clouds
+        .iter()
+        .find(|cloud| cloud.instance_id == object.object_id)
+        .ok_or_else(|| eyre!("实例 {} 缺少点云", object.object_id))?;
+    let mut candidates = http
+        .post(format!(
+            "{}/v1/grasps",
+            config.compute_service_url.trim_end_matches('/')
+        ))
+        .json(&GraspRequest {
+            points_xyz_m: &cloud.points_xyz_m,
+            scene_points_xyz_m: &cloud.scene_points_xyz_m,
+            gripper_asset_id,
+            collision_threshold_m: config.grasp_collision_distance_m,
+            observed_gripper,
+        })
+        .send()
+        .await
+        .context("调用 GraspGenX")?
+        .error_for_status()
+        .context("GraspGenX 返回错误")?
+        .json::<GraspResponse>()
+        .await?
+        .candidates;
+    candidates.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+    object.grasp_candidates = candidates
+        .iter()
+        .map(|candidate| GraspCandidate {
+            pose: candidate_tcp_pose_in_base(candidate.transform),
+            confidence: candidate.confidence,
+        })
+        .collect();
     Ok(())
 }
 

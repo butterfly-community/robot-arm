@@ -22,13 +22,7 @@ const scene: WorldScene = {
         orientation_xyzw: [0, 0, 0, 1],
       },
       size_m: [0.04, 0.04, 0.04],
-      grasp_candidates: [
-        {
-          confidence: 0.87,
-          position_m: [0.1, 0.2, 0.05],
-          orientation_xyzw: [0, 0, 0, 1],
-        },
-      ],
+      grasp_candidates: [],
     },
   ],
   placement_regions: [
@@ -45,14 +39,23 @@ const scene: WorldScene = {
   ],
   obstacles: [],
 };
+const graspScene: WorldScene = structuredClone(scene);
+graspScene.sequence = 5;
+graspScene.objects[0].grasp_candidates = [
+  {
+    confidence: 0.87,
+    position_m: [0.1, 0.2, 0.05],
+    orientation_xyzw: [0, 0, 0, 1],
+  },
+];
 
 describe("executeInstruction", () => {
   it("uses the selected automatic model without applying hidden prompts", async () => {
     const model = { id: "automatic", label: "Automatic", prompt_free: true };
     const gateway: RobotGateway = {
       model: vi.fn(async () => model),
-      post: vi.fn(async () => ({})),
-      scene: vi.fn(async () => scene),
+      post: vi.fn(async () => ({ value: { last_segmentation_sequence: 3 } })),
+      scene: vi.fn().mockResolvedValueOnce(scene).mockResolvedValue(graspScene),
     };
     const planner: InstructionPlanner = {
       plan: vi.fn().mockResolvedValue({
@@ -99,6 +102,7 @@ describe("executeInstruction", () => {
       }),
     };
     const calls: string[] = [];
+    let sceneReads = 0;
     const gateway: RobotGateway = {
       model: vi.fn(async () => ({
         id: "prompted",
@@ -107,11 +111,11 @@ describe("executeInstruction", () => {
       })),
       post: vi.fn(async (path) => {
         calls.push(path);
-        return {};
+        return { value: { last_segmentation_sequence: 3 } };
       }),
       scene: vi.fn(async () => {
         calls.push("scene");
-        return scene;
+        return sceneReads++ === 0 ? scene : graspScene;
       }),
     };
     let sequence = 0;
@@ -126,16 +130,34 @@ describe("executeInstruction", () => {
     expect(calls).toEqual([
       "/api/perception/request",
       "/api/perception/request",
+      "/api/perception/request",
+      "scene",
+      "/api/perception/request",
       "scene",
       "/api/motion/mode",
       "/api/perception/pick-place",
     ]);
     expect(gateway.post).toHaveBeenLastCalledWith(
       "/api/perception/pick-place",
-      expect.objectContaining({ scene_sequence: scene.sequence }),
+      expect.objectContaining({ scene_sequence: graspScene.sequence }),
+    );
+    expect(planner.select).toHaveBeenCalledWith("把红色方块放进灰色筐", scene);
+    expect(gateway.post).toHaveBeenNthCalledWith(
+      3,
+      "/api/perception/request",
+      expect.objectContaining({ action: "reconstruct", input_sequence: 3 }),
+    );
+    expect(gateway.post).toHaveBeenNthCalledWith(
+      4,
+      "/api/perception/request",
+      expect.objectContaining({
+        action: "generate_grasps",
+        input_sequence: scene.sequence,
+        object_id: "red-cube-0",
+      }),
     );
     expect(result).toMatchObject({
-      request_id: "request-4",
+      request_id: "request-6",
       object_id: "red-cube-0",
       placement_region_id: "gray-bin-interior",
       accepted: true,
@@ -149,7 +171,7 @@ describe("executeInstruction", () => {
         label: "Prompted",
         prompt_free: false,
       })),
-      post: vi.fn(async () => ({})),
+      post: vi.fn(async () => ({ value: { last_segmentation_sequence: 3 } })),
       scene: vi.fn(async () => scene),
     };
     const planner: InstructionPlanner = {
@@ -167,8 +189,8 @@ describe("executeInstruction", () => {
 
     await expect(
       executeInstruction("抓起来", planner, gateway, () => "request"),
-    ).rejects.toThrow("不存在或没有抓取候选");
-    expect(gateway.post).toHaveBeenCalledTimes(2);
+    ).rejects.toThrow("不存在");
+    expect(gateway.post).toHaveBeenCalledTimes(3);
   });
 
   it("rejects unsupported instructions before touching robot services", async () => {

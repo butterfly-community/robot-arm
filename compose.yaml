@@ -238,6 +238,7 @@ services:
       SERVICES_BASE_URL: http://web-entry:8765
     volumes:
       - "./tests:/workspace/tests:ro"
+      - "./tools/diagnostics/perception-stages.mjs:/workspace/tools/diagnostics/perception-stages.mjs:ro"
       - "./backend/nodes/camera/assets:/workspace/backend/nodes/camera/assets:ro"
       - "./temp:/workspace/temp"
     networks: [robot-services]

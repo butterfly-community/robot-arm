@@ -199,7 +199,7 @@ test("model edits are saved before running; failure keeps edits and never runs",
   await model.selectOption("auto-model");
   await expect(page.getByText("有待保存修改", { exact: true })).toBeVisible();
   await page
-    .getByRole("button", { name: "保存并运行感知", exact: true })
+    .getByRole("button", { name: "保存并运行分割", exact: true })
     .click();
   await expect(page.locator('p.error[role="alert"]')).toContainText(
     "测试保存失败",
@@ -208,7 +208,7 @@ test("model edits are saved before running; failure keeps edits and never runs",
   await expect(model).toHaveValue("auto-model");
   fail = false;
   await page
-    .getByRole("button", { name: "保存并运行感知", exact: true })
+    .getByRole("button", { name: "保存并运行分割", exact: true })
     .click();
   await expect.poll(() => actions.length).toBe(3);
   expect(actions).toEqual(["apply", "apply", "refresh"]);

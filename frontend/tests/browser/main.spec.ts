@@ -576,7 +576,7 @@ test("perception page uses the simulation camera through the canonical path", as
     await page.waitForTimeout(1_200);
     await expect(depthPreview).toHaveAttribute("src", depthSource!);
     const runPerception = page.getByRole("button", {
-      name: "运行一次感知",
+      name: "运行分割",
     });
     const runPerceptionOnce = async () => {
       const completed = page.waitForResponse(
@@ -587,6 +587,13 @@ test("perception page uses the simulation camera through the canonical path", as
       );
       await runPerception.click();
       expect((await (await completed).json()).original_error).toBeNull();
+      const positioned = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/api/perception/request") &&
+          response.request().postDataJSON()?.action === "reconstruct",
+      );
+      await page.getByRole("button", { name: "三维定位", exact: true }).click();
+      expect((await (await positioned).json()).original_error).toBeNull();
     };
     await expect(runPerception).toBeEnabled();
     await runPerceptionOnce();
@@ -908,10 +915,10 @@ test("perception layout groups camera workflow and structured results", async ({
   );
   await manualSettings.locator(".disclosure-toggle").click();
   const modelSelect = card("抓放场景").locator(
-    'select[aria-label="提示词模型"]',
+    'select[aria-label="识别与分割模型"]',
   );
   await expect(modelSelect).toHaveValue(/.+/);
-  await expect(modelSelect.locator("option")).toHaveCount(1);
+  await expect(modelSelect.locator("option")).toHaveCount(2);
   // Radix mounts the body while opening; measure after its layout settles.
   await card("抓放场景")
     .getByRole("button", { name: "保存模型配置" })
@@ -920,7 +927,7 @@ test("perception layout groups camera workflow and structured results", async ({
     .getByRole("button", { name: "保存模型配置" })
     .boundingBox();
   const runPerceptionButton = await card("抓放场景")
-    .getByRole("button", { name: "运行一次感知" })
+    .getByRole("button", { name: "三维定位", exact: true })
     .boundingBox();
   const executeButton = await card("抓放场景")
     .getByRole("button", { name: "执行抓放", exact: true })
@@ -1144,13 +1151,48 @@ test("execution viewer shows the selected pick and placement points only during 
         return state.values.perception_state?.color_frame != null;
       })
       .toBe(true);
-    await request.post("/api/perception/request", {
+    const segmentedResponse = await request.post("/api/perception/request", {
       data: {
         schema_version: 3,
         request_id: "browser-pick-points-run",
         action: "refresh",
         classes: null,
         placement_labels: null,
+      },
+    });
+    const segmented = await segmentedResponse.json();
+    const reconstructed = await (
+      await request.post("/api/perception/request", {
+        data: {
+          schema_version: 3,
+          request_id: "browser-pick-points-reconstruct",
+          action: "reconstruct",
+          input_sequence: segmented.value.last_segmentation_sequence,
+        },
+      })
+    ).json();
+    await expect
+      .poll(
+        async () =>
+          (await (await request.get("/api/perception/state")).json()).values
+            .world_scene?.sequence,
+      )
+      .toBe(reconstructed.value.last_scene_sequence);
+    const reconstructedScene = (
+      await (await request.get("/api/perception/state")).json()
+    ).values.world_scene;
+    const selectedTarget = reconstructedScene.objects.find(
+      (item: { label: string }) =>
+        item.label === fixture.cube.recognition_prompt,
+    );
+    expect(selectedTarget).toBeTruthy();
+    await request.post("/api/perception/request", {
+      data: {
+        schema_version: 3,
+        request_id: "browser-pick-points-grasps",
+        action: "generate_grasps",
+        input_sequence: reconstructedScene.sequence,
+        object_id: selectedTarget.object_id,
       },
     });
     await expect

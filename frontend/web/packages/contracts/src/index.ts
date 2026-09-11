@@ -17,6 +17,8 @@ export type RequestAction =
   | "disconnect"
   | "discover"
   | "refresh"
+  | "reconstruct"
+  | "generate_grasps"
   | "snapshot"
   | "reset";
 
@@ -359,6 +361,7 @@ export interface PerceptionInstanceSummary {
   label: string;
   confidence: number;
   bounding_box_xyxy: [number, number, number, number];
+  mask_asset_key?: string;
   position_m?: [number, number, number] | null;
   size_m?: [number, number, number] | null;
   grasp_candidate_count: number;
@@ -392,6 +395,8 @@ export interface PerceptionState {
   point_count?: number | null;
   last_frame_time_ns?: number | null;
   last_scene_sequence?: number | null;
+  last_segmentation_sequence?: number | null;
+  task_action?: RequestAction | null;
   task_request_id?: string | null;
   task_state: RequestState;
   calibrated: boolean;

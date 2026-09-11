@@ -455,6 +455,8 @@ pub enum RequestAction {
     Disconnect,
     Discover,
     Refresh,
+    Reconstruct,
+    GenerateGrasps,
     Snapshot,
     Reset,
 }
@@ -819,6 +821,7 @@ pub struct PerceptionInstanceSummary {
     pub label: String,
     pub confidence: f64,
     pub bounding_box_xyxy: [f64; 4],
+    pub mask_asset_key: String,
     pub position_m: Option<[f64; 3]>,
     pub size_m: Option<[f64; 3]>,
     pub grasp_candidate_count: u32,
@@ -867,6 +870,10 @@ pub struct PerceptionState {
     pub point_count: Option<u64>,
     pub last_frame_time_ns: Option<i64>,
     pub last_scene_sequence: Option<u64>,
+    #[serde(default)]
+    pub last_segmentation_sequence: Option<u64>,
+    #[serde(default)]
+    pub task_action: Option<RequestAction>,
     pub task_request_id: Option<String>,
     pub task_state: RequestState,
     pub calibrated: bool,
@@ -896,6 +903,11 @@ pub struct PerceptionRequest {
     pub schema_version: u32,
     pub request_id: String,
     pub action: RequestAction,
+    /// Exact upstream result consumed by reconstruct / generate_grasps.
+    #[serde(default)]
+    pub input_sequence: Option<u64>,
+    #[serde(default)]
+    pub object_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     pub classes: Option<Vec<String>>,
@@ -2104,6 +2116,8 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             request_id: "reset-model-1".into(),
             action: RequestAction::Reset,
+            input_sequence: None,
+            object_id: None,
             model: None,
             classes: None,
             prompt: None,

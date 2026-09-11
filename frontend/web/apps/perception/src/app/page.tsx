@@ -284,14 +284,14 @@ export default function Page() {
     `/api/perception/assets/${name}?v=${imageVersion}`;
   const selectedObject =
     objectId === undefined
-      ? (scene?.objects.find((item) => item.grasp_candidates.length)
-          ?.object_id ?? "")
-      : scene?.objects.some(
-            (item) =>
-              item.object_id === objectId && item.grasp_candidates.length,
-          )
+      ? (scene?.objects[0]?.object_id ?? "")
+      : scene?.objects.some((item) => item.object_id === objectId)
         ? objectId
         : "";
+  const selectedHasGrasps = Boolean(
+    scene?.objects.find((item) => item.object_id === selectedObject)
+      ?.grasp_candidates.length,
+  );
   const selectedRegion =
     regionId === undefined
       ? (scene?.placement_regions[0]?.region_id ?? "")
@@ -420,7 +420,14 @@ export default function Page() {
 
   async function perceptionRequest(
     action:
-      "apply" | "disconnect" | "unselect" | "refresh" | "snapshot" | "reset",
+      | "apply"
+      | "disconnect"
+      | "unselect"
+      | "refresh"
+      | "snapshot"
+      | "reset"
+      | "reconstruct"
+      | "generate_grasps",
     target: "camera" | "model" = "camera",
     visualPrompt?: VisualPrompt,
   ) {
@@ -497,6 +504,13 @@ export default function Page() {
         schema_version: schemaVersion,
         request_id: requestId(),
         action,
+        input_sequence:
+          action === "reconstruct"
+            ? perception?.last_segmentation_sequence
+            : action === "generate_grasps"
+              ? scene?.sequence
+              : null,
+        object_id: action === "generate_grasps" ? selectedObject : null,
         model: appliesModel ? selectedModelId : null,
         ...(visualPrompt && appliesModel && !promptFree
           ? { prompt: visualPrompt }
@@ -942,7 +956,7 @@ export default function Page() {
                     label="识别与分割提示词"
                     hint={
                       perception?.visual_prompt_active
-                        ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行一次感知会继续使用视觉示例。"
+                        ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行分割会继续使用视觉示例。"
                         : "逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
                     }
                   >
@@ -1033,20 +1047,40 @@ export default function Page() {
                     pending ||
                     perception?.task_state === "executing" ||
                     !camera?.streaming ||
-                    !perception?.color_frame ||
-                    !perception?.depth_frame ||
-                    !perception?.calibrated
+                    !perception?.color_frame
                   }
                   onClick={runPerception}
                 >
                   {pendingPerceptionAction === "model:refresh" ||
-                  perception?.task_state === "executing"
-                    ? "正在运行…"
+                  (perception?.task_state === "executing" &&
+                    perception.task_action === "refresh")
+                    ? "正在分割…"
                     : modelDirty
-                      ? "保存并运行感知"
-                      : "运行一次感知"}
+                      ? "保存并运行分割"
+                      : "运行分割"}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={
+                    pending ||
+                    perception?.task_state === "executing" ||
+                    modelDirty ||
+                    perception?.last_segmentation_sequence == null ||
+                    !perception?.calibrated
+                  }
+                  onClick={() => perceptionRequest("reconstruct", "model")}
+                >
+                  {perception?.task_state === "executing" &&
+                  perception.task_action === "reconstruct"
+                    ? "正在定位…"
+                    : "三维定位"}
                 </Button>
               </div>
+              <KeyValue
+                label="分割 / 三维场景"
+                value={`${perception?.last_segmentation_sequence ?? "—"} / ${perception?.last_scene_sequence ?? "—"}`}
+                hint="分割只产生类别、二维框和掩膜，不调用抓取模型。三维定位使用该次分割保留的同一帧深度和外参；选定目标后再单独生成抓取候选。"
+              />
               <div className="perception-task-grid">
                 <Field label="抓取目标">
                   <select
@@ -1054,14 +1088,12 @@ export default function Page() {
                     value={selectedObject}
                     onChange={(event) => setObjectId(event.currentTarget.value)}
                   >
-                    <option value="">选择有抓取候选的实例</option>
-                    {scene?.objects
-                      .filter((item) => item.grasp_candidates.length)
-                      .map((item) => (
-                        <option key={item.object_id} value={item.object_id}>
-                          {item.label} · {item.object_id}
-                        </option>
-                      ))}
+                    <option value="">选择已三维定位的实例</option>
+                    {scene?.objects.map((item) => (
+                      <option key={item.object_id} value={item.object_id}>
+                        {item.label} · {item.object_id}
+                      </option>
+                    ))}
                   </select>
                 </Field>
                 <Field label="放置区域">
@@ -1082,7 +1114,28 @@ export default function Page() {
               <div className="card-actions perception-task-actions">
                 <Button
                   variant="outline"
-                  disabled={pending || !selectedObject || !selectedRegion}
+                  disabled={
+                    pending ||
+                    perception?.task_state === "executing" ||
+                    modelDirty ||
+                    !selectedObject
+                  }
+                  onClick={() => perceptionRequest("generate_grasps", "model")}
+                >
+                  {perception?.task_state === "executing" &&
+                  perception.task_action === "generate_grasps"
+                    ? "正在生成候选…"
+                    : "生成抓取候选"}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={
+                    pending ||
+                    perception?.task_state === "executing" ||
+                    modelDirty ||
+                    !selectedHasGrasps ||
+                    !selectedRegion
+                  }
                   onClick={pickPlace}
                 >
                   {pendingPerceptionAction === "pick-place"
@@ -1954,7 +2007,7 @@ export default function Page() {
             eyebrow="Inference overlay"
             title="识别与分割叠加图"
           >
-            {perception?.last_scene_sequence != null &&
+            {perception?.last_segmentation_sequence != null &&
             perception.color_frame ? (
               <PerceptionAssetImage
                 src={asset("overlay.png")}
@@ -1982,7 +2035,7 @@ export default function Page() {
             <KeyValue
               label="实例三维点"
               value={String(perception?.point_count ?? 0)}
-              hint="由本次识别实例的分割区域与对齐深度生成，仅在点击运行一次感知后更新。"
+              hint="由当前分割区域与同帧深度生成，仅在点击三维定位后更新。运行分割不会计算三维点或抓取候选。"
             />
           </Card>
 
