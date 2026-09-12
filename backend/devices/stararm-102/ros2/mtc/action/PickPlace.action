@@ -1,7 +1,4 @@
 string request_id
-# Internal phase of the same webpage task: execute only the validated prefix,
-# obtain a new observation, then plan/execute the remaining pick and place.
-bool stop_at_pregrasp
 string frame_id
 # Same-frame observation, encoded as native ROS binary data rather than JSON.
 sensor_msgs/PointCloud2 scene_cloud
@@ -21,7 +18,6 @@ int32 error_code
 string message
 uint32 solution_count
 float64 selected_cost
-bool pregrasp_reached
 ---
 string state
 string stage

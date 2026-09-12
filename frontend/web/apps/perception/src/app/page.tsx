@@ -219,8 +219,7 @@ export default function Page() {
   const [driverParameterChanges, setDriverParameterChanges] = useState<
     Record<string, string>
   >({});
-  // A pregrasp observation can assign new detector IDs to the same physical
-  // objects. After the task acknowledges a draft, follow its actual selection.
+  // Follow the accepted task selection while preserving later human edits.
   const [objectId, setObjectId] = useDraftValue<string | undefined>(
     manipulation?.object_id ?? undefined,
   );

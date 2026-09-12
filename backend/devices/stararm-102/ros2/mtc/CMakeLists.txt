@@ -17,6 +17,8 @@ find_package(moveit_ros_perception REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(fcl REQUIRED)
+find_package(trac_ik_lib REQUIRED)
+find_package(kdl_parser REQUIRED)
 
 add_library(stararm_mesh_self_filter SHARED src/mesh_self_filter.cpp)
 target_compile_features(stararm_mesh_self_filter PUBLIC cxx_std_17)
@@ -46,6 +48,8 @@ target_link_libraries(pick_place_server PUBLIC
   tf2_ros::tf2_ros
   ${geometric_shapes_TARGETS}
   fcl
+  ${trac_ik_lib_TARGETS}
+  ${kdl_parser_TARGETS}
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 target_link_libraries(pick_place_server PRIVATE "${cpp_typesupport_target}")

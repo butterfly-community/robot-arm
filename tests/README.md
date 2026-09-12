@@ -11,6 +11,9 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`grasp-selection.spec.ts` 核对任务已接收的实例选择随快照更新，但不覆盖用户随后编辑的放置选择。
+所有 POST 被拦截，不发实际抓放；可单独运行 `pnpm --dir frontend exec playwright test tests/browser/grasp-selection.spec.ts`。
+
 `node --test tests/tools/check-ui-css.test.mjs` 检查共享 CSS 不引用未定义的旧变量；
 属于源码检查，不依赖服务。实际控件间距另由下面的浏览器回归验证。
 

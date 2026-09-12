@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 // UI contract only: all writes are intercepted, never a physical grasp trial.
-test("pregrasp re-observation follows rebound target IDs without losing a later human edit", async ({
+test("accepted task selection follows updates without losing a later human edit", async ({
   page,
   request,
 }) => {
@@ -42,7 +42,7 @@ test("pregrasp re-observation follows rebound target IDs without losing a later 
     place_position_m: null,
     solution_count: 1,
     selected_cost: 0,
-    stage: "等待二次观测",
+    stage: "执行抓放",
     original_error: null,
   };
   let publish: (() => void) | undefined;

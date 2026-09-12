@@ -299,7 +299,7 @@ fn run() -> Result<()> {
     while let Some(event) = events.recv() {
         match event {
             Event::Input { id, data, .. } => match id.as_str() {
-                "request" | "manipulation_observation" => {
+                "request" => {
                     scene_node.apply_request(&runtime, &mut node, from_arrow(data.as_array())?)?
                 }
                 "asset_request" => {

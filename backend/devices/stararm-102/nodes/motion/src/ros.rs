@@ -73,7 +73,6 @@ pub struct ManipulationResult {
     pub message: String,
     pub solution_count: u32,
     pub selected_cost: f64,
-    pub pregrasp_reached: bool,
 }
 
 #[derive(Clone)]
@@ -762,7 +761,6 @@ impl MotionActions {
                 message: value.message,
                 solution_count: value.solution_count,
                 selected_cost: value.selected_cost,
-                pregrasp_reached: value.pregrasp_reached,
             });
         }
     }
