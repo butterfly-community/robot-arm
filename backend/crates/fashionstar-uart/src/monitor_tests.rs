@@ -1,4 +1,4 @@
-//! Real PTY transport, no robot. A slow seventh servo must not hold up writes.
+//! Real PTY transport, no robot. Pending replies own the shared servo wire.
 use super::*;
 use serialport::TTYPort;
 
@@ -18,23 +18,25 @@ pub(super) fn pair() -> (FashionStarBus, TTYPort) {
 }
 
 #[test]
-fn firmware_read_is_read_only_correlated_and_does_not_block_commands() {
+fn firmware_read_is_correlated_and_excludes_motion_until_complete() {
     let (mut bus, mut peer) = pair();
     bus.begin_data_read(DataRequest::Register { id: 4, address: 7 })
         .unwrap();
     let request = packet(&mut peer);
     assert_eq!((request.code, request.params), (3, vec![4, 7]));
     assert!(bus.poll_data_read().unwrap().is_none());
-    bus.write_positions(&[PositionCommand {
-        id: 0,
-        position_tenths_degree: 0,
-        motion_time_ms: 100,
-        acceleration_time_ms: 50,
-        deceleration_time_ms: 50,
-        power_mw: 0,
-    }])
-    .unwrap();
-    assert_eq!(packet(&mut peer).code, CODE_SYNC_COMMAND);
+    assert!(
+        bus.write_positions(&[PositionCommand {
+            id: 0,
+            position_tenths_degree: 0,
+            motion_time_ms: 100,
+            acceleration_time_ms: 50,
+            deceleration_time_ms: 50,
+            power_mw: 0,
+        }])
+        .is_err()
+    );
+    assert_eq!(peer.bytes_to_read().unwrap(), 0);
     peer.write_all(&response_packet(3, &[3, 7, 0x30, 3]).unwrap())
         .unwrap();
     peer.write_all(&response_packet(3, &[4, 8, 0, 0]).unwrap())
@@ -99,7 +101,50 @@ fn wait_bytes(bus: &FashionStarBus) {
 }
 
 #[test]
-fn slow_monitor_never_prevents_position_writes_and_partial_feedback_is_not_published() {
+fn repeated_real_pty_transactions_preserve_all_seven_signed_positions() {
+    let (mut bus, mut peer) = pair();
+    let ids = [0, 1, 2, 3, 4, 5, 6];
+    let start = Instant::now();
+    for round in 0i32..1000 {
+        bus.begin_monitor_read(&ids).unwrap();
+        assert_eq!(packet(&mut peer).params, [22, 1, 7, 0, 1, 2, 3, 4, 5, 6]);
+        // Every competing transaction must leave the existing request intact.
+        assert!(bus.begin_monitor_read(&ids).is_err());
+        assert!(
+            bus.begin_data_read(DataRequest::Register { id: 0, address: 7 })
+                .is_err()
+        );
+        assert!(bus.begin_command(ServoCommand::Ping(0)).is_err());
+        let mut bytes = vec![];
+        for id in ids.into_iter().rev() {
+            let mut p = [0; 16];
+            p[0] = id;
+            p[10..14].copy_from_slice(&(-round - i32::from(id)).to_le_bytes());
+            bytes.extend(response_packet(22, &p).unwrap());
+        }
+        peer.write_all(&bytes).unwrap();
+        let began = Instant::now();
+        let result = loop {
+            if let Some(result) = bus.poll_monitor_read().unwrap() {
+                break result;
+            }
+            assert!(began.elapsed() < Duration::from_secs(2));
+            thread::yield_now();
+        };
+        assert_eq!(result.len(), 7);
+        for value in result {
+            assert_eq!(value.position_tenths_degree, -round - i32::from(value.id));
+        }
+        assert!(!bus.monitor_read_pending());
+    }
+    println!(
+        "pty_monitor rounds=1000 servo_responses=7000 elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.
+    );
+}
+
+#[test]
+fn slow_monitor_excludes_motion_and_partial_feedback_is_not_published() {
     let (mut bus, mut peer) = pair();
     bus.begin_monitor_read(&[0, 1, 2, 3, 4, 5, 6]).unwrap();
     assert_eq!(packet(&mut peer).params, [22, 1, 7, 0, 1, 2, 3, 4, 5, 6]);
@@ -114,8 +159,8 @@ fn slow_monitor_never_prevents_position_writes_and_partial_feedback_is_not_publi
             deceleration_time_ms: 50,
             power_mw: 0,
         };
-        bus.write_positions(&[command]).unwrap();
-        assert_eq!(packet(&mut peer).params[..4], [14, 15, 1, id]);
+        assert!(bus.write_positions(&[command]).is_err());
+        assert_eq!(peer.bytes_to_read().unwrap(), 0);
         // Optional action ack and fragmented Monitor packets share the stream.
         peer.write_all(&response_packet(14, &[id, 1]).unwrap())
             .unwrap();

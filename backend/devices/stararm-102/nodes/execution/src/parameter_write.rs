@@ -268,6 +268,7 @@ mod tests {
             .unwrap();
             let mut execution = StarArmExecution::new();
             execution.bus = Some(StarArmBus {
+                pending_commands: None,
                 bus,
                 last_commands: Some(cached_commands()),
             });
@@ -318,6 +319,7 @@ mod tests {
             let (_peer, port) = serialport::TTYPort::pair().unwrap();
             let mut execution = StarArmExecution::new();
             execution.bus = Some(StarArmBus {
+                pending_commands: None,
                 bus: FashionStarBus::open(&port.name().unwrap()).unwrap(),
                 last_commands: Some(cached_commands()),
             });

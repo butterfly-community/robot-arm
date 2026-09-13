@@ -318,6 +318,11 @@ impl FashionStarBus {
     }
     /// Send synchronized motion using the same encoder as individual motion.
     pub fn write_synchronized(&mut self, commands: &[(u8, MotionProfile)]) -> Result<(), Error> {
+        if self.monitor_read_pending() || self.data_read_pending() || self.command_pending() {
+            return Err(Error::Protocol(
+                "总线正在等待回包，普通运动写入须等待事务完成".into(),
+            ));
+        }
         self.port.write_all(&synchronized_packet(commands)?)?;
         Ok(())
     }
@@ -388,6 +393,12 @@ fn parse_reply(command: &ServoCommand, p: &Packet) -> Result<CommandReply, Error
         ServoCommand::Monitor(_) => CommandReply::Monitor(Monitor::from_params(&p.params)?),
         ServoCommand::WriteRegister { .. } if p.params.len() == 3 && p.params[2] == 1 => {
             CommandReply::Acknowledged
+        }
+        ServoCommand::WriteRegister { id, register, .. } if p.params.len() == 3 => {
+            return Err(Error::Protocol(format!(
+                "舵机 ID {id} 未确认写入寄存器 {}（地址 {}，设备返回状态 0x{:02x}）；请回读核对实际值",
+                register.key, register.address, p.params[2]
+            )));
         }
         ServoCommand::ResetUserData(_)
         | ServoCommand::WriteUserData { .. }

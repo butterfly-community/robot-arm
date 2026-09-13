@@ -1,5 +1,5 @@
-//! Incremental Monitor transaction, inspired by the vendor Browser SDK's
-//! serial_servo_bus.js readLoop / independently awaited write(). No motion filter.
+//! Incremental Monitor transaction. Async waiting does not permit concurrent
+//! motion TX on the shared half-duplex servo wire. The owner queues targets.
 use crate::{CODE_QUERY_MONITOR, DEFAULT_TIMEOUT, Error, Monitor, Packet};
 use std::time::Instant;
 

@@ -165,8 +165,8 @@ impl FashionStarBus {
         });
         Ok(())
     }
-    /// Poll available bytes only; trajectory writes keep running while a register
-    /// reply is pending. A missing register fails independently after one retry.
+    /// Poll available bytes only; motion targets may be queued by the caller,
+    /// but may not be transmitted during a reply. One retry for missing data.
     pub fn poll_data_read(&mut self) -> Result<Option<Vec<u8>>, Error> {
         let Some(mut pending) = self.data_read.take() else {
             return Ok(None);

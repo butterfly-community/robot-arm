@@ -22,6 +22,8 @@ use stararm_102_model::{
     validate_command,
 };
 
+#[cfg(all(test, unix))]
+mod bus_tests;
 mod gripper_feedback;
 mod information;
 mod parameter_write;
@@ -120,6 +122,8 @@ fn main() -> Result<()> {
 struct StarArmBus {
     bus: FashionStarBus,
     last_commands: Option<[PositionCommand; 7]>,
+    // One latest full target, not a FIFO of obsolete trajectory samples.
+    pending_commands: Option<[PositionCommand; 7]>,
 }
 
 impl StarArmBus {
@@ -137,6 +141,7 @@ impl StarArmBus {
             Self {
                 bus,
                 last_commands: None,
+                pending_commands: None,
             },
             vec![],
             state,
@@ -173,12 +178,29 @@ impl StarArmBus {
         };
         result.map_err(|error| error.to_string())?;
         self.last_commands = None;
+        self.pending_commands = None;
         Ok(())
     }
 
     fn write(&mut self, command: &ArmCommand, gripper_power_mw: u16) -> Result<(), String> {
         let mut commands = encode_command(command)?;
         commands[6].power_mw = gripper_power_mw;
+        self.pending_commands = Some(commands);
+        Ok(())
+    }
+
+    fn flush_motion(&mut self) -> Result<(), String> {
+        // Async event processing does NOT make the shared servo wire full duplex.
+        // Complete the outstanding reply before transmitting another command.
+        if self.bus.monitor_read_pending()
+            || self.bus.data_read_pending()
+            || self.bus.command_pending()
+        {
+            return Ok(());
+        }
+        let Some(commands) = self.pending_commands.take() else {
+            return Ok(());
+        };
         let changed = changed_servo_commands(self.last_commands.as_ref(), &commands);
         if changed.is_empty() {
             return Ok(());
@@ -658,6 +680,15 @@ impl StarArmExecution {
             }
             self.transport.parameter_write_pending = false;
             self.parameter_write = None;
+            return true;
+        }
+        // The existing tick owns dispatch: coalesce queued events, finish any
+        // maintenance write, then send motion before starting the next read.
+        if self.parameter_write.is_none()
+            && let Some(bus) = &mut self.bus
+            && let Err(error) = bus.flush_motion()
+        {
+            self.reopen_after_io_error(error);
             return true;
         }
         let now = Instant::now();

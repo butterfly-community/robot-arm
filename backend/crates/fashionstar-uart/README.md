@@ -104,6 +104,32 @@
 
 ## 测试与复现
 
+### 总线所有权
+
+非阻塞 `begin_* / poll_*` 不是全双工许可。同一总线一次只有一个回包事务；
+`write_positions / write_synchronized` 在 Monitor、寄存器或指令回包未完成时返回忙错误，
+不写出任何字节。执行适配层保留最新完整目标，在已有 tick 中等事务完成再发送，
+不因参数扫描积压历史动作。协议的 `BeginAsync/EndAsync` 是舵机固件缓存命令，
+与这里的 Rust 异步等待无关。
+
+驱动库与执行节点测试分别运行。`tests/protocol_stress.rs` 覆盖全部普通载荷长度和分包边界、
+10 万帧混合正确/坏校验流；库内 PTY 测试覆盖 1,000 轮七舵机乱序有符号反馈、
+事务竞争、残缺回包、超时重试、错误 ID/地址及维护写入。执行适配层另外验证最新目标合并，
+不能拿上层标定成功替代库测试。
+
+独立真机只读测试在 `tests/hardware.rs`，默认忽略。先通过网页断开执行服务，确保串口
+只有一个所有者，再在执行构建镜像运行：
+
+```sh
+SERVO_TEST_PORT=/dev/实际串口 cargo test --release --locked --offline \
+  -p fashionstar-uart --test hardware -- --ignored --nocapture
+```
+
+连续三轮，每轮 Ping 七个舵机、100 次七舵机 Monitor、全公开寄存器扫描，输出延迟分布。
+不改角度、力矩、零点、ID、波特率或 EEPROM；测试完成必须恢复网页连接。
+自动完成断开/测试/恢复的方法见 `tools/diagnostics/benchmark-servo-hardware.mjs`。
+这不证明重置、改 ID 等破坏性指令在实机上已验收，也不证明带负载运动平滑度。
+
 使用执行节点已有构建镜像，在 backend 工作目录运行：
 
 ```sh

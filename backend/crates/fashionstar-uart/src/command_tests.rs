@@ -181,6 +181,18 @@ fn register_write_requires_matching_ack_and_readback_keeps_signed_value() {
         }
     );
     assert!(bus.begin_monitor_read(&[4]).is_err());
+    assert!(
+        bus.write_synchronized(&[(
+            4,
+            MotionProfile::Multi {
+                position: 0,
+                time_ms: 100,
+                power_mw: 0,
+            }
+        )])
+        .is_err()
+    );
+    assert_eq!(peer.bytes_to_read().unwrap(), 0);
     peer.write_all(&response_packet(4, &[3, 52, 1]).unwrap())
         .unwrap();
     peer.write_all(&response_packet(4, &[4, 51, 1]).unwrap())
@@ -208,7 +220,9 @@ fn failed_ack_and_missing_ack_are_not_verified_success_and_writes_are_not_retrie
     packet(&mut peer);
     peer.write_all(&response_packet(4, &[4, 33, 0]).unwrap())
         .unwrap();
-    assert!(wait(&mut bus).is_err());
+    let error = wait(&mut bus).unwrap_err().to_string();
+    assert!(error.contains("ID 4"));
+    assert!(error.contains("设备返回状态 0x00"));
     bus.begin_command(ServoCommand::WriteRegister {
         id: 4,
         register: r,

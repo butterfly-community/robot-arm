@@ -381,7 +381,8 @@ impl FashionStarBus {
                 return Ok(monitors);
             }
             // Blocking convenience only for connection/explicit diagnostics.
-            // Streaming control uses begin/poll and continues handling targets.
+            // Streaming control uses begin/poll; its owner queues targets until
+            // the reply transaction is complete instead of writing into RX.
             thread::sleep(Duration::from_millis(1));
         }
     }
@@ -411,7 +412,8 @@ impl FashionStarBus {
     }
 
     /// Read only bytes already available. Waiting for a slow/lost reply must
-    /// never block trajectory writes. Same timeout and one retry as before.
+    /// never block the event loop. Motion TX waits for this transaction to end.
+    /// Same timeout and one retry as before.
     pub fn poll_monitor_read(&mut self) -> Result<Option<Vec<Monitor>>, Error> {
         let Some(mut request) = self.monitor_read.take() else {
             return Ok(None);
