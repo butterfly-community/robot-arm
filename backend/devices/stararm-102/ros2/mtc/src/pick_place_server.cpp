@@ -326,16 +326,29 @@ public:
       : mtc::stages::GeneratePose(name),
         poses_(std::move(poses)) {}
 
+  void reset() override {
+    active_ = nullptr;
+    active_scene_.reset();
+    next_ = 0;
+    mtc::stages::GeneratePose::reset();
+  }
+
+  bool canCompute() const override {
+    return !poses_.empty() && (active_ || mtc::stages::GeneratePose::canCompute());
+  }
+
   void compute() override {
-    if (upstream_solutions_.empty()) {
-      return;
+    if (!canCompute()) return;
+    if (!active_) {
+      active_ = upstream_solutions_.pop();
+      active_scene_ = active_->end()->scene()->diff();
+      next_ = 0;
     }
-    const auto &upstream = *upstream_solutions_.pop();
-    const auto scene = upstream.end()->scene()->diff();
-    for (std::size_t index = 0; index < poses_.size(); ++index) {
-      mtc::InterfaceState state(scene);
+    const auto &upstream = *active_;
+    {
+      mtc::InterfaceState state(active_scene_);
       forwardProperties(*upstream.end(), state);
-      const auto &variant = poses_[index];
+      const auto &variant = poses_[next_++];
       state.properties().set("target_pose", variant.pose);
       state.properties().set("grasp_candidate_index", variant.candidate_index);
       state.properties().set("grasp_depth_m", variant.depth_m);
@@ -346,10 +359,17 @@ public:
                             (variant.planar_centered ? " planar-centred" : " original"));
       spawn(std::move(state), std::move(trajectory));
     }
+    if (next_ == poses_.size()) {
+      active_ = nullptr;
+      active_scene_.reset();
+    }
   }
 
 private:
   std::vector<DepthPose> poses_;
+  const mtc::SolutionBase *active_ = nullptr;
+  planning_scene::PlanningScenePtr active_scene_;
+  std::size_t next_ = 0;
 };
 
 // Preserve candidate identity through MTC's replacement/wrapper stages.
@@ -843,6 +863,14 @@ private:
 
       auto poses = allowed_grasp_depth_poses(goal, octomap_resolution_,
           stararm::open_fingertips_tcp(task.getRobotModel()), candidate);
+      // Emit lazily in the SAME search-cost order. Eagerly inserting thousands
+      // of states into MTC's ordered linked lists costs quadratic queue work
+      // before the first IK query. All poses remain available after failures;
+      // only a complete task solution can terminate the search.
+      std::stable_sort(poses.begin(), poses.end(), [&goal](const auto &a, const auto &b) {
+        return grasp_quality_cost(goal, a.candidate_index, a.depth_m, a.planar_centered) <
+               grasp_quality_cost(goal, b.candidate_index, b.depth_m, b.planar_centered);
+      });
       if (poses.empty()) {
         std::ostringstream message;
         message << "没有两指尖连线相对任务地平面倾角小于 "
@@ -979,10 +1007,11 @@ private:
       // than streaming every iteration. Action feedback still reports progress.
       task.enableIntrospection(false);
       feedback(handle, "planning", "search complete task solutions");
-      // Rank COMPLETE solutions, not individual IK successes. The tutorial's
-      // five-solution example does not provide the broader ranking pool
-      // requested by the user.
-      const auto plan_result = task.plan(20);
+      // Search is already ordered by the grasp objective. Stop at the first
+      // COMPLETE collision-checked pick/place path, not the first valid IK.
+      // Failed candidates still lead to the next pose; selected-pose depth
+      // refinement below remains exhaustive. No deadline discards an unsolved task.
+      const auto plan_result = task.plan(1);
       result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
       if (!plan_result || task.solutions().empty()) {
         std::ostringstream explanation;
@@ -1004,7 +1033,7 @@ private:
                                         arm_motion_cost(*task.getRobotModel()),
                                         stararm::open_fingertips_tcp(task.getRobotModel()));
       { // Refine the selected grasp before the single full execution.
-        // A twenty-solution pool does NOT exhaust a candidate's insertion grid.
+        // A bounded complete pool does NOT exhaust a candidate's insertion grid.
         // Real replay: candidate 418 had a valid +25 mm complete plan, while
         // the bounded search returned only +5 mm. Refine the selected candidate
         // using the SAME factory, collision scene and full pick/place stages.
