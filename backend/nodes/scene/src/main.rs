@@ -305,6 +305,20 @@ fn run() -> Result<()> {
     while let Some(event) = events.recv() {
         match event {
             Event::Input { id, data, .. } => match id.as_str() {
+                "pick_place_request" => {
+                    let request: robot_arm_messages::PickPlaceRequest =
+                        from_arrow(data.as_array())?;
+                    // HTTP completion of candidate generation guarantees last_scene is updated here.
+                    // Bind once, so motion never races a separate large scene subscription.
+                    node.send_output(
+                        "scene_pick_place_request".into(),
+                        MetadataParameters::default(),
+                        robot_arm_messages::scene_pick_place_to_arrow(
+                            &request,
+                            scene_node.last_scene.as_ref(),
+                        )?,
+                    )?;
+                }
                 "request" => {
                     scene_node.apply_request(&runtime, &mut node, from_arrow(data.as_array())?)?
                 }

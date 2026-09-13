@@ -135,6 +135,16 @@ for (const width of [1440, 390])
     await page.getByRole("button", { name: "启动", exact: true }).click();
     await expect(progress).toContainText("启动失败");
     await expect(progress).toContainText("候选生成失败（测试）");
+    snapshot.values.manipulation_state = {
+      request_id: "rejected-before-planning",
+      state: "failed",
+      stage: null,
+      original_error: "机械臂执行连接已断开（测试）",
+    };
+    await page.reload();
+    await expect(progress).toContainText("抓放请求失败");
+    await expect(progress).toContainText("机械臂执行连接已断开（测试）");
+    await expect(progress).not.toContainText("等待运动服务反馈");
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth > innerWidth,

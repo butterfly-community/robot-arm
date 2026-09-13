@@ -10,6 +10,7 @@ export type PickPlaceAttempt = {
   requestId: string;
   startedAt: number;
   error?: string;
+  failedPhase?: PickPlaceStep["phase"];
 };
 
 const stages: Record<string, string> = {
@@ -33,9 +34,17 @@ export function pickPlaceStatus(
   if (attempt?.phase === "failed")
     return {
       status: "启动失败",
-      stage: "请求未完成",
+      stage:
+        attempt.failedPhase === "generate_grasps"
+          ? "生成抓取候选失败"
+          : attempt.failedPhase === "mode"
+            ? "切换感知控制模式失败"
+            : "提交抓放请求失败",
       active: false,
-      error: attempt.error,
+      error:
+        task?.request_id === attempt.requestId
+          ? (task.original_error ?? attempt.error)
+          : attempt.error,
       requestId: attempt.requestId,
     };
   if (
@@ -61,7 +70,16 @@ export function pickPlaceStatus(
   if (task?.request_id && (!attempt || task.request_id === attempt.requestId))
     return {
       status: states[task.state],
-      stage: stages[task.stage ?? ""] ?? task.stage ?? "等待运动服务反馈",
+      stage:
+        stages[task.stage ?? ""] ??
+        task.stage ??
+        (task.state === "failed"
+          ? "抓放请求失败"
+          : task.state === "cancelled"
+            ? "抓放已取消"
+            : task.state === "succeeded"
+              ? "抓放流程完成"
+              : "等待运动服务反馈"),
       active: task.state === "planning" || task.state === "executing",
       error: task.original_error,
       requestId: task.request_id,

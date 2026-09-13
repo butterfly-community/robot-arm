@@ -1036,12 +1036,19 @@ pub struct ScenePointCloud {
 }
 
 pub fn world_scene_to_arrow(scene: &WorldScene) -> Result<ArrayRef, ArrowCodecError> {
-    if let Some(cloud) = &scene.point_cloud
+    scene_payload_to_arrow(scene, scene.point_cloud.as_ref())
+}
+
+fn scene_payload_to_arrow<T: Serialize>(
+    value: &T,
+    cloud: Option<&ScenePointCloud>,
+) -> Result<ArrayRef, ArrowCodecError> {
+    if let Some(cloud) = cloud
         && cloud.xyz_le.len() != cloud.width as usize * cloud.height as usize * 12
     {
         return Err(ArrowCodecError::InvalidShape);
     }
-    let header = to_arrow(scene)?;
+    let header = to_arrow(value)?;
     let header = header.as_any().downcast_ref::<StructArray>().unwrap();
     let mut fields = header.fields().to_vec();
     fields.push(Arc::new(Field::new(
@@ -1050,17 +1057,22 @@ pub fn world_scene_to_arrow(scene: &WorldScene) -> Result<ArrayRef, ArrowCodecEr
         false,
     )));
     let mut columns = header.columns().to_vec();
-    let data = scene
-        .point_cloud
-        .as_ref()
-        .map_or(&[][..], |cloud| cloud.xyz_le.as_slice());
+    let data = cloud.map_or(&[][..], |cloud| cloud.xyz_le.as_slice());
     columns.push(Arc::new(BinaryArray::from_vec(vec![data])));
     Ok(Arc::new(StructArray::new(fields.into(), columns, None)))
 }
 
 pub fn world_scene_from_arrow(array: &dyn Array) -> Result<WorldScene, ArrowCodecError> {
     let mut scene: WorldScene = from_arrow(array)?;
-    if let Some(cloud) = &mut scene.point_cloud {
+    restore_scene_cloud(array, scene.point_cloud.as_mut())?;
+    Ok(scene)
+}
+
+fn restore_scene_cloud(
+    array: &dyn Array,
+    cloud: Option<&mut ScenePointCloud>,
+) -> Result<(), ArrowCodecError> {
+    if let Some(cloud) = cloud {
         let data = array
             .as_any()
             .downcast_ref::<StructArray>()
@@ -1074,7 +1086,7 @@ pub fn world_scene_from_arrow(array: &dyn Array) -> Result<WorldScene, ArrowCode
         }
         cloud.xyz_le = data.value(0).to_vec();
     }
-    Ok(scene)
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1191,6 +1203,44 @@ pub struct PickPlaceRequest {
     pub scene_sequence: u64,
     pub object_id: String,
     pub placement_region_id: String,
+}
+
+/// Bound by the scene owner, not by a browser or a second subscriber's cache.
+/// Request, candidate poses and binary XYZ travel in one Dora message.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScenePickPlaceRequest {
+    pub request: PickPlaceRequest,
+    pub scene: Option<WorldScene>,
+}
+
+pub fn scene_pick_place_to_arrow(
+    request: &PickPlaceRequest,
+    scene: Option<&WorldScene>,
+) -> Result<ArrayRef, ArrowCodecError> {
+    // Serialize borrowed metadata; do not clone the full point cloud here.
+    #[derive(Serialize)]
+    struct BoundRequest<'a> {
+        request: &'a PickPlaceRequest,
+        scene: Option<&'a WorldScene>,
+    }
+    scene_payload_to_arrow(
+        &BoundRequest { request, scene },
+        scene.and_then(|scene| scene.point_cloud.as_ref()),
+    )
+}
+
+pub fn scene_pick_place_from_arrow(
+    array: &dyn Array,
+) -> Result<ScenePickPlaceRequest, ArrowCodecError> {
+    let mut bound: ScenePickPlaceRequest = from_arrow(array)?;
+    restore_scene_cloud(
+        array,
+        bound
+            .scene
+            .as_mut()
+            .and_then(|scene| scene.point_cloud.as_mut()),
+    )?;
+    Ok(bound)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2132,9 +2182,35 @@ mod tests {
         assert_eq!(world_scene_from_arrow(encoded.as_ref()).unwrap(), scene);
         let metadata_only: WorldScene = from_arrow(encoded.as_ref()).unwrap();
         assert!(metadata_only.point_cloud.unwrap().xyz_le.is_empty());
+        let request = PickPlaceRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "bound-scene".into(),
+            scene_sequence: scene.sequence,
+            object_id: "cube-1".into(),
+            placement_region_id: "basket-interior".into(),
+        };
+        let bound = scene_pick_place_to_arrow(&request, Some(&scene)).unwrap();
+        let decoded = scene_pick_place_from_arrow(bound.as_ref()).unwrap();
+        assert_eq!(decoded.request, request);
+        assert_eq!(decoded.scene.as_ref(), Some(&scene));
+        // Neither a later scene update nor an older subscriber cache can replace this snapshot.
+        scene.sequence += 1;
+        assert_eq!(
+            scene_pick_place_from_arrow(bound.as_ref()).unwrap(),
+            decoded
+        );
+        let absent = scene_pick_place_to_arrow(&request, None).unwrap();
+        assert!(
+            scene_pick_place_from_arrow(absent.as_ref())
+                .unwrap()
+                .scene
+                .is_none()
+        );
+        assert!(scene_pick_place_from_arrow(to_arrow(&decoded).unwrap().as_ref()).is_err());
         assert!(world_scene_from_arrow(to_arrow(&scene).unwrap().as_ref()).is_err());
         scene.point_cloud.as_mut().unwrap().xyz_le.pop();
         assert!(world_scene_to_arrow(&scene).is_err());
+        assert!(scene_pick_place_to_arrow(&request, Some(&scene)).is_err());
 
         let calibration = CalibrationResult {
             schema_version: SCHEMA_VERSION,

@@ -675,6 +675,12 @@ export default function Page() {
       setError(String(reason));
       setPickPlaceAttempt((current) => ({
         phase: "failed",
+        failedPhase:
+          current?.phase === "generate_grasps" ||
+          current?.phase === "mode" ||
+          current?.phase === "submit"
+            ? current.phase
+            : undefined,
         requestId: current?.requestId ?? "",
         startedAt,
         error: String(reason),

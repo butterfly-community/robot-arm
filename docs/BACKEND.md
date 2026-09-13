@@ -258,7 +258,12 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 离散的 manual、calibration、准备相对控制及 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
 依次暂停 Servo、规划/执行并恢复 Servo。连续 relative 输入不进 FIFO，只有相对模式且队列空闲时才发送 Servo 位姿和输入夹爪动作。
 普通运动由 MoveGroup 规划，并把未改写的关节轨迹交给现有 ros2_control 的 `FollowJointTrajectory` action；抓放使用型号 MTC
-组件。motion 从 `WorldScene` 提取目标包围体、放置中心、抓取候选及同帧点云快照，使用原生
+组件。抓放请求先经过持有当前场景的 scene 节点，由其把请求与 `WorldScene`（含二进制点云）
+封装为同一条 `ScenePickPlaceRequest` 消息交给 motion；motion 不再订阅另一份独立场景缓存。
+这样候选生成完成后的请求不会超前于大体积点云消息，真正过期的场景序号仍拒绝并显示请求/当前序号。
+motion 同时接收执行节点的连接状态：选定真机端点但断连时不受理/启动抓放；任务期间已收到的
+执行断连错误保留到终态，不被随后 MTC 成功或重连覆盖。MTC 成功本身仍不证明实物夹住。
+motion 从绑定快照提取目标包围体、放置中心、抓取候选及同帧点云，使用原生
 `PickPlace` action 传递给 MTC。目标成为可附着对象，完整点云进入官方
 `PointCloudOctomapUpdater`；不启动 ROS 相机驱动，不把非目标实例包围盒当作实心障碍。
 一次任务只建立一次环境快照，结束后清理。更新确认、世界对象过滤和占用地图由官方插件处理，

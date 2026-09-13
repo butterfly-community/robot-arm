@@ -16,9 +16,9 @@ use std::{
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::Result;
 use robot_arm_messages::{
-    ArmCommand, ArmState, ControlMode, DiagnosticValue, FeedbackSource, ManipulationTaskState,
-    MotionRequest, MotionState, MotionStatus, PerceptionState, PickPlaceRequest, RequestAction,
-    RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
+    ArmCommand, ArmState, ControlMode, DiagnosticValue, ExecutionTransportState, FeedbackSource,
+    ManipulationTaskState, MotionRequest, MotionState, MotionStatus, PickPlaceRequest,
+    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
     SetControlModeRequest, ToolActuatorRequest, ToolActuatorStatus, ToolPose, ToolPoseFeedback,
     TransformedControlFrame, WorldScene, from_arrow, to_arrow,
 };
@@ -86,7 +86,7 @@ struct MotionNode {
     motion_status: MotionStatus,
     actuator_status: Option<ToolActuatorStatus>,
     last_error: Option<String>,
-    latest_scene: Option<WorldScene>,
+    execution_error: Option<String>,
     active_manipulation: Option<String>,
     manipulation_state: ManipulationTaskState,
 }
@@ -107,6 +107,22 @@ fn planning_state(state: &ArmState) -> (Vec<f64>, f64) {
 
 fn controller_sync_needed(previous: Option<FeedbackSource>, next: FeedbackSource) -> bool {
     next == FeedbackSource::Hardware && previous != Some(FeedbackSource::Hardware)
+}
+
+fn execution_connection_error(state: &ExecutionTransportState) -> Option<String> {
+    (!state.connected && state.selected_endpoint.is_some()).then(|| {
+        format!(
+            "机械臂执行连接已断开：{}",
+            state.last_error.as_deref().unwrap_or("请在执行页重新连接")
+        )
+    })
+}
+
+fn manipulation_outcome<T>(
+    result: Result<T, String>,
+    execution_error: Option<String>,
+) -> Result<T, String> {
+    execution_error.map_or(result, Err)
 }
 
 fn main() {
@@ -151,7 +167,7 @@ fn run() -> Result<()> {
         motion_status: idle_status(),
         actuator_status: None,
         last_error: None,
-        latest_scene: None,
+        execution_error: None,
         active_manipulation: None,
         manipulation_state: idle_manipulation_state(),
     };
@@ -202,18 +218,23 @@ fn run() -> Result<()> {
                     "tool_actuator_request" => {
                         motion.handle_actuator_request(&mut node, from_arrow(data.as_array())?)?
                     }
-                    "world_scene" => {
-                        let scene = robot_arm_messages::world_scene_from_arrow(data.as_array())?;
-                        motion.latest_scene = Some(scene);
-                    }
-                    "perception_state" => {
-                        let state: PerceptionState = from_arrow(data.as_array())?;
-                        if !state.enabled {
-                            motion.latest_scene = None;
-                        }
-                    }
                     "pick_place_request" => {
-                        motion.handle_pick_place(&mut node, from_arrow(data.as_array())?)?;
+                        let bound =
+                            robot_arm_messages::scene_pick_place_from_arrow(data.as_array())?;
+                        motion.handle_pick_place(&mut node, bound.request, bound.scene)?;
+                    }
+                    "execution_transport" => {
+                        let state: ExecutionTransportState = from_arrow(data.as_array())?;
+                        motion.execution_error = execution_connection_error(&state);
+                        if motion.active_manipulation.is_some()
+                            && let Some(error) = &motion.execution_error
+                        {
+                            motion
+                                .manipulation_state
+                                .original_error
+                                .get_or_insert_with(|| error.clone());
+                            send(&mut node, "manipulation_state", &motion.manipulation_state)?;
+                        }
                     }
                     "snapshot" => motion.publish_state(&mut node)?,
                     _ => {}
@@ -493,6 +514,10 @@ impl MotionNode {
             }
             WorkItem::Manipulation(pending) => {
                 self.manipulation_state = pending.state;
+                if let Some(error) = self.execution_error.clone() {
+                    self.fail_manipulation(node, pending.job.request_id, error)?;
+                    return self.start_next_work(node);
+                }
                 self.active_manipulation = Some(pending.job.request_id.clone());
                 send(node, "manipulation_state", &self.manipulation_state)?;
                 self.controller_output_armed = true;
@@ -573,13 +598,20 @@ impl MotionNode {
         Ok(())
     }
 
-    fn handle_pick_place(&mut self, node: &mut DoraNode, request: PickPlaceRequest) -> Result<()> {
+    fn handle_pick_place(
+        &mut self,
+        node: &mut DoraNode,
+        request: PickPlaceRequest,
+        scene: Option<WorldScene>,
+    ) -> Result<()> {
         let request_id = request.request_id.clone();
+        if let Some(error) = self.execution_error.clone() {
+            return self.fail_manipulation(node, request_id, error);
+        }
         if self.config.control_mode != ControlMode::Perception {
             return self.fail_manipulation(node, request_id, "抓放任务只在感知控制模式接受".into());
         }
-        let result = self
-            .latest_scene
+        let result = scene
             .as_ref()
             .ok_or_else(|| eyre::eyre!("尚未收到结构化感知场景"))
             .and_then(|scene| manipulation_job(scene, request));
@@ -795,6 +827,8 @@ impl MotionNode {
                         continue;
                     }
                     self.active_manipulation = None;
+                    let result =
+                        manipulation_outcome(result, self.manipulation_state.original_error.take());
                     match result {
                         Ok(result) => {
                             self.manipulation_state.state = RequestState::Succeeded;
@@ -1062,7 +1096,9 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
         .ok_or_else(|| eyre::eyre!("场景中没有放置区 {}", request.placement_region_id))?;
     eyre::ensure!(
         scene.sequence == request.scene_sequence,
-        "感知场景已改变，请从当前场景重新选择目标"
+        "感知场景已改变（请求 {}，当前 {}），请从当前场景重新选择目标",
+        request.scene_sequence,
+        scene.sequence
     );
     let object = scene
         .objects
@@ -1164,6 +1200,28 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_hardware_cannot_be_reported_as_a_successful_manipulation() {
+        let mut transport = ExecutionTransportState::default();
+        assert_eq!(execution_connection_error(&transport), None); // software adapter
+        transport.selected_endpoint = Some("/dev/serial/by-id/test".into());
+        transport.last_error = Some("Broken pipe".into());
+        let interrupted = execution_connection_error(&transport).unwrap();
+        assert!(interrupted.contains("Broken pipe"));
+        transport.connected = true;
+        assert_eq!(execution_connection_error(&transport), None);
+        // Reconnection cannot erase the interruption captured during this task.
+        assert_eq!(
+            manipulation_outcome(Ok(()), Some(interrupted.clone())),
+            Err(interrupted)
+        );
+        assert_eq!(manipulation_outcome(Ok(()), None), Ok(()));
+        assert_eq!(
+            manipulation_outcome::<()>(Err("MTC failed".into()), None),
+            Err("MTC failed".into())
+        );
+    }
     use robot_arm_messages::{PlacementRegion, Pose3, SceneObject};
 
     #[test]
@@ -1278,17 +1336,19 @@ mod tests {
                 xyz_le: vec![0; 12],
             }),
         };
-        let pending = manipulation_job(
-            &scene,
-            PickPlaceRequest {
+        let bound = robot_arm_messages::scene_pick_place_to_arrow(
+            &PickPlaceRequest {
                 schema_version: SCHEMA_VERSION,
                 request_id: "request".into(),
                 scene_sequence: scene.sequence,
                 object_id: "selected".into(),
                 placement_region_id: "destination".into(),
             },
+            Some(&scene),
         )
         .unwrap();
+        let bound = robot_arm_messages::scene_pick_place_from_arrow(bound.as_ref()).unwrap();
+        let pending = manipulation_job(bound.scene.as_ref().unwrap(), bound.request).unwrap();
         assert!(
             manipulation_job(
                 &scene,

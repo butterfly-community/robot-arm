@@ -9,6 +9,10 @@
 检查器本身的回归运行 `node --test tests/tools/check-doc-links.test.mjs`；
 Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成输入，不构建基础镜像。
 
+`node --test tests/tools/pick-place-routing.test.mjs` 确认抓放只经场景节点绑定快照后到运动节点，
+不恢复独立点云订阅与请求之间的时序竞争。消息 crate 测试覆盖绑定消息的二进制点云往返、
+场景后续变化不修改已绑定快照及缺失/损坏点云；运动测试使用相同绑定消息进入正常任务转换。
+
 ## 前端
 
 `segmentation-composition.spec.ts` 在 1440/390 像素宽度验证手动框选、中文命名、反向拖动的

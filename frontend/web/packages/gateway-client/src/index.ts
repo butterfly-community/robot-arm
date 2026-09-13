@@ -61,7 +61,18 @@ export async function patch<T extends Json>(
 }
 
 async function responseValue(response: Response): Promise<Json> {
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try {
+      const error = JSON.parse(text) as { original_error?: unknown };
+      if (typeof error.original_error === "string")
+        message = error.original_error;
+    } catch {
+      // A proxy may return text/HTML instead of the gateway's JSON envelope.
+    }
+    throw new Error(message || `HTTP ${response.status}`);
+  }
   const value = (await response.json()) as Json;
   if (
     value &&

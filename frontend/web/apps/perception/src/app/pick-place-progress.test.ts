@@ -2,6 +2,48 @@ import { expect, it } from "vitest";
 import type { ManipulationTaskState, PerceptionState } from "@robot/contracts";
 import { pickPlaceStatus, type PickPlaceAttempt } from "./pick-place-progress";
 
+it("does not show waiting after reloading a terminal request without a stage", () => {
+  for (const [state, stage] of [
+    ["failed", "抓放请求失败"],
+    ["cancelled", "抓放已取消"],
+    ["succeeded", "抓放流程完成"],
+  ]) {
+    expect(
+      pickPlaceStatus(undefined, undefined, {
+        request_id: "restored",
+        state,
+        stage: null,
+      } as ManipulationTaskState),
+    ).toMatchObject({ stage, active: false });
+  }
+});
+
+it("retains the failed preparation stage and uses only matching backend errors", () => {
+  const attempt = {
+    phase: "failed",
+    failedPhase: "generate_grasps",
+    requestId: "new",
+    startedAt: 0,
+    error: "current failure",
+  } as PickPlaceAttempt;
+  expect(
+    pickPlaceStatus(attempt, undefined, {
+      request_id: "old",
+      original_error: "old failure",
+    } as ManipulationTaskState),
+  ).toMatchObject({
+    stage: "生成抓取候选失败",
+    error: "current failure",
+    active: false,
+  });
+  expect(
+    pickPlaceStatus({ ...attempt, failedPhase: "submit" }, undefined, {
+      request_id: "new",
+      original_error: "scene mismatch",
+    } as ManipulationTaskState),
+  ).toMatchObject({ stage: "提交抓放请求失败", error: "scene mismatch" });
+});
+
 it("shows candidate preparation after reload, without calling it execution", () => {
   const state = {
     task_action: "generate_grasps",

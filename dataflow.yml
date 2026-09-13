@@ -79,6 +79,7 @@ nodes:
         queue_size: 1
         queue_policy: drop_oldest
       request: web-gateway-node/perception_request
+      pick_place_request: web-gateway-node/pick_place_request
       motion_state:
         source: stararm-102-motion-node/motion_state
         queue_size: 1
@@ -89,6 +90,7 @@ nodes:
     outputs:
       - perception_state
       - world_scene
+      - scene_pick_place_request
       - request_result
       - asset_response
       - service_state
@@ -128,14 +130,6 @@ nodes:
         source: stararm-102-execution-node/arm_state
         queue_size: 1
         queue_policy: drop_oldest
-      world_scene:
-        source: scene-node/world_scene
-        queue_size: 1
-        queue_policy: drop_oldest
-      perception_state:
-        source: scene-node/perception_state
-        queue_size: 1
-        queue_policy: drop_oldest
       robot_model_info: stararm-102-execution-node/robot_model_info
       set_control_mode: web-gateway-node/set_control_mode_request
       calibration_control_mode: camera-node/calibration_control_mode
@@ -143,7 +137,8 @@ nodes:
       motion_request: web-gateway-node/motion_request
       calibration_motion_request: camera-node/calibration_motion_request
       tool_actuator_request: web-gateway-node/tool_actuator_request
-      pick_place_request: web-gateway-node/pick_place_request
+      pick_place_request: scene-node/scene_pick_place_request
+      execution_transport: stararm-102-execution-node/transport_state
       snapshot: web-gateway-node/motion_snapshot
       tick:
         source: dora/timer/millis/10
