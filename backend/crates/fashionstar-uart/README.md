@@ -36,9 +36,12 @@
 | 用户数据恢复/批量 | ResetUserData / ReadUserData / WriteUserData；2/5/6 | C# SDK 仍提供，新手册主表未列；保留 SDK 明确结构，不用于启动/回退；未做本机破坏性验收 |
 | 串口速率 | open_with_baud_rate / set_host_baud_rate | 主机速率与写入舵机波特率是两步；调用者必须同步总线配置 |
 
-`begin_command / poll_command` 只消费已到达字节，不在节点事件循环 sleep 等待。一个总线同一时刻只持有一个应答事务；正常位置写入仍复用该总线。无应答的控制操作仅返回 `SentUnconfirmed`，不能宣称设备已执行。错误应答必须失败。
+`begin_command / poll_command` 只消费已到达字节，不在节点事件循环 sleep 等待。一个总线同一时刻只持有一个应答事务；正常位置写入复用该总线，必须等回包事务结束，不能与回包交叉发送。执行层等待期间只保留最新目标。无应答的控制操作仅返回 `SentUnconfirmed`，不能宣称设备已执行。错误应答必须失败。
 
 公开参数写入和 PID 修改通过原有网页 `/api/arm-execution/parameters`，字段为 `actuator_key / field_key / value`。HTTP 返回仅表示受理；最终以 transport 的 `parameter_write_pending=false`、`parameter_write_verified=true` 且无错误为准。回读不一致不覆盖成请求值。内部写入失败/取消会尝试恢复上力，并保留恢复失败的错误。
+
+这里的 verified 仅表示写入后的即时回读一致，不证明重新上电后仍保存或行为已经生效。
+上电首次缓慢执行等参数的行为需在对应条件下验证；整套软件服务重启不能代替舵机重新上电。
 
 网页开放 17 个普通配置字段和 7 个厂商工作台开放的 PID 字段。ID/波特率在通用驱动可写，但本机械臂适配器仍是已有固定 ID 0–6、1Mbps 映射；网页不擅自改变该连接契约。版本、型号、序列号及含义未公开的内部字段只读。请求参数只验证协议整数类型，不新增运动阈值、不自动调参。
 
