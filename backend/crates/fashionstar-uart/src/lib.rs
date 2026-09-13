@@ -3,8 +3,23 @@ use std::{
     fmt,
     io::{self, Read, Write},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+mod commands;
+mod monitor;
+pub use commands::{
+    CommandReply, MotionProfile, ServoCommand, StopMode, UserData, synchronized_packet,
+};
+use monitor::MonitorRead;
+mod parameter_help;
+mod registers;
+pub use parameter_help::parameter_help;
+pub use registers::{DataRequest, REGISTERS, Register, RegisterType};
+#[cfg(all(test, unix))]
+mod command_tests;
+#[cfg(all(test, unix))]
+mod monitor_tests;
 
 pub const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -25,7 +40,7 @@ const INTERNAL_PARAMETERS_RESPONSE_HEADER: [u8; 4] = [0x05, 0x1c, 0xc5, 0x1a];
 const INTERNAL_PARAMETERS_WRITE_HEADER: [u8; 4] = [0x13, 0x4d, 0xc4, 0x1a];
 const INTERNAL_PARAMETERS_RESPONSE_SIZE: usize = 31;
 const INTERNAL_PARAMETERS_RESPONSE_DELAY: Duration = Duration::from_millis(200);
-const INTERNAL_PARAMETERS_WRITE_DELAY: Duration = Duration::from_millis(60);
+pub const INTERNAL_PARAMETERS_WRITE_DELAY: Duration = Duration::from_millis(60);
 
 #[derive(Debug)]
 pub enum Error {
@@ -319,11 +334,17 @@ pub fn degrees_to_tenths(degrees: f64) -> Result<i32, Error> {
 pub struct FashionStarBus {
     port: Box<dyn SerialPort>,
     decoder: PacketDecoder,
+    monitor_read: Option<MonitorRead>,
+    data_read: Option<registers::PendingData>,
+    command: Option<commands::PendingCommand>,
 }
 
 impl FashionStarBus {
     pub fn open(path: &str) -> Result<Self, Error> {
-        let port = serialport::new(path, DEFAULT_BAUD_RATE)
+        Self::open_with_baud_rate(path, DEFAULT_BAUD_RATE)
+    }
+    pub fn open_with_baud_rate(path: &str, baud: u32) -> Result<Self, Error> {
+        let port = serialport::new(path, baud)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)
@@ -333,59 +354,113 @@ impl FashionStarBus {
         Ok(Self {
             port,
             decoder: PacketDecoder::responses(),
+            monitor_read: None,
+            data_read: None,
+            command: None,
         })
     }
     pub fn ping(&mut self, id: u8) -> Result<(), Error> {
-        self.send(CODE_PING, &[id])?;
-        let response = self.receive()?;
-        if response.code != CODE_PING || response.params.as_slice() != [id] {
-            return Err(Error::Protocol(format!("舵机 ID {id} 的 Ping 响应无效")));
+        self.begin_command(ServoCommand::Ping(id))?;
+        loop {
+            if let Some(reply) = self.poll_command()? {
+                return if reply == CommandReply::Acknowledged {
+                    Ok(())
+                } else {
+                    Err(Error::Protocol(format!(
+                        "舵机 ID {id} 的 Ping 响应无效：{reply:?}"
+                    )))
+                };
+            }
+            thread::sleep(Duration::from_millis(1));
         }
-        Ok(())
     }
     pub fn read_monitors(&mut self, ids: &[u8]) -> Result<Vec<Monitor>, Error> {
-        match self.read_monitors_once(ids) {
-            Ok(monitors) => Ok(monitors),
-            Err(first_error) => {
-                self.clear_input().map_err(|clear_error| {
-                    Error::Protocol(format!(
-                        "Monitor 首次读取失败：{first_error}；清理串口输入失败：{clear_error}"
-                    ))
-                })?;
-                self.read_monitors_once(ids).map_err(|retry_error| {
-                    Error::Protocol(format!(
-                        "Monitor 首次读取失败：{first_error}；重试仍失败：{retry_error}"
-                    ))
-                })
+        self.begin_monitor_read(ids)?;
+        loop {
+            if let Some(monitors) = self.poll_monitor_read()? {
+                return Ok(monitors);
             }
+            // Blocking convenience only for connection/explicit diagnostics.
+            // Streaming control uses begin/poll and continues handling targets.
+            thread::sleep(Duration::from_millis(1));
         }
     }
-    fn read_monitors_once(&mut self, ids: &[u8]) -> Result<Vec<Monitor>, Error> {
+    fn send_monitor_request(&mut self, ids: &[u8]) -> Result<(), Error> {
         let count = u8::try_from(ids.len())
             .map_err(|_| Error::Protocol("Monitor 舵机数量超过一个字节".to_owned()))?;
         let mut params = vec![CODE_QUERY_MONITOR, 1, count];
         params.extend_from_slice(ids);
-        self.send(CODE_SYNC_COMMAND, &params)?;
-        (0..ids.len())
-            .map(|_| {
-                let response = loop {
-                    let response = self.receive()?;
-                    if response.code == CODE_QUERY_MONITOR {
-                        break response;
+        self.send(CODE_SYNC_COMMAND, &params)
+    }
+
+    pub fn monitor_read_pending(&self) -> bool {
+        self.monitor_read.is_some()
+    }
+
+    pub fn begin_monitor_read(&mut self, ids: &[u8]) -> Result<(), Error> {
+        if self.command_pending() {
+            return Err(Error::Protocol("串口已有指令事务".into()));
+        }
+        if self.monitor_read_pending() || self.data_read_pending() {
+            return Err(Error::Protocol("Monitor 事务正在进行".into()));
+        }
+        let request = MonitorRead::new(ids, Instant::now())?;
+        self.send_monitor_request(ids)?;
+        self.monitor_read = Some(request);
+        Ok(())
+    }
+
+    /// Read only bytes already available. Waiting for a slow/lost reply must
+    /// never block trajectory writes. Same timeout and one retry as before.
+    pub fn poll_monitor_read(&mut self) -> Result<Option<Vec<Monitor>>, Error> {
+        let Some(mut request) = self.monitor_read.take() else {
+            return Ok(None);
+        };
+        let result = (|| {
+            let available = self.port.bytes_to_read()? as usize;
+            let mut buffer = [0u8; 256];
+            let count = available.min(buffer.len());
+            if count != 0 {
+                let read = self.port.read(&mut buffer[..count])?;
+                for byte in &buffer[..read] {
+                    if let Some(packet) = self.decoder.push(*byte) {
+                        request.accept(packet)?;
                     }
-                };
-                Monitor::from_params(&response.params)
-            })
-            .collect()
+                }
+            }
+            request.check_timeout(Instant::now())?;
+            Ok::<_, Error>(())
+        })();
+        if let Err(error) = result {
+            if let Some(first) = request.first_error.as_ref() {
+                return Err(Error::Protocol(format!(
+                    "Monitor 首次读取失败：{first}；重试仍失败：{error}"
+                )));
+            }
+            self.clear_input()?;
+            request.retry(error.to_string(), Instant::now());
+            self.send_monitor_request(&request.ids)?;
+        } else if request.complete() {
+            return Ok(Some(request.monitors));
+        }
+        self.monitor_read = Some(request);
+        Ok(None)
+    }
+
+    /// Explicit parameter transactions take ownership of the same serial bus.
+    pub fn cancel_monitor_read(&mut self) -> Result<(), Error> {
+        if self.monitor_read.take().is_some() {
+            self.clear_input()?;
+        }
+        Ok(())
     }
     pub fn write_positions(&mut self, commands: &[PositionCommand]) -> Result<(), Error> {
-        let count = u8::try_from(commands.len())
-            .map_err(|_| Error::Protocol("同步位置命令数量超过一个字节".to_owned()))?;
-        let mut params = vec![CODE_SET_MTURN_BY_INTERVAL, 15, count];
-        for command in commands {
-            command.append_to(&mut params);
-        }
-        self.send(CODE_SYNC_COMMAND, &params)
+        self.write_synchronized(
+            &commands
+                .iter()
+                .map(|c| (c.id, MotionProfile::MultiInterval(*c)))
+                .collect::<Vec<_>>(),
+        )
     }
     pub fn release_torque(&mut self, id: u8) -> Result<(), Error> {
         self.stop_control(id, STOP_RELEASE_TORQUE)
@@ -396,56 +471,6 @@ impl FashionStarBus {
     fn stop_control(&mut self, id: u8, method: u8) -> Result<(), Error> {
         self.send(CODE_STOP_CONTROL, &[id, method, 0, 0])
     }
-    pub fn read_internal_parameters(&mut self, id: u8) -> Result<InternalParameters, Error> {
-        self.port.clear(ClearBuffer::Input)?;
-        self.decoder = PacketDecoder::responses();
-        let result = (|| {
-            let mut request = INTERNAL_PARAMETERS_REQUEST_HEADER.to_vec();
-            request.push(id);
-            request.push(checksum(&request));
-            self.port.write_all(&request)?;
-            thread::sleep(INTERNAL_PARAMETERS_RESPONSE_DELAY);
-            let mut response = [0_u8; INTERNAL_PARAMETERS_RESPONSE_SIZE];
-            self.port.read_exact(&mut response)?;
-            InternalParameters::from_response(id, &response)
-        })();
-        self.decoder = PacketDecoder::responses();
-        if result.is_err() {
-            let _ = self.port.clear(ClearBuffer::Input);
-        }
-        result
-    }
-    pub fn write_internal_parameters(
-        &mut self,
-        parameters: InternalParameters,
-    ) -> Result<(), Error> {
-        self.port.clear(ClearBuffer::Input)?;
-        self.decoder = PacketDecoder::responses();
-        let result = (|| {
-            self.release_torque(parameters.id)?;
-            thread::sleep(INTERNAL_PARAMETERS_WRITE_DELAY);
-            self.port.write_all(&parameters.write_request())?;
-            let response = loop {
-                let response = self.receive()?;
-                if response.code == 0xc4 {
-                    break response;
-                }
-            };
-            if response.params.as_slice() != [parameters.id, 1] {
-                return Err(Error::Protocol(format!(
-                    "舵机 {} 内部参数写入响应无效：params={:02x?}",
-                    parameters.id, response.params
-                )));
-            }
-            Ok(())
-        })();
-        let restore = self.hold_torque(parameters.id);
-        self.decoder = PacketDecoder::responses();
-        if result.is_err() {
-            let _ = self.port.clear(ClearBuffer::Input);
-        }
-        result.and(restore)
-    }
     fn send(&mut self, code: u8, params: &[u8]) -> Result<(), Error> {
         self.port.write_all(&request_packet(code, params)?)?;
         Ok(())
@@ -454,26 +479,6 @@ impl FashionStarBus {
         self.port.clear(ClearBuffer::Input)?;
         self.decoder = PacketDecoder::responses();
         Ok(())
-    }
-    fn receive(&mut self) -> Result<Packet, Error> {
-        let mut last_protocol_error = None;
-        loop {
-            let mut byte = [0];
-            if let Err(io_error) = self.port.read_exact(&mut byte) {
-                return match last_protocol_error {
-                    Some(protocol_error) => Err(Error::Protocol(format!(
-                        "{protocol_error}；随后读取失败：{io_error}"
-                    ))),
-                    None => Err(Error::Io(io_error)),
-                };
-            }
-            if let Some(result) = self.decoder.push(byte[0]) {
-                match result {
-                    Ok(packet) => return Ok(packet),
-                    Err(error) => last_protocol_error = Some(error),
-                }
-            }
-        }
     }
 }
 

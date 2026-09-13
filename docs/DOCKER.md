@@ -27,7 +27,7 @@ motion 原有同项配置保持一致。复现方法见[诊断工具](../tools/d
 | --- | --- |
 | `robot-arm-services-backend-base:2026.09.05-r9` | Ubuntu 26.04、Rust 1.97、Dora 和多个 Rust 服务共同使用的原生构建工具 |
 | `robot-arm-services-backend-runtime:2026.09.05-r3` | Ubuntu 26.04、Dora 可执行文件、入口脚本和最小 Rust 运行库 |
-| `robot-arm-services-stararm-102-base:2026.09.05-r2` | 固定厂商提交、校验、StarArm-102 型号补丁与验证后的厂商资产 |
+| `robot-arm-services-stararm-102-base:2026.09.13-r1` | 固定厂商提交、校验、StarArm-102 型号补丁与验证后的厂商资产 |
 | `robot-arm-services-perception-compute-base:2026.09.07-r7` | Python 3.11、PyTorch、YOLOE、GraspGenX、仓库模型和构建期夹爪资产；由张开夹指几何测量采样深度 |
 | `robot-arm-services-perception-compute-runtime:2026.09.07-r7` | 上述计算环境的运行文件，不含其构建工具 |
 | `robot-arm-services-frontend-base:2026.09.03-r1` | Ubuntu 26.04、Node.js 24 与 pnpm 11 |
@@ -35,6 +35,10 @@ motion 原有同项配置保持一致。复现方法见[诊断工具](../tools/d
 StarArm-102 基础不是全局后端基础。运动和执行镜像读取同一份已打补丁的型号资产，计算基础镜像
 读取它来生成对应 GraspGenX 夹爪描述。该资产层不含 ROS；当前工程 ROS 源码由 motion 自己构建，
 因此修改应用代码不需要重建厂商资产层。
+
+2026-09-13 上游文档同步生成新的型号资产标签；补丁后 109 个 ROS 资产文件与旧标签
+`2026.09.05-r2` 完全一致，故只构建该资产层，不重建未变化的运动、执行或计算环境。
+固定提交、差异与校验结论见[厂商模型版本](STARARM-102.md#厂商模型版本)。
 
 ## 服务所有权
 

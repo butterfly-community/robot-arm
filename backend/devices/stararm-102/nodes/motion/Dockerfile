@@ -1,4 +1,4 @@
-FROM robot-arm-services-stararm-102-base:2026.09.05-r2 AS device
+FROM robot-arm-services-stararm-102-base:2026.09.13-r1 AS device
 
 FROM robot-arm-services-backend-base:2026.09.05-r9 AS build
 

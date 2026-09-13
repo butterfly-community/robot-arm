@@ -1750,6 +1750,10 @@ pub struct ArmState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActuatorTelemetry {
     pub actuator_key: String,
+    #[serde(default)]
+    pub position_tenths_degree: Option<i32>,
+    #[serde(default)]
+    pub turns: Option<i16>,
     pub voltage_mv: u16,
     pub current_ma: u16,
     pub power_mw: u16,
@@ -1794,6 +1798,10 @@ pub struct ExecutionInfo {
     pub connection_fields: Vec<ConnectionFieldSchema>,
     pub actuator_labels: Vec<String>,
     pub parameter_fields: Vec<NumericFieldSchema>,
+    #[serde(default)]
+    pub writable_parameter_keys: Vec<String>,
+    #[serde(default)]
+    pub parameter_help: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1827,6 +1835,22 @@ pub struct ExecutionTransportState {
     pub discovered_endpoints: Vec<ExecutionEndpoint>,
     pub selected_endpoint: Option<String>,
     pub connected: bool,
+    #[serde(default)]
+    pub arm_telemetry: Option<ArmTelemetry>,
+    #[serde(default)]
+    pub parameter_reading: bool,
+    #[serde(default)]
+    pub parameter_write_pending: bool,
+    #[serde(default)]
+    pub parameter_write_request_id: Option<String>,
+    #[serde(default)]
+    pub parameter_write_verified: bool,
+    #[serde(default)]
+    pub parameter_write_error: Option<String>,
+    #[serde(default)]
+    pub parameter_read_completed: usize,
+    #[serde(default)]
+    pub parameter_read_total: usize,
     pub feedback_interval_ms: u64,
     #[serde(default)]
     pub gripper_strength_percent: Option<f64>,

@@ -4,7 +4,7 @@ WORKDIR /src
 COPY backend .
 RUN cargo build --release --locked -p stararm-102-execution-node
 
-FROM robot-arm-services-stararm-102-base:2026.09.05-r2 AS device
+FROM robot-arm-services-stararm-102-base:2026.09.13-r1 AS device
 
 FROM robot-arm-services-backend-runtime:2026.09.05-r3
 # Execution serves the same patched URDF/meshes to the browser; no ROS runtime.

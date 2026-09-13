@@ -23,7 +23,10 @@ use stararm_102_model::{
 };
 
 mod gripper_feedback;
+mod information;
+mod parameter_write;
 use gripper_feedback::GripperFeedbackController;
+use information::InformationScan;
 
 const ADAPTER_REVISION: &str = "stararm-102-fashionstar-v1";
 const SERVO_IDS: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
@@ -104,7 +107,10 @@ fn main() -> Result<()> {
                 "snapshot" => publish_snapshot(&mut node, &execution, &model)?,
                 _ => {}
             },
-            Event::Stop(_) => break,
+            Event::Stop(_) => {
+                execution.cancel_parameter_write();
+                break;
+            }
             _ => {}
         }
     }
@@ -124,7 +130,6 @@ impl StarArmBus {
             bus.ping(id)
                 .map_err(|error| format!("Ping 舵机 ID {id} 失败：{error}"))?;
         }
-        let parameters = read_parameters(&mut bus);
         let monitors = read_sorted_monitors(&mut bus)?;
         let state = state_from_monitors(&monitors, 1);
         let telemetry = telemetry_from_monitors(&monitors, 1, state.sample_time_ns, None);
@@ -133,14 +138,21 @@ impl StarArmBus {
                 bus,
                 last_commands: None,
             },
-            parameters,
+            vec![],
             state,
             telemetry,
         ))
     }
 
-    fn read_state(&mut self, sequence: u64) -> Result<(ArmState, ArmTelemetry), String> {
-        let monitors = read_sorted_monitors(&mut self.bus)?;
+    fn read_state(&mut self, sequence: u64) -> Result<Option<(ArmState, ArmTelemetry)>, String> {
+        let Some(monitors) = self
+            .bus
+            .poll_monitor_read()
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let monitors = sort_monitors(monitors)?;
         let state = state_from_monitors(&monitors, sequence);
         let telemetry = telemetry_from_monitors(
             &monitors,
@@ -150,35 +162,7 @@ impl StarArmBus {
                 .as_ref()
                 .map(|commands| commands[6].power_mw),
         );
-        Ok((state, telemetry))
-    }
-
-    fn read_parameters(&mut self) -> Vec<ParameterValue> {
-        read_parameters(&mut self.bus)
-    }
-
-    fn write_gains(&mut self, id: u8, kp: u16, hold_kp: u16) -> Result<(), String> {
-        let mut parameters = self
-            .bus
-            .read_internal_parameters(id)
-            .map_err(|error| error.to_string())?;
-        parameters.kp = kp;
-        parameters.hold_kp = hold_kp;
-        self.bus
-            .write_internal_parameters(parameters)
-            .map_err(|error| error.to_string())?;
-        let actual = self
-            .bus
-            .read_internal_parameters(id)
-            .map_err(|error| error.to_string())?;
-        if actual.kp != kp || actual.hold_kp != hold_kp {
-            return Err(format!(
-                "舵机 ID {id} 参数回读不一致：kp={} hold_kp={}",
-                actual.kp, actual.hold_kp
-            ));
-        }
-        self.last_commands = None;
-        Ok(())
+        Ok(Some((state, telemetry)))
     }
 
     fn set_torque(&mut self, hold: bool) -> Result<(), String> {
@@ -231,6 +215,8 @@ impl Default for ExecutionConfig {
 }
 
 struct StarArmExecution {
+    parameter_scan: Option<InformationScan>,
+    parameter_write: Option<parameter_write::ParameterWrite>,
     config_path: PathBuf,
     config: ExecutionConfig,
     info: ExecutionInfo,
@@ -257,6 +243,9 @@ impl StarArmExecution {
         }
         let selected_endpoint = config.selected_endpoint.clone();
         let mut execution = Self::with_config(config_path, config);
+        if let Err(error) = execution.discover() {
+            execution.transport.last_error = Some(error);
+        }
         if let Some(path) = selected_endpoint {
             let _ = execution.connect(path);
         }
@@ -273,6 +262,8 @@ impl StarArmExecution {
         let gripper_strength_percent = config.gripper_strength_percent;
         Self {
             config_path,
+            parameter_scan: None,
+            parameter_write: None,
             config,
             info: execution_info(),
             transport: ExecutionTransportState {
@@ -318,7 +309,7 @@ impl StarArmExecution {
         }
     }
 
-    fn discover(&mut self) {
+    fn discover(&mut self) -> Result<(), String> {
         self.transport.discovered_endpoints = serialport::available_ports()
             .map(|ports| {
                 ports
@@ -338,15 +329,29 @@ impl StarArmExecution {
                                 properties.insert("serial".into(), value);
                             }
                         }
+                        let description = ["manufacturer", "product", "serial"]
+                            .iter()
+                            .filter_map(|key| properties.get(*key).map(String::as_str))
+                            .filter(|value| !value.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
                         ExecutionEndpoint {
                             key: port.port_name.clone(),
-                            label: port.port_name,
+                            label: if description.is_empty() {
+                                port.port_name
+                            } else {
+                                format!("{description} · {}", port.port_name)
+                            },
                             properties,
                         }
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .map_err(|error| format!("枚举串口失败：{error}"))?;
+        self.transport
+            .discovered_endpoints
+            .sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(())
     }
 
     fn handle_request(
@@ -362,21 +367,8 @@ impl StarArmExecution {
                 .and_then(|port| self.configure_endpoint(Some(port.clone())))
                 .err(),
             RequestAction::Disconnect => self.configure_endpoint(None).err(),
-            RequestAction::Discover => {
-                self.discover();
-                None
-            }
-            RequestAction::Refresh => {
-                if let Some(bus) = self.bus.as_mut() {
-                    self.transport.parameter_values = bus.read_parameters();
-                    self.transport.parameter_error = self
-                        .transport
-                        .parameter_values
-                        .iter()
-                        .find_map(|value| value.original_error.clone());
-                }
-                None
-            }
+            RequestAction::Discover => self.discover().err(),
+            RequestAction::Refresh => self.start_information_scan().err(),
             RequestAction::Apply => {
                 if request.fields.contains_key("torque_mode") {
                     self.apply_torque(&request.fields).err()
@@ -406,6 +398,7 @@ impl StarArmExecution {
             Some(value) => return Err(format!("未知力矩模式 {value}")),
             None => return Err("力矩请求缺少 torque_mode".into()),
         };
+        self.cancel_parameter_write();
         self.bus
             .as_mut()
             .ok_or_else(|| "真机串口未连接".to_owned())?
@@ -418,34 +411,27 @@ impl StarArmExecution {
     }
 
     fn apply_parameters(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
-        let actuator = fields
-            .get("actuator_key")
-            .ok_or_else(|| "参数写入请求缺少 actuator_key".to_owned())?;
-        let id = JOINTS
-            .iter()
-            .position(|key| key == actuator)
-            .map(|index| index as u8)
-            .or_else(|| (actuator == "gripper").then_some(6))
-            .ok_or_else(|| format!("未知执行器 {actuator}"))?;
-        let parse = |key: &str| {
-            fields
-                .get(key)
-                .ok_or_else(|| format!("参数写入请求缺少 {key}"))?
-                .parse::<u16>()
-                .map_err(|error| format!("参数 {key} 无效：{error}"))
-        };
-        let bus = self
-            .bus
-            .as_mut()
-            .ok_or_else(|| "真机串口未连接".to_owned())?;
-        bus.write_gains(id, parse("kp")?, parse("hold_kp")?)?;
-        self.transport.parameter_values = bus.read_parameters();
-        self.transport.parameter_error = self
-            .transport
-            .parameter_values
-            .iter()
-            .find_map(|value| value.original_error.clone());
-        Ok(())
+        if fields.contains_key("field_key") {
+            if self.bus.is_none() {
+                return Err("真机串口未连接".into());
+            }
+            if self.parameter_write.is_some() {
+                return Err("参数写入正在进行".into());
+            }
+            let request = ExecutionRequest {
+                schema_version: SCHEMA_VERSION,
+                request_id: self.transport.latest_request_id.clone().unwrap_or_default(),
+                action: RequestAction::Apply,
+                fields: fields.clone(),
+            };
+            self.parameter_write = Some(parameter_write::ParameterWrite::new(request)?);
+            self.transport.parameter_write_request_id = self.transport.latest_request_id.clone();
+            self.transport.parameter_write_pending = true;
+            self.transport.parameter_write_verified = false;
+            self.transport.parameter_write_error = None;
+            return Ok(());
+        }
+        Err("参数写入需要 actuator_key、field_key 和 value".into())
     }
 
     fn apply_execution_config(&mut self, fields: &BTreeMap<String, String>) -> Result<(), String> {
@@ -490,6 +476,10 @@ impl StarArmExecution {
     }
 
     fn connect(&mut self, path: String) -> Result<(), String> {
+        self.cancel_parameter_write();
+        self.parameter_scan = None;
+        self.transport.parameter_reading = false;
+        self.transport.arm_telemetry = None;
         self.bus = None;
         self.last_feedback_poll = None;
         self.transport.connected = false;
@@ -507,8 +497,9 @@ impl StarArmExecution {
                     .find_map(|value| value.original_error.clone());
                 self.state = state;
                 self.telemetry = telemetry;
+                self.transport.arm_telemetry = Some(self.telemetry.clone());
                 self.next_sequence = self.state.sequence + 1;
-                Ok(())
+                self.start_information_scan()
             }
             Err(error) => {
                 self.transport.last_error = Some(error.clone());
@@ -518,6 +509,10 @@ impl StarArmExecution {
     }
 
     fn disconnect(&mut self) {
+        self.cancel_parameter_write();
+        self.parameter_scan = None;
+        self.transport.parameter_reading = false;
+        self.transport.arm_telemetry = None;
         self.gripper_feedback = GripperFeedbackController::default();
         self.transport.gripper_control_power_mw = None;
         self.transport.gripper_strength_feedback_percent = None;
@@ -566,24 +561,153 @@ impl StarArmExecution {
         }
     }
 
-    fn poll_hardware(&mut self) -> bool {
-        let now = Instant::now();
-        if self.bus.is_none()
-            || self.last_feedback_poll.is_some_and(|last| {
-                now.duration_since(last) < Duration::from_millis(self.config.feedback_interval_ms)
-            })
-        {
+    fn start_information_scan(&mut self) -> Result<(), String> {
+        if self.bus.is_none() {
+            return Err("串口未连接，不能读取舵机信息（现有值为历史缓存）".into());
+        }
+        // Repeated refresh returns the same ongoing scan, not another serial owner.
+        if self.parameter_scan.is_some() {
+            return Ok(());
+        }
+        let scan = InformationScan::new();
+        self.transport.parameter_reading = true;
+        self.transport.parameter_read_completed = 0;
+        self.transport.parameter_read_total = scan.total;
+        self.transport.parameter_values.clear();
+        self.transport.parameter_error = None;
+        self.parameter_scan = Some(scan);
+        Ok(())
+    }
+
+    fn poll_information_scan(&mut self) -> bool {
+        let (Some(scan), Some(bus)) = (&mut self.parameter_scan, &mut self.bus) else {
+            return false;
+        };
+        if !scan.poll(&mut bus.bus) {
             return false;
         }
-        self.last_feedback_poll = Some(now);
+        self.transport.parameter_read_completed = scan.completed;
+        self.transport.parameter_values = scan.values.clone();
+        self.transport.parameter_error = scan.values.iter().find_map(|p| p.original_error.clone());
+        if scan.done() {
+            self.transport.parameter_reading = false;
+            self.parameter_scan = None;
+        }
+        true
+    }
+
+    fn cancel_parameter_write(&mut self) {
+        if let Some(mut write) = self.parameter_write.take() {
+            let restore = self.bus.as_mut().map(|b| {
+                let restored = write.restore(&mut b.bus);
+                let cancelled = b.bus.cancel_command().map_err(|e| e.to_string());
+                if write.stops_motion() {
+                    b.last_commands = None;
+                }
+                restored.and(cancelled)
+            });
+            self.transport.parameter_write_error = Some(format!(
+                "参数写入已取消，未完成回读确认；恢复状态：{restore:?}"
+            ));
+            self.transport.parameter_write_verified = false;
+        }
+        self.transport.parameter_write_pending = false;
+    }
+
+    fn poll_hardware(&mut self) -> bool {
+        if self.parameter_write.is_some()
+            && self
+                .bus
+                .as_ref()
+                .is_some_and(|b| !b.bus.monitor_read_pending() && !b.bus.data_read_pending())
+        {
+            let result = self
+                .parameter_write
+                .as_mut()
+                .unwrap()
+                .poll(&mut self.bus.as_mut().unwrap().bus);
+            match result {
+                Ok(None) => return false,
+                Ok(Some(value)) => {
+                    self.transport.parameter_values.retain(|p| {
+                        p.actuator_key != value.actuator_key || p.field_key != value.field_key
+                    });
+                    self.transport.parameter_values.push(value.clone());
+                    self.transport.parameter_error = self
+                        .transport
+                        .parameter_values
+                        .iter()
+                        .find_map(|p| p.original_error.clone());
+                    // A scan already in progress must not later restore a stale pre-write value.
+                    if let Some(scan) = &mut self.parameter_scan {
+                        for cached in &mut scan.values {
+                            if cached.actuator_key == value.actuator_key
+                                && cached.field_key == value.field_key
+                            {
+                                *cached = value.clone();
+                            }
+                        }
+                    }
+                    self.transport.parameter_write_verified = true;
+                    self.transport.parameter_write_error = None;
+                }
+                Err(error) => self.transport.parameter_write_error = Some(error),
+            }
+            if self
+                .parameter_write
+                .as_ref()
+                .is_some_and(|write| write.stops_motion())
+            {
+                self.bus.as_mut().unwrap().last_commands = None;
+            }
+            self.transport.parameter_write_pending = false;
+            self.parameter_write = None;
+            return true;
+        }
+        let now = Instant::now();
+        // Complete an in-flight information transaction without blocking the
+        // event loop. Otherwise give due Monitor feedback priority over the
+        // next register so force feedback continues during the whole scan.
+        let feedback_due = self.last_feedback_poll.is_none_or(|last| {
+            now.duration_since(last) >= Duration::from_millis(self.config.feedback_interval_ms)
+        });
+        if self
+            .bus
+            .as_ref()
+            .is_some_and(|bus| bus.bus.data_read_pending())
+            || (!feedback_due
+                && self.parameter_scan.is_some()
+                && self
+                    .bus
+                    .as_ref()
+                    .is_some_and(|bus| !bus.bus.monitor_read_pending()))
+        {
+            return self.poll_information_scan();
+        }
+        let Some(bus) = self.bus.as_mut() else {
+            return false;
+        };
+        if !bus.bus.monitor_read_pending() {
+            if self.last_feedback_poll.is_some_and(|last| {
+                now.duration_since(last) < Duration::from_millis(self.config.feedback_interval_ms)
+            }) {
+                return false;
+            }
+            self.last_feedback_poll = Some(now);
+            if let Err(error) = bus.bus.begin_monitor_read(&SERVO_IDS) {
+                self.reopen_after_io_error(error.to_string());
+                return true;
+            }
+        }
         let result = self
             .bus
             .as_mut()
             .map(|bus| bus.read_state(self.next_sequence));
         match result {
-            Some(Ok((state, telemetry))) => {
+            Some(Ok(Some((state, telemetry)))) => {
                 self.state = state;
                 self.telemetry = telemetry;
+                self.transport.arm_telemetry = Some(self.telemetry.clone());
                 self.transport.gripper_feedback_telemetry = self
                     .telemetry
                     .actuators
@@ -621,7 +745,7 @@ impl StarArmExecution {
                 self.reopen_after_io_error(error);
                 true
             }
-            None => false,
+            None | Some(Ok(None)) => false,
         }
     }
 
@@ -654,6 +778,36 @@ fn execution_info() -> ExecutionInfo {
         schema_version: SCHEMA_VERSION,
         adapter_id: "stararm-102-fashionstar".into(),
         adapter_revision: ADAPTER_REVISION.into(),
+        parameter_help: fashionstar_uart::REGISTERS
+            .iter()
+            .map(|r| r.key)
+            .chain([
+                "kp",
+                "kd",
+                "ki",
+                "bias",
+                "hold_kp",
+                "hold_kd",
+                "hold_bias",
+                "full_deg",
+                "reserved",
+                "pwm_limit",
+                "direction",
+                "pwm_frequency",
+                "dead_zone",
+                "motor_direction",
+                "version_info",
+            ])
+            .filter_map(|key| {
+                fashionstar_uart::parameter_help(key).map(|help| (key.into(), help.into()))
+            })
+            .collect(),
+        writable_parameter_keys: fashionstar_uart::REGISTERS
+            .iter()
+            .filter(|r| r.writable() && !matches!(r.address, 34 | 36))
+            .map(|r| r.key.into())
+            .chain(parameter_write::PID_KEYS.iter().map(|key| (*key).into()))
+            .collect(),
         model_revision: MODEL_REVISION.into(),
         connection_fields: vec![ConnectionFieldSchema {
             key: "port".into(),
@@ -689,8 +843,22 @@ fn execution_info() -> ExecutionInfo {
             parameter("pwm_frequency", "PWM 频率"),
             parameter("dead_zone", "死区"),
             parameter("motor_direction", "电机方向"),
-            parameter("version_info", "内部版本"),
-        ],
+            parameter("version_info", "内部参数格式版本（非固件）"),
+        ]
+        .into_iter()
+        .chain(
+            fashionstar_uart::REGISTERS
+                .iter()
+                .map(|r| NumericFieldSchema {
+                    key: r.key.into(),
+                    label: r.label.into(),
+                    unit: r.unit.into(),
+                    minimum: None,
+                    maximum: None,
+                    required: false,
+                }),
+        )
+        .collect(),
     }
 }
 
@@ -732,29 +900,14 @@ fn parameter_values(value: InternalParameters, time: i64) -> Vec<ParameterValue>
     .collect()
 }
 
-fn read_parameters(bus: &mut FashionStarBus) -> Vec<ParameterValue> {
-    let read_time_ns = now_ns();
-    let mut parameters = Vec::new();
-    for id in SERVO_IDS {
-        match bus.read_internal_parameters(id) {
-            Ok(value) => parameters.extend(parameter_values(value, read_time_ns)),
-            Err(error) => parameters.push(ParameterValue {
-                actuator_key: actuator_key(id),
-                field_key: "internal_parameters".into(),
-                value: None,
-                unit: String::new(),
-                read_time_ns,
-                original_error: Some(format!("读取舵机 ID {id} 内部参数失败：{error}")),
-            }),
-        }
-    }
-    parameters
-}
-
 fn read_sorted_monitors(bus: &mut FashionStarBus) -> Result<[Monitor; 7], String> {
     let monitors = bus
         .read_monitors(&SERVO_IDS)
         .map_err(|error| error.to_string())?;
+    sort_monitors(monitors)
+}
+
+fn sort_monitors(monitors: Vec<Monitor>) -> Result<[Monitor; 7], String> {
     let mut sorted: [Option<Monitor>; 7] = [None; 7];
     for monitor in monitors {
         let index = usize::from(monitor.id);
@@ -799,6 +952,8 @@ fn telemetry_from_monitors(
             .iter()
             .map(|monitor| ActuatorTelemetry {
                 actuator_key: actuator_key(monitor.id),
+                position_tenths_degree: Some(monitor.position_tenths_degree),
+                turns: Some(monitor.turns),
                 voltage_mv: monitor.voltage_mv,
                 current_ma: monitor.current_ma,
                 power_mw: monitor.power_mw,
@@ -1046,6 +1201,8 @@ mod tests {
             model_revision: MODEL_REVISION.into(),
             actuators: vec![ActuatorTelemetry {
                 actuator_key: "gripper".into(),
+                position_tenths_degree: None,
+                turns: None,
                 voltage_mv: 12_000,
                 current_ma: 30,
                 power_mw,
@@ -1108,6 +1265,13 @@ mod tests {
             fields: BTreeMap::new(),
         });
         assert_eq!(result.acknowledged_action, RequestAction::Refresh);
+        assert!(
+            result
+                .original_error
+                .as_deref()
+                .unwrap()
+                .contains("串口未连接")
+        );
         assert_eq!(execution.transport.discovered_endpoints[0].key, "fixture");
     }
 

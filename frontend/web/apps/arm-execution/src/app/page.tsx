@@ -30,6 +30,8 @@ import {
 } from "@robot/ui";
 import { useState } from "react";
 import { RobotViewer } from "@robot/visualization/robot-viewer";
+import { parameterText, servoStatus, type ServoFeedback } from "./servo-info";
+import { ParameterEditor } from "./parameter-editor";
 
 type ExecutionAction =
   | "connect"
@@ -59,10 +61,26 @@ export default function Page() {
     ExecutionInfo | undefined;
   const transport = (values.transport_state ?? {}) as Record<string, unknown>;
   const parameters = (transport.parameter_values ?? []) as ParameterValue[];
+  const readingInformation = Boolean(transport.parameter_reading);
+  const servoTelemetry = transport.arm_telemetry as
+    { sample_time_ns: number; actuators: ServoFeedback[] } | undefined;
   const command = transport.last_command as ArmCommand | undefined;
   const [connectionFields, setConnectionFields] = useState<
     Record<string, string>
   >({});
+  const resolvedConnectionFields = {
+    port: String(transport.selected_endpoint ?? ""),
+    ...connectionFields,
+  };
+  // A connected port is reported state, not an editable draft. Another browser
+  // may have changed the connection while this page retained a local draft.
+  if (transport.connected) {
+    resolvedConnectionFields.port = String(transport.selected_endpoint ?? "");
+  }
+  const discoveredEndpoints = (transport.discovered_endpoints ?? []) as Array<{
+    key: string;
+    label: string;
+  }>;
   const [showLabels, setShowLabels] = useState(false);
   const [feedbackIntervalOverride, setFeedbackIntervalOverride] = useDraftValue(
     String(transport.feedback_interval_ms ?? ""),
@@ -83,6 +101,7 @@ export default function Page() {
     action: "connect" | "disconnect" | "discover" | "refresh",
   ) {
     setError(undefined);
+    if (action === "disconnect") setConnectionFields(resolvedConnectionFields);
     setPendingAction(action);
     try {
       const endpoint = {
@@ -95,7 +114,7 @@ export default function Page() {
         schema_version: schemaVersion,
         request_id: requestId(),
         action,
-        fields: connectionFields,
+        fields: resolvedConnectionFields,
       });
     } catch (reason) {
       setError(String(reason));
@@ -317,17 +336,50 @@ export default function Page() {
                   value={String(transport.feedback_summary ?? "—")}
                 />
               </>
-            ) : (
-              <>
-                {execution?.connection_fields.map((field) => (
-                  <Field key={field.key} label={field.label}>
-                    {field.field_type === "endpoint" ? (
-                      <>
+            ) : null}
+            <div className="card-stack">
+              {execution?.connection_fields.map((field) => (
+                <div key={field.key} className="card-stack">
+                  {field.field_type === "endpoint" ? (
+                    <>
+                      <Field label={`${field.label}选择`}>
+                        <select
+                          aria-label={`${field.label}选择`}
+                          disabled={connected || Boolean(pendingAction)}
+                          value={
+                            discoveredEndpoints.some(
+                              (endpoint) =>
+                                endpoint.key === resolvedConnectionFields.port,
+                            )
+                              ? resolvedConnectionFields.port
+                              : ""
+                          }
+                          onChange={(event) =>
+                            setConnectionFields({
+                              ...connectionFields,
+                              [field.key]: event.currentTarget.value,
+                            })
+                          }
+                        >
+                          <option value="" disabled>
+                            {discoveredEndpoints.length
+                              ? "选择串口，或在下方手动输入"
+                              : "未枚举到串口，可刷新或手动输入"}
+                          </option>
+                          {discoveredEndpoints.map((endpoint) => (
+                            <option key={endpoint.key} value={endpoint.key}>
+                              {endpoint.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label={`${field.label}路径（可手动输入）`}>
                         <Input
-                          aria-label={field.label}
+                          aria-label={`${field.label}路径（可手动输入）`}
                           required={field.required}
-                          list={`connection-${field.key}`}
-                          value={connectionFields[field.key] ?? ""}
+                          disabled={connected || Boolean(pendingAction)}
+                          placeholder="/dev/ttyUSB0 或 /dev/serial/by-id/…"
+                          value={resolvedConnectionFields.port}
                           onChange={(event) =>
                             setConnectionFields({
                               ...connectionFields,
@@ -335,30 +387,14 @@ export default function Page() {
                             })
                           }
                         />
-                        <datalist id={`connection-${field.key}`}>
-                          {(
-                            (transport.discovered_endpoints ?? []) as Array<
-                              Record<string, unknown>
-                            >
-                          ).map((endpoint) => (
-                            <option
-                              key={String(endpoint.key)}
-                              value={String(endpoint.key)}
-                            >
-                              {String(endpoint.label ?? endpoint.key)}
-                            </option>
-                          ))}
-                          {field.options.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </datalist>
-                      </>
-                    ) : (
+                      </Field>
+                    </>
+                  ) : (
+                    <Field label={field.label}>
                       <Input
                         aria-label={field.label}
                         required={field.required}
+                        disabled={connected || Boolean(pendingAction)}
                         value={connectionFields[field.key] ?? ""}
                         onChange={(event) =>
                           setConnectionFields({
@@ -367,11 +403,14 @@ export default function Page() {
                           })
                         }
                       />
-                    )}
-                  </Field>
-                ))}
-              </>
-            )}
+                    </Field>
+                  )}
+                </div>
+              ))}
+              <p className="status">
+                选择和手动输入使用同一个路径，连接时保存；已连接时请先断开再更换串口。
+              </p>
+            </div>
             <Field label="真机反馈周期（ms）">
               <Input
                 aria-label="真机反馈周期（ms）"
@@ -454,10 +493,14 @@ export default function Page() {
               </Button>
               <Button
                 variant="outline"
-                disabled={Boolean(pendingAction)}
+                disabled={
+                  !connected || Boolean(pendingAction) || readingInformation
+                }
                 onClick={() => requestExecution("refresh")}
               >
-                {pendingAction === "refresh" ? "正在读取…" : "读取参数"}
+                {pendingAction === "refresh" || readingInformation
+                  ? `正在读取 ${transport.parameter_read_completed ?? 0}/${transport.parameter_read_total ?? 0}…`
+                  : "读取全部舵机信息"}
               </Button>
               <Button
                 variant="outline"
@@ -519,9 +562,78 @@ export default function Page() {
 
         <Card
           className="span-12"
-          eyebrow="Live servo parameters"
-          title="真机舵机参数"
+          eyebrow="Servo monitor"
+          title="全部舵机实时反馈"
         >
+          <p className="muted">
+            {connected
+              ? "原始电机反馈，不裁剪角度或圈数；温度保留 ADC，不假定摄氏度换算。"
+              : "未连接：不能将历史反馈当作当前状态。"}
+          </p>
+          <div className="table-scroll">
+            <table className="telemetry-table">
+              <thead>
+                <tr>
+                  <th>执行器</th>
+                  <th>电机角度</th>
+                  <th>圈数</th>
+                  <th>电压 mV</th>
+                  <th>电流 mA</th>
+                  <th>功率 mW</th>
+                  <th>温度 ADC</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(servoTelemetry?.actuators ?? []).map((servo) => (
+                  <tr key={servo.actuator_key}>
+                    <td>{servo.actuator_key}</td>
+                    <td>
+                      {connected && servo.position_tenths_degree != null
+                        ? `${(servo.position_tenths_degree / 10).toFixed(1)}°`
+                        : "—"}
+                    </td>
+                    <td>{connected ? (servo.turns ?? "—") : "—"}</td>
+                    <td>{connected ? servo.voltage_mv : "—"}</td>
+                    <td>{connected ? servo.current_ma : "—"}</td>
+                    <td>{connected ? servo.power_mw : "—"}</td>
+                    <td>{connected ? servo.temperature_raw : "—"}</td>
+                    <td
+                      title={`原始状态字节：0x${servo.status.toString(16).padStart(2, "0")}`}
+                    >
+                      {connected ? servoStatus(servo.status) : "历史数据"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card
+          className="span-12"
+          eyebrow="Live servo parameters"
+          title="舵机设备信息与参数"
+        >
+          <ParameterEditor
+            info={execution}
+            parameters={parameters}
+            connected={connected}
+            transport={transport}
+          />
+          <p className="muted">
+            {readingInformation
+              ? `正在读取 ${transport.parameter_read_completed}/${transport.parameter_read_total} 项；实时反馈继续更新。`
+              : connected
+                ? "显示最近一次实读结果；鼠标移到数值可查看读取时间或错误。"
+                : "未连接，以下仅为历史缓存。"}{" "}
+            固件显示原始版本编码，内部参数格式版本不是固件版本。
+          </p>
+          {transport.parameter_error != null && (
+            <p className="error">
+              部分字段读取失败：{String(transport.parameter_error)}
+            </p>
+          )}
           {parameters.length ? (
             <div className="table-scroll">
               <table className="telemetry-table parameter-table">
@@ -529,7 +641,10 @@ export default function Page() {
                   <tr>
                     <th>执行器</th>
                     {parameterColumns.map((column) => (
-                      <th key={column.key}>
+                      <th
+                        key={column.key}
+                        title={execution?.parameter_help?.[column.key]}
+                      >
                         <span className="parameter-heading">
                           <LocalizedLabel
                             text={column.label}
@@ -554,9 +669,13 @@ export default function Page() {
                         return (
                           <td
                             key={column.key}
-                            title={item?.original_error ?? undefined}
+                            title={
+                              item
+                                ? `${item.original_error ?? ""} 读取时间：${new Date(item.read_time_ns / 1e6).toLocaleString()}`
+                                : undefined
+                            }
                           >
-                            {item?.value ?? item?.original_error ?? "—"}
+                            {parameterText(item)}
                           </td>
                         );
                       })}
@@ -566,7 +685,9 @@ export default function Page() {
               </table>
             </div>
           ) : (
-            <p className="status">连接真机后点击“读取参数”显示实际舵机参数。</p>
+            <p className="status">
+              连接真机后自动读取，或点击“读取全部舵机信息”刷新。
+            </p>
           )}
         </Card>
 

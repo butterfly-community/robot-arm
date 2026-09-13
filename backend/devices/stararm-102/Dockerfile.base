@@ -1,7 +1,7 @@
 FROM robot-arm-services-backend-base:2026.09.05-r9
 
-ARG STARARM_ARCHIVE=https://codeload.github.com/servodevelop/Star-Arm-102/tar.gz/5979b346eb3a417840b29b76740754e4005d071a
-ARG STARARM_ARCHIVE_SHA256=790cd792c0a4e663a9cedb17f1a990e5c7eb90c388e496e9aae15bad270508b8
+ARG STARARM_ARCHIVE=https://codeload.github.com/servodevelop/Star-Arm-102/tar.gz/0896306e40891c3ee4c97228e85dd708d61326de
+ARG STARARM_ARCHIVE_SHA256=a6c010a7004760ebd31071361c7c2a81edac77ede871d36db4f3bdd5567313a1
 
 RUN apt-get update && apt-get install --yes python3 \
     && mkdir -p /opt/build/downloads

@@ -1,25 +1,122 @@
-# fashionstar-uart
+# FashionStar UART Rust 驱动
 
-FashionStar UART 协议库。生产路径只包含厂家协议已有的 1 Mbps、8N1、Ping、Monitor、进阶
-内部参数读写和同步多圈位置命令；关节符号和工具传动换算均由使用它的型号 execution 节点
-负责。一次 Monitor 事务失败时，库清空残留输入并在同一串口完整重试一次；重试仍失败才把
-错误交给 execution 节点执行重连。
+这是项目维护的 Rust 驱动，不是厂商官方 Rust SDK。正常运动仍由 MoveIt → execution → 同一个 UART 总线发送；新增维护接口不是第二条机械臂业务链路。
 
-单元测试：
+## 来源与取舍
+
+- [UART/RS-485 协议 v1.0.25](https://fashionstar.com.cn/wiki/protocols/servo/uart-rs485/)：公开指令及线格式。
+- [官方 SDK 仓库](https://github.com/servodevelop/servo-uart-rs485-sdk/tree/772c181ec683252b9aaa360d29cecf2f76022051)：本次核对提交 `772c181ec683252b9aaa360d29cecf2f76022051`，交叉检查 STM32F103 的 C 实现与 README 附表、C# 的 Protocol/ServoController.Tx、Arduino/C++ 的字节封包和 MicroPython 的弃用说明。
+- [厂商网页工作台](https://fashionstar.com.cn/wiki/software/servo/data/web-controller/)：地址 45 功率保护迟滞、七个高级 PID 字段、内部参数块 0xC4/0xC5 和卸力后等待 60ms 的写入流程。
+- 未运行闭源客户端、未提取或刷写固件。当前可实现的协议已有上述公开依据，不把没有来源的内部字段变成可调参数。
+
+已确认弃用的轮式控制 0x07、轮式刹车字段 47 不进入驱动，没有版本判断后启用的兼容分支。MicroPython 注释说 V321 后弃用，Arduino 文档说 V316 后弃用；这处阈值不一致不影响本项目直接移除的决定。这里指固件/接口版本，不代表硬件有新旧代。
+
+### 资料冲突的处理
+
+1. 多圈速度指令 0x0F：手册某行写 speed 为 uint32，但同页总长 13 字节及实例均为 uint16；C#/Arduino/C++/MicroPython 实际编码一致采用 uint16。Rust 使用 uint16、总长 13，测试核对完整字节。
+2. 同步表部分长度错写为 13/15：从对应单指令编码生成同步 payload，不再独立维护另一份长度表。
+3. STM32 设置原点示例声明长度 2，却只传一个 ID 的地址；C#、协议明确是 [ID, reset]，Rust 显式编码两字节。
+4. READ_DATA 回包：新手册的示例漏掉 data_id；多 SDK 和本机实读都是 [ID, data_id, data]。Rust 匹配指令、ID、地址及校验和。
+5. 地址 46：C 头文件出现 0x11，但参数表定义开关 0/1；0x11 是停止指令的“保持”模式，两个概念不能混用。
+6. 地址 45：旧附表保留，新网页明确定义为功率保护迟滞百分比。无公开阈值公式，不推算。
+7. 固件字段是地址 7，不是内部 version_info；Vxxx 编码映射仍未确认。保持原始十六进制及整数，不据此推断硬件型号、代际或自动选择协议。
+
+## 接口覆盖
+
+| 能力 | Rust 入口 / 编号 | 行为 |
+| --- | --- | --- |
+| 连通、信息、角度、Monitor | ServoCommand::Ping / ReadRegister / ReadAngle / ReadMultiAngle / Monitor；1/3/10/16/22 | 类型化回包；多圈角度和圈数为有符号值，不裁剪为单圈 |
+| 六种位置指令 | MotionProfile；8/11/12/13/14/15 | 单圈/多圈，普通时间、加减速时间、速度模式；全部用协议原始单位 |
+| 同步控制 | write_synchronized / write_positions；25 | 复用单指令编码；C#/STM32 扩展长度帧；现有机械臂仍使用多圈时间模式 |
+| 异步缓存执行 | BeginAsync / EndAsync；18/19 | 固件缓存下一条有效命令，执行或取消；与 Rust 非阻塞 I/O 是不同概念 |
+| 停止与阻尼 | Stop / Damping；24/9 | Release、Hold、Damping，功率 mW；现有全电机上力/卸力保持原调用 |
+| 圈数和原点 | ResetTurns / Origin；17/23 | 明确调用才发送；不在连接、读取、失败恢复时自动修改零点 |
+| 公开配置写入 | WriteRegister；4 | 按 Register 的 U8/U16/I16/U32 编码；只读字段不可写；不自动重试写操作 |
+| 内部参数读写 | ReadInternal / WriteInternal；C5/C4 | 厂商保护帧头，完整保留未编辑字段；节点按读→卸力→60ms→写→上力→回读处理 |
+| 用户数据恢复/批量 | ResetUserData / ReadUserData / WriteUserData；2/5/6 | C# SDK 仍提供，新手册主表未列；保留 SDK 明确结构，不用于启动/回退；未做本机破坏性验收 |
+| 串口速率 | open_with_baud_rate / set_host_baud_rate | 主机速率与写入舵机波特率是两步；调用者必须同步总线配置 |
+
+`begin_command / poll_command` 只消费已到达字节，不在节点事件循环 sleep 等待。一个总线同一时刻只持有一个应答事务；正常位置写入仍复用该总线。无应答的控制操作仅返回 `SentUnconfirmed`，不能宣称设备已执行。错误应答必须失败。
+
+公开参数写入和 PID 修改通过原有网页 `/api/arm-execution/parameters`，字段为 `actuator_key / field_key / value`。HTTP 返回仅表示受理；最终以 transport 的 `parameter_write_pending=false`、`parameter_write_verified=true` 且无错误为准。回读不一致不覆盖成请求值。内部写入失败/取消会尝试恢复上力，并保留恢复失败的错误。
+
+网页开放 17 个普通配置字段和 7 个厂商工作台开放的 PID 字段。ID/波特率在通用驱动可写，但本机械臂适配器仍是已有固定 ID 0–6、1Mbps 映射；网页不擅自改变该连接契约。版本、型号、序列号及含义未公开的内部字段只读。请求参数只验证协议整数类型，不新增运动阈值、不自动调参。
+
+## 参数详解
+
+以下表由 `src/parameter_help.rs` 生成，执行节点向网页发送同一份文字。PID 的趋势是通用控制原理解释，不是厂家未公开的固件公式；不能把 PID、功率 mW、角度和 0–100 力度目标混为一谈。
+
+<!-- parameter-help:start -->
+| 参数 | 字段 | 作用与调整效果 |
+| --- | --- | --- |
+| 电压（地址 1） | `voltage` | 只读，当前供电电压，mV。1000 mV = 1 V；不是电压设定值。 |
+| 电流（地址 2） | `current` | 只读，当前电流，mA。1000 mA = 1 A；反映当时负载，不等于夹持力。 |
+| 功率（地址 3） | `power` | 只读，当前功率，mW。1000 mW = 1 W；不是 0–100 力度百分比，也不是可直接设定的牛顿力。 |
+| 温度原始值（地址 4） | `temperature` | 只读，温度传感器 ADC 原码，不是摄氏度。厂商表中温度升高时 ADC 降低；未确认本型号换算前保留原值。 |
+| 状态位（地址 5） | `servo_status` | 只读状态位：bit0 执行中、bit1 指令错误、bit2 堵转、bit3 过压、bit4 欠压、bit5 电流错误、bit6 功率错误、bit7 温度错误；0 表示未置位。 |
+| 型号编码（地址 6） | `servo_type` | 只读型号编码。没有已核实的编码对照表，不能根据数值推断型号或硬件新旧。 |
+| 固件版本编码（地址 7） | `firmware_version` | 只读固件编码，地址 7、两个小端字节。Vxxx 显示规则尚未确认；不是内部参数格式版本，也不根据大小自动切换协议。 |
+| 序列号（地址 8） | `serial_number` | 只读序列号原值。本批七个舵机都报告 10000001，不能作为唯一设备身份。 |
+| 控制响应模式（地址 33） | `response_switch` | 0：旧 SDK 定义为新运动命令覆盖旧命令、不返回控制完成应答；1：不可中断当前命令，完成后应答，等待队列只有一条。新手册仅描述是否应答，所以不能当成无副作用的日志开关。固定应答的查询不受此开关控制。 |
+| 总线 ID（地址 34） | `servo_id` | 总线寻址 ID：0–254，255 是广播地址。改变后需同步设备映射，并使用新 ID 读取；不改变机械臂关节名称。SDK 支持写入，当前固定映射的机械臂页面只读。 |
+| 波特率选项（地址 36） | `baudrate` | 波特率选项：1=9600、2=19200、3=38400、4=57600、5=115200、6=250000、7=500000、8=1000000。越高传输时间越短，不会直接提高电机速度；写入立即生效，主机和总线设备必须一致。页面只读，SDK 提供写入和主机串口切换。 |
+| 堵转保护模式（地址 37） | `stall_protect_mode` | 堵转后的处理：0 将功率降至 stall_power_limit；1 释放锁力。不是堵转检测灵敏度，也不是正常工作时的力度指令。 |
+| 堵转功率上限（地址 38） | `stall_power_limit` | 堵转后的功率上限，mW，配合堵转模式 0。增大允许堵转后维持更高功率，减小降低该功率；不会让正常抓取保持某个力度百分比。 |
+| 电压下限（地址 39） | `over_volt_low` | 欠压阈值，mV。调高：较高电压就可能触发欠压；调低：允许更低供电电压。不会改变电源实际输出。 |
+| 电压上限（地址 40） | `over_volt_high` | 过压阈值，mV。调高：容许更高电压；调低：更早触发过压。不会改变电源实际输出。 |
+| 温度上限原始值（地址 41） | `over_temperature` | 温度保护阈值，ADC 原码，不是 °C。厂商 ADC 表是反向关系：增大 ADC 对应降低温度阈值，减小 ADC 对应升高温度阈值。型号换算未核实，不显示虚构的摄氏度。 |
+| 功率上限（地址 42） | `over_power` | 功率保护上限，mW。调高允许更高功率，调低更早限功率/触发保护。运动指令 power=0 或超过此值时，厂商定义按此上限执行；它不是恒力目标。 |
+| 电流上限（地址 43） | `over_current` | 电流保护阈值，mA。调高允许更大电流，调低更早触发电流保护。实际电流由负载、位置控制及电机决定，不是直接设定电流。 |
+| 加速度处理开关（地址 44） | `accel_switch` | 舵机内部加速度处理开关。旧 SDK 说明只支持 1（梯形加减速），但本机存在实读 0；不同资料不一致，不自动改写。它与每条运动命令的 accel/decel 时间不是同一个参数。 |
+| 功率保护迟滞（地址 45） | `power_hysteresis` | 厂商网页称功率保护迟滞百分比（%），用于保护触发/退出的迟滞。一般增大迟滞会拉大切换间隔、减少反复切换；具体阈值公式、作用方向及范围未公开，不能按猜测计算。旧 SDK 将地址 45 标为保留，新工作台已定义。 |
+| 上电锁力开关（地址 46） | `po_lock_switch` | 上电时的默认状态：0 释放锁力、1 保持锁力（官方参数表）。修改不等于立即上力/卸力；立即操作使用上力/卸力按钮。旧 C 头文件出现 0x11，不能混同停止指令的保持模式。 |
+| 角度限制开关（地址 48） | `angle_limit_switch` | 0 关闭、1 开启舵机内部角度限制；与 angle_limit_high/low 配合。不是 MoveIt/URDF 的关节限制，不能用它推断多圈控制或规划范围已同步改变。 |
+| 上电首次缓慢执行（地址 49） | `soft_start_switch` | 0 关闭、1 启用上电后的首次角度命令缓慢执行；与 soft_start_time 配合。不是每一段运动的速度倍率。 |
+| 首次执行时间（地址 50） | `soft_start_time` | 上电首次执行时间，ms。启用 soft_start_switch 时，增大通常使首次运动更慢，减小更快；不修改后续每条轨迹的运动时间。 |
+| 角度上限（地址 51） | `angle_limit_high` | 舵机内部角度上限，单位 0.1°（1800=180°）。增大向正方向扩展上限，减小收紧；需要内部限制开关生效。不等于项目 J1–J6 的模型限位。 |
+| 角度下限（地址 52） | `angle_limit_low` | 舵机内部角度下限，单位 0.1°（-650=-65°）。数值减小向负方向扩展，数值增大收紧；需要内部限制开关生效。不等于项目模型限位。 |
+| 中位角度偏移（地址 53） | `angle_mid_offset` | 舵机内部中位偏移，单位 0.1°。改变会移动硬件角度参考，不是将关节运动到该角度。不同方向配置下物理正负影响未核实；项目目前不另加软件零偏。 |
+| kp | `kp` | 位置环比例增益 Kp。按通用 PID 语义：增大通常响应更强、更硬，过大可能振荡；减小通常更柔和，但跟随误差可能增大。厂商未公开系数标度/完整控制律，不保证同数值对应相同力。 |
+| kd | `kd` | 位置环微分增益 Kd。按通用 PID 语义：增大通常增加动态阻尼、抑制超调，也可能放大测量噪声；减小阻尼作用。厂商未公开内部滤波和标度。 |
+| ki | `ki` | 位置环积分增益 Ki。按通用 PID 语义：增大可更快消除持续误差，也可能增加超调和积分积累；减小积分作用。厂商积分饱和/清零策略未公开。 |
+| bias | `bias` | 厂商工作台名称 PwmBias（驱动偏置）。不是角度零偏。偏置如何加到正反向 PWM、是否有死区补偿未公开，不能保证增大就增力或给出具体换算。 |
+| hold_kp | `hold_kp` | 保持位置时的 Kp。通常增大保持刚性、减小更柔和；过大可能出现抖动。保持模式切换细节未公开。它不是保持 30/50 力度的目标值。 |
+| hold_kd | `hold_kd` | 保持位置时的 Kd。通常调整保持环阻尼及对动态误差的响应；实际效果取决于固件滤波和负载，不等于降低运动速度。 |
+| hold_bias | `hold_bias` | 保持模式的 HoldPwmBias。不是关节角度偏移；内部 PWM 偏置计算规则未公开，不能把该值换算成夹持力。 |
+| full_deg | `full_deg` | 内部满量程字段，当前仅展示原码。厂商工作台不开放此字段的普通调参，确切标度和修改效果未公开；不用于设置项目的关节角范围。 |
+| reserved | `reserved` | 内部保留字段。读取及写回整个参数块时原样保留，没有可解释的调整用途，不提供单项编辑。 |
+| pwm_limit | `pwm_limit` | 内部 PWM 上限原码，不是 mW 功率上限。与占空比的换算和固件作用方式未公开，只读展示。 |
+| direction | `direction` | 内部方向字段。与电机方向字段的分工、取值及实际反转作用未公开，只读展示；不能根据名字直接给 J4/J5 加反号。 |
+| pwm_frequency | `pwm_frequency` | 内部 PWM 频率编码，不是以 Hz 显示的实值。频率编码映射及调整影响未公开，只读展示。 |
+| dead_zone | `dead_zone` | 内部死区原码。通常死区影响小误差是否继续驱动，但厂商未公开单位、阈值方向和算法，只读，不自行换算成角度。 |
+| motor_direction | `motor_direction` | 内部电机方向字段。和 direction 的差异、编码未公开，只读展示；不是应用层关节轴向配置。 |
+| version_info | `version_info` | 内部参数格式/布局版本字段，不是地址 7 的固件版本。读改写时保持原值，不提供单项编辑。 |
+<!-- parameter-help:end -->
+
+## 运动命令参数（不是 EEPROM 配置）
+
+- position：电机位置原值，单位 0.1°；单圈 i16、多圈 i32。增减表示电机角度正负变化，不在驱动加关节零偏。
+- time_ms：指定到目标的时间；相同位移下增大通常更慢。单圈 u16、多圈 u32。
+- speed_tenths_dps：速度大小，单位 0.1°/s，u16；方向来自当前位置与目标位置关系。它不是 rpm。
+- accel_ms / decel_ms：每条命令的加减速时间，u16 毫秒；调整速度曲线而非目标角度。厂商说明小于 20ms 的加减速设置不生效；驱动不偷偷改成另一个值。
+- power_mw：本次控制功率。0 或超过 EEPROM 功率阈值时，固件按该阈值执行，**0 不是零力**。持续保持力度由现有反馈控制完成，不能用固定功率代替。
+- 同步数量、长度是封包参数，不是动作完成判定；串口成功、控制应答、实测到位分别是不同事件。
+
+## 测试与复现
+
+使用执行节点已有构建镜像，在 backend 工作目录运行：
 
 ```sh
-cargo test -p fashionstar-uart --all-targets
+cargo test --locked --offline -p fashionstar-uart -p stararm-102-execution-node -p robot-arm-messages
+cargo clippy --locked --offline -p fashionstar-uart -p stararm-102-execution-node --all-targets -- -D warnings
 ```
 
-与厂家 `fashionstar_uart_sdk==1.3.12` 双向交叉测试：
+单元和 PTY 测试覆盖六种动作的官方字节实例、同步长度、带符号回读、错误 ID/地址应答、失败应答、无应答不重写、内部保护帧及参数类型。测试不移动真机，不把协议测试等同所有硬件指令已验收。
+
+文档一致性：
 
 ```sh
-cargo build -p fashionstar-uart --example cross_peer
-python3 crates/fashionstar-uart/tests/python_sdk_cross.py \
-  --sdk-wheel /path/to/fashionstar_uart_sdk-1.3.12-py3-none-any.whl \
-  --rust-peer target/debug/examples/cross_peer
+node tools/diagnostics/render-servo-parameter-doc.mjs --check
 ```
 
-脚本让 Rust 和厂家 SDK 分别作为客户端运行，另一侧逐字段核对 Ping、Monitor、同步位置帧、
-校验和、分片读取、噪声恢复、一次丢包重试、合法的可选动作响应和角度舍入；它使用临时
-PTY，不连接机械臂。
+不带 --check 输出最新表格，用于更新本文件中 parameter-help 标记段。网页参数写入验收使用 `tools/diagnostics/verify-servo-parameter-write-ui.mjs`；每次输出到新的 temp 子目录，原始输入从实时页面读取，不依赖旧临时文件。

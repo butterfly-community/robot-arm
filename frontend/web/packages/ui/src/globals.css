@@ -756,6 +756,7 @@ datalist option {
   border-bottom: 0;
 }
 .key-value + .field,
+.key-value + .card-stack,
 .key-value + .source-list,
 .range-stack + .key-value {
   margin-top: 20px;

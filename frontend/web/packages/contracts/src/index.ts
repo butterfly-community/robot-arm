@@ -127,6 +127,8 @@ export interface ParameterValue {
 }
 
 export interface ExecutionInfo {
+  writable_parameter_keys?: string[];
+  parameter_help?: Record<string, string>;
   parameter_fields: FieldSchema[];
   connection_fields: Array<{
     key: string;
