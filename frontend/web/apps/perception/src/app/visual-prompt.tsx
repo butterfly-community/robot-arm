@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, type PointerEvent } from "react";
+import { useState } from "react";
 import { Button, Disclosure, Field, StatusBadge } from "@robot/ui";
+import { ImageBoxCanvas } from "./image-box-canvas";
 
 export type VisualPrompt = {
   kind: "visual";
@@ -30,8 +31,6 @@ export function VisualPromptEditor({
   }>();
   const [boxes, setBoxes] = useState<{ bbox: number[]; classId: number }[]>([]);
   const [classId, setClassId] = useState(0);
-  const [start, setStart] = useState<number[]>();
-  const [cursor, setCursor] = useState<number[]>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [saved, setSaved] = useState(false);
@@ -58,8 +57,6 @@ export function VisualPromptEditor({
         height: image.naturalHeight,
       });
       setBoxes([]);
-      setStart(undefined);
-      setCursor(undefined);
       setSaved(false);
     } catch (reason) {
       setError(String(reason));
@@ -67,37 +64,6 @@ export function VisualPromptEditor({
       setLoading(false);
     }
   }
-  function point(event: PointerEvent<SVGSVGElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return [
-      Math.max(
-        0,
-        Math.min(
-          reference!.width,
-          ((event.clientX - rect.left) * reference!.width) / rect.width,
-        ),
-      ),
-      Math.max(
-        0,
-        Math.min(
-          reference!.height,
-          ((event.clientY - rect.top) * reference!.height) / rect.height,
-        ),
-      ),
-    ];
-  }
-  function bbox(a: number[], b: number[]) {
-    return [
-      Math.min(a[0], b[0]),
-      Math.min(a[1], b[1]),
-      Math.max(a[0], b[0]),
-      Math.max(a[1], b[1]),
-    ];
-  }
-  const rectangles = [
-    ...boxes,
-    ...(start && cursor ? [{ bbox: bbox(start, cursor), classId }] : []),
-  ];
   return (
     <Disclosure
       title="视觉示例提示"
@@ -128,68 +94,23 @@ export function VisualPromptEditor({
               ))}
             </select>
           </Field>
-          <svg
-            aria-label="视觉示例框选区域"
-            role="img"
-            viewBox={`0 0 ${reference.width} ${reference.height}`}
-            style={{
-              display: "block",
-              width: "100%",
-              touchAction: "none",
-              cursor: busy ? "default" : "crosshair",
-            }}
-            onPointerDown={(event) => {
-              if (busy || event.button !== 0) return;
-              event.currentTarget.setPointerCapture(event.pointerId);
-              const p = point(event);
-              setStart(p);
-              setCursor(p);
+          <ImageBoxCanvas
+            key={reference.url}
+            src={reference.url}
+            width={reference.width}
+            height={reference.height}
+            label="视觉示例框选区域"
+            disabled={busy || !classes[classId]}
+            boxes={boxes.map((box, index) => ({
+              id: String(index),
+              bbox: box.bbox,
+              label: classes[box.classId] ?? "",
+            }))}
+            onDraw={(bbox) => {
+              setBoxes((previous) => [...previous, { bbox, classId }]);
               setSaved(false);
             }}
-            onPointerMove={(event) => {
-              if (start && !busy) setCursor(point(event));
-            }}
-            onPointerCancel={() => {
-              setStart(undefined);
-              setCursor(undefined);
-            }}
-            onPointerUp={(event) => {
-              if (start && !busy) {
-                const box = bbox(start, point(event));
-                if (box[2] > box[0] && box[3] > box[1])
-                  setBoxes((previous) => [...previous, { bbox: box, classId }]);
-              }
-              setStart(undefined);
-              setCursor(undefined);
-            }}
-          >
-            <image
-              href={reference.url}
-              width={reference.width}
-              height={reference.height}
-            />
-            {rectangles.map(({ bbox: box, classId: id }, index) => (
-              <g key={index}>
-                <rect
-                  x={box[0]}
-                  y={box[1]}
-                  width={box[2] - box[0]}
-                  height={box[3] - box[1]}
-                  fill="none"
-                  stroke="#45d6c1"
-                  strokeWidth="2"
-                />
-                <text
-                  x={box[0] + 3}
-                  y={box[1] + 18}
-                  fill="#45d6c1"
-                  fontSize="16"
-                >
-                  {classes[id]}
-                </text>
-              </g>
-            ))}
-          </svg>
+          />
           <div
             className="card-actions"
             style={{ marginTop: "1rem", flexWrap: "wrap" }}

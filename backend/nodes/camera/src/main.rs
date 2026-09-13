@@ -502,6 +502,9 @@ impl CameraNode {
                 Ok(())
             }
             RequestAction::Snapshot => Ok(()),
+            RequestAction::Reconstruct | RequestAction::GenerateGrasps => {
+                bail!("三维定位与抓取候选由感知场景服务处理，不是相机配置操作")
+            }
         }
     }
 
@@ -945,6 +948,9 @@ impl CameraNode {
             }
             match latest.map(|status| status.state) {
                 Some(RequestState::Succeeded) => {
+                    if finish_calibration_return(&mut self.config.calibration_session) {
+                        return Ok(());
+                    }
                     if self
                         .config
                         .calibration_session
@@ -1014,7 +1020,13 @@ impl CameraNode {
             .run_id
             .as_deref()
             .ok_or_else(|| eyre!("标定运行标识缺失"))?;
-        let request = calibration_motion_request(model, target, run_id)?;
+        // Entry and return both use `work`, but must not share an acknowledgement.
+        let motion_run_id = if session.solved_result.is_some() {
+            format!("{run_id}-return")
+        } else {
+            run_id.to_owned()
+        };
+        let request = calibration_motion_request(model, target, &motion_run_id)?;
         let request_id = request.request_id.clone();
         send(node, "calibration_motion_request", &request)?;
         let session = &mut self.config.calibration_session;
@@ -1100,9 +1112,10 @@ impl CameraNode {
             }
             Ok(CalibrationWork::Solved(solved)) => {
                 self.config.calibration_session.solved_result = Some(solved);
-                self.config.calibration_session.phase = CalibrationPhase::AwaitingConfirmation;
+                self.config.calibration_session.current_target_index = None;
+                self.send_current_calibration_target(node)?;
                 self.config.calibration_session.stage_message =
-                    Some("自动采样和求解完成，等待确认应用".into());
+                    Some("自动采样和求解完成，正在返回工作位，保持夹爪状态".into());
                 return Ok(());
             }
             Err(error) if self.config.calibration_session.phase == CalibrationPhase::Detecting => {
@@ -1138,6 +1151,9 @@ impl CameraNode {
     }
 
     fn apply_solved_calibration(&mut self) -> Result<()> {
+        if self.config.calibration_session.phase != CalibrationPhase::AwaitingConfirmation {
+            bail!("标定流程尚未完成：等待返回工作位后确认应用");
+        }
         let solved = self
             .config
             .calibration_session
@@ -1395,6 +1411,19 @@ fn color_png(message: &robot_arm_messages::CameraImagePlane) -> Result<Vec<u8>> 
     let mut output = Cursor::new(Vec::new());
     DynamicImage::ImageRgb8(rgb).write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
+}
+
+// Called only for the matching motion request's success, never on HTTP acceptance.
+fn finish_calibration_return(session: &mut CalibrationSessionState) -> bool {
+    if session.phase != CalibrationPhase::Moving
+        || session.current_target_index.is_some()
+        || session.solved_result.is_none()
+    {
+        return false;
+    }
+    session.phase = CalibrationPhase::AwaitingConfirmation;
+    session.stage_message = Some("自动采样和求解完成，已返回工作位，等待确认应用".into());
+    true
 }
 
 fn calibration_motion_request(
@@ -1664,6 +1693,24 @@ mod tests {
         );
         assert!(!restored.calibration_session.active);
         assert_eq!(restored.calibration_session.phase, CalibrationPhase::Idle);
+
+        // Solving is not completion: only a successful return motion can confirm.
+        let mut session = CalibrationSessionState {
+            phase: CalibrationPhase::Moving,
+            current_target_index: None,
+            ..Default::default()
+        };
+        assert!(!finish_calibration_return(&mut session)); // Initial work move.
+        session.solved_result = Some(result);
+        session.current_target_index = Some(8);
+        assert!(!finish_calibration_return(&mut session)); // Last sample pose.
+        session.current_target_index = None;
+        session.phase = CalibrationPhase::Failed;
+        assert!(!finish_calibration_return(&mut session)); // Failed return.
+        session.phase = CalibrationPhase::Moving;
+        assert!(finish_calibration_return(&mut session));
+        assert_eq!(session.phase, CalibrationPhase::AwaitingConfirmation);
+        assert!(!finish_calibration_return(&mut session));
     }
 
     #[test]
@@ -1698,6 +1745,11 @@ mod tests {
         assert_eq!(request.model_revision, "fixture-v1");
         assert_eq!(request.joints[0].joint_key, "axis-a");
         assert_eq!(request.joints[1].position_rad, -0.5);
+        assert!(request.actuators.is_empty());
+        let returned = calibration_motion_request(&model, &target, "run-return").unwrap();
+        assert_ne!(returned.request_id, request.request_id);
+        assert_eq!(returned.joints, request.joints);
+        assert!(returned.actuators.is_empty());
     }
 
     #[test]

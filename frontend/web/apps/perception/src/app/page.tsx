@@ -7,6 +7,7 @@ import {
   type CalibrationSessionState,
   type ManipulationTaskState,
   type PerceptionState,
+  type SegmentationEdit,
   type RobotModelInfo,
   type WorldScene,
 } from "@robot/contracts";
@@ -33,7 +34,13 @@ import {
 import { useState } from "react";
 
 import { FloatingCameraVideo } from "./camera-video";
-import { VisualPromptEditor, type VisualPrompt } from "./visual-prompt";
+import { SegmentationEditor } from "./segmentation-editor";
+import { startPickPlace } from "./start-pick-place";
+import {
+  PickPlaceProgress,
+  pickPlaceStatus,
+  type PickPlaceAttempt,
+} from "./pick-place-progress";
 import type { InstructionResult } from "./instruction-flow";
 
 const initialBoard = {
@@ -227,14 +234,8 @@ export default function Page() {
     manipulation?.placement_region_id ?? undefined,
   );
   const [board, setBoard] = useState(initialBoard);
-  const [promptText, setPromptText] = useDraftValue(
-    perception?.classes.join(", ") ?? "",
-  );
   const [segmentationModel, setSegmentationModel] = useDraftValue(
     perception?.model ?? "",
-  );
-  const [placementLabels, setPlacementLabels] = useDraftValue(
-    perception?.placement_labels.join(", ") ?? "",
   );
   const [graspCollisionDistance, setGraspCollisionDistance] = useDraftValue(
     perception ? String(perception.grasp_collision_distance_m * 1000) : "",
@@ -244,6 +245,7 @@ export default function Page() {
   const [instructionResult, setInstructionResult] =
     useState<InstructionResult>();
   const [requestPending, setPending] = useState(false);
+  const [pickPlaceAttempt, setPickPlaceAttempt] = useState<PickPlaceAttempt>();
   const [pendingPerceptionAction, setPendingPerceptionAction] =
     useState<string>();
   const [pendingCalibrationAction, setPendingCalibrationAction] =
@@ -264,14 +266,7 @@ export default function Page() {
         (result) => result.camera_source_id === selectedSourceId,
       )
     : savedCalibrations;
-  const selectedPrompts = promptText ?? perception?.classes.join(", ") ?? "";
   const selectedModelId = segmentationModel ?? perception?.model ?? "";
-  const selectedSegmentationModel = perception?.available_models?.find(
-    (item) => item.id === selectedModelId,
-  );
-  const promptFree = selectedSegmentationModel?.prompt_free ?? false;
-  const selectedPlacementLabels =
-    placementLabels ?? perception?.placement_labels.join(", ") ?? "";
   const selectedGraspCollisionDistance =
     graspCollisionDistance ??
     (perception ? String(perception.grasp_collision_distance_m * 1000) : "");
@@ -287,10 +282,6 @@ export default function Page() {
       : scene?.objects.some((item) => item.object_id === objectId)
         ? objectId
         : "";
-  const selectedHasGrasps = Boolean(
-    scene?.objects.find((item) => item.object_id === selectedObject)
-      ?.grasp_candidates.length,
-  );
   const selectedRegion =
     regionId === undefined
       ? (scene?.placement_regions[0]?.region_id ?? "")
@@ -383,16 +374,10 @@ export default function Page() {
   const modelDirty =
     Boolean(perception) &&
     (selectedModelId !== perception?.model ||
-      (!promptFree &&
-        (selectedPrompts !== perception?.classes.join(", ") ||
-          selectedPlacementLabels !==
-            perception?.placement_labels.join(", "))) ||
       Number(selectedGraspCollisionDistance) !==
         (perception?.grasp_collision_distance_m ?? 0) * 1000);
   function restoreModelConfig() {
-    setPromptText(undefined);
     setSegmentationModel(undefined);
-    setPlacementLabels(undefined);
     setGraspCollisionDistance(undefined);
   }
   function restoreCameraConfig() {
@@ -428,7 +413,6 @@ export default function Page() {
       | "reconstruct"
       | "generate_grasps",
     target: "camera" | "model" = "camera",
-    visualPrompt?: VisualPrompt,
   ) {
     const appliesModel = action === "apply" && target === "model";
     setPendingPerceptionAction(`${target}:${action}`);
@@ -511,45 +495,14 @@ export default function Page() {
               : null,
         object_id: action === "generate_grasps" ? selectedObject : null,
         model: appliesModel ? selectedModelId : null,
-        ...(visualPrompt && appliesModel && !promptFree
-          ? { prompt: visualPrompt }
-          : {}),
-        classes:
-          appliesModel && !promptFree
-            ? selectedPrompts
-                .split(",")
-                .map((value) => value.trim())
-                .filter(Boolean)
-            : null,
-        placement_labels:
-          appliesModel && !promptFree
-            ? selectedPlacementLabels
-                .split(",")
-                .map((value) => value.trim())
-                .filter(Boolean)
-            : null,
+        classes: null,
+        placement_labels: null,
         grasp_collision_distance_m:
           appliesModel && selectedGraspCollisionDistance !== ""
             ? Number(selectedGraspCollisionDistance) / 1000
             : null,
       });
       if (accepted && appliesModel) {
-        if (!promptFree) {
-          setPromptText(
-            selectedPrompts
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean)
-              .join(", "),
-          );
-          setPlacementLabels(
-            selectedPlacementLabels
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean)
-              .join(", "),
-          );
-        }
         setGraspCollisionDistance(
           String(Number(selectedGraspCollisionDistance)),
         );
@@ -560,9 +513,26 @@ export default function Page() {
     }
   }
 
-  async function runPerception() {
-    if (modelDirty && !(await perceptionRequest("apply", "model"))) return;
-    await perceptionRequest("refresh", "model");
+  async function editSegmentation(
+    edit: SegmentationEdit,
+    fields?: Record<string, unknown>,
+  ) {
+    setPendingPerceptionAction(`segmentation:${edit.kind}`);
+    try {
+      return await send("/api/perception/request", {
+        schema_version: schemaVersion,
+        request_id: requestId(),
+        action: "refresh",
+        input_sequence:
+          edit.kind === "capture"
+            ? null
+            : perception?.last_segmentation_sequence,
+        segmentation_edit: edit,
+        ...fields,
+      });
+    } finally {
+      setPendingPerceptionAction(undefined);
+    }
   }
 
   async function selectCamera(nextSourceId: string) {
@@ -667,20 +637,28 @@ export default function Page() {
   async function pickPlace() {
     if (!scene || !selectedObject || !selectedRegion) return;
     setPendingPerceptionAction("pick-place");
+    setError(undefined);
+    const startedAt = Date.now();
     try {
-      const accepted = await send("/api/motion/mode", {
-        schema_version: schemaVersion,
-        request_id: requestId(),
-        mode: "perception",
-      });
-      if (!accepted) return;
-      await send("/api/perception/pick-place", {
-        schema_version: schemaVersion,
-        request_id: requestId(),
-        object_id: selectedObject,
-        scene_sequence: scene.sequence,
-        placement_region_id: selectedRegion,
-      });
+      await startPickPlace(
+        scene,
+        selectedObject,
+        selectedRegion,
+        (path, body) => post(path, body as never),
+        requestId,
+        (step) => setPickPlaceAttempt({ ...step, startedAt }),
+      );
+      setPickPlaceAttempt((current) =>
+        current ? { ...current, phase: "accepted" } : current,
+      );
+    } catch (reason) {
+      setError(String(reason));
+      setPickPlaceAttempt((current) => ({
+        phase: "failed",
+        requestId: current?.requestId ?? "",
+        startedAt,
+        error: String(reason),
+      }));
     } finally {
       setPendingPerceptionAction(undefined);
     }
@@ -711,10 +689,6 @@ export default function Page() {
       const result = value as InstructionResult;
       setInstructionResult(result);
       setSegmentationModel(result.model);
-      if (!result.prompt_free) {
-        setPromptText(result.perception_prompts.join(", "));
-        setPlacementLabels(result.placement_labels.join(", "));
-      }
       setObjectId(result.object_id);
       setRegionId(result.placement_region_id);
     } catch (reason) {
@@ -802,363 +776,9 @@ export default function Page() {
         <section className="perception-section">
           <PerceptionSectionHeading
             index="01"
-            title="相机与应用场景"
-            description="左侧选择相机并维护配置，右侧按需展开具体应用场景；抓放只是结构化感知结果的一种使用方式。"
+            title="相机与标定"
+            description="相机来源、采集数据、内外参与标定统一管理。"
           />
-          <Card
-            className="span-6 aligned-row-card perception-task-card"
-            eyebrow="Pick and place scenario"
-            title="抓放场景"
-            action={
-              <StatusBadge
-                tone={
-                  manipulation?.state === "failed"
-                    ? "bad"
-                    : manipulation?.state === "succeeded"
-                      ? "good"
-                      : "neutral"
-                }
-              >
-                {perception?.task_state === "executing"
-                  ? "正在识别并生成抓取候选"
-                  : manipulationStateLabels[manipulation?.state ?? "idle"]}
-              </StatusBadge>
-            }
-          >
-            <div className="ai-task-panel">
-              <div className="ai-task-heading">
-                <div>
-                  <h3>AI 自然语言抓放</h3>
-                  <p>
-                    描述要抓取的物体和放置位置；AI
-                    会使用已保存的分割模型、选择真实场景实例，再调用现有 MTC
-                    抓放流程。
-                  </p>
-                </div>
-                <StatusBadge tone="cyan">服务端 AI</StatusBadge>
-              </div>
-              <div className="instruction-task">
-                <Field
-                  label="自然语言任务"
-                  hint="AI 使用已保存的模型：提示词模式生成识别提示词，自动模式直接识别。之后选择真实场景实例，沿同一条手动链路完成规划和执行。"
-                >
-                  <Input
-                    aria-label="自然语言任务"
-                    value={instruction}
-                    placeholder="例如：把红色方块放进灰色置物筐"
-                    onChange={(event) =>
-                      setInstruction(event.currentTarget.value)
-                    }
-                  />
-                </Field>
-                <Button
-                  variant="outline"
-                  disabled={
-                    pending ||
-                    instructionPending ||
-                    !instruction.trim() ||
-                    !camera?.streaming ||
-                    !perception?.calibrated ||
-                    perception?.task_state === "executing" ||
-                    manipulation?.state === "planning" ||
-                    manipulation?.state === "executing"
-                  }
-                  onClick={executeNaturalLanguageTask}
-                >
-                  {instructionPending ? "AI 正在编排并执行…" : "用 AI 执行抓放"}
-                </Button>
-              </div>
-              {instructionResult && (
-                <KeyValue
-                  label="最近一次 AI 编排"
-                  value={`${instructionResult.object_id} → ${instructionResult.placement_region_id}`}
-                  hint={`${instructionResult.prompt_free ? "已使用自动分割" : `已使用提示词 ${instructionResult.perception_prompts.join(", ")}`} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
-                />
-              )}
-            </div>
-            <Disclosure
-              className="scenario-details"
-              title="抓放详细配置"
-              englishTitle="Pick and place details"
-            >
-              <KeyValue
-                label="已生效模型"
-                value={
-                  perception?.available_models?.find(
-                    (item) => item.id === perception.model,
-                  )?.label ??
-                  perception?.model ??
-                  "等待配置"
-                }
-              />
-              <KeyValue
-                label="感知任务状态"
-                value={
-                  perception
-                    ? manipulationStateLabels[perception.task_state]
-                    : "等待状态"
-                }
-                hint={
-                  perception?.task_request_id
-                    ? `当前请求：${perception.task_request_id}。感知包括图像分割与抓取候选计算，完成前不代表卡住。`
-                    : "尚未运行感知"
-                }
-              />
-              <div className="perception-task-summary">
-                <div>
-                  <span>当前相机</span>
-                  <strong>{camera?.selected_source_id ?? "未选择"}</strong>
-                </div>
-                <div>
-                  <span>二维实例</span>
-                  <strong>{perception?.instances.length ?? 0}</strong>
-                </div>
-                <div>
-                  <span>抓取候选</span>
-                  <strong>{graspCandidateCount}</strong>
-                </div>
-                <div>
-                  <span>放置区域</span>
-                  <strong>{scene?.placement_regions.length ?? 0}</strong>
-                </div>
-                <div>
-                  <span>场景序号</span>
-                  <strong>{perception?.last_scene_sequence ?? "—"}</strong>
-                </div>
-              </div>
-              <div className="perception-model-settings">
-                <Field
-                  label="识别与分割模型"
-                  hint="模型及配置能力来自计算服务。切换只修改待保存配置；保存后仍需点击运行，不会自动执行识别或抓放。"
-                >
-                  <select
-                    aria-label="识别与分割模型"
-                    value={selectedModelId}
-                    disabled={pending}
-                    onChange={(event) =>
-                      setSegmentationModel(event.currentTarget.value)
-                    }
-                  >
-                    {!perception?.available_models?.length && (
-                      <option value={selectedModelId}>等待模型目录</option>
-                    )}
-                    {perception?.available_models?.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.prompt_free ? "自动分割" : "提示词分割"} ·{" "}
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                {!promptFree && (
-                  <Field
-                    label="识别与分割提示词"
-                    hint={
-                      perception?.visual_prompt_active
-                        ? "当前使用已保存的视觉示例生成分割，下面是示例对应的类别名称。保存文字提示词配置会切回文字提示模式；运行分割会继续使用视觉示例。"
-                        : "逗号分隔的开放词汇提示词，直接传给当前模型；内容由当前任务决定，不绑定方块、置物筐或抓放场景。"
-                    }
-                  >
-                    <Input
-                      aria-label="识别与分割提示词"
-                      disabled={pending}
-                      value={selectedPrompts}
-                      onChange={(event) =>
-                        setPromptText(event.currentTarget.value)
-                      }
-                    />
-                  </Field>
-                )}
-                {!promptFree && (
-                  <Field
-                    label="放置区域角色"
-                    hint="可选的下游场景角色。填写已识别实例的提示词后，这些实例可作为放置区域；它不参与模型推理，也不是模型类别。"
-                  >
-                    <Input
-                      aria-label="放置区域角色"
-                      disabled={pending}
-                      value={selectedPlacementLabels}
-                      onChange={(event) =>
-                        setPlacementLabels(event.currentTarget.value)
-                      }
-                    />
-                  </Field>
-                )}
-                <Field
-                  label="抓取点云邻近距离 · mm"
-                  hint="GraspGenX 官方场景筛选参数：张开夹爪表面采样点与环境点云小于此距离时排除候选。它不是实体碰撞或 MoveIt 膨胀量；过大会排除实际离地的姿态。保存于后端，与模拟或真机来源无关。"
-                >
-                  <Input
-                    type="number"
-                    aria-label="抓取点云邻近距离"
-                    disabled={pending}
-                    min={0}
-                    step="any"
-                    value={selectedGraspCollisionDistance}
-                    onChange={(event) =>
-                      setGraspCollisionDistance(event.currentTarget.value)
-                    }
-                  />
-                </Field>
-              </div>
-              {!promptFree && perception?.visual_prompt_active && (
-                <StatusBadge tone="cyan">已启用视觉示例提示</StatusBadge>
-              )}
-              {!promptFree && (
-                <VisualPromptEditor
-                  key={`${selectedSourceId}:${selectedModelId}:${selectedPrompts}`}
-                  imageUrl={asset("color.png")}
-                  classes={selectedPrompts
-                    .split(",")
-                    .map((value) => value.trim())
-                    .filter(Boolean)}
-                  disabled={pending}
-                  onSave={(prompt) =>
-                    perceptionRequest("apply", "model", prompt)
-                  }
-                />
-              )}
-              <div className="card-actions perception-task-actions">
-                {modelDirty && (
-                  <StatusBadge tone="warning">有待保存修改</StatusBadge>
-                )}
-                {modelDirty && (
-                  <Button
-                    variant="outline"
-                    disabled={pending}
-                    onClick={restoreModelConfig}
-                  >
-                    恢复已保存配置
-                  </Button>
-                )}
-                <Button
-                  variant="outline"
-                  disabled={pending}
-                  onClick={() => perceptionRequest("apply", "model")}
-                >
-                  {pendingPerceptionAction === "model:apply"
-                    ? "正在保存…"
-                    : "保存模型配置"}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={
-                    pending ||
-                    perception?.task_state === "executing" ||
-                    !camera?.streaming ||
-                    !perception?.color_frame
-                  }
-                  onClick={runPerception}
-                >
-                  {pendingPerceptionAction === "model:refresh" ||
-                  (perception?.task_state === "executing" &&
-                    perception.task_action === "refresh")
-                    ? "正在分割…"
-                    : modelDirty
-                      ? "保存并运行分割"
-                      : "运行分割"}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={
-                    pending ||
-                    perception?.task_state === "executing" ||
-                    modelDirty ||
-                    perception?.last_segmentation_sequence == null ||
-                    !perception?.calibrated
-                  }
-                  onClick={() => perceptionRequest("reconstruct", "model")}
-                >
-                  {perception?.task_state === "executing" &&
-                  perception.task_action === "reconstruct"
-                    ? "正在定位…"
-                    : "三维定位"}
-                </Button>
-              </div>
-              <KeyValue
-                label="分割 / 三维场景"
-                value={`${perception?.last_segmentation_sequence ?? "—"} / ${perception?.last_scene_sequence ?? "—"}`}
-                hint="分割只产生类别、二维框和掩膜，不调用抓取模型。三维定位使用该次分割保留的同一帧深度和外参；选定目标后再单独生成抓取候选。"
-              />
-              <div className="perception-task-grid">
-                <Field label="抓取目标">
-                  <select
-                    aria-label="抓取目标"
-                    value={selectedObject}
-                    onChange={(event) => setObjectId(event.currentTarget.value)}
-                  >
-                    <option value="">选择已三维定位的实例</option>
-                    {scene?.objects.map((item) => (
-                      <option key={item.object_id} value={item.object_id}>
-                        {item.label} · {item.object_id}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="放置区域">
-                  <select
-                    aria-label="放置区域"
-                    value={selectedRegion}
-                    onChange={(event) => setRegionId(event.currentTarget.value)}
-                  >
-                    <option value="">选择放置区域</option>
-                    {scene?.placement_regions.map((item) => (
-                      <option key={item.region_id} value={item.region_id}>
-                        {item.label} · {item.region_id}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </div>
-              <div className="card-actions perception-task-actions">
-                <Button
-                  variant="outline"
-                  disabled={
-                    pending ||
-                    perception?.task_state === "executing" ||
-                    modelDirty ||
-                    !selectedObject
-                  }
-                  onClick={() => perceptionRequest("generate_grasps", "model")}
-                >
-                  {perception?.task_state === "executing" &&
-                  perception.task_action === "generate_grasps"
-                    ? "正在生成候选…"
-                    : "生成抓取候选"}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={
-                    pending ||
-                    perception?.task_state === "executing" ||
-                    modelDirty ||
-                    !selectedHasGrasps ||
-                    !selectedRegion
-                  }
-                  onClick={pickPlace}
-                >
-                  {pendingPerceptionAction === "pick-place"
-                    ? "正在提交…"
-                    : "执行抓放"}
-                </Button>
-              </div>
-              <KeyValue
-                label="抓取 / 放置位置"
-                value={`${numbers(manipulation?.pick_position_m ?? undefined)} / ${numbers(manipulation?.place_position_m ?? undefined)}`}
-                hint="来自当前选中物体和放置区域的结构化三维场景，单位为米，坐标系与场景坐标系一致。"
-              />
-            </Disclosure>
-            <KeyValue
-              label="阶段 / 方案 / 代价"
-              value={`${manipulation?.stage ?? "—"} / ${manipulation?.solution_count ?? "—"} / ${manipulation?.selected_cost?.toFixed(3) ?? "—"}`}
-              hint="每个候选优先选择最深的完整可行方案，再比较综合代价（1−模型分＋归一化关节行程，越低越好）。阶段显示所选候选和加深量；规划成功不代表实际夹持成功。"
-            />
-            {manipulation?.original_error && (
-              <p className="error" role="alert">
-                {manipulation.original_error}
-              </p>
-            )}
-          </Card>
           <Card
             className="span-6 aligned-row-card perception-camera-source"
             eyebrow="Camera source"
@@ -1517,56 +1137,44 @@ export default function Page() {
                 camera?.original_error ?? perception?.original_error ?? "无"
               }
             />
-          </Card>
-
-          <Card
-            className="span-6 aligned-row-card perception-camera-parameters"
-            eyebrow="Camera parameters"
-            title="相机内参与外参"
-          >
-            <KeyValue
-              label="彩色 / 深度流"
-              value={`${camera?.selected_color_profile_key ?? "—"} / ${camera?.selected_depth_profile_key ?? "—"}`}
-              hint="来自所选驱动声明，决定读取哪两路图像。图像流必须与相机参数流的分辨率配套，否则像素和三维点会错位。"
-            />
-            <KeyValue
-              label="相机参数流"
-              value={activeSource ? "随原子 RGB-D 帧提供" : "—"}
-              hint="来自所选驱动声明，提供与图像分辨率对应的 K、D、P 标定数据。"
-            />
-            <KeyValue
-              label="内参 K"
-              value={numbers(perception?.camera_calibration?.camera_matrix)}
-              hint="K = [fx, 0, cx; 0, fy, cy; 0, 0, 1]，由相机参数流提供。fx、fy 是像素焦距，cx、cy 是光心；错误会改变点云的横向尺度和位置。"
-            />
-            <KeyValue
-              label="畸变模型 / D"
-              value={
-                perception?.camera_calibration
-                  ? `${perception.camera_calibration.distortion_model} · ${numbers(perception.camera_calibration.distortion)}`
-                  : "—"
-              }
-              hint="D 由相机参数流提供，元素含义由畸变模型决定；plumb_bob 通常依次为 k1、k2、t1、t2、k3，用于修正径向和切向畸变。"
-            />
-            <KeyValue
-              label="投影矩阵 P"
-              value={numbers(perception?.camera_calibration?.projection_matrix)}
-              hint="P = [fx′, 0, cx′, Tx; 0, fy′, cy′, Ty; 0, 0, 1, 0]，由相机参数流提供，决定校正后的三维点投影到哪个像素。"
-            />
-            <KeyValue
-              label="深度比例"
-              value={`${perception?.depth_scale_m ?? "—"} m / unit`}
-              hint="由活动相机驱动随帧报告。原始深度值乘以它得到米，并等比例决定点云、物体距离和尺寸。"
-            />
-            <KeyValue
-              label="外参：平移 / 四元数"
-              value={
-                perception?.camera_calibration
-                  ? `${numbers(perception.camera_calibration.translation_m)} / ${numbers(perception.camera_calibration.orientation_xyzw)}`
-                  : "—"
-              }
-              hint="由下方标定流程求得。平移 x/y/z 是相机在机械臂底座坐标中的米制位置，四元数 x/y/z/w 是朝向；共同把相机数据转换到底座坐标。"
-            />
+            <Disclosure
+              title="深度图"
+              defaultOpen
+              englishTitle="独立按上送频率更新；彩色视频保留在可拖动浮窗中。"
+            >
+              <div className="card-actions card-actions-leading">
+                <Button
+                  variant="outline"
+                  disabled={pending || !camera?.streaming}
+                  onClick={() => perceptionRequest("snapshot")}
+                >
+                  更新深度预览
+                </Button>
+              </div>
+              {perception?.depth_frame ? (
+                <PerceptionAssetImage
+                  src={asset("depth.png")}
+                  alt="深度图"
+                  width={perception.depth_frame.width}
+                  height={perception.depth_frame.height}
+                  empty="尚未生成预览，点击更新深度预览"
+                />
+              ) : (
+                <div className="visual-empty">等待图像</div>
+              )}
+              <KeyValue
+                label="尺寸 / 编码"
+                value={
+                  perception?.depth_frame
+                    ? `${perception.depth_frame.width} × ${perception.depth_frame.height} · ${perception.depth_frame.encoding}`
+                    : "—"
+                }
+              />
+              <KeyValue
+                label="坐标系"
+                value={perception?.depth_frame?.frame_id ?? "—"}
+              />
+            </Disclosure>
           </Card>
 
           <Card
@@ -1621,7 +1229,7 @@ export default function Page() {
                 label="自动进度"
                 value={
                   calibration?.target_count
-                    ? `${Math.min((calibration.current_target_index ?? 0) + 1, calibration.target_count)} / ${calibration.target_count} · ${calibration.observations.length} 个样本`
+                    ? `${Math.min(Math.max(calibration.observations.length, calibration.current_target_index == null ? 0 : calibration.current_target_index + 1), calibration.target_count)} / ${calibration.target_count} · ${calibration.observations.length} 个样本`
                     : `0 / ${model?.calibration_targets?.length ?? 0} · 0 个样本`
                 }
               />
@@ -1836,7 +1444,9 @@ export default function Page() {
                     label="当前姿态"
                     value={
                       calibration?.current_target_key
-                        ? `${(calibration.current_target_index ?? 0) + 1} / ${calibration.target_count} · ${calibration.current_target_key}`
+                        ? calibration.current_target_index == null
+                          ? `工作位 · ${calibration.current_target_key}`
+                          : `${calibration.current_target_index + 1} / ${calibration.target_count} · ${calibration.current_target_key}`
                         : "—"
                     }
                   />
@@ -1944,160 +1554,308 @@ export default function Page() {
                 </div>
               </section>
             </div>
+            <Disclosure
+              className="calibration-parameters"
+              title="相机内参与外参"
+              englishTitle="当前 RGB-D 帧内参、深度比例与生效外参。"
+            >
+              <KeyValue
+                label="彩色 / 深度流"
+                value={`${camera?.selected_color_profile_key ?? "—"} / ${camera?.selected_depth_profile_key ?? "—"}`}
+                hint="来自所选驱动声明，决定读取哪两路图像。图像流必须与相机参数流的分辨率配套，否则像素和三维点会错位。"
+              />
+              <KeyValue
+                label="相机参数流"
+                value={activeSource ? "随原子 RGB-D 帧提供" : "—"}
+                hint="来自所选驱动声明，提供与图像分辨率对应的 K、D、P 标定数据。"
+              />
+              <KeyValue
+                label="内参 K"
+                value={numbers(perception?.camera_calibration?.camera_matrix)}
+                hint="K = [fx, 0, cx; 0, fy, cy; 0, 0, 1]，由相机参数流提供。fx、fy 是像素焦距，cx、cy 是光心；错误会改变点云的横向尺度和位置。"
+              />
+              <KeyValue
+                label="畸变模型 / D"
+                value={
+                  perception?.camera_calibration
+                    ? `${perception.camera_calibration.distortion_model} · ${numbers(perception.camera_calibration.distortion)}`
+                    : "—"
+                }
+                hint="D 由相机参数流提供，元素含义由畸变模型决定；plumb_bob 通常依次为 k1、k2、t1、t2、k3，用于修正径向和切向畸变。"
+              />
+              <KeyValue
+                label="投影矩阵 P"
+                value={numbers(
+                  perception?.camera_calibration?.projection_matrix,
+                )}
+                hint="P = [fx′, 0, cx′, Tx; 0, fy′, cy′, Ty; 0, 0, 1, 0]，由相机参数流提供，决定校正后的三维点投影到哪个像素。"
+              />
+              <KeyValue
+                label="深度比例"
+                value={`${perception?.depth_scale_m ?? "—"} m / unit`}
+                hint="由活动相机驱动随帧报告。原始深度值乘以它得到米，并等比例决定点云、物体距离和尺寸。"
+              />
+              <KeyValue
+                label="外参：平移 / 四元数"
+                value={
+                  perception?.camera_calibration
+                    ? `${numbers(perception.camera_calibration.translation_m)} / ${numbers(perception.camera_calibration.orientation_xyzw)}`
+                    : "—"
+                }
+                hint="由本卡片的标定流程求得。平移 x/y/z 是相机在机械臂底座坐标中的米制位置，四元数 x/y/z/w 是朝向；共同把相机数据转换到底座坐标。"
+              />
+            </Disclosure>
           </Card>
         </section>
 
         <section className="perception-section">
           <PerceptionSectionHeading
             index="02"
-            title="采集数据"
-            description="彩色视频在可拖动、可收起的浮动窗口中按相机实际采集频率显示；深度与感知 RGB-D 按独立上送频率更新。"
+            title="AI 与任务"
+            description="左侧选择任务并启动，右侧独立或组合使用三种分割。"
           />
-
           <Card
-            className="span-6 aligned-row-card"
-            eyebrow="Depth frame"
-            title="深度图"
+            className="span-12 perception-task-card"
+            eyebrow="自然语言任务、分割与应用场景"
+            title="AI"
             action={
-              <Button
-                variant="outline"
-                disabled={pending || !camera?.streaming}
-                onClick={() => perceptionRequest("snapshot")}
+              <StatusBadge
+                tone={
+                  manipulation?.state === "failed"
+                    ? "bad"
+                    : manipulation?.state === "succeeded"
+                      ? "good"
+                      : "neutral"
+                }
               >
-                更新深度预览
-              </Button>
+                {perception?.task_state === "executing"
+                  ? "正在处理感知任务"
+                  : manipulationStateLabels[manipulation?.state ?? "idle"]}
+              </StatusBadge>
             }
           >
-            {perception?.depth_frame ? (
-              <PerceptionAssetImage
-                src={asset("depth.png")}
-                alt="深度图"
-                width={perception.depth_frame.width}
-                height={perception.depth_frame.height}
-                empty="尚未生成预览，点击更新深度预览"
-              />
-            ) : (
-              <div className="visual-empty">等待图像</div>
-            )}
-            <KeyValue
-              label="尺寸 / 编码"
-              value={
-                perception?.depth_frame
-                  ? `${perception.depth_frame.width} × ${perception.depth_frame.height} · ${perception.depth_frame.encoding}`
-                  : "—"
-              }
-            />
-            <KeyValue
-              label="坐标系"
-              value={perception?.depth_frame?.frame_id ?? "—"}
-            />
-          </Card>
-        </section>
-
-        <section className="perception-section">
-          <PerceptionSectionHeading
-            index="03"
-            title="AI 模型与结果"
-            description="推理叠加图、二维实例、三维定位和抓取候选集中在这一组，便于核对结构化输出。"
-          />
-
-          <Card
-            className="span-6 aligned-row-card"
-            eyebrow="Inference overlay"
-            title="识别与分割叠加图"
-          >
-            {perception?.last_segmentation_sequence != null &&
-            perception.color_frame ? (
-              <PerceptionAssetImage
-                src={asset("overlay.png")}
-                alt="识别与分割叠加图"
-                width={perception.color_frame.width}
-                height={perception.color_frame.height}
-                empty="等待模型输出"
-              />
-            ) : (
-              <div className="visual-empty">等待模型输出</div>
-            )}
-            <KeyValue
-              label="二维实例 / 三维物体"
-              value={`${perception?.instances.length ?? 0} / ${scene?.objects.length ?? 0}`}
-            />
-            <KeyValue
-              label="抓取候选"
-              value={String(
-                scene?.objects.reduce(
-                  (sum, item) => sum + item.grasp_candidates.length,
-                  0,
-                ) ?? 0,
-              )}
-            />
-            <KeyValue
-              label="实例三维点"
-              value={String(perception?.point_count ?? 0)}
-              hint="由当前分割区域与同帧深度生成，仅在点击三维定位后更新。运行分割不会计算三维点或抓取候选。"
-            />
-          </Card>
-
-          <Card
-            className="span-6 aligned-row-card"
-            eyebrow="Structured 3D scene"
-            title="结构化三维场景"
-          >
-            <div className="perception-scene-results">
-              <KeyValue label="场景坐标系" value={scene?.frame_id ?? "—"} />
-              <KeyValue
-                label="物体 / 放置区 / 显式障碍"
-                value={`${scene?.objects.length ?? 0} / ${scene?.placement_regions.length ?? 0} / ${scene?.obstacles.length ?? 0}`}
-              />
-              <div className="table-scroll perception-instance-table">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>实例</th>
-                      <th>置信度</th>
-                      <th>二维框 x1/y1/x2/y2</th>
-                      <th>三维中心 m</th>
-                      <th>尺寸 m</th>
-                      <th>抓取候选</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {perception?.instances.map((item) => (
-                      <tr key={item.instance_id}>
-                        <td>
-                          <strong>{item.label}</strong>
-                          <small>{item.instance_id}</small>
-                        </td>
-                        <td>{(item.confidence * 100).toFixed(1)}%</td>
-                        <td>{numbers(item.bounding_box_xyxy, 0)}</td>
-                        <td>{numbers(item.position_m ?? undefined)}</td>
-                        <td>{numbers(item.size_m ?? undefined)}</td>
-                        <td>{item.grasp_candidate_count}</td>
-                      </tr>
-                    ))}
-                    {!perception?.instances.length && (
-                      <tr>
-                        <td colSpan={6}>尚无实例</td>
-                      </tr>
+            <div className="ai-columns">
+              <div className="ai-workspace">
+                <div className="ai-task-panel">
+                  <div className="ai-task-heading">
+                    <div>
+                      <h3>AI 自然语言抓放</h3>
+                      <p>
+                        描述要抓取的物体和放置位置；AI
+                        会使用已保存的分割模型、选择真实场景实例，再调用现有 MTC
+                        抓放流程。
+                      </p>
+                    </div>
+                    <StatusBadge tone="cyan">服务端 AI</StatusBadge>
+                  </div>
+                  <div className="instruction-task">
+                    <Field
+                      label="自然语言任务"
+                      hint="AI 使用已保存的模型：提示词模式生成识别提示词，自动模式直接识别。之后选择真实场景实例，沿同一条手动链路完成规划和执行。"
+                    >
+                      <Input
+                        aria-label="自然语言任务"
+                        value={instruction}
+                        placeholder="例如：把红色方块放进灰色置物筐"
+                        onChange={(event) =>
+                          setInstruction(event.currentTarget.value)
+                        }
+                      />
+                    </Field>
+                    <Button
+                      variant="outline"
+                      disabled={
+                        pending ||
+                        instructionPending ||
+                        !instruction.trim() ||
+                        !camera?.streaming ||
+                        !perception?.calibrated ||
+                        perception?.task_state === "executing" ||
+                        manipulation?.state === "planning" ||
+                        manipulation?.state === "executing"
+                      }
+                      onClick={executeNaturalLanguageTask}
+                    >
+                      {instructionPending
+                        ? "AI 正在编排并执行…"
+                        : "用 AI 执行抓放"}
+                    </Button>
+                  </div>
+                  {instructionResult && (
+                    <KeyValue
+                      label="最近一次 AI 编排"
+                      value={`${instructionResult.object_id} → ${instructionResult.placement_region_id}`}
+                      hint={`${instructionResult.prompt_free ? "已使用自动分割" : `已使用提示词 ${instructionResult.perception_prompts.join(", ")}`} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
+                    />
+                  )}
+                </div>
+                <Disclosure
+                  title="抓放场景"
+                  englishTitle="选择已三维定位的物体和目标后启动。缺少候选时先生成候选，成功后使用同一场景执行抓放；不会重新运行分割。"
+                >
+                  <div className="perception-task-grid">
+                    <Field label="抓取目标">
+                      <select
+                        aria-label="抓取目标"
+                        disabled={pending}
+                        value={selectedObject}
+                        onChange={(event) =>
+                          setObjectId(event.currentTarget.value)
+                        }
+                      >
+                        <option value="">选择已三维定位的实例</option>
+                        {scene?.objects.map((item) => (
+                          <option key={item.object_id} value={item.object_id}>
+                            {item.label} · {item.object_id}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="放置区域">
+                      <select
+                        aria-label="放置区域"
+                        disabled={pending}
+                        value={selectedRegion}
+                        onChange={(event) =>
+                          setRegionId(event.currentTarget.value)
+                        }
+                      >
+                        <option value="">选择放置区域</option>
+                        {scene?.placement_regions.map((item) => (
+                          <option key={item.region_id} value={item.region_id}>
+                            {item.label} · {item.region_id}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="card-actions perception-task-actions">
+                    <Button
+                      disabled={
+                        pending ||
+                        pickPlaceStatus(
+                          pickPlaceAttempt,
+                          perception,
+                          manipulation,
+                        ).active ||
+                        perception?.task_state === "executing" ||
+                        manipulation?.state === "planning" ||
+                        manipulation?.state === "executing" ||
+                        !selectedObject ||
+                        !selectedRegion
+                      }
+                      onClick={pickPlace}
+                    >
+                      {pendingPerceptionAction === "pick-place"
+                        ? `${pickPlaceStatus(pickPlaceAttempt, perception, manipulation).status}…`
+                        : "启动"}
+                    </Button>
+                  </div>
+                  <PickPlaceProgress
+                    attempt={pickPlaceAttempt}
+                    perception={perception}
+                    task={manipulation}
+                    objectId={selectedObject}
+                  />
+                </Disclosure>
+                <Disclosure
+                  title="高级设置"
+                  englishTitle="AI 默认模型与抓取模型参数；不影响三种分割入口是否可用。"
+                >
+                  <div className="perception-model-settings">
+                    <Field
+                      label="AI 默认分割模型"
+                      hint="仅指定 AI 自然语言任务默认使用的模型。三种分割始终独立可用，不受此选择限制。"
+                    >
+                      <select
+                        aria-label="AI 默认分割模型"
+                        value={selectedModelId}
+                        disabled={pending}
+                        onChange={(event) =>
+                          setSegmentationModel(event.currentTarget.value)
+                        }
+                      >
+                        {!perception?.available_models?.length && (
+                          <option value={selectedModelId}>等待模型目录</option>
+                        )}
+                        {perception?.available_models?.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.prompt_free ? "自动分割" : "提示词分割"} ·{" "}
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field
+                      label="抓取点云邻近距离 · mm"
+                      hint="GraspGenX 官方场景筛选参数：张开夹爪表面采样点与环境点云小于此距离时排除候选。它不是实体碰撞或 MoveIt 膨胀量；过大会排除实际离地的姿态。保存于后端，与模拟或真机来源无关。"
+                    >
+                      <Input
+                        type="number"
+                        aria-label="抓取点云邻近距离"
+                        disabled={pending}
+                        min={0}
+                        step="any"
+                        value={selectedGraspCollisionDistance}
+                        onChange={(event) =>
+                          setGraspCollisionDistance(event.currentTarget.value)
+                        }
+                      />
+                    </Field>
+                  </div>
+                  <div className="card-actions perception-task-actions">
+                    {modelDirty && (
+                      <StatusBadge tone="warning">有待保存修改</StatusBadge>
                     )}
-                  </tbody>
-                </table>
+                    {modelDirty && (
+                      <Button
+                        variant="outline"
+                        disabled={pending}
+                        onClick={restoreModelConfig}
+                      >
+                        恢复已保存配置
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      disabled={pending}
+                      onClick={() => perceptionRequest("apply", "model")}
+                    >
+                      {pendingPerceptionAction === "model:apply"
+                        ? "正在保存…"
+                        : "保存设置"}
+                    </Button>
+                  </div>
+                </Disclosure>
               </div>
-              {scene?.objects.map((item) => (
-                <KeyValue
-                  key={item.object_id}
-                  label={`${item.label} · ${item.object_id}`}
-                  value={`中心 ${numbers(item.pose.position_m)} m · 尺寸 ${numbers(item.size_m)} m · 候选 ${item.grasp_candidates.length}`}
+              <div className="ai-workspace">
+                <SegmentationEditor
+                  state={perception}
+                  scene={scene}
+                  busy={pending || perception?.task_state === "executing"}
+                  canCapture={Boolean(
+                    camera?.streaming && perception?.color_frame,
+                  )}
+                  onEdit={editSegmentation}
+                  onSave={(fields) =>
+                    send("/api/perception/request", {
+                      schema_version: schemaVersion,
+                      request_id: requestId(),
+                      action: "apply",
+                      ...fields,
+                    })
+                  }
+                  onReconstruct={() =>
+                    perceptionRequest("reconstruct", "model")
+                  }
                 />
-              ))}
-              {scene?.placement_regions.map((item) => (
-                <KeyValue
-                  key={item.region_id}
-                  label={`放置区 · ${item.label}`}
-                  value={`中心 ${numbers(item.pose.position_m)} m · 来源 ${item.source_object_id ?? "无"}`}
-                />
-              ))}
+              </div>
             </div>
+            {manipulation?.original_error && (
+              <p className="error" role="alert">
+                {manipulation.original_error}
+              </p>
+            )}
           </Card>
         </section>
 

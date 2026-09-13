@@ -14,14 +14,17 @@ use json_config_store::{load_or_default, save};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use robot_arm_messages::{
     AlignedDepthFrame, CameraCaptureState, CameraFrameBundle, CameraImagePlane,
-    DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo, MotionState,
-    PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary,
+    DepthCameraCalibration, DetectedInstance2D, GraspCandidate, ImageFrameInfo, ManualRegion,
+    MotionState, PerceptionAssetRequest, PerceptionAssetResponse, PerceptionInstanceSummary,
     PerceptionModelInfo, PerceptionRequest, PerceptionState, Pose3, RequestAction, RequestResult,
-    RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationPrompt, ServiceState,
-    ToolPoseFeedback, WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
+    RequestState, RobotModelInfo, SCHEMA_VERSION, SegmentationEdit, SegmentationPrompt,
+    ServiceState, ToolPoseFeedback, WorldScene, camera_frame_from_arrow, from_arrow, to_arrow,
 };
 use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligned_depth};
 use serde::{Deserialize, Serialize};
+
+mod segmentation;
+use segmentation::{SegmentationLayer, edit_segmented, empty_segmented, rebuild_segmented};
 
 #[cfg(test)]
 mod stage_tests;
@@ -97,6 +100,7 @@ struct SceneNode {
     task_sender: tokio::sync::mpsc::Sender<SceneTaskResult>,
 }
 
+#[derive(Clone)]
 struct SegmentedFrame {
     sequence: u64,
     model: String,
@@ -106,6 +110,8 @@ struct SegmentedFrame {
     instances: Vec<DetectedInstance2D>,
     placement_labels: Vec<String>,
     assets: BTreeMap<String, (String, Vec<u8>)>,
+    layers: Vec<SegmentationLayer>,
+    manual_regions: Vec<ManualRegion>,
 }
 
 enum ProcessedStage {
@@ -410,8 +416,9 @@ impl SceneNode {
         self.instance_clouds = Arc::new(vec![]);
         self.instances.clear();
         self.point_count = None;
-        self.assets
-            .retain(|key, _| key != "overlay.png" && !key.starts_with("mask-"));
+        self.assets.retain(|key, _| {
+            key != "overlay.png" && key != "segmentation-color.png" && !key.starts_with("mask-")
+        });
         self.sequence += 1;
         send(
             node,
@@ -487,6 +494,9 @@ impl SceneNode {
         }
         let http = self.http.clone();
         let config = self.config.clone();
+        let request = request.clone();
+        let active_model = self.model.clone();
+        let available_models = self.models.clone();
         let robot_model = self.robot_model.clone();
         let sequence = self.sequence + 1;
         let sender = self.task_sender.clone();
@@ -501,11 +511,63 @@ impl SceneNode {
             let result = async {
                 match action {
                     RequestAction::Refresh => {
+                        if let Some(edit) = &request.segmentation_edit
+                            && !matches!(edit, SegmentationEdit::Capture)
+                        {
+                            let mut config = config;
+                            if let Some(model) = &request.model {
+                                config.model = Some(model.clone());
+                            }
+                            if let Some(classes) = &request.classes {
+                                config.classes = classes.clone();
+                                config.prompt = SegmentationPrompt::Text;
+                            }
+                            if let Some(prompt) = &request.prompt {
+                                config.prompt = prompt.clone();
+                            }
+                            if let Some(labels) = &request.placement_labels {
+                                config.placement_labels = labels.clone();
+                            }
+                            let result = edit_segmented(
+                                http,
+                                config,
+                                segmented
+                                    .expect("validated frozen segmentation")
+                                    .as_ref()
+                                    .clone(),
+                                edit.clone(),
+                                sequence,
+                            )
+                            .await?;
+                            return Ok(ProcessedStage::Segmentation(Arc::new(result)));
+                        }
                         let frame = next_observation_frame(&mut frames, requested_at).await?;
+                        // Capture-only must not depend on inference latency or an attached arm.
+                        // Preserve the latest actual feedback observed with this frame; never read
+                        // a later robot pose when the user eventually saves their rectangles.
+                        let capture_tool = tools.borrow().clone();
                         // Pair feedback concurrently for later grasp self filtering.
                         // The segmentation result is never delayed by missing feedback.
                         let received_time = frame.received_time_ns;
-                        let mut work = Box::pin(segment_frame(http, config, frame, None, sequence));
+                        let mut work = Box::pin(async move {
+                            if matches!(request.segmentation_edit, Some(SegmentationEdit::Capture))
+                            {
+                                tokio::task::spawn_blocking(move || {
+                                    let mut input = empty_segmented(
+                                        frame,
+                                        sequence,
+                                        active_model,
+                                        available_models,
+                                    );
+                                    input.tool = capture_tool;
+                                    rebuild_segmented(input)
+                                })
+                                .await
+                                .context("冻结标注图失败")?
+                            } else {
+                                segment_frame(http, config, frame, None, sequence).await
+                            }
+                        });
                         let segmented = tokio::select! {
                             result = &mut work => result?,
                             tool = feedback_after_frame(&mut tools, received_time) => {
@@ -660,6 +722,17 @@ impl SceneNode {
                     grasp_candidate_count: object
                         .map(|object| object.grasp_candidates.len() as u32)
                         .unwrap_or_default(),
+                    segmentation_source: segmented
+                        .layers
+                        .iter()
+                        .find(|layer| {
+                            layer
+                                .instances
+                                .iter()
+                                .any(|item| item.instance_id == instance.instance_id)
+                        })
+                        .map(|layer| layer.source.clone())
+                        .unwrap_or_else(|| "manual".into()),
                 }
             })
             .collect();
@@ -828,6 +901,15 @@ impl SceneNode {
             camera_calibration: self.camera_calibration.clone(),
             depth_scale_m: self.latest_bundle.as_ref().map(|frame| frame.depth_scale_m),
             instances: self.instances.clone(),
+            manual_regions: self
+                .segmented
+                .as_ref()
+                .map(|s| s.manual_regions.clone())
+                .unwrap_or_default(),
+            segmentation_frame: self
+                .segmented
+                .as_ref()
+                .map(|s| image_frame_info(&s.frame.color)),
             point_count: self.point_count,
             last_frame_time_ns: self.last_frame_time_ns,
             last_scene_sequence: self.last_scene.as_ref().map(|scene| scene.sequence),
@@ -874,7 +956,19 @@ fn validate_stage_input(
     scene: Option<&WorldScene>,
 ) -> Result<()> {
     match request.action {
-        RequestAction::Refresh => Ok(()),
+        RequestAction::Refresh => {
+            if request
+                .segmentation_edit
+                .as_ref()
+                .is_some_and(|edit| !matches!(edit, SegmentationEdit::Capture))
+            {
+                let input = segmented.ok_or_else(|| eyre!("请先载入标注帧或运行分割"))?;
+                if request.input_sequence != Some(input.sequence) {
+                    bail!("标注帧或分割结果已改变，请使用当前结果重新编辑");
+                }
+            }
+            Ok(())
+        }
         RequestAction::Reconstruct => {
             let input = segmented.ok_or_else(|| eyre!("请先运行分割"))?;
             if request.input_sequence != Some(input.sequence) {
@@ -940,30 +1034,21 @@ async fn segment_frame(
         config.placement_labels.clone()
     };
     tokio::task::spawn_blocking(move || {
-        let overlay = segmentation_debug_image(&color, &instances)?;
-        let mut assets = BTreeMap::from([
-            ("color.png".into(), ("image/png".into(), color_png(&color)?)),
-            (
-                "overlay.png".into(),
-                ("image/png".into(), color_png(&overlay)?),
-            ),
-        ]);
-        for (index, instance) in instances.iter().enumerate() {
-            assets.insert(
-                format!("mask-{index}.png"),
-                ("image/png".into(), instance.mask_png.clone()),
-            );
-        }
-        Ok(SegmentedFrame {
-            sequence,
-            model,
-            models: catalog.models,
-            frame,
-            tool,
+        let instances = instances
+            .into_iter()
+            .map(|mut instance| {
+                instance.instance_id = format!("model:{model}:{}", instance.instance_id);
+                instance
+            })
+            .collect();
+        let mut output = empty_segmented(frame, sequence, model.clone(), catalog.models);
+        output.tool = tool;
+        output.layers.push(SegmentationLayer {
+            source: model,
             instances,
             placement_labels,
-            assets,
-        })
+        });
+        rebuild_segmented(output)
     })
     .await
     .context("分割图像编码任务异常结束")?

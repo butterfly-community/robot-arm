@@ -158,25 +158,33 @@ test("perception supports empty roles, rejects stale selections and stops after 
   await expect(
     page.getByRole("alert").filter({ hasText: "测试规划错误" }),
   ).toBeVisible();
-  await page.getByText("抓放详细配置", { exact: true }).click();
+  await page.getByText("抓放场景", { exact: true }).click();
+  await page
+    .getByText("提示词分割", { exact: true })
+    .locator("xpath=ancestor::button[1]")
+    .click();
   const roles = page.getByLabel("放置区域角色", { exact: true });
   await roles.fill("");
   await expect(roles).toHaveValue("");
-  await page.getByRole("button", { name: "保存模型配置", exact: true }).click();
+  await page
+    .getByRole("button", { name: "保存提示词配置", exact: true })
+    .click();
   await expect.poll(() => commands.length).toBe(1);
   expect(commands[0].body.placement_labels).toEqual([]);
-  await page.getByRole("button", { name: "执行抓放", exact: true }).click();
+  await page.getByRole("button", { name: "启动", exact: true }).click();
   await expect.poll(() => commands.length).toBe(2);
   expect(commands[1].path).toBe("/api/motion/mode");
   await expect(
-    page.getByText("Error: 模式切换失败", { exact: true }),
+    page
+      .getByLabel("抓放进度", { exact: true })
+      .getByText("Error: 模式切换失败", { exact: true }),
   ).toBeVisible();
   await page.getByLabel("抓取目标", { exact: true }).selectOption("object-a");
   snapshot.values.world_scene.objects[0].object_id = "object-b";
   socket!.send(JSON.stringify(snapshot));
   await expect(page.getByLabel("抓取目标", { exact: true })).toHaveValue("");
   await expect(
-    page.getByRole("button", { name: "执行抓放", exact: true }),
+    page.getByRole("button", { name: "启动", exact: true }),
   ).toBeDisabled();
   expect(commands).toHaveLength(2);
   expect(errors).toEqual([]);

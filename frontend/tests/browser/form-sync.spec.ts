@@ -160,7 +160,7 @@ test("a missing depth preview loads after the snapshot button, without running i
   expect(actions).toEqual(["snapshot"]);
 });
 
-test("model edits are saved before running; failure keeps edits and never runs", async ({
+test("AI model default saves independently; failure preserves edits and never runs", async ({
   page,
   request,
 }) => {
@@ -194,29 +194,29 @@ test("model edits are saved before running; failure keeps edits and never runs",
     return route.fulfill({ json: { original_error: null } });
   });
   await page.goto("/perception/");
-  await page.getByText("抓放详细配置", { exact: true }).click();
-  const model = page.getByLabel("识别与分割模型", { exact: true });
+  await page.getByText("高级设置", { exact: true }).click();
+  const model = page.getByLabel("AI 默认分割模型", { exact: true });
   await model.selectOption("auto-model");
   await expect(page.getByText("有待保存修改", { exact: true })).toBeVisible();
-  await page
-    .getByRole("button", { name: "保存并运行分割", exact: true })
-    .click();
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(page.locator('p.error[role="alert"]')).toContainText(
     "测试保存失败",
   );
   expect(actions).toEqual(["apply"]);
   await expect(model).toHaveValue("auto-model");
   fail = false;
-  await page
-    .getByRole("button", { name: "保存并运行分割", exact: true })
-    .click();
-  await expect.poll(() => actions.length).toBe(3);
-  expect(actions).toEqual(["apply", "apply", "refresh"]);
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect.poll(() => actions.length).toBe(2);
+  expect(actions).toEqual(["apply", "apply"]);
   await expect(page.getByText("有待保存修改", { exact: true })).toHaveCount(0);
   state.model = "text-model";
   state.classes = ["updated remotely"];
   f.publish();
   await expect(model).toHaveValue("text-model");
+  await page
+    .getByText("提示词分割", { exact: true })
+    .locator("xpath=ancestor::button[1]")
+    .click();
   await expect(
     page.getByLabel("识别与分割提示词", { exact: true }),
   ).toHaveValue("updated remotely");

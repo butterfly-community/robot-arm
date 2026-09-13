@@ -118,7 +118,11 @@ test("saved calibration survives reload and requires explicit recalibration", as
   await expect(saved).toContainText("3.54 / 4.00");
   await restart.click();
   Object.assign(session, {
-    phase: "awaiting_confirmation",
+    phase: "moving",
+    current_target_index: null,
+    current_target_key: "work",
+    target_count: 2,
+    observations: [{}, {}],
     solved_result: {
       ...result,
       camera_in_base: {
@@ -127,6 +131,14 @@ test("saved calibration survives reload and requires explicit recalibration", as
       },
     },
   });
+  publish();
+  await expect(
+    page.getByText("2 / 2 · 2 个样本", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "确认并应用标定", exact: true }),
+  ).toBeDisabled();
+  session.phase = "awaiting_confirmation";
   publish();
   await expect(saved).toContainText("0.300000 / 0.050000 / 0.790000");
   await page

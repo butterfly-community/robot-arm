@@ -16,6 +16,8 @@
   --blue: #78a9ff;
   --radius: 9px;
   --radius-control: 7px;
+  --space-control: 12px;
+  --space-section: 20px;
   --text-body: 14px;
   --text-nav: 13px;
   --text-page-title: clamp(26px, 2.6vw, 32px);
@@ -446,6 +448,20 @@ nav a > span:first-child {
 .card-content-inner > :last-child {
   margin-bottom: 0;
 }
+/* Block-flow containers need spacing around framed sections. Grid/flex stacks
+   own their gap instead: do not add margins to every Disclosure globally. */
+:where(.card-content-inner, .disclosure-content-inner)
+  > :is(.disclosure, details) {
+  margin-block: var(--space-section);
+}
+:where(.card-content-inner, .disclosure-content-inner)
+  > :is(.disclosure, details):first-child {
+  margin-top: 0;
+}
+:where(.card-content-inner, .disclosure-content-inner)
+  > :is(.disclosure, details):last-child {
+  margin-bottom: 0;
+}
 .card-title {
   min-width: 0;
   display: flex;
@@ -819,7 +835,10 @@ datalist option {
 
 .range-stack {
   display: grid;
-  gap: 10px;
+  gap: var(--space-control);
+}
+.range-stack + .range-stack {
+  margin-top: var(--space-control);
 }
 .range-control {
   min-height: 50px;
@@ -906,7 +925,7 @@ input[type="range"] {
   display: grid;
   grid-template-columns: repeat(3, 72px);
   grid-template-rows: repeat(3, 64px);
-  gap: 6px;
+  gap: var(--space-control);
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 50%;
@@ -1370,10 +1389,61 @@ input[type="range"] {
 .instruction-task .button {
   white-space: nowrap;
 }
+.ai-workspace {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.ai-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 24px;
+}
+.annotation-title {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.annotation-title:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -2px;
+}
+.segmentation-detail {
+  width: min(36rem, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  margin: auto;
+  padding: var(--space-section);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-control);
+  color: var(--foreground);
+  background: var(--surface);
+}
+.segmentation-detail::backdrop {
+  background: #0009;
+}
+.segmentation-detail h3 {
+  margin: 0 0 var(--space-section);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+  .ai-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .ai-task-panel {
   display: grid;
   gap: 18px;
-  margin-bottom: 20px;
   padding: 20px;
   border: 1px solid color-mix(in srgb, var(--cyan) 55%, var(--line));
   border-radius: var(--radius-control);
@@ -1467,15 +1537,6 @@ input[type="range"] {
 .perception-model-settings .field {
   margin-bottom: 0;
 }
-.perception-instance-table {
-  margin-top: 18px;
-}
-.perception-scene-results {
-  min-width: 0;
-}
-.perception-camera-source {
-  order: 1;
-}
 .camera-driver-extension > p {
   margin: 0;
   border-top: 1px solid var(--line);
@@ -1514,14 +1575,8 @@ input[type="range"] {
   font-weight: 550;
   font-variant-numeric: tabular-nums;
 }
-.perception-task-card {
-  order: 2;
-}
-.perception-camera-calibration {
-  order: 3;
-}
-.perception-camera-parameters {
-  order: 4;
+.calibration-parameters {
+  margin-top: 20px;
 }
 
 @media (max-width: 760px) {
@@ -1860,7 +1915,7 @@ input[type="range"] {
 }
 .switch-stack {
   display: grid;
-  gap: 7px;
+  gap: var(--space-control);
 }
 .switch-row {
   min-height: 44px;

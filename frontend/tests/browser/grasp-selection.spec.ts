@@ -54,7 +54,7 @@ test("accepted task selection follows updates without losing a later human edit"
     route.request().method() === "POST" ? route.abort() : route.fallback(),
   );
   await page.goto("/perception/");
-  await page.getByText("抓放详细配置", { exact: true }).click();
+  await page.getByText("抓放场景", { exact: true }).click();
   const target = page.getByLabel("抓取目标", { exact: true });
   const destination = page.getByLabel("放置区域", { exact: true });
   await expect(target).toHaveValue("old-box");

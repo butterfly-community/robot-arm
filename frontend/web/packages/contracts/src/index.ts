@@ -365,7 +365,20 @@ export interface PerceptionInstanceSummary {
   position_m?: [number, number, number] | null;
   size_m?: [number, number, number] | null;
   grasp_candidate_count: number;
+  segmentation_source?: string;
 }
+
+export interface ManualRegion {
+  id: string;
+  label: string;
+  bounding_box_xyxy: [number, number, number, number];
+}
+
+export type SegmentationEdit =
+  | { kind: "capture" }
+  | { kind: "model" }
+  | { kind: "manual"; regions: ManualRegion[] }
+  | { kind: "remove"; instance_ids: string[] };
 
 export type RequestState =
   "idle" | "planning" | "executing" | "succeeded" | "failed" | "cancelled";
@@ -392,6 +405,8 @@ export interface PerceptionState {
   camera_calibration?: DepthCameraCalibration | null;
   depth_scale_m?: number | null;
   instances: PerceptionInstanceSummary[];
+  manual_regions?: ManualRegion[];
+  segmentation_frame?: ImageFrameInfo | null;
   point_count?: number | null;
   last_frame_time_ns?: number | null;
   last_scene_sequence?: number | null;

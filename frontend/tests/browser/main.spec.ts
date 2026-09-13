@@ -509,7 +509,7 @@ test("perception page uses the simulation camera through the canonical path", as
     });
     await page.goto("/perception/");
     const manualSettings = page
-      .getByText("抓放详细配置", { exact: true })
+      .getByText("高级设置", { exact: true })
       .locator(
         "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' disclosure ')][1]",
       );
@@ -576,9 +576,24 @@ test("perception page uses the simulation camera through the canonical path", as
     await page.waitForTimeout(1_200);
     await expect(depthPreview).toHaveAttribute("src", depthSource!);
     const runPerception = page.getByRole("button", {
-      name: "运行分割",
+      name: "运行提示词分割",
     });
     const runPerceptionOnce = async () => {
+      const captureDone = page.waitForResponse(
+        (r) =>
+          r.url().endsWith("/api/perception/request") &&
+          r.request().postDataJSON()?.segmentation_edit?.kind === "capture",
+        { timeout: 60000 },
+      );
+      await page
+        .getByRole("button", { name: "载入新分割帧", exact: true })
+        .click();
+      expect((await (await captureDone).json()).original_error).toBeNull();
+      const disclosure = page
+        .getByText("提示词分割", { exact: true })
+        .locator("xpath=ancestor::button[1]");
+      if ((await disclosure.getAttribute("aria-expanded")) !== "true")
+        await disclosure.click();
       const completed = page.waitForResponse(
         (response) =>
           response.url().endsWith("/api/perception/request") &&
@@ -595,7 +610,6 @@ test("perception page uses the simulation camera through the canonical path", as
       await page.getByRole("button", { name: "三维定位", exact: true }).click();
       expect((await (await positioned).json()).original_error).toBeNull();
     };
-    await expect(runPerception).toBeEnabled();
     await runPerceptionOnce();
     await expect
       .poll(async () => {
@@ -613,7 +627,6 @@ test("perception page uses the simulation camera through the canonical path", as
       });
     await camera.selectOption("simulation:pick-place-scene");
     await page.getByRole("button", { name: "保存并启用" }).click();
-    await expect(runPerception).toBeEnabled();
     await runPerceptionOnce();
     await expect(
       page.getByText("已配置", { exact: true }).first(),
@@ -873,101 +886,7 @@ test("motion control modes use separate buttons", async ({ page }) => {
   expect(boxes[2].left - boxes[1].right).toBeGreaterThanOrEqual(10);
 });
 
-test("perception layout groups camera workflow and structured results", async ({
-  page,
-}) => {
-  await page.goto("/perception/");
-  const card = (title: string) =>
-    page.locator("section.card").filter({
-      has: page.getByText(title, { exact: true }),
-    });
-  const camera = await card("相机来源与配置").boundingBox();
-  const task = await card("抓放场景").boundingBox();
-  const calibration = await card("相机外参标定").boundingBox();
-  const parameters = await card("相机内参与外参").boundingBox();
-  expect(camera).not.toBeNull();
-  expect(task).not.toBeNull();
-  expect(calibration).not.toBeNull();
-  expect(parameters).not.toBeNull();
-  expect(camera!.x).toBeLessThan(task!.x);
-  expect(Math.abs(camera!.y - task!.y)).toBeLessThan(2);
-  expect(calibration!.x).toBeLessThan(parameters!.x);
-  expect(Math.abs(calibration!.y - parameters!.y)).toBeLessThan(2);
-  await expect(
-    card("相机外参标定").getByRole("button", { name: "开始自动标定" }),
-  ).toBeVisible();
-  await expect(
-    card("相机外参标定").getByRole("button", { name: "记录当前姿态样本" }),
-  ).toHaveCount(0);
-  await expect(
-    card("相机外参标定").getByRole("button", { name: "用当前样本求解" }),
-  ).toHaveCount(0);
-
-  await expect(card("识别与分割模型")).toHaveCount(0);
-  const manualSettings = page
-    .getByText("抓放详细配置", { exact: true })
-    .locator(
-      "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' disclosure ')][1]",
-    );
-  await expect(manualSettings.locator(".disclosure-toggle")).toHaveAttribute(
-    "aria-expanded",
-    "false",
-  );
-  await manualSettings.locator(".disclosure-toggle").click();
-  const modelSelect = card("抓放场景").locator(
-    'select[aria-label="识别与分割模型"]',
-  );
-  await expect(modelSelect).toHaveValue(/.+/);
-  await expect(modelSelect.locator("option")).toHaveCount(2);
-  // Radix mounts the body while opening; measure after its layout settles.
-  await card("抓放场景")
-    .getByRole("button", { name: "保存模型配置" })
-    .scrollIntoViewIfNeeded();
-  const savePromptButton = await card("抓放场景")
-    .getByRole("button", { name: "保存模型配置" })
-    .boundingBox();
-  const runPerceptionButton = await card("抓放场景")
-    .getByRole("button", { name: "三维定位", exact: true })
-    .boundingBox();
-  const executeButton = await card("抓放场景")
-    .getByRole("button", { name: "执行抓放", exact: true })
-    .boundingBox();
-  expect(savePromptButton).not.toBeNull();
-  expect(runPerceptionButton).not.toBeNull();
-  expect(executeButton).not.toBeNull();
-  expect(
-    runPerceptionButton!.x - (savePromptButton!.x + savePromptButton!.width),
-  ).toBeGreaterThanOrEqual(10);
-  expect(
-    Math.abs(
-      runPerceptionButton!.x +
-        runPerceptionButton!.width -
-        (executeButton!.x + executeButton!.width),
-    ),
-  ).toBeLessThan(2);
-  const overlayCard = card("识别与分割叠加图");
-  const overlayImage = overlayCard.getByAltText("识别与分割叠加图");
-  if (await overlayImage.count()) {
-    await expect(overlayImage).toHaveAttribute("loading", "eager");
-    await expect
-      .poll(() => overlayImage.evaluate((image) => image.naturalWidth))
-      .toBeGreaterThan(0);
-  } else {
-    await expect(overlayCard.getByText("等待模型输出")).toBeVisible();
-  }
-  await expect(
-    card("识别与分割叠加图").locator("table.data-table"),
-  ).toHaveCount(0);
-  await expect(card("结构化三维场景").locator("table.data-table")).toHaveCount(
-    1,
-  );
-  const overlay = await card("识别与分割叠加图").boundingBox();
-  const structuredScene = await card("结构化三维场景").boundingBox();
-  expect(overlay).not.toBeNull();
-  expect(structuredScene).not.toBeNull();
-  expect(overlay!.x).toBeLessThan(structuredScene!.x);
-  expect(Math.abs(overlay!.y - structuredScene!.y)).toBeLessThan(2);
-});
+// Perception layout is covered at desktop/mobile sizes in ai-layout.spec.ts.
 
 test("virtual feedback is selectable, draggable, and visible across pages", async ({
   page,

@@ -825,6 +825,26 @@ pub struct PerceptionInstanceSummary {
     pub position_m: Option<[f64; 3]>,
     pub size_m: Option<[f64; 3]>,
     pub grasp_candidate_count: u32,
+    /// Model ID or "manual"; manual confidence is not a model probability.
+    #[serde(default)]
+    pub segmentation_source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManualRegion {
+    pub id: String,
+    pub label: String,
+    /// Pixel coordinates in the frozen segmentation RGB frame, not live video.
+    pub bounding_box_xyxy: [f64; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SegmentationEdit {
+    Capture,
+    Model,
+    Manual { regions: Vec<ManualRegion> },
+    Remove { instance_ids: Vec<String> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -867,6 +887,10 @@ pub struct PerceptionState {
     pub depth_scale_m: Option<f64>,
     #[serde(default)]
     pub instances: Vec<PerceptionInstanceSummary>,
+    #[serde(default)]
+    pub manual_regions: Vec<ManualRegion>,
+    #[serde(default)]
+    pub segmentation_frame: Option<ImageFrameInfo>,
     pub point_count: Option<u64>,
     pub last_frame_time_ns: Option<i64>,
     pub last_scene_sequence: Option<u64>,
@@ -906,6 +930,9 @@ pub struct PerceptionRequest {
     /// Exact upstream result consumed by reconstruct / generate_grasps.
     #[serde(default)]
     pub input_sequence: Option<u64>,
+    /// Compose results on one frozen RGB-D frame; absent means normal fresh inference.
+    #[serde(default)]
+    pub segmentation_edit: Option<SegmentationEdit>,
     #[serde(default)]
     pub object_id: Option<String>,
     #[serde(default)]
@@ -2117,6 +2144,7 @@ mod tests {
             request_id: "reset-model-1".into(),
             action: RequestAction::Reset,
             input_sequence: None,
+            segmentation_edit: None,
             object_id: None,
             model: None,
             classes: None,

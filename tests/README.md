@@ -11,11 +11,36 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`segmentation-composition.spec.ts` 在 1440/390 像素宽度验证手动框选、中文命名、反向拖动的
+1920 像素坐标换算、保存失败保留草稿、三种来源单独/混用、同模型替换、独立清除、来源型号显示、
+刷新回显与删除。三个折叠状态独立保存；其他模型运行不丢失手动草稿，AI 默认模型不控制分割区可用性。
+结果使用原始彩色图和框线，不染色或高亮；测试实际点击三种来源的图上标题、详情置信度、Escape 关闭、删除后关闭旧详情，
+并核对手动编辑图不显示模型标注。覆盖桌面及窄屏，框坐标仍对应原图而非 CSS 缩放尺寸。
+保存回显改变 JSON 字段顺序/浮点尾数时，成功确认仍释放手动草稿并启用三维定位；失败则保留草稿。
+置灰原因在按钮旁明确显示，不再只有无说明的禁用状态。
+三种分割都在顶部 AI 栏目内；“抓放场景”单独折叠，有两个选择框、启动和同请求实时进度。
+`pick-place-progress.spec.ts` 覆盖候选等待、模式切换、规划、执行、刷新后继续显示和失败，
+并核对桌面/窄屏无横向溢出。它拦截写请求，只证明状态展示，不作为实际抓放成绩。
+HTTP 202 与首条运动反馈之间仍计时并禁用重复启动；仅匹配请求的终态结束等待，不使用旧任务状态。
+`ai-layout.spec.ts` 核对相机/标定第一行、AI 双栏第二行，深度/内外参/结果折叠项的归属，
+以及桌面和窄屏的宽度、间距、展开和刷新保持。旧的独立结果卡片不能重新出现。
+`segmentation-models.spec.ts` 从按钮验证启动顺序及新场景序号，所有运动写入均拦截；
+`start-pick-place.test.ts` 补充已有候选复用、候选失败、模式失败及失效选择的测试。
+所有写请求和相机视频均拦截，不运行真实模型或机械臂；与真实网页链路验收分开报告。
+运行：`pnpm --dir frontend exec playwright test tests/browser/segmentation-composition.spec.ts`。
+Rust `scene-node` 的 `stage_tests` 补充同帧 RGB、掩膜像素、1280/1920 尺寸、重复标注编号、
+过期序号和三种来源经同一深度重建的回归，在 scene 构建镜像运行 `cargo test -p scene-node`。
+
 `grasp-selection.spec.ts` 核对任务已接收的实例选择随快照更新，但不覆盖用户随后编辑的放置选择。
 所有 POST 被拦截，不发实际抓放；可单独运行 `pnpm --dir frontend exec playwright test tests/browser/grasp-selection.spec.ts`。
 
 `node --test tests/tools/check-ui-css.test.mjs` 检查共享 CSS 不引用未定义的旧变量；
 属于源码检查，不依赖服务。实际控件间距另由下面的浏览器回归验证。
+
+`layout-spacing.spec.ts` 从全部五个真实网页展开/收起栏目，在桌面、平板和窄屏测量实际边框。
+拦截业务写请求，不改变硬件或配置；覆盖“错误行底线紧贴深度折叠框”和关节/夹爪框等回归。
+此检查包含正常信息行到独立框的距离，不只检查按钮和页面溢出。共享块分组间距为 20 px、
+控制框组为 12 px，连续表格行不额外插入分组空白。
 
 `form-sync.spec.ts` 覆盖网页编辑值与已生效配置的区分、保存失败不继续运行、保存后的实时回显、
 未保存编辑保留（包括控制绑定），以及切换相机 profile 后低频上送保持、首次深度预览更新。
@@ -35,8 +60,8 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 只验证分割模型配置切换可执行
 `pnpm --dir frontend exec playwright test tests/browser/segmentation-models.spec.ts`。
-该测试截获全部 POST，验证自动模式隐藏提示词输入/视觉状态、切换不自动运行、保存不发送隐藏
-配置、切回保留提示词以及页面无横向溢出；不操作真机。
+该测试截获全部 POST，验证自动/提示词两个入口始终可用、AI 默认模型不隐藏它们、视觉示例保存
+不自动运行模型，以及启动按新候选响应序号提交抓放；不操作真机。
 
 ## 正式软件调用链
 

@@ -175,7 +175,7 @@ async fn reconstruction_has_no_grasps_and_generation_targets_only_one_instance()
         &config,
         "fixture-gripper",
         None,
-        "frame-0",
+        "model:auto:frame-0",
         &mut scene,
         &clouds,
     )
@@ -214,4 +214,199 @@ async fn stages_reject_stale_or_unselected_inputs_without_recomputing_upstream()
     assert!(validate_stage_input(&request, Some(&input), None).is_err());
     assert_eq!(calls.lock().unwrap().len(), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn manual_and_both_models_compose_on_one_frame_without_duplicate_layers() {
+    let (url, calls, server) = compute_fixture().await;
+    let config = SceneConfig {
+        compute_service_url: url,
+        model: Some("auto".into()),
+        ..Default::default()
+    };
+    let empty = rebuild_segmented(empty_segmented(frame(), 20, "auto".into(), vec![])).unwrap();
+    assert!(empty.instances.is_empty());
+    assert!(calls.lock().unwrap().is_empty());
+    let manual = ManualRegion {
+        id: "region-1".into(),
+        label: "自定义放置区".into(),
+        bounding_box_xyxy: [2., 3., 6., 8.],
+    };
+    let edit = SegmentationEdit::Manual {
+        regions: vec![manual.clone()],
+    };
+    let mut result = edit_segmented(reqwest::Client::new(), config.clone(), empty, edit, 21)
+        .await
+        .unwrap();
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "manual rectangles must not call compute"
+    );
+    assert_eq!(result.instances[0].instance_id, "manual:region-1");
+    assert_eq!(result.instances[0].label, "自定义放置区");
+    let mask = image::load_from_memory(&result.instances[0].mask_png)
+        .unwrap()
+        .into_luma8();
+    assert_eq!(mask.pixels().filter(|p| p[0] == 255).count(), 20);
+    assert_eq!(mask.get_pixel(2, 3)[0], 255);
+    assert_eq!(mask.get_pixel(6, 3)[0], 0);
+    let frozen_color = result.assets["segmentation-color.png"].1.clone();
+    for (sequence, model) in [(22, "auto"), (23, "text"), (24, "auto")] {
+        let config = SceneConfig {
+            model: Some(model.into()),
+            classes: vec!["frame".into()],
+            ..config.clone()
+        };
+        result = edit_segmented(
+            reqwest::Client::new(),
+            config,
+            result,
+            SegmentationEdit::Model,
+            sequence,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.frame.sequence, 7);
+        assert_eq!(result.frame.received_time_ns, 100);
+        assert_eq!(result.assets["segmentation-color.png"].1, frozen_color);
+        assert_eq!(result.manual_regions, vec![manual.clone()]);
+    }
+    assert_eq!(result.instances.len(), 3);
+    assert_eq!(result.layers.len(), 2);
+    // The combined masks use the normal geometry path, not a manual-only scene.
+    let mut calibrated = result.clone();
+    calibrated.frame.aligned_depth = CameraImagePlane {
+        width: 16,
+        height: 16,
+        stride_bytes: 32,
+        pixel_format: "z16le".into(),
+        frame_id: "optical".into(),
+        data: [232, 3].repeat(16 * 16),
+    };
+    calibrated.frame.calibration = Some(DepthCameraCalibration {
+        schema_version: SCHEMA_VERSION,
+        sequence: 7,
+        source_time_ns: 100,
+        source_id: "fixture".into(),
+        parent_frame_id: "base".into(),
+        frame_id: "optical".into(),
+        translation_m: [0.; 3],
+        orientation_xyzw: [0., 0., 0., 1.],
+        width: 16,
+        height: 16,
+        distortion_model: "none".into(),
+        distortion: vec![],
+        camera_matrix: [20., 0., 8., 0., 20., 8., 0., 0., 1.],
+        projection_matrix: [20., 0., 8., 0., 0., 20., 8., 0., 0., 0., 1., 0.],
+    });
+    let ProcessedStage::Reconstruction(scene, clouds) = reconstruct_frame(&calibrated, 25).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(scene.objects.len(), 3);
+    assert_eq!(clouds.len(), 3);
+    assert_eq!(scene.sample_time_ns, 100);
+    assert!(
+        scene
+            .objects
+            .iter()
+            .all(|object| object.grasp_candidates.is_empty())
+    );
+    assert!(
+        scene
+            .placement_regions
+            .iter()
+            .any(|region| region.source_object_id.as_deref() == Some("manual:region-1"))
+    );
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls
+            .iter()
+            .all(|(_, r)| r["image_base64"] == calls[0].1["image_base64"])
+    );
+    assert_eq!(calls[0].1["classes"], json!([]));
+    assert_eq!(calls[1].1["classes"], json!(["frame"]));
+    assert_eq!(
+        result
+            .instances
+            .iter()
+            .map(|i| &i.instance_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    let request: PerceptionRequest = serde_json::from_value(json!({ "schema_version": 3,
+        "request_id": "stale", "action": "refresh", "input_sequence": 23,
+        "segmentation_edit": { "kind": "manual", "regions": [] } }))
+    .unwrap();
+    assert!(validate_stage_input(&request, Some(&result), None).is_err());
+    let result = edit_segmented(
+        reqwest::Client::new(),
+        config.clone(),
+        result,
+        SegmentationEdit::Remove {
+            instance_ids: vec!["model:text:frame-0".into()],
+        },
+        25,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    let result = edit_segmented(
+        reqwest::Client::new(),
+        config,
+        result,
+        SegmentationEdit::Manual { regions: vec![] },
+        26,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    assert!(!result.assets.contains_key("mask-1.png"));
+    assert_eq!(result.instances[0].instance_id, "model:auto:frame-0");
+    server.abort();
+}
+
+#[test]
+fn manual_region_validation_is_transactional_and_resolution_independent() {
+    for [width, height] in [[1280, 720], [1920, 1080]] {
+        let mut source = frame();
+        source.color.width = width;
+        source.color.height = height;
+        source.color.stride_bytes = width * 3;
+        source.color.data = vec![0; (width * height * 3) as usize];
+        let mut input = empty_segmented(source, 1, String::new(), vec![]);
+        input.manual_regions = vec![ManualRegion {
+            id: "edge".into(),
+            label: "边缘".into(),
+            bounding_box_xyxy: [
+                (width - 2) as f64,
+                (height - 3) as f64,
+                width as f64,
+                height as f64,
+            ],
+        }];
+        let result = rebuild_segmented(input.clone()).unwrap();
+        let mask = image::load_from_memory(&result.instances[0].mask_png)
+            .unwrap()
+            .into_luma8();
+        assert_eq!(mask.dimensions(), (width, height));
+        assert_eq!(mask.pixels().filter(|p| p[0] == 255).count(), 6);
+        for bounds in [
+            [-1., 0., 2., 2.],
+            [0., 0., width as f64 + 1., 1.],
+            [2., 2., 1., 3.],
+            [f64::NAN, 0., 2., 2.],
+        ] {
+            let mut invalid = input.clone();
+            invalid.manual_regions[0].bounding_box_xyxy = bounds;
+            assert!(rebuild_segmented(invalid).is_err());
+        }
+        let mut invalid = input.clone();
+        invalid.manual_regions[0].label = " ".into();
+        assert!(rebuild_segmented(invalid).is_err());
+        input.manual_regions.push(input.manual_regions[0].clone());
+        assert!(rebuild_segmented(input).is_err());
+    }
 }
