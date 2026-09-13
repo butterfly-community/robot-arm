@@ -476,13 +476,9 @@ impl StarArmExecution {
     }
 
     fn connect(&mut self, path: String) -> Result<(), String> {
-        self.cancel_parameter_write();
-        self.parameter_scan = None;
-        self.transport.parameter_reading = false;
-        self.transport.arm_telemetry = None;
-        self.bus = None;
-        self.last_feedback_poll = None;
-        self.transport.connected = false;
+        // Opening a transport only reads feedback. A regulator left over from
+        // the lost connection must not replay the previous motion command.
+        self.disconnect();
         self.transport.selected_endpoint = Some(path.clone());
         match StarArmBus::open(&path) {
             Ok((bus, parameters, state, telemetry)) => {
@@ -1291,6 +1287,9 @@ mod tests {
         let before = execution.state.clone();
         execution.transport.connected = true;
         execution.transport.selected_endpoint = Some("/path/that/does/not/exist".into());
+        execution.gripper_feedback.request(600, 30.0);
+        execution.gripper_feedback.request(0, 30.0);
+        assert!(execution.gripper_feedback.regulated_power_mw().is_some());
         execution.reopen_after_io_error("operation timed out".into());
 
         assert!(!execution.transport.connected);
@@ -1304,6 +1303,8 @@ mod tests {
         assert!(error.contains("重新打开同一串口失败"));
         assert_eq!(execution.state, before);
         assert!(execution.transport.last_command.is_none());
+        assert!(execution.gripper_feedback.regulated_power_mw().is_none());
+        assert!(!execution.gripper_feedback.observe(100, 30.0, now_ns()));
     }
 
     #[test]

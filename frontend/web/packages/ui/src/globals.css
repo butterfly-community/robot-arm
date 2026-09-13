@@ -892,6 +892,10 @@ input[type="range"] {
   font-size: var(--text-control);
 }
 
+.connection-alert {
+  margin-bottom: 16px;
+}
+
 .pose-viewer,
 .robot-viewer {
   position: relative;

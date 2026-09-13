@@ -17,6 +17,7 @@ nodes:
       request: web-gateway-node/camera_request
       calibration_request: web-gateway-node/calibration_request
       calibration_mode_result: stararm-102-motion-node/mode_request_result
+      execution_transport: stararm-102-execution-node/transport_state
       asset_request: web-gateway-node/camera_asset_request
       snapshot: web-gateway-node/camera_snapshot
       motion_state:

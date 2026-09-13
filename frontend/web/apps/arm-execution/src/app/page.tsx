@@ -164,6 +164,14 @@ export default function Page() {
 
   const connected = Boolean(transport.connected);
   const hardwareSelected = transport.selected_endpoint != null;
+  const connectionError =
+    !connected && hardwareSelected
+      ? String(transport.last_error ?? "无法取得新的电机反馈")
+      : undefined;
+  const requestError =
+    error && (!connectionError || !error.includes(connectionError))
+      ? error
+      : undefined;
   const parameterColumns = Array.from(
     new Map(
       parameters.map((item) => [
@@ -206,10 +214,25 @@ export default function Page() {
       title="机械臂执行"
       description="三维反馈、最后命令、串口状态和舵机参数形成同一高密度执行台；原始连接状态与消息只在排障区展开。"
     >
-      {error && (
+      {requestError && (
         <p className="error" role="alert">
-          {error}
+          {requestError}
         </p>
+      )}
+      {connectionError && (
+        <div
+          className="error connection-alert"
+          role="alert"
+          aria-label="机械臂连接异常"
+        >
+          <strong>
+            机械臂连接已断开 · {String(transport.selected_endpoint)}
+          </strong>
+          <p>{connectionError}</p>
+          <p>
+            设备恢复后，请在下方“执行连接”栏目点击“连接真机”。连接不会重新执行之前的运动任务。
+          </p>
+        </div>
       )}
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">

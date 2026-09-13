@@ -208,6 +208,17 @@ function CalibrationResultValues({ result }: { result: CalibrationResult }) {
 export default function Page() {
   const { snapshot, error, setError, connection } = useGateway("perception");
   const values = snapshot?.values ?? {};
+  const transport = values.transport_state as
+    | {
+        connected: boolean;
+        selected_endpoint?: string | null;
+        last_error?: string | null;
+      }
+    | undefined;
+  const executionDisconnected =
+    transport &&
+    !transport.connected &&
+    (transport.selected_endpoint != null || transport.last_error != null);
   const perception = values.perception_state as unknown as
     PerceptionState | undefined;
   const camera = values.camera_state as unknown as
@@ -215,6 +226,15 @@ export default function Page() {
   const scene = values.world_scene as unknown as WorldScene | undefined;
   const calibration = values.calibration_state as unknown as
     CalibrationSessionState | undefined;
+  const calibrationFailure =
+    calibration?.phase === "failed" ? calibration.original_error : undefined;
+  const displayedFailure = executionDisconnected
+    ? transport.last_error
+    : calibrationFailure;
+  const requestError =
+    error && (!displayedFailure || !error.includes(displayedFailure))
+      ? error
+      : undefined;
   const manipulation = values.manipulation_state as unknown as
     ManipulationTaskState | undefined;
   const model = values.robot_model_info as unknown as
@@ -734,11 +754,31 @@ export default function Page() {
       title="场景感知"
       description="深度相机、提示词识别与分割、深度、三维场景和标定集中在同一页面；结构化结果可交给下游动作使用。"
     >
-      {error && (
+      {requestError && (
         <p className="error" role="alert">
-          {error}
+          {requestError}
         </p>
       )}
+      {executionDisconnected ? (
+        <div
+          className="error connection-alert"
+          role="alert"
+          aria-label="机械臂连接异常"
+        >
+          <strong>
+            机械臂连接已断开 · {transport.selected_endpoint ?? "执行连接"}
+          </strong>
+          <p>{transport.last_error ?? "无法取得新的电机反馈及 TCP"}</p>
+          <p>
+            请到<a href="/arm-execution/">机械臂执行页</a>
+            重新连接，再重新开始标定。上次保存的标定仍然保留；页面实时连接正常不代表串口正常。
+          </p>
+        </div>
+      ) : calibrationFailure ? (
+        <p className="error connection-alert" role="alert">
+          本轮标定失败：{calibrationFailure}
+        </p>
+      ) : null}
       <div className="dashboard-grid">
         <div className="span-12 metric-grid">
           <Metric

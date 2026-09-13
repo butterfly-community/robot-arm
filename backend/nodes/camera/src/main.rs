@@ -20,9 +20,9 @@ use robot_arm_messages::{
     CalibrationAction, CalibrationObservation, CalibrationPhase, CalibrationRequest,
     CalibrationResult, CalibrationSessionState, CameraCaptureState, CameraDriverParameterValue,
     CameraFrameBundle, CameraRequest, CameraSourceConfiguration, CameraSourceInfo,
-    CameraStreamKind, ControlMode, DepthCameraCalibration, JointPosition, MotionRequest,
-    MotionState, NamedMotionTarget, PerceptionAssetRequest, PerceptionAssetResponse, RequestAction,
-    RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
+    CameraStreamKind, ControlMode, DepthCameraCalibration, ExecutionTransportState, JointPosition,
+    MotionRequest, MotionState, NamedMotionTarget, PerceptionAssetRequest, PerceptionAssetResponse,
+    RequestAction, RequestResult, RequestState, RobotModelInfo, SCHEMA_VERSION, ServiceState,
     SetControlModeRequest, ToolPose, ToolPoseFeedback, camera_frame_to_arrow, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,7 @@ struct CameraNode {
     latest_frame: Option<CameraFrameBundle>,
     pending_calibration_frame: Option<CameraFrameBundle>,
     latest_motion_state: Option<MotionState>,
+    latest_execution_transport: Option<ExecutionTransportState>,
     robot_model: Option<RobotModelInfo>,
     calibration_capture_at: Option<Instant>,
     last_calibration_attempt_ns: Option<i64>,
@@ -117,6 +118,26 @@ struct CameraNode {
 enum CalibrationWork {
     Detected(CalibrationObservation, Vec<u8>),
     Solved(CalibrationResult),
+}
+
+// Connection status belongs to execution, not to the last successful MoveIt
+// request. Never replace missing hardware feedback with a command/old TCP.
+fn calibration_transport_error(
+    transport: &ExecutionTransportState,
+    was_connected: bool,
+) -> Option<String> {
+    if transport.connected
+        || (!was_connected
+            && transport.selected_endpoint.is_none()
+            && transport.last_error.is_none())
+    {
+        return None;
+    }
+    Some(format!(
+        "机械臂连接已断开（{}）：{}。无法取得同次采样的电机反馈及 TCP；请在机械臂执行页重新连接后，重新开始标定。已保存的标定不受影响",
+        transport.selected_endpoint.as_deref().unwrap_or("执行连接"),
+        transport.last_error.as_deref().unwrap_or("执行连接已关闭"),
+    ))
 }
 
 fn calibration_feedback_after_frame(
@@ -191,6 +212,7 @@ fn run() -> Result<()> {
         latest_frame: None,
         pending_calibration_frame: None,
         latest_motion_state: None,
+        latest_execution_transport: None,
         robot_model: None,
         calibration_capture_at: None,
         last_calibration_attempt_ns: None,
@@ -232,6 +254,20 @@ fn run() -> Result<()> {
                         camera.update_tool_pose(pose.pose)?;
                     }
                     camera.latest_motion_state = Some(state);
+                }
+                "execution_transport" => {
+                    let transport: ExecutionTransportState = from_arrow(data.as_array())?;
+                    let was_connected = camera
+                        .latest_execution_transport
+                        .as_ref()
+                        .is_some_and(|previous| previous.connected);
+                    if camera.config.calibration_session.active
+                        && let Some(error) = calibration_transport_error(&transport, was_connected)
+                    {
+                        camera.fail_automatic_calibration(error);
+                        camera.publish_state(&mut node)?;
+                    }
+                    camera.latest_execution_transport = Some(transport);
                 }
                 "calibration_mode_result" => {
                     let result: RequestResult<MotionState> = from_arrow(data.as_array())?;
@@ -865,6 +901,11 @@ impl CameraNode {
         node: &mut DoraNode,
         request: &CalibrationRequest,
     ) -> Result<()> {
+        if let Some(transport) = &self.latest_execution_transport
+            && let Some(error) = calibration_transport_error(transport, false)
+        {
+            bail!(error);
+        }
         let camera_source_id = request
             .camera_source_id
             .clone()
@@ -1594,6 +1635,42 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_execution_reports_the_original_fault_instead_of_waiting_for_feedback() {
+        let transport = ExecutionTransportState {
+            selected_endpoint: Some("/dev/ttyUSB0".into()),
+            last_error: Some("Broken pipe；重新打开同一串口失败：No such file or directory".into()),
+            ..Default::default()
+        };
+        let error = calibration_transport_error(&transport, true).unwrap();
+        assert!(error.contains("/dev/ttyUSB0"));
+        assert!(error.contains("Broken pipe"));
+        assert!(error.contains("重新开始标定"));
+        // Starting another run while disconnected must fail before motion too.
+        assert_eq!(calibration_transport_error(&transport, false), Some(error));
+    }
+
+    #[test]
+    fn transport_checks_allow_connected_hardware_and_unconfigured_software_execution() {
+        assert!(calibration_transport_error(&ExecutionTransportState::default(), false).is_none());
+        let transport = ExecutionTransportState {
+            selected_endpoint: Some("/dev/ttyUSB0".into()),
+            connected: true,
+            ..Default::default()
+        };
+        assert!(calibration_transport_error(&transport, false).is_none());
+    }
+
+    #[test]
+    fn explicit_disconnect_during_calibration_is_not_a_switch_to_software_feedback() {
+        let transport = ExecutionTransportState::default();
+        assert!(
+            calibration_transport_error(&transport, true)
+                .unwrap()
+                .contains("执行连接已关闭")
+        );
+    }
 
     #[test]
     fn calibration_waits_for_new_feedback_and_keeps_its_pose_and_raw_angles_together() {
