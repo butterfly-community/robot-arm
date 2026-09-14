@@ -868,7 +868,11 @@ private:
           "approach object", cartesian);
       approach->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
       approach->setIKFrame(kTcpFrame);
-      approach->setMinMaxDistance(0.0, goal.object_size.z);
+      // MTC propagates BACKWARD from the grasp: this finds the pregrasp, not
+      // an insertion-depth limit. Let native collision/IK stop the retreat.
+      // A finite ray spanning the entire robot envelope cannot truncate a
+      // reachable straight segment (triangle inequality); no object-size cap.
+      approach->setMinMaxDistance(0.0, 2.0 * collision_reach(*task.getRobotModel()));
       approach->setDirection(direction(kTcpFrame, 1.0));
       pick->insert(std::move(approach));
 
@@ -895,7 +899,9 @@ private:
           "candidate IK", std::move(generator));
       grasp_ik->setGroup(kArmGroup);
       grasp_ik->setEndEffector(kEndEffector);
-      grasp_ik->setMaxIKSolutions(8);
+      // Native timeout still governs search. Do not stop at an application-
+      // selected count; zero is NOT unlimited in MTC (it runs no IK attempts).
+      grasp_ik->setMaxIKSolutions(std::numeric_limits<uint32_t>::max());
       grasp_ik->setForwardedProperties({"grasp_candidate_index", "grasp_depth_m", "grasp_planar_centered"});
       grasp_ik->setIKFrame(Eigen::Isometry3d::Identity(), kTcpFrame);
       grasp_ik->properties().configureInitFrom(mtc::Stage::INTERFACE,

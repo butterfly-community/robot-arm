@@ -176,8 +176,8 @@ class GraspGenXBackend:
                 # do not rewrite poses or impose a top-only preference.
                 planner="graspmoe",
                 moe_obb_density="dense-topandside",
-                # Preserve scene-demo offsets and cover measured axial finger
-                # extension during closing through the SAME official sampler.
+                # Official scene-demo offsets only; positive values retreat
+                # from the face rather than increasing insertion depth.
                 moe_z_offsets_cm=offsets,
                 # Preserve scored proposals for complete-plan selection instead
                 # of rejecting alternatives solely by the demo's 0.7 cutoff.
