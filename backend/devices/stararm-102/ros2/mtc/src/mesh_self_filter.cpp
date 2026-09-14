@@ -7,6 +7,8 @@
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <map>
 #include <mutex>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 namespace stararm_102 {
 class MeshSelfFilter final : public occupancy_map_monitor::PointCloudOctomapUpdater {
@@ -53,17 +55,22 @@ protected:
           surfaces.emplace_back(mesh, transform->second.inverse());
       }
     }
-    sensor_msgs::PointCloud2ConstIterator<float> x(cloud, "x"), y(cloud, "y"), z(cloud, "z");
-    for (std::size_t i = 0; i < mask.size(); ++i, ++x, ++y, ++z) {
-      if (mask[i] != point_containment_filter::ShapeMask::OUTSIDE) continue;
-      const Eigen::Vector3d point(*x, *y, *z);
-      for (const auto& [mesh, cloud_in_mesh] : surfaces) {
-        if (mesh->contains(cloud_in_mesh * point)) {
-          mask[i] = point_containment_filter::ShapeMask::INSIDE;
-          break;
+    // FCL queries own their result buffers; the mesh and transforms are read-only.
+    // Disjoint output ranges preserve the exact sequential mask, without sampling.
+    tbb::parallel_for(tbb::blocked_range<std::size_t>(0, mask.size()), [&](const auto& range) {
+      sensor_msgs::PointCloud2ConstIterator<float> x(cloud, "x"), y(cloud, "y"), z(cloud, "z");
+      x += range.begin(); y += range.begin(); z += range.begin();
+      for (std::size_t i = range.begin(); i < range.end(); ++i, ++x, ++y, ++z) {
+        if (mask[i] != point_containment_filter::ShapeMask::OUTSIDE) continue;
+        const Eigen::Vector3d point(*x, *y, *z);
+        for (const auto& [mesh, cloud_in_mesh] : surfaces) {
+          if (mesh->contains(cloud_in_mesh * point)) {
+            mask[i] = point_containment_filter::ShapeMask::INSIDE;
+            break;
+          }
         }
       }
-    }
+    });
   }
 
 private:

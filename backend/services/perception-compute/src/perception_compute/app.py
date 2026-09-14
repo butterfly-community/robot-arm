@@ -148,6 +148,7 @@ class GraspGenXBackend:
     def infer(self, request: GraspRequest) -> GraspResponse:
         import trimesh
         from graspgenx.samplers import run_planner_on_batch
+        from perception_compute.grasp_selection import MAX_GRASP_CANDIDATES, representative_grasps
         from perception_compute.gripper_sampling import obb_z_offsets_cm
         from perception_compute.scene_collision import filter_colliding_grasps
 
@@ -205,6 +206,13 @@ class GraspGenXBackend:
             )
             grasps, scores = grasps[keep], scores[keep]
             branches = [branch for branch, valid in zip(branches, keep, strict=True) if valid]
+            if len(grasps) > MAX_GRASP_CANDIDATES:
+                representatives = representative_grasps(
+                    grasps, scores, trimesh.bounds.corners(sampler.gripper.collision_mesh.bounds)
+                )
+                # Keep original poses, scores and branch provenance together.
+                grasps, scores = grasps[representatives], scores[representatives]
+                branches = [branches[index] for index in representatives]
             inference_ms = (time.perf_counter() - started) * 1000.0
         return GraspResponse(
             candidates=[

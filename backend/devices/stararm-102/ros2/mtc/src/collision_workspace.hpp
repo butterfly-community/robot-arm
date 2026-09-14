@@ -9,7 +9,9 @@
 // Triangle-inequality envelope of ALL robot collision geometry over all rotations.
 // Not a joint limit or a task workspace restriction. Outside this envelope a
 // measured obstacle cannot touch this fixed-base robot in any configuration.
-inline double collision_reach(const moveit::core::RobotModel& model) {
+inline double collision_reach(const moveit::core::RobotModel& model,
+                              const moveit::core::LinkModel* attachment = nullptr,
+                              double attached_extent = 0.0) {
   std::map<const moveit::core::LinkModel*, double> origins;
   double radius = 0.0;
   for (const auto* link : model.getLinkModels()) {
@@ -23,6 +25,10 @@ inline double collision_reach(const moveit::core::RobotModel& model) {
     }
     origins[link] = origin;
     radius = std::max(radius, origin);
+    // Held geometry extends from its attachment frame, not from the farthest
+    // robot collision surface (which already includes the fingers).
+    if (link == attachment)
+      radius = std::max(radius, origin + attached_extent);
     for (std::size_t i = 0; i < link->getShapes().size(); ++i) {
       std::unique_ptr<bodies::Body> body(bodies::createBodyFromShape(link->getShapes()[i].get()));
       bodies::BoundingSphere sphere;
@@ -45,7 +51,7 @@ inline sensor_msgs::msg::PointCloud2 collision_workspace_cloud(
   sensor_msgs::PointCloud2ConstIterator<float> x(input, "x"), y(input, "y"), z(input, "z");
   for (std::size_t i = 0; i < std::size_t(input.width) * input.height; ++i, ++x, ++y, ++z) {
     const auto position = sensor_in_model * Eigen::Vector3d(*x, *y, *z);
-    if ((position.array().abs() <= radius).all()) {
+    if (position.squaredNorm() <= radius * radius) {
       const auto begin = input.data.begin() + i * input.point_step;
       result.data.insert(result.data.end(), begin, begin + input.point_step);
     }

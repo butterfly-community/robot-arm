@@ -316,7 +316,8 @@ double collision_workspace_radius(const moveit::core::RobotModel& model,
   }
   // Include held geometry at ANY generated insertion and an entire voxel
   // diagonal at the boundary. This is a conservative map crop, not an IK limit.
-  return collision_reach(model) + attached_extent + std::sqrt(3.0) * resolution;
+  return collision_reach(model, model.getLinkModel(kTcpFrame), attached_extent)
+      + std::sqrt(3.0) * resolution;
 }
 
 class GeneratePoses final : public mtc::stages::GeneratePose {
@@ -683,6 +684,8 @@ std::string failure_summary(const mtc::Task &task,
 
 } // namespace
 
+#include "planning_resources.hpp"
+
 class PickPlaceServer : public rclcpp::Node {
 public:
   PickPlaceServer() : Node("stararm_102_mtc") {
@@ -712,6 +715,10 @@ public:
         });
   }
 
+  void initialize_planning() {
+    resources_ = std::make_shared<PlanningResources>(shared_from_this());
+  }
+
 private:
   void feedback(const std::shared_ptr<GoalHandle> &handle,
                 const std::string &state, const std::string &stage,
@@ -725,6 +732,7 @@ private:
   }
 
   void apply_scene(const PickPlace::Goal &goal, const moveit::core::RobotModelConstPtr& model) {
+    const auto begun = std::chrono::steady_clock::now();
     std::vector<moveit_msgs::msg::CollisionObject> objects;
     objects.push_back(ground(goal.frame_id));
     objects.push_back(
@@ -768,6 +776,7 @@ private:
     transform.transform.translation.z = goal.sensor_in_scene.position.z;
     transform.transform.rotation = goal.sensor_in_scene.orientation;
     sensor_tf_->sendTransform(transform);
+    const auto prepared = std::chrono::steady_clock::now();
     cloud_publisher_->publish(cloud);
     std::unique_lock<std::mutex> lock(cloud_mutex_);
     // Only the corresponding callback certifies that Octomap finished updating.
@@ -776,6 +785,9 @@ private:
     lock.unlock();
     if (!scene_.applyCollisionObject(actual_target))
       throw std::runtime_error("MoveIt rejected restoration of actual target dimensions");
+    RCLCPP_INFO(get_logger(), "request %s scene: prepare %.6f s, update/sync %.6f s", goal.request_id.c_str(),
+        std::chrono::duration<double>(prepared-begun).count(),
+        std::chrono::duration<double>(std::chrono::steady_clock::now()-prepared).count());
   }
 
   void cleanup_scene(const std::vector<std::string> &temporary_ids) {
@@ -799,16 +811,15 @@ private:
 
   mtc::Task create_task(const PickPlace::Goal &goal,
                         std::optional<std::size_t> candidate = std::nullopt) {
-    mtc::Task task;
+    mtc::Task task("", false); // Publish only the final task; no throw-away DDS introspection.
     task.setName("pick and place " + goal.request_id);
-    task.loadRobotModel(shared_from_this());
+    task.setRobotModel(resources_->model);
     task.setProperty("group", kArmGroup);
     task.setProperty("eef", kEndEffector);
     task.setProperty("hand", kGripperGroup);
     task.setProperty("ik_frame", kTcpFrame);
 
-    auto pipeline =
-        std::make_shared<mtc::solvers::PipelinePlanner>(shared_from_this());
+    auto pipeline = resources_->pipeline;
     auto cartesian = std::make_shared<mtc::solvers::CartesianPath>();
     auto joint_interpolation =
         std::make_shared<CheckedJointInterpolation>();
@@ -914,7 +925,7 @@ private:
       pick->insert(std::move(attach));
 
       auto depart = std::make_unique<mtc::stages::MoveTo>(
-          "carry to work pose", std::make_shared<SupportAwarePipelinePlanner>(shared_from_this()));
+          "carry to work pose", resources_->carry);
       depart->setGroup(kArmGroup);
       depart->setGoal(kWorkPose);
       pick->insert(std::move(depart));
@@ -939,7 +950,7 @@ private:
       release_point.header.frame_id = goal.frame_id;
       release_point.point = goal.placement_pose.position;
       auto release = std::make_unique<mtc::stages::MoveTo>(
-          "transport to release point", std::make_shared<PositionOnlyPlanner>(shared_from_this()));
+          "transport to release point", resources_->release);
       release->setGroup(kArmGroup);
       // Move the attached object's centre to the requested placement point.
       // MTC resolves its candidate-specific offset from the attachment state;
@@ -995,14 +1006,18 @@ private:
     const auto goal = handle->get_goal();
     auto result = std::make_shared<PickPlace::Result>();
     const std::vector<std::string> temporary_ids{goal->object_id};
+    // Include cleanup on both success and exceptions in the same serialization.
+    std::unique_lock<std::mutex> planning_lock(planning_mutex_);
     try {
       if (goal->grasp_poses.size() != goal->grasp_confidences.size() ||
           !std::all_of(goal->grasp_confidences.begin(), goal->grasp_confidences.end(),
                        [](double confidence) { return std::isfinite(confidence); }))
         throw std::runtime_error("Grasp poses require matching finite model confidences");
+      const auto planning_started = std::chrono::steady_clock::now();
       feedback(handle, "planning", "build planning scene");
       auto task = create_task(*goal);
       apply_scene(*goal, task.getRobotModel());
+      const auto scene_ready = std::chrono::steady_clock::now();
       // Publish the selected solution and search statistics once below, rather
       // than streaming every iteration. Action feedback still reports progress.
       task.enableIntrospection(false);
@@ -1012,6 +1027,7 @@ private:
       // Failed candidates still lead to the next pose; selected-pose depth
       // refinement below remains exhaustive. No deadline discards an unsolved task.
       const auto plan_result = task.plan(1);
+      const auto coarse_ready = std::chrono::steady_clock::now();
       result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
       if (!plan_result || task.solutions().empty()) {
         std::ostringstream explanation;
@@ -1070,6 +1086,12 @@ private:
         result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
       }
       const auto &best = ranked.front();
+      const auto plan_ready = std::chrono::steady_clock::now();
+      RCLCPP_INFO(get_logger(), "request %s planning: scene %.6f s, coarse %.6f s, refine %.6f s, total %.6f s",
+          goal->request_id.c_str(), std::chrono::duration<double>(scene_ready-planning_started).count(),
+          std::chrono::duration<double>(coarse_ready-scene_ready).count(),
+          std::chrono::duration<double>(plan_ready-coarse_ready).count(),
+          std::chrono::duration<double>(plan_ready-planning_started).count());
       const auto *solution = best.solution;
       for (const auto &candidate : ranked)
         RCLCPP_INFO(get_logger(),
@@ -1122,6 +1144,8 @@ private:
   }
 
   moveit::planning_interface::PlanningSceneInterface scene_;
+  std::shared_ptr<PlanningResources> resources_;
+  std::mutex planning_mutex_;
   double octomap_resolution_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_subscription_;
@@ -1136,6 +1160,7 @@ private:
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<PickPlaceServer>();
+  node->initialize_planning();
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
   executor.spin();

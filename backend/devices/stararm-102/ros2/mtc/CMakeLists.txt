@@ -19,12 +19,13 @@ find_package(geometric_shapes REQUIRED)
 find_package(fcl REQUIRED)
 find_package(trac_ik_lib REQUIRED)
 find_package(kdl_parser REQUIRED)
+find_package(TBB REQUIRED)
 
 add_library(stararm_mesh_self_filter SHARED src/mesh_self_filter.cpp)
 target_compile_features(stararm_mesh_self_filter PUBLIC cxx_std_17)
 target_link_libraries(stararm_mesh_self_filter PUBLIC
   moveit_ros_perception::moveit_pointcloud_octomap_updater_core
-  pluginlib::pluginlib ${geometric_shapes_TARGETS} fcl)
+  pluginlib::pluginlib ${geometric_shapes_TARGETS} fcl TBB::tbb)
 pluginlib_export_plugin_description_file(moveit_ros_occupancy_map_monitor octomap_plugins.xml)
 install(TARGETS stararm_mesh_self_filter LIBRARY DESTINATION lib)
 
