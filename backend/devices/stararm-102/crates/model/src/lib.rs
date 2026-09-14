@@ -273,9 +273,7 @@ fn named_target(key: &str, label: &str, joints: [f64; 6]) -> NamedMotionTarget {
 }
 
 fn calibration_targets() -> Vec<NamedMotionTarget> {
-    // User-approved default (2026-09-08): real-arm retest max 6.479 mm, RMS 4.808 mm.
-    // This restores the best historical pose set; see docs/STARARM-102.md for evidence.
-    // Keep the current raw-feedback calibration path; never restore old sampling bugs.
+    // User-approved motor-angle targets; sampling uses actual feedback, not these commands.
     // Do not replace these device poses to suit a simulation camera viewpoint.
     [
         [0.0, 0.0, -60.0, 60.0, 0.0, 0.0],

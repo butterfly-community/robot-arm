@@ -24,7 +24,7 @@ MoveIt、RViz、Python、AI 模型和设备厂商包都不属于全局基础层�
 Dora daemon 的公共 Compose 配置声明 `ulimits.memlock: -1`。Zenoh 1.9.0 使用 `mlock`
 锁定 POSIX SHM；默认 16 MiB 传输池超过原容器 8 MiB 锁页额度，会报 `OS error 12`，
 即使 `/dev/shm` 和主机 RAM 空余很多。只调整容器锁页额度，不关闭共享内存、不增加传输分支；
-motion 原有同项配置保持一致。复现方法见[诊断工具](../tools/diagnostics/README.md#zenoh-共享内存锁页复现)。
+motion 使用相同锁页配置。只读探针见 [zenoh-shm.rs](../tools/diagnostics/zenoh-shm.rs)。
 
 | 标签 | 唯一职责 |
 | --- | --- |
@@ -39,9 +39,7 @@ StarArm-102 基础不是全局后端基础。运动和执行镜像读取同一�
 读取它来生成对应 GraspGenX 夹爪描述。该资产层不含 ROS；当前工程 ROS 源码由 motion 自己构建，
 因此修改应用代码不需要重建厂商资产层。
 
-2026-09-13 上游文档同步生成新的型号资产标签；补丁后 109 个 ROS 资产文件与旧标签
-`2026.09.05-r2` 完全一致，故只构建该资产层，不重建未变化的运动、执行或计算环境。
-固定提交、差异与校验结论见[厂商模型版本](STARARM-102.md#厂商模型版本)。
+固定提交和补丁说明见[模型来源](STARARM-102.md#模型来源与补丁)。
 
 ## 服务所有权
 
@@ -68,8 +66,7 @@ motion 镜像；AI 环境与模型仅存在于 perception-compute 镜像。
 motion 还安装官方 `moveit-ros-perception`，处理显式抓放请求里的点云快照，不安装 ROS 相机驱动。
 该服务仅对同版本 MoveIt 2.15.0 构建已有 `moveit_servo` 边界停止 overlay；
 TOTG/moveit_core 与 JTC 均使用官方二进制，不构建自定义 JTC 完成判定。
-实验性 JTC/TOTG 补丁已撤出生产构建，历史对照仅在 tools，见
-[原生回归工具](../tools/diagnostics/mtc-ranking-test/README.md)。运行镜像复制 Servo 成品并在入口加载 overlay，
+运行镜像复制 Servo 成品并在入口加载 overlay，
 不拷贝研究源码树、不改厂商资产标签。修改这些依赖补丁才重编对应运动依赖层；
 核对时必须检查实际加载的共享库及原生回归，不能只看补丁文件存在。
 完整 1920×1080 XYZ 消息约 24.9 MB：该服务的 Fast DDS 配置为每个 participant 分配 128 MiB SHM

@@ -17,5 +17,5 @@
 
 FashionStar 串口帧解析仍是可复用的厂家协议库，保留在
 `backend/crates/fashionstar-uart`。通用消息、输入、空间转换、感知、状态和网页服务不得包含
-本型号的关节数、命名位、TCP 或夹爪几何。完整型号事实与验收记录见
+本型号的关节数、命名位、TCP 或夹爪几何。型号参数与使用边界见
 [`docs/STARARM-102.md`](../../../docs/STARARM-102.md)。
