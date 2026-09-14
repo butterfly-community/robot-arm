@@ -1,7 +1,9 @@
 #pragma once
+#include "planner_adapters.hpp"
 #include <moveit/robot_model_loader/robot_model_loader.hpp>
 
-// Included after the task's planner adapters. Immutable model/plugin resources
+namespace stararm_mtc {
+// Shared model/plugin resources
 // belong to the service; stages, start scenes and solutions belong to each task.
 struct PlanningResources {
   robot_model_loader::RobotModelLoader loader;
@@ -21,3 +23,5 @@ struct PlanningResources {
     release->init(model);
   }
 };
+
+} // namespace stararm_mtc

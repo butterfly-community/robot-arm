@@ -368,7 +368,7 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 
 ## `stararm-102-motion-node`
 
-源码：[队列与状态](../backend/devices/stararm-102/nodes/motion/src/main.rs)、[ROS 桥](../backend/devices/stararm-102/nodes/motion/src/ros.rs)、[MTC 工厂与执行](../backend/devices/stararm-102/ros2/mtc/src/pick_place_server.cpp)。
+源码：[队列与状态](../backend/devices/stararm-102/nodes/motion/src/main.rs)、[ROS 桥](../backend/devices/stararm-102/nodes/motion/src/ros.rs)、[Action 调度](../backend/devices/stararm-102/ros2/mtc/src/pick_place_server.cpp)、[任务工厂](../backend/devices/stararm-102/ros2/mtc/src/task_factory.hpp)、[场景管理](../backend/devices/stararm-102/ros2/mtc/src/task_scene.hpp)、[候选与排名](../backend/devices/stararm-102/ros2/mtc/src/grasp_candidates.hpp)。
 
 | 方法 | 输入 → 输出 / 副作用 |
 | --- | --- |
@@ -377,9 +377,9 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 | `publish_pose` | 相对控制目标 → 带当前 ROS 时间戳的 Servo 消息 |
 | `run_motion` / `run_manipulation` / `work_loop` | 已接收任务 → 唯一顺序 ROS worker |
 | `plan_and_execute` | 普通关节/TCP 目标 → MoveGroup 规划 → 原生控制器执行 |
-| `create_task` / `apply_scene` | 绑定场景 → 本次 MTC 阶段与官方 Octomap 快照 |
+| `create_task` / `TaskScene::apply` | 绑定场景 → 本次 MTC 阶段与官方 Octomap 快照 |
 | `allowed_grasp_depth_poses` / `rank_complete_grasps` | 候选 → 指尖过滤、深度变体、完整解排名；不执行失败 IK |
-| MTC `execute` / `cleanup_scene` | 首条完整解 → 同场景单候选精修 → 一次执行 → 清理 |
+| MTC `execute` / `TaskScene::cleanup` | 首条完整解 → 同场景单候选精修 → 一次执行 → 清理 |
 
 离散的 manual、calibration、准备相对控制及 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
 依次暂停 Servo、规划/执行并恢复 Servo。连续 relative 输入不进 FIFO，只有相对模式且队列空闲时才发送 Servo 位姿和输入夹爪动作。
@@ -520,9 +520,15 @@ Servo 使用节点 ROS 时钟填写位姿消息时间戳，不能发送零时间
 camera，模型和提示属于 scene，输入绑定属于 controller-input，串口/反馈周期/夹持目标属于 execution。
 没有前端或中央配置副本。相机选择和运行中任务不持久化。
 
-## 后续模块化边界（仅计划）
+## MTC 模块边界
 
-MTC 仍为 C++ 原生实现，Rust 负责消息和编排。可进一步把任务工厂、场景生命周期和排名拆成
-直接可测模块，让测试不再通过包含整个服务 `.cpp` 并重命名 `main` 来访问实现。
-重构应保持同输入完整规划结果、碰撞、力度和阶段顺序，先做软件回归再按授权真机验证；
-不为换语言增加 FFI 或备用路径。这不是当前验收的未完成条件，本轮不实施该重构。
+MTC 保留原生 C++，Rust 负责消息和编排；不增加 FFI、新服务或第二条抓放路径。
+`pick_place_server.cpp` 只负责 Action、反馈、搜索/精修与一次执行；不持有点云更新细节。
+`TaskScene` 管理地图发布/对应确认、目标恢复与清理；`create_task` 显式接收资源和分辨率，构造原有阶段。
+`grasp_candidates.hpp` 负责几何变体、排序与解属性，`planner_adapters.hpp` 保留已验证的原生规划器封装，
+`PlanningResources` 仍只初始化一次模型/插件。内部头文件依赖显式声明，可直接由测试编译，
+不依赖包含顺序或重命名服务 `main`；生产构建不依赖 tools。
+
+结果属性共用一份递归逻辑；候选排序缓存每个提议的几何成本，稳定排序与原比较器顺序一致。
+没有改变评分、加深网格、碰撞矩阵、速度或阶段顺序，也没有新增门限。
+测试工厂直接调用生产 `create_task`，不再字符串截取/改写工厂；旧的原始姿态优先诊断变体已删除。
