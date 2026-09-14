@@ -4,6 +4,9 @@
 临时输出统一根目录 `temp/`。软件反馈测试不证明真机夹持、力度或实际定位精度。
 服务停止后 `temp/` 可以随时清空；测试自行创建结果目录，正式夹具不在其中。
 
+跨服务测试需要独立 `tools/` 仓库位于工程根目录；生产构建不依赖它。
+文档检查同时枚举主仓库和工具仓库，忽略 `tools/` 不等于跳过其中链接。
+
 文档整理后在根目录运行 `node tools/check-doc-links.mjs` 检查本地内联链接目标；
 此检查不访问服务、不发控制请求，也不验证外部网页和标题锚点。
 检查器本身的回归运行 `node --test tests/tools/check-doc-links.test.mjs`；
@@ -28,9 +31,15 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 HTTP 202 与首条运动反馈之间仍计时并禁用重复启动；仅匹配请求的终态结束等待，不使用旧任务状态。
 `ai-layout.spec.ts` 核对相机/标定第一行、AI 双栏第二行，深度/内外参/结果折叠项的归属，
 以及桌面和窄屏的宽度、间距、展开和刷新保持。旧的独立结果卡片不能重新出现。
+scene 原生回归核对分割原图像素不变、mask 可用，不再要求已移除的染色 `overlay.png`。
+实际预览回归运行 `node tools/diagnostics/verify-web-depth-preview.mjs --capture=temp/depth-preview`，
+核对两次刷新、载入分割帧及页面重载后深度 PNG 仍可解码；这是正式服务测试，不拦截响应。
+`instruction-flow.test.ts` 验证 AI 复用手动 `startPickPlace`，候选响应推进场景序号时，
+即使独立场景查询仍是旧值也使用响应序号提交；不会调用外部 AI 或真机。
 `segmentation-models.spec.ts` 从按钮验证启动顺序及新场景序号，所有运动写入均拦截；
 `start-pick-place.test.ts` 补充已有候选复用、候选失败、模式失败及失效选择的测试。
-所有写请求和相机视频均拦截，不运行真实模型或机械臂；与真实网页链路验收分开报告。
+`segmentation-composition.spec.ts` 的写请求和相机视频均拦截，不运行真实模型或机械臂；
+与上面的实际预览脚本、未拦截模型调用的工具验收分开报告。
 运行：`pnpm --dir frontend exec playwright test tests/browser/segmentation-composition.spec.ts`。
 Rust `scene-node` 的 `stage_tests` 补充同帧 RGB、掩膜像素、1280/1920 尺寸、重复标注编号、
 过期序号和三种来源经同一深度重建的回归，在 scene 构建镜像运行 `cargo test -p scene-node`。

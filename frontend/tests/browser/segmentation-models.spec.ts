@@ -28,6 +28,15 @@ test("AI groups segmentation and a minimal Start that generates selected-object 
     instances: [],
   });
   snapshot.values.camera_state.streaming = true;
+  // This fixture owns the task too; do not inherit a live request from the site.
+  snapshot.values.manipulation_state = {
+    ...snapshot.values.manipulation_state,
+    request_id: null,
+    state: "idle",
+    object_id: null,
+    placement_region_id: null,
+    original_error: null,
+  };
   snapshot.values.world_scene = {
     schema_version: 3,
     sequence: 1,
@@ -148,9 +157,10 @@ test("AI groups segmentation and a minimal Start that generates selected-object 
   state.calibrated = true;
   publish();
   await reconstruct.click();
+  await page.getByLabel("抓取目标", { exact: true }).selectOption("two");
+  await page.getByLabel("放置区域", { exact: true }).selectOption("pad");
   await expect(execute).toBeEnabled();
   expect(writes.map((x) => x.action)).toEqual(["refresh", "reconstruct"]);
-  await page.getByLabel("抓取目标", { exact: true }).selectOption("two");
   await execute.click();
   await expect.poll(() => writes.length).toBe(5);
   // HTTP acceptance is not completion. Only matching terminal feedback

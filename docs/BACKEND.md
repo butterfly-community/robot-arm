@@ -1,6 +1,6 @@
 # 架构与调用链
 
-本文记录当前实现边界和关键方法；StarArm-102 的数值和补丁见 [型号适配](STARARM-102.md)。
+本文记录当前实现边界和关键方法（方法表为源码导航，随后为契约说明）；StarArm-102 的数值和补丁见 [型号适配](STARARM-102.md)。
 
 控制输入经过 `controller-input → spatial-transform → motion → execution`；相机经过
 `camera → scene → WorldScene → motion`。scene 按显式请求分别调用分割和抓取模型。
@@ -10,10 +10,14 @@
 
 ## `controller-input-node`
 
-`ControllerInput::load()` 通过 `json-config-store` 读取设备名称、Action 与反馈绑定；
-`commit_config()` 先写盘再替换内存配置。`drain()` 合并驱动事件，`tick()` 只把新样本转成统一
-绝对位姿和 Action。`combined_pose_frame()` 允许位置和姿态来自不同设备；
-`evaluate_actions()` 将按钮、连续轴或正负按钮对转成设备无关动作。
+源码：[输入节点](../backend/nodes/controller-input/src/main.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `ControllerInput::load` / `commit_config` | 设备绑定配置 → 内存状态；保存先落盘 |
+| `drain` / `tick` | 驱动事件 → 统一位姿与 Action |
+| `combined_pose_frame` / `evaluate_actions` | 多设备组件 → 组合位姿、连续轴及按钮动作 |
+| `apply_user_config` | 用户编辑 → 持久配置；不把临时演示绑定当用户配置 |
 
 演示期间 `user_config()` 始终指向演示前的用户配置；`apply_user_config()` 更新该配置，
 同时保留正在运行的临时演示绑定。改名/保存绑定不会把生成式演示配置写入文件，停止演示也不会撤销用户刚保存的修改。
@@ -23,6 +27,14 @@ haptic 能力发布组件，两者的 IMU 都使用 `fusion-ahrs`。位置和连
 `one_euro_filter`。模拟输入声明同一 Action，不另建下游测试路径。
 
 ## `spatial-transform-node`
+
+源码：[空间核心](../backend/crates/spatial-core/src/lib.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `update_pose` | 输入源绝对位姿 → 最新空间状态 |
+| `handle_control` | Action → 接管/积分状态 |
+| `current_output` | 接管原点与当前输入 → 统一相对控制帧；不调用 ROS 或硬件 |
 
 节点只处理配置和 Dora I/O，数学集中在 `spatial-core::SpatialTransform`。
 `update_pose()` 接收组合绝对位姿，`handle_control()` 接收 Action，`current_output()` 按当前接管
@@ -47,12 +59,23 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 
 ## `camera-node`
 
+源码：[节点与标定状态机](../backend/nodes/camera/src/main.rs)、[采集 worker](../backend/nodes/camera/src/capture_worker.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `capture_worker::spawn` | 命令/最新值通道 → 驱动长期任务；事件循环不执行 SDK 阻塞操作 |
+| `refresh` / `select` | 发现/用户选择 → 来源和 profile；不按设备枚举索引存配置 |
+| `start` / `stop_capture` / `reset` | 明确请求 → 同一 worker 的采集状态 |
+| `tick` / `finish_capture_command` | worker 结果 → 状态、RGB-D 原子 bundle |
+| `start_automatic_calibration` / `advance_automatic_calibration` | 型号姿态与实际反馈 → 采样、求解、回工作位 |
+| `poll_calibration_work` / `apply_solved_calibration` | 当前会话结果 → 待确认状态 / 已落盘外参 |
+
 节点统一管理硬件与 simulation 适配器、持久配置、采集和标定。Dora 循环只处理请求、状态和
 发布；Tokio `spawn_blocking` 长期任务拥有驱动、pipeline 与非 `Send` 的 Align，通过有界命令通道
 和 latest-value 通道通信。设备 60 FPS、上层 1 FPS 时仍排空 60 FPS 并提供彩色视频，但约每秒只 Align 并
 发布一次 RGB-D。命令通道关闭时退出任务；停用或重开 pipeline 会清空旧帧，旧的打开结果不能覆盖新请求。
 
-- `refresh()` 只在按钮请求时发现设备，并把已保存但暂时离线的来源/profile 标成不可用。
+- `refresh()` 由启动发现和网页刷新共用，发现设备，并把已保存但暂时离线的来源/profile 标成不可用。
 - `select()` 校验驱动刚报告的 profile、上送 FPS 与厂商扩展参数，再按稳定来源身份保存。
 - `start()`、`stop_capture()` 与 `reset()` 都在同一采集任务内操作驱动，不维护第二套硬件状态。
 - `tick()` 读取最新采集结果、绑定该帧的外参快照并发布专用 Arrow Binary bundle。
@@ -102,17 +125,14 @@ stride、格式、内参、时间和 `depth_units()` 全部来自实际帧，不
 OpenCV 5 支持 `IMREAD_COLOR_RGB`，但没有“所有算法切换 RGB”的全局开关。
 三通道 ChArUco 检测内部按 BGR 转灰度，因此不能直接把 RGB Mat 当作 BGR 使用。
 检测沿用官方默认的 ArUco/ChArUco 角点设置，不额外调用 `cornerSubPix`；PnP 与手眼算法不变。
-旧二次精修在同一 D415 图像上将平面拟合残差从 0.139 px 增至 0.258 px，已移除。
-检测使用原始图像，不做高斯预模糊：D415 同一工作位图像的默认检测得到 16 个角点，
-旧 σ=0.8 像素预模糊只剩 2 个角点，已移除。不得仅凭模拟图精度给真机加入该预处理。
+检测使用原始图像，不做高斯预模糊，不重新引入已撤销的二次角点精修。
 需要直接处理 RGB 的新算法应明确使用 `COLOR_RGB2GRAY` 等对应参数；不要在全链路来回换色。
 YOLOE 的官方 PIL loader 内部转 BGR，predictor 再转 RGB tensor，这是库内部契约，不应在调用前补一次转换。
 ChArUco/PnP 接受 forward Brown/rational 或零畸变针孔输入，调用时同时传入模型。
 非零 inverse/modified Brown、鱼眼投影不能直接当成相同系数，需要驱动提供校正彩色图及对应内参。
 鱼眼即使系数全零也不是针孔投影，不能省略这个模型区别。
 原始相机分辨率不等于模型张量输入尺寸：不再强制 `imgsz=max(image.size)`，由模型默认预处理
-处理输入；`retina_masks=True` 保证输出掩码回到原图尺寸。相同提示词的实测中，强制 1920
-输入没有检测结果，模型默认输入则识别到两项；相机图像、内参和标定仍保留 1920×1080。
+处理输入；`retina_masks=True` 保证输出掩码回到原图尺寸。相机图像、内参和标定保留各自实际分辨率，不跟随模型张量尺寸变化。
 见 [Ultralytics Predict 参数](https://docs.ultralytics.com/modes/predict/#inference-arguments)。
 GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的颜色张量为零，不把展示用点云颜色当作模型输入。
 
@@ -123,17 +143,40 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 
 ## `robot-arm-messages`
 
+源码：[消息与 Arrow codec](../backend/crates/robot-arm-messages/src/lib.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `to_arrow` / `from_arrow` | 小消息 ↔ JSON Arrow |
+| `camera_frame_from_arrow` | RGB-D bundle → 已校验的图像平面与同帧元数据 |
+| `world_scene_to_arrow` | 场景 → 小元数据与二进制 XYZ；不把点云展开为网页 JSON |
+| `scene_pick_place_to_arrow` | 请求 + 场景快照 → 单条绑定消息；没有第二个场景订阅竞态 |
+
 小消息使用共享 JSON Arrow codec。`CameraFrameBundle` 用专用 codec，把元数据与两个 Arrow Binary
 图像 buffer 分开。彩色和深度必须同尺寸、同 frame id，且共享内参尺寸一致。bundle 原子携带已
 对齐 RGB-D、深度比例、两个时钟和本帧外参快照；未标定时快照为 `None`。
 
 ## `scene-node`
 
+源码：[阶段编排](../backend/nodes/scene/src/main.rs)、[组合分割](../backend/nodes/scene/src/segmentation.rs)、[三维重建](../backend/crates/scene-core/src/lib.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `apply_request` / `start_scene_task` | 显式网页请求 → 一个异步阶段；不自动串联全部模型 |
+| `next_observation_frame` / `feedback_after_frame` | 新帧与实际反馈 → 同次输入及末端自过滤依据 |
+| `segment_frame` / `segment` | 冻结 RGB、模型/提示 → 二维实例；不定位、不抓取 |
+| `edit_segmented` / `rebuild_segmented` | 模型层与手动层 → 原图、框信息、mask；不生成染色图 |
+| `reconstruct_frame` | 冻结帧深度 + mask + 外参 → 场景与实例点云；不重跑分割 |
+| `attach_grasp_candidates` | 指定实例点云 + 环境 + 实际夹爪 → 该实例候选 |
+| `finish_scene_task` / `publish_scene` | 同序号阶段结果 → 状态、响应及场景；旧输入结果不覆盖新输入 |
+| `clear_scene` / `clear_output` | 标注变化 / 来源配置变化 → 对应下游结果失效 |
+| `snapshot_previews` / `send_asset` | 明确刷新 / 资源查询 → 预览 PNG / 已缓存二进制；不触发模型 |
+
 节点缓存 `camera-node` 发布的最新原子帧，只在显式请求时启动对应阶段。`reqwest::Client`
 异步调用 YOLOE/GraspGenX；深度解码、掩码融合、场景重建和预览编码在 Tokio `spawn_blocking`
 中执行，因此 Dora 循环仍可响应状态。手动刷新静态预览的 PNG 编码仍在显式快照请求内执行。
 公开 `task_state` 和 `task_action` 驱动网页按钮状态，同类任务不排队。
-`refresh`（网页“运行分割”）**只调用分割模型**，返回类别、二维框、原始掩膜资源和叠加图，
+`refresh`（网页“运行分割”）**只调用分割模型**，返回类别、二维框、冻结原图及原始掩膜资源，
 不要求标定或机械臂反馈、不解码深度、不构造点云、不调用 GraspGenX。
 `reconstruct`（“三维定位”）消费 `input_sequence = last_segmentation_sequence`，
 使用该分割保留的同一原子帧深度和外参生成场景，不调用任何 AI 模型。
@@ -153,6 +196,7 @@ GraspGenX 当前官方场景推理使用目标/环境 XYZ；所用 sampler 的�
 提示词配置；三维定位后实际识别出的实例可作为抓取或放置目标，由用户或 AI 选择。
 模型 ID 持久保存在场景配置；切换模型不丢弃已保存的文字配置。
 新帧不会自动触发模型，刷新静态预览也不会触发模型。
+分割完成只替换分割资源，不删除独立生成的深度快照；切换相机或配置时才清空整套图像资源。
 
 ### 辅助标注与组合分割
 
@@ -218,9 +262,21 @@ HTTP 接收确认只是 accepted；在收到同请求的运动反馈前持续显
 
 ## `perception-compute`
 
+源码：[模型边界](../backend/services/perception-compute/src/perception_compute/app.py)、[自过滤](../backend/services/perception-compute/src/perception_compute/gripper_self_filter.py)、[碰撞筛选](../backend/services/perception-compute/src/perception_compute/scene_collision.py)、[候选代表](../backend/services/perception-compute/src/perception_compute/grasp_selection.py)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `create_app` / `default_backends` / `default_grasp_backend` | lifespan → 常驻模型；请求不重复初始化 |
+| `segment` / `_segment` | PIL RGB、模型与提示 → 官方分割结果；实例锁隔离提示更新 |
+| `GraspGenXBackend.infer` | 目标/环境 XYZ、夹爪资产与观测 → 原始评分候选 |
+| `GripperSelfFilter.filter` | 实际 TCP/关节、环境点 → 去掉已观测夹爪自体点 |
+| `filter_colliding_grasps` | 官方取样几何与场景 → 精确最近距离碰撞筛选 |
+| `representative_grasps` | 筛选后的姿态、模型分与 CAD 角点 → 最多 100 个原始代表 |
+| `build-description.py` | 正式型号 URDF/清单 → 构建期夹爪资产；脚本由计算服务维护，不依赖 tools |
+
 `GRASPGENX_NUM_GRASPS` 透传官方 `num_grasps`，默认 200；Compose 从 `.env` 读取。
-它只增加同一模型的候选探索数量，不修改分数门限、候选位姿、关节范围或碰撞规则。
-本机原始采样曾为 4000；用户本轮指定降为 500，写入持久 `.env`，不改官方默认值。
+它控制同一模型的候选探索数量，不修改分数门限、候选位姿、关节范围或碰撞规则。
+本机已验收配置为 500，保存在持久 `.env`；不改变源码的官方默认值。性能优化已按用户要求收敛。
 该参数控制 GraspMoE 的 diffusion 分支采样，不等于最终返回数量。正式模型调用使用
 `grasp_threshold=-1.0` 和 `topk_num_grasps=-1` 保留评分候选，不再按示例 0.7 分截断；
 分数继续用于完整方案排名。海绵实物重复验证见 [验收边界](REVIEW.md)，不等于保证低分候选能夹住物体。
@@ -261,6 +317,19 @@ CPU/CUDA 只改变运行设备，不改变接口。服务不连接相机、Dora�
 资产。
 
 ## `stararm-102-motion-node`
+
+源码：[队列与状态](../backend/devices/stararm-102/nodes/motion/src/main.rs)、[ROS 桥](../backend/devices/stararm-102/nodes/motion/src/ros.rs)、[MTC 工厂与执行](../backend/devices/stararm-102/ros2/mtc/src/pick_place_server.cpp)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `planning_state` | 实际反馈 → 控制器同步用状态；不修改用于标定 FK 的原始反馈 |
+| `RosInterface::request_current_pose` | 带来源/时间的实际反馈 → 官方 FK 与同一输入快照 |
+| `publish_pose` | 相对控制目标 → 带当前 ROS 时间戳的 Servo 消息 |
+| `run_motion` / `run_manipulation` / `work_loop` | 已接收任务 → 唯一顺序 ROS worker |
+| `plan_and_execute` | 普通关节/TCP 目标 → MoveGroup 规划 → 原生控制器执行 |
+| `create_task` / `apply_scene` | 绑定场景 → 本次 MTC 阶段与官方 Octomap 快照 |
+| `allowed_grasp_depth_poses` / `rank_complete_grasps` | 候选 → 指尖过滤、深度变体、完整解排名；不执行失败 IK |
+| MTC `execute` / `cleanup_scene` | 首条完整解 → 同场景单候选精修 → 一次执行 → 清理 |
 
 离散的 manual、calibration、准备相对控制及 perception 请求进入一个顺序 `WorkItem` FIFO；唯一 ROS worker
 依次暂停 Servo、规划/执行并恢复 Servo。连续 relative 输入不进 FIFO，只有相对模式且队列空闲时才发送 Servo 位姿和输入夹爪动作。
@@ -310,6 +379,17 @@ XYZ float32 LE，避免几百万浮点数展开为 JSON。网页只读元数据�
 
 ## `stararm-102-execution-node`
 
+源码：[执行与串口调度](../backend/devices/stararm-102/nodes/execution/src/main.rs)、[夹持反馈控制](../backend/devices/stararm-102/nodes/execution/src/gripper_feedback.rs)、[UART 协议库](../backend/crates/fashionstar-uart/src/lib.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `configure_endpoint` | 用户选择 → 保存并连接/断开；有端点但断连不回退软件反馈 |
+| `encode_command` / `StarArmBus::write` | 完整目标 → 型号总线编码及唯一待发目标 |
+| `flush_motion` | 最新目标 → 串口同步写；不能插入未完成回包事务 |
+| `poll_hardware` | Monitor / 参数事务 → 实际角度、遥测和连接状态 |
+| `GripperFeedbackController::request` / `observe` | 明确夹持意图 + 新负载反馈 → 持续功率调节；不锁存夹持角 |
+| `primary_tool_feedback` | 设备遥测 → 统一负载百分比，不是牛顿力 |
+
 `configure_endpoint()` 保存用户串口选择并显式连接/断开；未选串口时同一 `ArmCommand` 产生软件
 反馈，选择串口但连接失败时不会回退。模块级 `encode_command()` 按模型映射总线指令，
 `StarArmBus::write()` 编码并覆盖唯一的待发送完整目标；已有 tick 在没有回包事务和参数写入时，
@@ -330,6 +410,16 @@ Monitor 读取失败先在同一串口重试一次，仍失败才进入重连逻
 
 ## `web-gateway-node`
 
+源码：[网关](../backend/nodes/web-gateway/src/main.rs)、[就绪状态聚合](../backend/nodes/service-status/src/main.rs)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| `validate_request` / `forward_value` | HTTP 请求 → 校验、request ID 配对与唯一节点输出 |
+| `request_pick_place` | 抓放提交 → 场景所有者；HTTP 202 只表示已受理 |
+| `AppState::update` / `snapshot` / `websocket` | 节点小状态 → 页面快照与实时流 |
+| `perception_asset` / `model_asset` / `binary_response` | 按需资源 → 所属节点 → 二进制 HTTP |
+| service-status `evaluate` | 服务报告及依赖表 → 就绪状态；不控制节点重启 |
+
 Gateway 只保存最近一份小状态和按 request ID 配对的结果。相机及标定请求直接转给
 `camera-node`，感知请求转给 `scene-node`；按需图像资源使用二进制 HTTP 响应。实时彩色视频由
 `camera-node` 内置的 latest-value WebSocket 直接提供，反向代理只转发连接，不缓存帧。原始 RGB-D
@@ -337,7 +427,7 @@ frame 不进入 Gateway，Gateway 也不解析或保存任何服务配置。
 
 HTTP 入站复用 `robot-arm-messages` 请求类型校验；非法载荷在网关返回 400，不送到节点使其退出。
 相同尚未完成的 request ID 不重复转发；退出先释放所有 pending 响应，再等待 HTTP 结束。
-感知快照同时通知拥有原始图像的 camera 和拥有叠加图的 scene。模型配置请求不再携带已迁移到 camera 的来源选择字段。
+感知快照同时通知采集所有者 camera 和冻结分割图/深度预览所有者 scene。模型配置请求不携带 camera 所有的来源选择字段。
 
 ## 公共配置存储
 
@@ -347,13 +437,23 @@ HTTP 入站复用 `robot-arm-messages` 请求类型校验；非法载荷在网�
 
 ## Next.js 抓放场景编排
 
+源码：[AI 编排](../frontend/web/apps/perception/src/app/instruction-flow.ts)、[共享启动方法](../frontend/web/apps/perception/src/app/start-pick-place.ts)、[服务端接口](../frontend/web/apps/perception/src/app/api/instruction/route.ts)。
+
+| 方法 | 输入 → 输出 / 副作用 |
+| --- | --- |
+| Route `POST` / `planner` | 自然语言 → 服务端 AI 调用；密钥不进入浏览器 |
+| `executeInstruction` / `compactScene` | 提示配置、分割和定位 → 供 AI 选择的真实实例 ID |
+| `startPickPlace` | 已选对象/区域 → 按需候选 → 感知模式 → 抓放提交；AI 与手动共用 |
+| `startPickPlace` 的进度回调 | 阶段与 request ID → 网页状态 / AI 返回任务 ID |
+
 `web-perception` 的服务端 Route Handler 先查询已保存的模型。提示词模式使用 AI SDK 将自然语言
 转换为开放词汇提示词和放置角色；自动模式保持该模型、跳过提示词配置。
 依次请求分割、三维定位后，再根据实际 `WorldScene` 选择对象与放置区域 ID；
 选定后显式请求该对象的抓取候选。AI 不改变底层阶段边界。
 任务解析为每个用户指代生成从具体描述到常见视觉类别的少量英文同义提示词，避免把单一语言
 翻译误当成模型固定词表；用户明确指定的匹配词原样保留，不再扩写。这些词不包含场景硬编码。
-本地校验实例、抓取候选和区域都存在后，才调用既有 `motion/mode` 与 `perception/pick-place`。
+选择后直接复用 `startPickPlace`：统一校验实例/区域、按需生成候选、使用候选响应的新场景序号提交。
+不再在候选返回后另读一次可能滞后的场景快照，也不维护 AI 专属的模式切换/提交代码。
 它不是 Dora 节点，不新增消息，也不复制 scene、MTC、碰撞或执行逻辑；浏览器只收到编排结果，
 接触不到 API 密钥。
 

@@ -5,6 +5,7 @@ import {
   type WorldScene,
 } from "@robot/contracts";
 import { z } from "zod";
+import { startPickPlace } from "./start-pick-place";
 
 export const instructionSchema = z.object({
   instruction: z.string().trim().min(1, "请输入要执行的任务"),
@@ -100,48 +101,19 @@ export async function executeInstruction(
 
   const scene = await gateway.scene();
   const selection = await planner.select(instruction, scene);
-  const object = scene.objects.find(
-    (item) => item.object_id === selection.object_id,
+  // AI selects IDs; generation, fresh scene binding and submission are exactly
+  // the same implementation used by the manual Start button.
+  let requestId = "";
+  await startPickPlace(
+    scene,
+    selection.object_id,
+    selection.placement_region_id,
+    (path, body) => gateway.post(path, body),
+    makeRequestId,
+    (step) => {
+      if (step.phase === "submit") requestId = step.requestId;
+    },
   );
-  if (!object) {
-    throw new Error("AI 选择的抓取目标不存在");
-  }
-
-  await gateway.post("/api/perception/request", {
-    schema_version: schemaVersion,
-    request_id: makeRequestId(),
-    action: "generate_grasps",
-    input_sequence: scene.sequence,
-    object_id: selection.object_id,
-  });
-  const graspScene = await gateway.scene();
-  if (
-    !graspScene.objects.find((item) => item.object_id === selection.object_id)
-      ?.grasp_candidates.length
-  ) {
-    throw new Error("选定目标没有抓取候选");
-  }
-  if (
-    !scene.placement_regions.some(
-      (item) => item.region_id === selection.placement_region_id,
-    )
-  ) {
-    throw new Error("AI 选择的放置区域不存在");
-  }
-
-  await gateway.post("/api/motion/mode", {
-    schema_version: schemaVersion,
-    request_id: makeRequestId(),
-    mode: "perception",
-  });
-  const requestId = makeRequestId();
-  await gateway.post("/api/perception/pick-place", {
-    schema_version: schemaVersion,
-    request_id: requestId,
-    object_id: selection.object_id,
-    scene_sequence: graspScene.sequence,
-    placement_region_id: selection.placement_region_id,
-  });
   return {
     request_id: requestId,
     accepted: true,

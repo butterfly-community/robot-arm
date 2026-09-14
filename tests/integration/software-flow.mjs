@@ -418,7 +418,7 @@ assert.equal(
   typeof perceptionSnapshot.values.perception_state.point_count,
   "number",
 );
-for (const asset of ["color.png", "overlay.png", "depth.png"]) {
+for (const asset of ["color.png", "segmentation-color.png", "depth.png"]) {
   const response = await fetch(`${base}/api/perception/assets/${asset}`);
   assert.equal(response.ok, true, `perception asset ${asset}`);
   assert.match(response.headers.get("content-type") ?? "", /^image\/png/);

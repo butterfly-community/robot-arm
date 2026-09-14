@@ -118,11 +118,8 @@ test("a missing depth preview loads after the snapshot button, without running i
 }) => {
   const f = await fixture(page, request, "perception");
   f.snapshot.values.camera_state.streaming = true;
-  f.snapshot.values.perception_state.depth_frame = {
-    width: 1280,
-    height: 720,
-    encoding: "z16le",
-  };
+  f.snapshot.values.perception_state.color_frame = null;
+  f.snapshot.values.perception_state.depth_frame = null;
   let ready = false;
   await page.route("**/api/perception/assets/depth.png?*", (route) =>
     ready
@@ -147,6 +144,19 @@ test("a missing depth preview loads after the snapshot button, without running i
     return route.fulfill({ json: { original_error: null } });
   });
   await page.goto("/perception/");
+  const update = page.getByRole("button", {
+    name: "更新深度预览",
+    exact: true,
+  });
+  await expect(update).toBeDisabled();
+  await expect(update).toHaveAttribute("title", "等待相机首帧");
+  expect(actions).toEqual([]);
+  Object.assign(f.snapshot.values.perception_state, {
+    color_frame: { width: 1280, height: 720, encoding: "rgb8" },
+    depth_frame: { width: 1280, height: 720, encoding: "z16le" },
+  });
+  f.publish();
+  await expect(update).toBeEnabled();
   await expect(
     page.getByText("尚未生成预览，点击更新深度预览", { exact: true }),
   ).toBeVisible();

@@ -49,12 +49,20 @@ graspScene.objects[0].grasp_candidates = [
   },
 ];
 
+const stageResult = {
+  value: {
+    last_segmentation_sequence: 3,
+    last_scene_sequence: graspScene.sequence,
+    instances: [{ instance_id: "red-cube-0", grasp_candidate_count: 1 }],
+  },
+};
+
 describe("executeInstruction", () => {
   it("uses the selected automatic model without applying hidden prompts", async () => {
     const model = { id: "automatic", label: "Automatic", prompt_free: true };
     const gateway: RobotGateway = {
       model: vi.fn(async () => model),
-      post: vi.fn(async () => ({ value: { last_segmentation_sequence: 3 } })),
+      post: vi.fn(async () => stageResult),
       scene: vi.fn().mockResolvedValueOnce(scene).mockResolvedValue(graspScene),
     };
     const planner: InstructionPlanner = {
@@ -102,7 +110,6 @@ describe("executeInstruction", () => {
       }),
     };
     const calls: string[] = [];
-    let sceneReads = 0;
     const gateway: RobotGateway = {
       model: vi.fn(async () => ({
         id: "prompted",
@@ -111,11 +118,11 @@ describe("executeInstruction", () => {
       })),
       post: vi.fn(async (path) => {
         calls.push(path);
-        return { value: { last_segmentation_sequence: 3 } };
+        return stageResult;
       }),
       scene: vi.fn(async () => {
         calls.push("scene");
-        return sceneReads++ === 0 ? scene : graspScene;
+        return scene; // Remains old: submission must use the generation response.
       }),
     };
     let sequence = 0;
@@ -133,7 +140,6 @@ describe("executeInstruction", () => {
       "/api/perception/request",
       "scene",
       "/api/perception/request",
-      "scene",
       "/api/motion/mode",
       "/api/perception/pick-place",
     ]);
@@ -171,7 +177,7 @@ describe("executeInstruction", () => {
         label: "Prompted",
         prompt_free: false,
       })),
-      post: vi.fn(async () => ({ value: { last_segmentation_sequence: 3 } })),
+      post: vi.fn(async () => stageResult),
       scene: vi.fn(async () => scene),
     };
     const planner: InstructionPlanner = {
@@ -189,7 +195,7 @@ describe("executeInstruction", () => {
 
     await expect(
       executeInstruction("抓起来", planner, gateway, () => "request"),
-    ).rejects.toThrow("不存在");
+    ).rejects.toThrow("请选择当前场景");
     expect(gateway.post).toHaveBeenCalledTimes(3);
   });
 

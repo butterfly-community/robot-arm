@@ -113,7 +113,11 @@ async fn segmentation_only_needs_rgb_and_does_not_call_grasps() {
             .unwrap();
         assert_eq!(output.instances.len(), 1);
         assert!(output.assets.contains_key("mask-0.png"));
-        assert!(output.assets.contains_key("overlay.png"));
+        assert!(!output.assets.contains_key("overlay.png"));
+        let rgb = image::load_from_memory(&output.assets["segmentation-color.png"].1)
+            .unwrap()
+            .into_rgb8();
+        assert_eq!(rgb.as_raw(), &output.frame.color.packed_rgb().unwrap());
         assert!(!output.assets.contains_key("depth.png"));
         assert!(output.frame.calibration.is_none());
         assert!(reconstruct_frame(&output, 11).is_err());

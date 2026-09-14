@@ -3,6 +3,9 @@
 构建上下文仅使用根目录、`frontend/` 和 `backend/services/perception-compute/`；
 各自的 `.dockerignore` 排除本地 `.env*`、缓存和运行配置。计算基础镜像使用根上下文及
 `Dockerfile.base.dockerignore`，该文件会覆盖根规则，必须同步排除这些本地资源。
+根上下文与计算基础上下文同时排除独立 `tools/` 及嵌套 `.git`。
+正式夹爪资产生成器位于 `backend/services/perception-compute/build-description.py`；设备自己的
+`backend/devices/stararm-102/tools/` 仍属于生产构建输入，不能和根目录工具仓库一并排除。
 不维护未被构建入口使用的 `backend/.dockerignore`。正式标定配置只由 Compose 挂载，不打进镜像。
 规则按 [Docker 构建上下文约定](https://docs.docker.com/build/concepts/context/#dockerignore-files) 生效，
 不是 Git 忽略规则的继承。
@@ -83,10 +86,14 @@ segment，Compose `/dev/shm` 为 2 GiB，供 MoveGroup、MTC、Rust 桥和 RViz 
 Dockerfile；不得用 `latest` 隐式漂移。应用代码的日常构建仍只有：
 
 ```bash
-docker compose build <受影响的服务>
+docker compose build <受影响的后端服务>
 docker compose down
 docker compose up -d --no-build --force-recreate
 ```
+
+五个网页共用一个镜像，Compose 仅在 `web-tracking` 声明构建入口。
+任何前端应用或共享包变化，都运行 `docker compose build web-tracking`，再整套重启；
+`docker compose build web-perception` 等没有 build 声明的服务不会更新网页镜像。
 
 系统统一启停，不维护单节点生命周期。重启时先整套 `down`，再整体 `up`，不指定单个服务；
 dataflow 不单独自动重启某个节点。只读审查或不改变行为的源码整理不要求打断当前真机运行；

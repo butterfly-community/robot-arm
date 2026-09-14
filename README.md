@@ -20,10 +20,14 @@ docker compose down
 应用代码变化时：
 
 ```bash
-docker compose build <受影响的服务>
+docker compose build <受影响的后端服务>
 docker compose down
 docker compose up -d --no-build --force-recreate
 ```
+
+五个网页共用一个镜像，Compose 仅在 `web-tracking` 声明构建入口。
+任何前端应用或共享包变化，都运行 `docker compose build web-tracking`，再整套重启；
+`docker compose build web-perception` 等没有 build 声明的服务不会更新网页镜像。
 
 Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
 `http://192.168.100.10:6080/`。
@@ -92,12 +96,11 @@ Rust 测试、Clippy 和模型测试必须在各自服务的构建/运行镜像�
 
 测试脚本和诊断工具位于 `tests/`、`tools/` 与各节点自己的测试目录。
 `tools/` 是独立 Git 仓库，主仓库忽略整个目录；工具、验收图片及逐轮记录在其中单独提交，
-不再混入应用提交。当前仅建立本地仓库，尚未配置远程；克隆主仓库不会自动获取它。
+不再混入应用提交。工具按本地独立仓库维护，无须远程；克隆主仓库不会自动获取它。
 开发/测试前需将独立工具仓库放到根目录 `tools/`，日常使用 `git -C tools status`、
 `git -C tools add` 和 `git -C tools commit` 维护。生产构建不依赖此目录；正式夹爪资产生成器
 由计算服务维护。拆分前的工具历史仍可从主仓库提交 `c975133` 追溯，不改写历史。
-项目中间资源只能放仓库
-`temp/`；运行配置位于 `backend/config/runtime/`，网页不保存服务配置副本。
+项目中间资源只能放仓库 `temp/`；运行配置位于 `backend/config/runtime/`，网页不保存服务配置副本。
 服务停止后 `temp/` 随时可以清空，下次启动/测试不依赖旧临时数据；正式输入和配置不放在其中。
 
 ## 文档入口
@@ -108,7 +111,7 @@ Rust 测试、Clippy 和模型测试必须在各自服务的构建/运行镜像�
 - [资产基线与验收边界](docs/REVIEW.md)
 - [测试入口与环境](tests/README.md)
 
-真实抓放已由用户验收；海绵通过一批十次实际持物搬运，硬盒不稳定和漏检仍是已知边界，详见验收说明。
+真实抓放已由用户验收；当前性能基线为真实网页连续六次持物搬运，硬盒不稳定和漏检仍是已知边界，详见验收说明。
 `docs/` 只维护当前实现、操作方法和必要限制；历史调查与逐轮记录不再保留在工作树，
 需要追溯可从 Git 历史恢复；不可重拍的关键实物证据归档在 `tools/diagnostics/evidence/`。
 标定与运行配置保留，不受文档清理影响。

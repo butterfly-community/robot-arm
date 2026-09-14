@@ -93,17 +93,18 @@ pub(super) fn rebuild_segmented(mut input: SegmentedFrame) -> Result<SegmentedFr
     input.placement_labels.sort();
     input.placement_labels.dedup();
     let color = &input.frame.color;
-    let overlay = segmentation_debug_image(color, &input.instances)?;
     let rgb = color_png(color)?;
     input.assets = BTreeMap::from([
         ("color.png".into(), ("image/png".into(), rgb.clone())),
         ("segmentation-color.png".into(), ("image/png".into(), rgb)),
-        (
-            "overlay.png".into(),
-            ("image/png".into(), color_png(&overlay)?),
-        ),
     ]);
     for (index, instance) in input.instances.iter().enumerate() {
+        // Retain mask validation without rendering an unused tinted copy.
+        let mask = image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?;
+        eyre::ensure!(
+            mask.width() == color.width && mask.height() == color.height,
+            "实例分割掩码尺寸与彩色图不一致"
+        );
         input.assets.insert(
             format!("mask-{index}.png"),
             ("image/png".into(), instance.mask_png.clone()),

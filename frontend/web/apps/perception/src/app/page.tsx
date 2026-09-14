@@ -292,6 +292,9 @@ export default function Page() {
     (perception ? String(perception.grasp_collision_distance_m * 1000) : "");
   const perceptionRequestResult = values.perception_request_result as
     { request_id?: string } | undefined;
+  const canSnapshot = Boolean(
+    camera?.streaming && perception?.color_frame && perception?.depth_frame,
+  );
   const imageVersion =
     perceptionRequestResult?.request_id ?? perception?.last_scene_sequence ?? 0;
   const asset = (name: string) =>
@@ -1089,12 +1092,7 @@ export default function Page() {
               </Button>
               <Button
                 variant="outline"
-                disabled={
-                  pending ||
-                  !camera?.streaming ||
-                  !perception?.color_frame ||
-                  !perception?.depth_frame
-                }
+                disabled={pending || !canSnapshot}
                 onClick={() => perceptionRequest("snapshot")}
               >
                 {pendingPerceptionAction === "camera:snapshot"
@@ -1186,12 +1184,13 @@ export default function Page() {
             <Disclosure
               title="深度图"
               defaultOpen
-              englishTitle="独立按上送频率更新；彩色视频保留在可拖动浮窗中。"
+              englishTitle="点击更新当前深度快照；彩色视频保留在可拖动浮窗中。"
             >
               <div className="card-actions card-actions-leading">
                 <Button
                   variant="outline"
-                  disabled={pending || !camera?.streaming}
+                  disabled={pending || !canSnapshot}
+                  title={canSnapshot ? undefined : "等待相机首帧"}
                   onClick={() => perceptionRequest("snapshot")}
                 >
                   更新深度预览

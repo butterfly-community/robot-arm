@@ -9,7 +9,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result, bail, eyre};
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+use image::{DynamicImage, ImageFormat, RgbImage};
 use json_config_store::{load_or_default, save};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use robot_arm_messages::{
@@ -430,9 +430,8 @@ impl SceneNode {
         self.instance_clouds = Arc::new(vec![]);
         self.instances.clear();
         self.point_count = None;
-        self.assets.retain(|key, _| {
-            key != "overlay.png" && key != "segmentation-color.png" && !key.starts_with("mask-")
-        });
+        self.assets
+            .retain(|key, _| key != "segmentation-color.png" && !key.starts_with("mask-"));
         self.sequence += 1;
         send(
             node,
@@ -660,7 +659,9 @@ impl SceneNode {
                         self.sequence = segmented.sequence;
                         self.model = segmented.model.clone();
                         self.models = segmented.models.clone();
-                        self.assets = segmented.assets.clone();
+                        // clear_scene removed only old segmentation assets; preserve
+                        // the independently requested color/depth preview snapshots.
+                        self.assets.extend(segmented.assets.clone());
                         self.segmented = Some(segmented);
                     }
                     ProcessedStage::Reconstruction(scene, clouds) => {
@@ -1294,56 +1295,6 @@ fn depth_preview_png(depth: &AlignedDepthFrame) -> Result<Vec<u8>> {
     let mut output = Cursor::new(Vec::new());
     DynamicImage::ImageLuma8(image).write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
-}
-
-fn segmentation_debug_image(
-    source: &CameraImagePlane,
-    instances: &[DetectedInstance2D],
-) -> Result<CameraImagePlane> {
-    const COLORS: [[u8; 3]; 4] = [
-        [255, 72, 72],
-        [64, 196, 255],
-        [255, 196, 64],
-        [150, 92, 255],
-    ];
-    let mut image = color_rgb(source)?;
-    for (index, instance) in instances.iter().enumerate() {
-        let color = COLORS[index % COLORS.len()];
-        let mask =
-            image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?.into_luma8();
-        if mask.dimensions() != image.dimensions() {
-            bail!("实例分割掩码尺寸与彩色图不一致");
-        }
-        for (pixel, mask_value) in image.pixels_mut().zip(mask.pixels()) {
-            if mask_value[0] != 0 {
-                for channel in 0..3 {
-                    pixel[channel] =
-                        ((u16::from(pixel[channel]) * 2 + u16::from(color[channel])) / 3) as u8;
-                }
-            }
-        }
-        let [left, top, right, bottom] = instance.bounding_box_xyxy;
-        let left = left.round().clamp(0.0, f64::from(image.width() - 1)) as u32;
-        let right = right.round().clamp(0.0, f64::from(image.width() - 1)) as u32;
-        let top = top.round().clamp(0.0, f64::from(image.height() - 1)) as u32;
-        let bottom = bottom.round().clamp(0.0, f64::from(image.height() - 1)) as u32;
-        for x in left..=right {
-            image.put_pixel(x, top, Rgb(color));
-            image.put_pixel(x, bottom, Rgb(color));
-        }
-        for y in top..=bottom {
-            image.put_pixel(left, y, Rgb(color));
-            image.put_pixel(right, y, Rgb(color));
-        }
-    }
-    Ok(CameraImagePlane {
-        height: image.height(),
-        width: image.width(),
-        pixel_format: "rgb8".into(),
-        frame_id: source.frame_id.clone(),
-        stride_bytes: image.width() * 3,
-        data: image.into_raw(),
-    })
 }
 
 fn send_scene(node: &mut DoraNode, scene: &WorldScene) -> Result<()> {
