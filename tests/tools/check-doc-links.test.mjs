@@ -45,6 +45,13 @@ test("document checks handle unstaged deletion and still reject broken links", a
       (await check()).stdout,
       /Checked 2 local link paths in 3 Markdown files/,
     );
+    await writeFile(path.join(fixture, ".gitignore"), "/tools/\n");
+    await exec("git", ["init", "--quiet", path.join(fixture, "tools")]);
+    await writeFile(path.join(fixture, "tools/README.md"), "[parent](../README.md)\n");
+    assert.match((await check()).stdout, /Checked 3 local link paths in 4 Markdown files/);
+    await writeFile(path.join(fixture, "tools/README.md"), "[broken](missing.md)\n");
+    await assert.rejects(check(),
+      error => error.code === 1 && /tools\/README.md:1: missing.md/.test(error.stderr));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

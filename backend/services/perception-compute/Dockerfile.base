@@ -51,7 +51,7 @@ RUN mkdir -p /service \
 # Generate the selected device's GraspGenX description from the patched model.
 COPY --from=stararm-102 /opt/devices/stararm-102/vendor /opt/devices/stararm-102/vendor
 COPY backend/devices/stararm-102/graspgenx /opt/devices/stararm-102/project/graspgenx
-COPY tools/graspgenx/build-description.py /opt/tools/graspgenx/build-description.py
+COPY backend/services/perception-compute/build-description.py /opt/tools/graspgenx/build-description.py
 RUN mkdir -p /grippers/x_grippers \
     && /opt/compute-venv/bin/python /opt/tools/graspgenx/build-description.py \
        /opt/devices/stararm-102/project/graspgenx/manifest.json \

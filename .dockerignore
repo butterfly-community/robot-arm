@@ -1,4 +1,6 @@
 .git
+**/.git
+tools
 .codex
 .agents
 .env

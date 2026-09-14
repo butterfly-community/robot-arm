@@ -21,6 +21,9 @@
 /backend/services/perception-compute/models/
 /temp
 
+# Independently maintained repository; tools and evidence are committed there.
+/tools/
+
 # Local secrets at any depth; keep explicitly named shareable templates.
 .env
 .env.*
