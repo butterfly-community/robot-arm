@@ -13,6 +13,7 @@ if (
     "inspect",
     "camera",
     "settings",
+    "reply-layout",
     "config",
     "send",
     "stop",
@@ -22,7 +23,7 @@ if (
   !directory
 )
   throw Error(
-    "Usage: general-ai.mjs inspect|camera|settings|config|send|stop|new|history OUTPUT [TEXT or SESSION_ID] [IMAGE] [EFFORT]",
+    "Usage: general-ai.mjs inspect|camera|settings|reply-layout|config|send|stop|new|history OUTPUT [TEXT or SESSION_ID] [IMAGE] [EFFORT]",
   );
 const output = resolve(directory);
 process.env.TMPDIR = join(output, "browser-temp");
@@ -75,6 +76,10 @@ try {
   });
   await expect.poll(() => Boolean(latest), { timeout: 60000 }).toBe(true);
   const canvas = page.getByLabel("相机原始彩色视频", { exact: true });
+  if (["inspect", "camera", "send"].includes(mode)) {
+    const expand = page.getByRole("button", { name: "展开", exact: true });
+    if (await expand.isVisible()) await expand.click();
+  }
   async function screenshot(name) {
     if (await canvas.isVisible()) {
       if (latest?.perception_state?.source_id) {
@@ -123,6 +128,56 @@ try {
     await page
       .getByLabel("添加 AI 图片", { exact: true })
       .setInputFiles(resolve(imagePath));
+  if (mode === "reply-layout") {
+    // Reopen an actual completed multi-step conversation; never inject its text.
+    const minimizeVideo = page.getByRole("button", {
+      name: "收起",
+      exact: true,
+    });
+    if (await minimizeVideo.isVisible()) await minimizeVideo.click();
+    const card = page.locator(".ai-run").last();
+    await expect(card).toHaveAttribute("data-run-state", "succeeded");
+    const reply = card.locator(".ai-response");
+    const content = await reply.textContent();
+    expect(content).toContain("\n\n");
+    const conversation = page.getByLabel("AI 会话记录", { exact: true });
+    await expect(conversation).toHaveCount(1);
+    const inputs = await conversation
+      .locator(".ai-user-text")
+      .allTextContents();
+    const replies = await conversation
+      .locator(".ai-response")
+      .allTextContents();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      const disclosure = card.locator(":scope > .disclosure");
+      const gap = await disclosure.evaluate(
+        (el) =>
+          el.getBoundingClientRect().top -
+          el.previousElementSibling.getBoundingClientRect().bottom,
+      );
+      expect(gap).toBeGreaterThanOrEqual(20);
+      await expect(reply).toHaveCSS("white-space", "pre-wrap");
+      await expect(card).toHaveCSS("border-top-width", "0px");
+      await expect(card.getByLabel("AI 状态", { exact: true })).toContainText(
+        "本轮回复已结束",
+      );
+      await card.screenshot({ path: join(output, `reply-${width}.png`) });
+      console.log("REPLY_LAYOUT", JSON.stringify({ width, gap }));
+    }
+    await page.reload();
+    await expect(reply).toHaveText(content);
+    await expect(conversation.locator(".ai-user-text")).toHaveText(inputs);
+    await expect(conversation.locator(".ai-response")).toHaveText(replies);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await conversation.screenshot({
+      path: join(output, "conversation.jpg"),
+      type: "jpeg",
+      quality: 70,
+    });
+    console.log("CONVERSATION_PERSISTED", inputs.length);
+    console.log("REPLY_LAYOUT_PASS", JSON.stringify(content));
+  }
   if (mode === "settings") {
     // Real settings round trip only: no task, image upload, or motion request.
     const toggle = page.getByRole("button", { name: /^模型与思考配置/ });

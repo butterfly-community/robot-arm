@@ -25,7 +25,7 @@ const endpoint = "/perception/api/ai/";
 const labels = {
   running: "正在处理",
   stopping: "正在停止，等待当前动作结果",
-  succeeded: "流程已完成",
+  succeeded: "本轮回复已结束",
   failed: "失败",
   cancelled: "已取消",
   interrupted: "已中断，需核对原请求",
@@ -450,14 +450,19 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
                 ))}
               </div>
             )}
-            <KeyValue
-              label="AI 状态"
-              value={`${labels[run.state]} · ${Math.round(((run.endedAt ?? (activeRun(run) ? now : run.updatedAt)) - run.startedAt) / 1000)} 秒`}
-            />
-            <KeyValue
-              label="模型 / 思考强度"
-              value={`${run.settings.model} / ${run.settings.effort || "模型默认"}`}
-            />
+            <div className="ai-response">
+              {run.text ||
+                (activeRun(run) ? "等待模型响应或工具结果…" : "暂无文本回复")}
+            </div>
+            <p className="ai-run-status" aria-label="AI 状态">
+              {labels[run.state]} ·{" "}
+              {Math.round(
+                ((run.endedAt ?? (activeRun(run) ? now : run.updatedAt)) -
+                  run.startedAt) /
+                  1000,
+              )}{" "}
+              秒
+            </p>
             {activeRun(run) && (
               <KeyValue
                 label="当前步骤"
@@ -480,32 +485,32 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
                   value={`${request.state} · ${request.id}`}
                 />
               ))}
-            <div className="ai-response">
-              {run.text ||
-                (activeRun(run) ? "等待模型响应或工具结果…" : "暂无文本回复")}
-            </div>
-            <KeyValue
-              label="服务回显思考强度"
-              value={
-                run.reportedEfforts?.join(", ") ||
-                "未回显；不能据此确认档位生效"
-              }
-            />
             {run.error && (
               <p className="error" role="alert">
                 {run.error}
               </p>
             )}
-            {run.requests.length > 0 && (
-              <KeyValue
-                label="最近机器人请求"
-                value={`${run.requests.at(-1)!.label} · ${run.requests.at(-1)!.state}`}
-              />
-            )}
             <Disclosure
               title="工具与执行详情"
               englishTitle="模型回复与控制器终态分别记录；动作成功不等于已经通过图像确认抓持。"
             >
+              <KeyValue
+                label="模型 / 思考强度"
+                value={`${run.settings.model} / ${run.settings.effort || "模型默认"}`}
+              />
+              <KeyValue
+                label="服务回显思考强度"
+                value={
+                  run.reportedEfforts?.join(", ") ||
+                  "未回显；不能据此确认档位生效"
+                }
+              />
+              {run.requests.length > 0 && (
+                <KeyValue
+                  label="最近机器人请求"
+                  value={`${run.requests.at(-1)!.label} · ${run.requests.at(-1)!.state}`}
+                />
+              )}
               <KeyValue label="运行编号" value={run.id} />
               <KeyValue
                 label="服务返回模型"

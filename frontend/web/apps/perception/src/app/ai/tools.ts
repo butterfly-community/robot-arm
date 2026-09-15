@@ -237,7 +237,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     annotate: define(
       "annotate",
-      "复用网页手动框选契约，在最近 capture_segmentation 返回的当前固定帧提交像素框；来源为 manual。可提交空数组清除。框坐标使用原图分辨率，不能当成三维位置。内部结果序号由工具按当前帧填写，与网页一致。",
+      "依据当前图像自主框选可见目标，任务内无需额外授权，模型漏检时也可直接使用。复用网页手动框选契约，在最近 capture_segmentation 返回的当前固定帧提交像素框；来源为 manual，不能冒充模型分割。可提交空数组清除。框坐标使用原图分辨率，不能当成三维位置。内部结果序号由工具按当前帧填写，与网页一致。",
       z.object({
         regions: z.array(
           z.object({

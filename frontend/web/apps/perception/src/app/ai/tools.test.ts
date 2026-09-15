@@ -35,6 +35,14 @@ function setup() {
   return { command, tools: robotTools(context) };
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
+  it("exposes every tool for direct execution without approval gates", () => {
+    const { tools } = setup();
+    for (const definition of Object.values(tools)) {
+      expect(definition.execute).toBeTypeOf("function");
+      expect(definition.needsApproval).toBeUndefined();
+    }
+    expect(tools.annotate.description).toContain("任务内无需额外授权");
+  });
   it("returns the registered models and saved prompt mode with the captured image, without another query", async () => {
     const { command, tools } = setup();
     command.mockResolvedValueOnce({

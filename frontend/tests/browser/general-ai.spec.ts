@@ -204,7 +204,7 @@ test("running robot task survives browser reload and cancellation is not immedia
     state: "running",
     input: "测试任务",
     images: [],
-    text: "",
+    text: "开始读取。\n\n读取完成，准备下一步。",
     startedAt: Date.now(),
     updatedAt: Date.now(),
     calls: [],
@@ -220,6 +220,15 @@ test("running robot task survives browser reload and cancellation is not immedia
     responseIds: [],
     warnings: [],
   };
+  const previous = {
+    ...run,
+    id: "previous-run",
+    state: "succeeded",
+    input: "上一轮问题",
+    text: "上一轮回复",
+    requests: [],
+    endedAt: run.startedAt,
+  };
   await page.route("**/api/**", (route) =>
     ["GET", "HEAD"].includes(route.request().method())
       ? route.fallback()
@@ -228,7 +237,7 @@ test("running robot task survives browser reload and cancellation is not immedia
   await page.route("**/perception/api/ai/events/**", (route) =>
     route.fulfill({
       contentType: "text/event-stream",
-      body: "data: " + JSON.stringify([run]) + "\n\n",
+      body: "data: " + JSON.stringify([previous, run]) + "\n\n",
     }),
   );
   await page.route("**/perception/api/ai/?**", (route) =>
@@ -240,7 +249,7 @@ test("running robot task survives browser reload and cancellation is not immedia
         sessions: [
           { id: run.sessionId, title: run.input, updatedAt: run.updatedAt },
         ],
-        runs: [run],
+        runs: [previous, run],
       },
     }),
   );
@@ -258,12 +267,44 @@ test("running robot task survives browser reload and cancellation is not immedia
   await expect(page.locator('[data-run-id="fixture-run"]')).toContainText(
     "正在处理",
   );
+  const card = page.locator('[data-run-id="fixture-run"]');
+  const conversation = page.getByLabel("AI 会话记录", { exact: true });
+  await expect(conversation).toHaveCount(1);
+  await expect(conversation.locator(".ai-run")).toHaveCount(2);
+  await expect(conversation.locator(".ai-user-text")).toHaveText([
+    "上一轮问题",
+    "测试任务",
+  ]);
+  await expect(page.locator('[data-run-id="previous-run"]')).toContainText(
+    "本轮回复已结束",
+  );
+  await expect(conversation).not.toContainText("流程已完成");
+  await expect(
+    card.getByRole("button", { name: /^工具与执行详情/ }),
+  ).toHaveAttribute("aria-expanded", "false");
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(card).toHaveCSS("border-top-width", "0px");
+    const disclosure = card.locator(":scope > .disclosure");
+    const preceding = disclosure.locator("xpath=preceding-sibling::*[1]");
+    const a = await preceding.boundingBox();
+    const b = await disclosure.boundingBox();
+    expect(b!.y - a!.y - a!.height).toBeGreaterThanOrEqual(19);
+    await expect(card.locator(".ai-response")).toHaveCSS(
+      "white-space",
+      "pre-wrap",
+    );
+    expect(await card.locator(".ai-response").textContent()).toBe(
+      "开始读取。\n\n读取完成，准备下一步。",
+    );
+  }
   // Generic AI and manual pick/place have independent progress. The enclosing
   // card must not repeat the manual task's old idle/success badge for AI work.
   await expect(
     page.locator(".perception-task-card > .card-heading > .card-action"),
   ).toHaveCount(0);
   await page.reload();
+  await expect(conversation.locator(".ai-run")).toHaveCount(2);
   await expect(
     page.getByRole("button", { name: "发送 AI 任务", exact: true }),
   ).toBeDisabled();

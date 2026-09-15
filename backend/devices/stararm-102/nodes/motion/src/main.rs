@@ -1262,7 +1262,7 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
     let mut placement_pose = placement.pose.clone();
     // User-defined minimum held-object centre release height above Z=0,
     // not an offset from the destination. MTC ignores its orientation.
-    placement_pose.position_m[2] = placement_pose.position_m[2].max(0.10);
+    placement_pose.position_m[2] = placement_pose.position_m[2].max(0.05);
     let goal = json!({
         "request_id": request.request_id,
         "frame_id": scene.frame_id,
@@ -1529,7 +1529,7 @@ mod tests {
         assert_eq!(pending.state.pick_position_m, Some([0.1, 0.2, 0.02]));
         let release = pending.state.place_position_m.unwrap();
         assert_eq!(&release[..2], &[-0.1, 0.2]);
-        assert_eq!(release[2], 0.10);
+        assert_eq!(release[2], 0.05);
         assert_eq!(
             pending.job.goal["placement_pose"]["position"]["z"],
             release[2]

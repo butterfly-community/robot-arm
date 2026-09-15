@@ -808,6 +808,7 @@ datalist option {
 .key-value + .field,
 .key-value + .card-stack,
 .key-value + .source-list,
+.key-value + .disclosure,
 .range-stack + .key-value {
   margin-top: 20px;
 }
@@ -2214,7 +2215,7 @@ input[type="range"] {
   gap: 20px;
   min-width: 0;
 }
-.ai-task-panel > .card-disclosure,
+.ai-task-panel > .disclosure,
 .ai-task-panel > .field {
   margin-top: 20px;
 }
@@ -2232,14 +2233,27 @@ input[type="range"] {
 }
 .ai-conversation {
   margin-top: 20px;
-}
-.ai-run {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 16px;
+  gap: 28px;
+}
+.ai-conversation:empty {
+  display: none;
+}
+.ai-run {
   min-width: 0;
 }
+.ai-run > .disclosure {
+  margin-top: 20px;
+}
+.ai-run-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
 .ai-user-text {
+  margin: 0;
   font-weight: 600;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

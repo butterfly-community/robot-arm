@@ -64,6 +64,8 @@ scene 原生回归核对分割原图像素不变、mask 可用，不再要求已
 `node tests/integration/general-ai.mjs send temp/general-ai/task "任务文本"`。
 `node tests/integration/general-ai.mjs settings temp/general-ai/settings` 实测模型/思考强度下拉、
 手动输入、保存与刷新及窄屏布局，结束恢复原配置，不发送任务、图片或运动指令。
+`reply-layout OUTPUT` 只读复查当前会话最后一条已完成的多轮回复：桌面/窄屏折叠框间距、
+段落换行及刷新后的保留。先用 `send` 完成一个工具调用前后都有文本的只读任务。
 `inspect` 只查看；`camera` 在网页选择可用 RealSense 并保存；`config OUTPUT "" [图片路径] [思考强度]`
 查询模型、保存配置并验证真实文本/图像/工具回传；`stop` 点击停止并等终态。
 浏览器会话默认保存到 temp/general-ai/browser-state.json，丢失时可在网页历史会话中恢复。
