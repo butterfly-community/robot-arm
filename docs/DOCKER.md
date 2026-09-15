@@ -1,5 +1,23 @@
 # Docker 与服务镜像
 
+## 使用入口
+
+首次配置自然语言能力时，将根目录 `.env.example` 复制为 `.env` 并填写模型服务设置与密钥。
+Compose 只向所需服务注入配置，密钥不进入浏览器或 Git。
+
+Web 入口为 `http://192.168.100.10:8765/`，MoveIt/RViz 的 noVNC 入口为
+`http://192.168.100.10:6080/`。已完成构建的服务在根目录统一启动和关闭：
+
+```bash
+docker compose up -d --no-build
+docker compose down
+```
+
+重启始终整套关闭、整套启动，不独立重启节点。源码变更的构建方式见下文“构建顺序”。
+前端检查和原生服务测试见[测试入口](../tests/README.md)。
+
+## 构建上下文
+
 构建上下文仅使用根目录、`frontend/` 和 `backend/services/perception-compute/`；
 各自的 `.dockerignore` 排除本地 `.env*`、缓存和运行配置。计算基础镜像使用根上下文及
 `Dockerfile.base.dockerignore`，该文件会覆盖根规则，必须同步排除这些本地资源。
