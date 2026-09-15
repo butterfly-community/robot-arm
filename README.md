@@ -159,9 +159,13 @@ Model names and reasoning effort can be selected from lists or entered manually.
 
 AI replies and robot execution results are displayed separately. A finished reply does not mean the robot has completed its movement. The user can inspect task progress and actual feedback, or stop the current AI and action.
 
-![AI conversation, segmentation results and pick-and-place controls](.github/media/ai-workspace.jpg)
+### Example: AI-driven pick-and-place
 
-The task text in this screenshot is an unsent example. The adjacent results are existing model detections and manual annotations.
+Task: “Place the purple object in the red frame, then move it from there to the center.”
+
+![Two AI-driven pick-and-place operations with conversation, segmentation and live video](.github/media/ai-pick-place.png)
+
+A user-provided screenshot of an actual operation. The conversation records recognition, region selection, manipulation and image checks. The large image on the right is the segmentation frame used for localization; the live video above it shows the later object state. The record also acknowledges that the first placement extended outside the red frame, followed by another grasp and placement at the center as instructed.
 
 ## Motion
 
