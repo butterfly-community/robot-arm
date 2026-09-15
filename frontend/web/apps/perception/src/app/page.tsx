@@ -28,6 +28,7 @@ import {
   JsonView,
   KeyValue,
   Metric,
+  RequestStatus,
   Shell,
   StatusBadge,
 } from "@robot/ui";
@@ -41,7 +42,7 @@ import {
   pickPlaceStatus,
   type PickPlaceAttempt,
 } from "./pick-place-progress";
-import type { InstructionResult } from "./instruction-flow";
+import { AIPanel } from "./ai-panel";
 
 const initialBoard = {
   squaresX: "5",
@@ -52,16 +53,6 @@ const initialBoard = {
   measuredHeightMm: "75",
   toolId: "charuco-test-tool",
 };
-
-const manipulationStateLabels: Record<ManipulationTaskState["state"], string> =
-  {
-    idle: "等待任务",
-    planning: "正在规划",
-    executing: "正在执行",
-    succeeded: "执行完成",
-    failed: "执行失败",
-    cancelled: "已取消",
-  };
 
 type CalibrationAction = "start" | "apply" | "cancel";
 
@@ -260,10 +251,8 @@ export default function Page() {
   const [graspCollisionDistance, setGraspCollisionDistance] = useDraftValue(
     perception ? String(perception.grasp_collision_distance_m * 1000) : "",
   );
-  const [instruction, setInstruction] = useState("");
-  const [instructionPending, setInstructionPending] = useState(false);
-  const [instructionResult, setInstructionResult] =
-    useState<InstructionResult>();
+  const [aiBusy, setAIBusy] = useState(false);
+  const [cancellingGrasp, setCancellingGrasp] = useState(false);
   const [requestPending, setPending] = useState(false);
   const [pickPlaceAttempt, setPickPlaceAttempt] = useState<PickPlaceAttempt>();
   const [pendingPerceptionAction, setPendingPerceptionAction] =
@@ -274,7 +263,7 @@ export default function Page() {
     requestPending ||
     Boolean(pendingPerceptionAction) ||
     Boolean(pendingCalibrationAction) ||
-    instructionPending;
+    aiBusy;
 
   const selectedSourceId = sourceId ?? camera?.selected_source_id ?? "";
   const savedCalibrations = camera?.saved_calibrations ?? [];
@@ -690,40 +679,6 @@ export default function Page() {
       }));
     } finally {
       setPendingPerceptionAction(undefined);
-    }
-  }
-
-  async function executeNaturalLanguageTask() {
-    if (!instruction.trim()) return;
-    setInstructionPending(true);
-    setError(undefined);
-    try {
-      const response = await fetch("/perception/api/instruction/", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ instruction }),
-      });
-      const value = (await response.json()) as
-        InstructionResult | { original_error?: string };
-      if (
-        !response.ok ||
-        ("original_error" in value && typeof value.original_error === "string")
-      ) {
-        throw new Error(
-          "original_error" in value && value.original_error
-            ? value.original_error
-            : `自然语言任务请求失败 (${response.status})`,
-        );
-      }
-      const result = value as InstructionResult;
-      setInstructionResult(result);
-      setSegmentationModel(result.model);
-      setObjectId(result.object_id);
-      setRegionId(result.placement_region_id);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setInstructionPending(false);
     }
   }
 
@@ -1663,77 +1618,10 @@ export default function Page() {
             className="span-12 perception-task-card"
             eyebrow="自然语言任务、分割与应用场景"
             title="AI"
-            action={
-              <StatusBadge
-                tone={
-                  manipulation?.state === "failed"
-                    ? "bad"
-                    : manipulation?.state === "succeeded"
-                      ? "good"
-                      : "neutral"
-                }
-              >
-                {perception?.task_state === "executing"
-                  ? "正在处理感知任务"
-                  : manipulationStateLabels[manipulation?.state ?? "idle"]}
-              </StatusBadge>
-            }
           >
             <div className="ai-columns">
               <div className="ai-workspace">
-                <div className="ai-task-panel">
-                  <div className="ai-task-heading">
-                    <div>
-                      <h3>AI 自然语言抓放</h3>
-                      <p>
-                        描述要抓取的物体和放置位置；AI
-                        会使用已保存的分割模型、选择真实场景实例，再调用现有 MTC
-                        抓放流程。
-                      </p>
-                    </div>
-                    <StatusBadge tone="cyan">服务端 AI</StatusBadge>
-                  </div>
-                  <div className="instruction-task">
-                    <Field
-                      label="自然语言任务"
-                      hint="AI 使用已保存的模型：提示词模式生成识别提示词，自动模式直接识别。之后选择真实场景实例，沿同一条手动链路完成规划和执行。"
-                    >
-                      <Input
-                        aria-label="自然语言任务"
-                        value={instruction}
-                        placeholder="例如：把红色方块放进灰色置物筐"
-                        onChange={(event) =>
-                          setInstruction(event.currentTarget.value)
-                        }
-                      />
-                    </Field>
-                    <Button
-                      variant="outline"
-                      disabled={
-                        pending ||
-                        instructionPending ||
-                        !instruction.trim() ||
-                        !camera?.streaming ||
-                        !perception?.calibrated ||
-                        perception?.task_state === "executing" ||
-                        manipulation?.state === "planning" ||
-                        manipulation?.state === "executing"
-                      }
-                      onClick={executeNaturalLanguageTask}
-                    >
-                      {instructionPending
-                        ? "AI 正在编排并执行…"
-                        : "用 AI 执行抓放"}
-                    </Button>
-                  </div>
-                  {instructionResult && (
-                    <KeyValue
-                      label="最近一次 AI 编排"
-                      value={`${instructionResult.object_id} → ${instructionResult.placement_region_id}`}
-                      hint={`${instructionResult.prompt_free ? "已使用自动分割" : `已使用提示词 ${instructionResult.perception_prompts.join(", ")}`} 完成感知，并把同一抓放请求 ${instructionResult.request_id} 提交给运动服务。`}
-                    />
-                  )}
-                </div>
+                <AIPanel onBusy={setAIBusy} />
                 <Disclosure
                   title="抓放场景"
                   englishTitle="选择已三维定位的物体和目标后启动。缺少候选时先生成候选，成功后使用同一场景执行抓放；不会重新运行分割。"
@@ -1796,6 +1684,34 @@ export default function Page() {
                         : "启动"}
                     </Button>
                   </div>
+                  <div className="card-actions">
+                    <Button
+                      disabled={
+                        cancellingGrasp ||
+                        !manipulation ||
+                        !["planning", "executing"].includes(manipulation.state)
+                      }
+                      onClick={async () => {
+                        if (!manipulation) return;
+                        setCancellingGrasp(true);
+                        try {
+                          await post("/api/motion/cancel", {
+                            schema_version: schemaVersion,
+                            request_id: requestId(),
+                            action: "cancel",
+                            target_request_id: manipulation.request_id,
+                          });
+                        } catch (reason) {
+                          setError(String(reason));
+                        } finally {
+                          setCancellingGrasp(false);
+                        }
+                      }}
+                    >
+                      {cancellingGrasp ? "正在请求取消…" : "取消抓放"}
+                    </Button>
+                  </div>
+                  <RequestStatus scope="perception" />
                   <PickPlaceProgress
                     attempt={pickPlaceAttempt}
                     perception={perception}

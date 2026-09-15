@@ -38,17 +38,14 @@ test("AI task input and execute button have a real gap at desktop and mobile wid
   for (const width of [1600, 1024, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     const input = await page
-      .getByLabel("自然语言任务", { exact: true })
+      .getByLabel("AI 任务", { exact: true })
       .boundingBox();
     const button = await page
-      .getByRole("button", { name: "用 AI 执行抓放", exact: true })
+      .getByRole("button", { name: "发送 AI 任务", exact: true })
       .boundingBox();
     expect(input).not.toBeNull();
     expect(button).not.toBeNull();
-    const gap =
-      width > 720
-        ? button!.x - input!.x - input!.width
-        : button!.y - input!.y - input!.height;
+    const gap = button!.y - input!.y - input!.height;
     expect(gap).toBeGreaterThanOrEqual(11);
   }
 });

@@ -1,4 +1,11 @@
 import { defineConfig } from "@playwright/test";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+
+// Browser profiles must also stay in project temp, not the system /tmp.
+// Keep them outside outputDir, which Playwright clears when starting a run.
+process.env.TMPDIR = resolve(__dirname, "../temp/playwright-browser");
+mkdirSync(process.env.TMPDIR, { recursive: true });
 
 export default defineConfig({
   testDir: "./tests/browser",

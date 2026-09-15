@@ -1650,6 +1650,8 @@ pub struct MotionRequest {
     pub request_id: String,
     pub model_revision: String,
     pub joints: Vec<JointPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_target: Option<TcpMotionTarget>,
     pub actuators: Vec<ActuatorPosition>,
     pub options: BTreeMap<String, f64>,
     pub action: RequestAction,
@@ -1718,6 +1720,13 @@ pub struct ToolPose {
     pub frame: String,
     pub position_m: [f64; 3],
     pub orientation_xyzw: [f64; 4],
+}
+
+/// Absolute pose in the base frame, or a delta expressed in base/tool axes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TcpMotionTarget {
+    pub pose: ToolPose,
+    pub relative: bool,
 }
 
 /// Measured TCP and the exact, unmodified feedback used for its FK request.

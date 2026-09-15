@@ -22,11 +22,13 @@ import {
   KeyValue,
   Metric,
   RangeControls,
+  RequestStatus,
   Shell,
   StatusBadge,
 } from "@robot/ui";
 import { useState } from "react";
 import { RobotViewer } from "@robot/visualization/robot-viewer";
+import { TcpTarget } from "./tcp-target";
 
 type ManualTarget = {
   model_revision: string;
@@ -60,6 +62,11 @@ export default function Page() {
   );
   const [pendingAction, setPendingAction] = useState<string>();
   const [cancelling, setCancelling] = useState(false);
+  const actuatorExecuting =
+    (motion?.latest_actuator as { state?: string } | undefined)?.state ===
+      "executing" &&
+    (motion?.latest_actuator as { request_id?: string } | undefined)
+      ?.request_id !== "input-action";
 
   // Feedback follows the arm until edited. A draft survives feedback and failures.
   // A different model must never inherit joint keys from the previous model.
@@ -299,6 +306,36 @@ export default function Page() {
             >
               恢复当前姿态
             </Button>
+            <Button
+              disabled={!model || Boolean(pendingAction) || actuatorExecuting}
+              onClick={async () => {
+                if (!model) return;
+                setPendingAction("actuator");
+                setError(undefined);
+                try {
+                  await manualMode();
+                  for (const actuator of model.tool_actuators) {
+                    await post("/api/motion/actuator", {
+                      schema_version: schemaVersion,
+                      request_id: requestId(),
+                      model_revision: model.model_revision,
+                      actuator_key: actuator.key,
+                      position_rad: actuators[actuator.key],
+                    });
+                  }
+                } catch (reason) {
+                  setError(String(reason));
+                } finally {
+                  setPendingAction(undefined);
+                }
+              }}
+            >
+              {pendingAction === "actuator"
+                ? "正在提交夹爪目标…"
+                : actuatorExecuting
+                  ? "夹爪正在执行…"
+                  : "仅执行夹爪目标"}
+            </Button>
           </div>
           {error && (
             <p className="error" role="alert">
@@ -485,6 +522,18 @@ export default function Page() {
           </div>
         </Card>
 
+        {model && (
+          <TcpTarget
+            key={model.model_revision}
+            model={model}
+            arm={arm}
+            motion={motion}
+            busy={motionBusy || Boolean(pendingAction)}
+          />
+        )}
+        <Card className="span-12" title="动作结果查询">
+          <RequestStatus scope="motion" />
+        </Card>
         <Card className="span-6" eyebrow="Tool pose" title="末端当前 / 目标">
           <div className="pose-comparison">
             <div>

@@ -32,6 +32,31 @@ export async function post<T extends Json>(
   value: T,
   options?: Pick<RequestInit, "keepalive">,
 ): Promise<Json> {
+  if (
+    typeof window !== "undefined" &&
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof value.request_id === "string"
+  ) {
+    const scope =
+      path === "/api/perception/pick-place"
+        ? "perception"
+        : [
+              "/api/motion/request",
+              "/api/motion/actuator",
+              "/api/motion/prepare-relative",
+            ].includes(path)
+          ? "motion"
+          : undefined;
+    if (scope) {
+      window.localStorage.setItem(
+        `robot-arm:last-request:${scope}`,
+        value.request_id,
+      );
+      window.dispatchEvent(new Event("robot-arm:request"));
+    }
+  }
   const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },

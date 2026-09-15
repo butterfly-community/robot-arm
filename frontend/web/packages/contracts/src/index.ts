@@ -90,6 +90,9 @@ export interface FieldSchema {
 }
 
 export interface ArmState {
+  // Present on measured feedback; not invented for a local preview draft.
+  sequence?: number;
+  sample_time_ns?: number;
   model_revision: string;
   feedback_source: "software" | "hardware";
   joints_rad: number[];
@@ -111,10 +114,34 @@ export interface ToolPose {
   orientation_xyzw: [number, number, number, number];
 }
 
+export interface TcpMotionTarget {
+  pose: ToolPose;
+  relative: boolean;
+}
+
+export interface RequestRecord {
+  schema_version: number;
+  request_id: string;
+  operation: string;
+  session_id: string;
+  state: RequestState | "accepted" | "unknown";
+  terminal: boolean;
+  value: Record<string, Json> | null;
+  original_error: string | null;
+  updated_at_ms: number;
+}
+
 export interface MotionState {
   control_mode: "relative" | "manual" | "perception";
   current_tool_pose?: (ToolPose & { arm_state: ArmState }) | null;
   target_tool_pose?: ToolPose | null;
+  latest_actuator?: {
+    request_id: string;
+    actuator_key: string;
+    state: RequestState;
+    result_code?: string | null;
+    result_message?: string | null;
+  } | null;
 }
 
 export interface ParameterValue {

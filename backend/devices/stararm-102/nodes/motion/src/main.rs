@@ -88,6 +88,7 @@ struct MotionNode {
     last_error: Option<String>,
     execution_error: Option<String>,
     active_manipulation: Option<String>,
+    manipulation_cancel: Option<Arc<AtomicBool>>,
     manipulation_state: ManipulationTaskState,
 }
 
@@ -169,6 +170,7 @@ fn run() -> Result<()> {
         last_error: None,
         execution_error: None,
         active_manipulation: None,
+        manipulation_cancel: None,
         manipulation_state: idle_manipulation_state(),
     };
     let (mut node, mut events) = DoraNode::init_from_env()?;
@@ -207,6 +209,7 @@ fn run() -> Result<()> {
                                     .as_str()
                                     .unwrap_or_default()
                                     .to_owned(),
+                                request["target_request_id"].as_str().map(str::to_owned),
                             )?
                         } else {
                             motion.handle_motion_request(
@@ -365,8 +368,10 @@ impl MotionNode {
             cancel: Arc::default(),
             request_id,
             current,
+            measured: state.joints_rad.clone(),
             target: DEFAULT_JOINTS_RAD.to_vec(),
-            actuator: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
+            tcp_target: None,
+            actuator: Some(GRIPPER_DRIVE_JOINT_CLOSED_RAD),
             options: BTreeMap::new(),
         };
         self.queue_or_start_motion(node, job, true)
@@ -423,7 +428,16 @@ impl MotionNode {
                 RequestAction::Apply,
             );
         }
-        let (current, mut actuator) = planning_state(state);
+        let current = planning_state(state).0;
+        let mut actuator = None;
+        if request.tcp_target.is_some() && !request.joints.is_empty() {
+            return self.fail_motion(
+                node,
+                request.request_id,
+                "一次请求只能指定关节目标或 TCP 目标".into(),
+                RequestAction::Apply,
+            );
+        }
         let mut target = JOINTS
             .iter()
             .copied()
@@ -460,13 +474,15 @@ impl MotionNode {
                     RequestAction::Apply,
                 );
             }
-            actuator = item.position_rad;
+            actuator = Some(item.position_rad);
         }
         let job = MotionJob {
             cancel: Arc::default(),
             request_id: request.request_id,
             current,
+            measured: state.joints_rad.clone(),
             target: JOINTS.map(|name| target[name]).to_vec(),
+            tcp_target: request.tcp_target,
             actuator,
             options: request.options,
         };
@@ -496,6 +512,7 @@ impl MotionNode {
         };
         if let (WorkItem::Motion(pending), Some(state)) = (next, &self.latest_arm_state) {
             pending.job.current = planning_state(state).0;
+            pending.job.measured = state.joints_rad.clone();
         }
         if self.controller_sync_required || self.controller_sync_running {
             self.start_controller_sync();
@@ -506,7 +523,7 @@ impl MotionNode {
                 self.motion_status = MotionStatus {
                     request_id: pending.job.request_id.clone(),
                     state: RequestState::Planning,
-                    result_message: Some("MoveIt 正在规划普通关节目标".into()),
+                    result_message: Some("MoveIt 正在规划运动目标".into()),
                     ..idle_status()
                 };
                 send(node, "motion_status", &self.motion_status)?;
@@ -519,6 +536,7 @@ impl MotionNode {
                     return self.start_next_work(node);
                 }
                 self.active_manipulation = Some(pending.job.request_id.clone());
+                self.manipulation_cancel = Some(pending.job.cancel.clone());
                 send(node, "manipulation_state", &self.manipulation_state)?;
                 self.controller_output_armed = true;
                 self.ros.run_manipulation(pending.job);
@@ -549,7 +567,17 @@ impl MotionNode {
         {
             Some("request does not match StarArm-102 gripper".into())
         } else {
-            self.publish_actuator(&request.request_id, request.position_rad)
+            self.controller_output_armed = true;
+            self.actuator_status = Some(ToolActuatorStatus {
+                schema_version: SCHEMA_VERSION,
+                request_id: request.request_id.clone(),
+                actuator_key: request.actuator_key.clone(),
+                state: RequestState::Executing,
+                result_code: None,
+                result_message: Some("已受理，等待夹爪控制器执行结果".into()),
+            });
+            self.ros
+                .run_actuator(request.request_id.clone(), request.position_rad)
                 .err()
                 .map(|error| error.to_string())
         };
@@ -591,7 +619,7 @@ impl MotionNode {
             schema_version: SCHEMA_VERSION,
             request_id: request_id.into(),
             actuator_key: GRIPPER_KEY.into(),
-            state: RequestState::Succeeded,
+            state: RequestState::Executing,
             result_code: None,
             result_message: None,
         });
@@ -620,6 +648,10 @@ impl MotionNode {
                 // Acknowledge validation/queueing before returning HTTP 202.
                 // Completion is still reported through manipulation_state.
                 Self::send_manipulation_result(node, &pending.state)?;
+                if self.active_manipulation.is_none() {
+                    self.manipulation_state = pending.state.clone();
+                    send(node, "manipulation_state", &self.manipulation_state)?;
+                }
                 self.work_queue
                     .push_back(WorkItem::Manipulation(Box::new(pending)));
                 self.start_next_work(node)
@@ -677,6 +709,43 @@ impl MotionNode {
     fn drain_ros_events(&mut self, node: &mut DoraNode) -> Result<()> {
         while let Ok(event) = self.ros_events.try_recv() {
             match event {
+                RosEvent::ActuatorFinished { request_id, result } => {
+                    let status =
+                        ToolActuatorStatus {
+                            schema_version: SCHEMA_VERSION,
+                            request_id: request_id.clone(),
+                            actuator_key: GRIPPER_KEY.into(),
+                            state: if result.is_ok() {
+                                RequestState::Succeeded
+                            } else {
+                                RequestState::Failed
+                            },
+                            result_code: None,
+                            result_message: Some(result.clone().err().unwrap_or_else(|| {
+                                "夹爪控制器执行完成；不代表已确认抓持物体".into()
+                            })),
+                        };
+                    send(
+                        node,
+                        "actuator_request_result",
+                        &RequestResult {
+                            schema_version: SCHEMA_VERSION,
+                            request_id: request_id.clone(),
+                            acknowledged_action: RequestAction::Apply,
+                            value: Some(status.clone()),
+                            original_error: result.err(),
+                        },
+                    )?;
+                    if self
+                        .actuator_status
+                        .as_ref()
+                        .is_some_and(|s| s.request_id == request_id)
+                    {
+                        self.actuator_status = Some(status.clone());
+                        send(node, "actuator_status", &status)?;
+                        self.publish_state(node)?;
+                    }
+                }
                 RosEvent::ControllerCommand(value) => {
                     self.apply_controller_command(node, &value)?
                 }
@@ -827,11 +896,16 @@ impl MotionNode {
                         continue;
                     }
                     self.active_manipulation = None;
+                    self.manipulation_cancel = None;
                     let result =
                         manipulation_outcome(result, self.manipulation_state.original_error.take());
                     match result {
                         Ok(result) => {
-                            self.manipulation_state.state = RequestState::Succeeded;
+                            self.manipulation_state.state = if result.cancelled {
+                                RequestState::Cancelled
+                            } else {
+                                RequestState::Succeeded
+                            };
                             self.manipulation_state.stage = Some(result.message);
                             self.manipulation_state.solution_count = Some(result.solution_count);
                             self.manipulation_state.selected_cost = Some(result.selected_cost);
@@ -913,7 +987,75 @@ impl MotionNode {
         )
     }
 
-    fn cancel_motion(&mut self, node: &mut DoraNode, request_id: String) -> Result<()> {
+    fn cancel_motion(
+        &mut self,
+        node: &mut DoraNode,
+        request_id: String,
+        target: Option<String>,
+    ) -> Result<()> {
+        if let Some(target) = target.as_deref() {
+            if self.active_manipulation.as_deref() == Some(target) {
+                if let Some(cancel) = &self.manipulation_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                return self.send_motion_result(
+                    node,
+                    &MotionStatus {
+                        request_id,
+                        acknowledged_action: "cancel".into(),
+                        state: RequestState::Succeeded,
+                        result_message: Some("已请求取消抓放，等待原任务停止结果".into()),
+                        ..idle_status()
+                    },
+                );
+            }
+            if let Some(index) = self.work_queue.iter().position(|work| match work {
+                WorkItem::Motion(p) => p.job.request_id == target,
+                WorkItem::Manipulation(p) => p.job.request_id == target,
+            }) {
+                match self
+                    .work_queue
+                    .remove(index)
+                    .expect("queued request exists")
+                {
+                    WorkItem::Motion(p) => self.send_motion_result(
+                        node,
+                        &MotionStatus {
+                            request_id: p.job.request_id,
+                            state: RequestState::Cancelled,
+                            ..idle_status()
+                        },
+                    )?,
+                    WorkItem::Manipulation(mut p) => {
+                        p.state.state = RequestState::Cancelled;
+                        p.state.stage = Some("排队中的抓放已取消".into());
+                        Self::send_manipulation_result(node, &p.state)?;
+                        if self.manipulation_state.request_id == p.state.request_id {
+                            self.manipulation_state = p.state;
+                            send(node, "manipulation_state", &self.manipulation_state)?;
+                        }
+                    }
+                }
+                return self.send_motion_result(
+                    node,
+                    &MotionStatus {
+                        request_id,
+                        acknowledged_action: "cancel".into(),
+                        state: RequestState::Succeeded,
+                        result_message: Some("排队请求已取消".into()),
+                        ..idle_status()
+                    },
+                );
+            }
+            if !self.active_request_is(target) {
+                return self.fail_motion(
+                    node,
+                    request_id,
+                    "指定请求当前未在运行或排队；请查询其最终结果".into(),
+                    RequestAction::Cancel,
+                );
+            }
+        }
         let cancelling_active = self.active_motion.is_some();
         if let Some(active) = &self.active_motion {
             active.cancel.store(true, Ordering::Relaxed);
@@ -1135,6 +1277,7 @@ fn manipulation_job(scene: &WorldScene, request: PickPlaceRequest) -> Result<Pen
     });
     Ok(PendingManipulation {
         job: ManipulationJob {
+            cancel: Arc::default(),
             request_id: request.request_id.clone(),
             goal,
             point_cloud: scene

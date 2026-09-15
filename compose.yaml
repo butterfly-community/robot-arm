@@ -29,6 +29,14 @@ x-web-app: &web-app
   networks: [robot-services]
 
 services:
+  redis:
+    image: redis:8.6.3
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes: ["request-history-data:/data"]
+    networks: [robot-services]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+
   dora-coordinator:
     image: robot-arm-services-backend-runtime:2026.09.05-r3
     command: ["dora", "coordinator", "--interface", "0.0.0.0"]
@@ -155,6 +163,10 @@ services:
     environment:
       <<: *dora-environment
       DORA_MACHINE_ID: web-gateway
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      dora-coordinator: { condition: service_started }
+      redis: { condition: service_healthy }
 
   stararm-102-motion:
     <<: *dora-daemon
@@ -215,7 +227,13 @@ services:
       AI_API_BASE_URL: ${AI_API_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-}
-      AI_API_AUTH_HEADER: ${AI_API_AUTH_HEADER:-Authorization}
+      AI_REASONING_EFFORT: ${AI_REASONING_EFFORT:-}
+      REDIS_URL: redis://redis:6379
+      AI_DATA_DIR: /data/ai
+    volumes:
+      - ai-conversation-data:/data/ai
+    depends_on:
+      redis: { condition: service_healthy }
   web-motion:
     <<: *web-app
     environment: { WEB_APP: motion }
@@ -245,3 +263,7 @@ services:
 
 networks:
   robot-services:
+
+volumes:
+  request-history-data:
+  ai-conversation-data:

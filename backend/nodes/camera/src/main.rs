@@ -1492,6 +1492,7 @@ fn calibration_motion_request(
         request_id: format!("{run_id}-{}", target.key),
         model_revision: model.model_revision.clone(),
         joints,
+        tcp_target: None,
         actuators: vec![],
         options: BTreeMap::new(),
         action: RequestAction::Apply,

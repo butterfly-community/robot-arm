@@ -6,7 +6,9 @@ find_package(geometry_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_task_constructor_core REQUIRED)
+find_package(moveit_task_constructor_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcpputils REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(shape_msgs REQUIRED)
@@ -41,7 +43,9 @@ target_link_libraries(pick_place_server PUBLIC
   ${moveit_msgs_TARGETS}
   ${moveit_ros_planning_interface_TARGETS}
   ${moveit_task_constructor_core_TARGETS}
+  ${moveit_task_constructor_msgs_TARGETS}
   rclcpp::rclcpp
+  rcpputils::rcpputils
   rclcpp_action::rclcpp_action
   ${shape_msgs_TARGETS}
   ${sensor_msgs_TARGETS}

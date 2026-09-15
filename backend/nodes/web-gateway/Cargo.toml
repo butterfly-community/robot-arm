@@ -9,6 +9,7 @@ license.workspace = true
 axum.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
+redis = { version = "1.7.0", features = ["tokio-comp", "connection-manager"] }
 robot-arm-messages.workspace = true
 serde.workspace = true
 serde_json.workspace = true

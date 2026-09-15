@@ -1987,6 +1987,12 @@ input[type="range"] {
   gap: 12px;
   margin-top: 20px;
 }
+.tcp-target-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 20px;
+}
+
 .pose-comparison {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2150,4 +2156,80 @@ input[type="range"] {
     animation: none;
     transition: none;
   }
+}
+
+.ai-settings-grid,
+.ai-conversation {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.ai-task-panel > .card-disclosure,
+.ai-task-panel > .field {
+  margin-top: 20px;
+}
+.ai-task-panel textarea {
+  display: block;
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  padding: 12px;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+}
+.ai-conversation {
+  margin-top: 20px;
+}
+.ai-run {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  min-width: 0;
+}
+.ai-user-text {
+  font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-response {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 16px 0;
+}
+.ai-tool {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.ai-run details {
+  margin-top: 12px;
+}
+.ai-run pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+}
+.ai-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0;
+}
+.ai-images img {
+  display: block;
+  width: 128px;
+  height: 96px;
+  object-fit: contain;
+}
+.ai-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.ai-upload input {
+  max-width: 210px;
 }

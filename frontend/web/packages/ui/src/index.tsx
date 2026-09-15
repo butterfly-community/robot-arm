@@ -1,5 +1,7 @@
 "use client";
 
+export { RequestStatus } from "./request-status";
+
 import { virtualFeedbackTarget, type ActionFeedback } from "@robot/contracts";
 import { useGateway, type ConnectionState } from "@robot/gateway-client";
 import * as Collapsible from "@radix-ui/react-collapsible";

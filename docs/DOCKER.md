@@ -12,6 +12,17 @@
 
 ## 原则
 
+本地 `redis` 服务固定使用 `redis:8.6.3`，仅在 Compose 内网提供请求记录存储，不发布主机端口。
+`web-gateway` 通过 `REDIS_URL` 连接，启动依赖 Redis 健康检查。命名卷
+`request-history-data` 保存 AOF，`appendfsync everysec`；普通整套重启保留记录，
+突然断电可能丢失最后约一秒写入，不能当作恰好一次物理执行保证。
+不要使用 `docker compose down -v` 做日常重启。该卷不在 `temp/`，也不代替相机标定/设备配置。
+web-perception 同样连接本地 Redis，使用 robot-arm:ai: 独立键空间保存会话、非敏感设置和运行关联。
+AI 原图单独保存于 ai-conversation-data 卷的 /data/ai/images；Redis 仅存引用，不存图片/点云。
+AI_API_KEY 仅通过服务端环境注入；Responses 使用 Bearer 鉴权。AI_API_BASE_URL、AI_MODEL、
+AI_REASONING_EFFORT 是未在网页保存过设置时的默认值。不要把密钥写入网页配置或对话。
+持久化语义见 [Redis 官方说明](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)。
+
 每个服务在自己的目录维护 Dockerfile、专属构建依赖和专属运行依赖。只有三个以上后端服务共同
 使用的 Rust/Dora 构建环境与最小运行库进入全局基础镜像。相机、OpenCV、RealSense、ROS、
 MoveIt、RViz、Python、AI 模型和设备厂商包都不属于全局基础层。

@@ -517,19 +517,15 @@ test("perception page uses the simulation camera through the canonical path", as
       "aria-expanded",
       "false",
     );
-    const instructionBox = await page.getByLabel("自然语言任务").boundingBox();
+    const instructionBox = await page.getByLabel("AI 任务").boundingBox();
     const instructionButtonBox = await page
-      .getByRole("button", { name: "用 AI 执行抓放" })
+      .getByRole("button", { name: "发送 AI 任务" })
       .boundingBox();
     expect(instructionBox).not.toBeNull();
     expect(instructionButtonBox).not.toBeNull();
     expect(
-      Math.abs(
-        instructionBox!.y +
-          instructionBox!.height -
-          (instructionButtonBox!.y + instructionButtonBox!.height),
-      ),
-    ).toBeLessThan(2);
+      instructionButtonBox!.y - instructionBox!.y - instructionBox!.height,
+    ).toBeGreaterThanOrEqual(11);
     await manualSettings.locator(".disclosure-toggle").click();
     const camera = page.getByLabel("相机来源");
     await page.getByRole("button", { name: "刷新相机列表" }).click();
@@ -632,36 +628,7 @@ test("perception page uses the simulation camera through the canonical path", as
       page.getByText("已配置", { exact: true }).first(),
     ).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
-    await page.route("**/perception/api/instruction/", async (route) => {
-      await route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        body: JSON.stringify({
-          action: "pick_place",
-          reason: "",
-          perception_prompts: ["red cube", "gray storage bin"],
-          placement_labels: ["gray storage bin"],
-          object_id: "red-cube-0",
-          placement_region_id: "gray-bin-0-interior",
-          request_id: "browser-natural-language-task",
-          accepted: true,
-        }),
-      });
-    });
-    await page.getByLabel("自然语言任务").fill("把红色方块放进灰色置物筐");
-    await page.getByRole("button", { name: "用 AI 执行抓放" }).click();
-    await expect(
-      page.getByText("最近一次 AI 编排", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("red-cube-0 → gray-bin-0-interior"),
-    ).toBeVisible();
-    await expect(page.getByLabel("识别与分割提示词")).toHaveValue(
-      "red cube, gray storage bin",
-    );
-    await expect(page.getByLabel("放置区域角色")).toHaveValue(
-      "gray storage bin",
-    );
+    // Generic AI is covered by its own Responses and browser tests.
     await camera.selectOption("");
     await expect(camera).toHaveValue("");
     await expect

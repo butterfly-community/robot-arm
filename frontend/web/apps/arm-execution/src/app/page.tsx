@@ -468,6 +468,15 @@ export default function Page() {
                   ? " · 持续力度调节中"
                   : " · 未进入夹持调节"}
               </span>
+              <p className="muted">
+                力度反馈采样时间：
+                {typeof transport.gripper_feedback_time_ns === "number"
+                  ? new Date(
+                      transport.gripper_feedback_time_ns / 1e6,
+                    ).toLocaleString()
+                  : "—"}
+                ；负载反馈不等于已确认抓住物体。
+              </p>
             </Field>
             <Field label="全部电机力矩">
               <div className="card-actions">

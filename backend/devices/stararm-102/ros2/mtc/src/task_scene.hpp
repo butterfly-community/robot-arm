@@ -53,7 +53,9 @@ public:
     sensor_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(&node_);
   }
 
-  void apply(const PickPlace::Goal &goal, const moveit::core::RobotModelConstPtr& model) {
+  void apply(const PickPlace::Goal &goal, const moveit::core::RobotModelConstPtr& model,
+             const std::function<bool()> &cancelled = [] { return false; }) {
+    if (cancelled()) throw std::runtime_error("抓放建图已取消");
     const auto begun = std::chrono::steady_clock::now();
     std::vector<moveit_msgs::msg::CollisionObject> objects;
     objects.push_back(ground(goal.frame_id));
@@ -103,7 +105,10 @@ public:
     std::unique_lock<std::mutex> lock(cloud_mutex_);
     // Only the corresponding callback certifies that Octomap finished updating.
     // Do not mistake publishing the message for a completed scene update.
-    cloud_ready_.wait(lock, [&] { return filtered_stamp_ == cloud.header.stamp; });
+    while (filtered_stamp_ != cloud.header.stamp) {
+      if (cancelled()) throw std::runtime_error("抓放建图已取消");
+      cloud_ready_.wait_for(lock, std::chrono::milliseconds(10));
+    }
     lock.unlock();
     if (!scene_.applyCollisionObject(actual_target))
       throw std::runtime_error("MoveIt rejected restoration of actual target dimensions");
@@ -112,8 +117,11 @@ public:
         std::chrono::duration<double>(std::chrono::steady_clock::now()-prepared).count());
   }
 
-  void cleanup(const std::vector<std::string> &temporary_ids) {
+  void cleanup(const std::vector<std::string> &temporary_ids, bool preserve_held_object = false) {
     auto attached_objects = scene_.getAttachedObjects(temporary_ids);
+    // A cancelled transport may still hold the object. Do not pretend it was
+    // released or discard the attached collision geometry.
+    if (preserve_held_object && !attached_objects.empty()) return;
     std::vector<moveit_msgs::msg::AttachedCollisionObject> removals;
     removals.reserve(attached_objects.size());
     for (auto &entry : attached_objects) {

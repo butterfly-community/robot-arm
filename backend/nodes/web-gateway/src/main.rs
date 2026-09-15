@@ -1,3 +1,5 @@
+mod request_history;
+
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -30,6 +32,7 @@ const DEFAULT_PORT: u16 = 8080;
 
 #[derive(Clone)]
 struct AppState {
+    history: Arc<Mutex<request_history::RequestHistory>>,
     snapshots: Arc<Mutex<BTreeMap<String, BTreeMap<String, Value>>>>,
     sequences: Arc<Mutex<BTreeMap<String, u64>>>,
     channels: Arc<BTreeMap<String, watch::Sender<String>>>,
@@ -79,6 +82,12 @@ fn main() -> Result<()> {
             );
             if let Some(response) = request.response {
                 if let Err(error) = result {
+                    state.history.lock().expect("request history lock").observe(
+                        "request_result",
+                        &json!({
+                            "request_id": request_id, "original_error": error.to_string()
+                        }),
+                    );
                     let _ = response.send(json!({
                         "schema_version": SCHEMA_VERSION,
                         "request_id": request_id,
@@ -98,6 +107,11 @@ fn main() -> Result<()> {
                 let value: Value =
                     from_arrow(data.as_array()).with_context(|| format!("decode {id}"))?;
                 let input = id.as_str();
+                state
+                    .history
+                    .lock()
+                    .expect("request history lock")
+                    .observe(input, &value);
                 if (input.ends_with("request_result")
                     || input == "model_asset_response"
                     || input == "camera_asset_response"
@@ -142,6 +156,7 @@ impl AppState {
         })
         .collect();
         Self {
+            history: Default::default(),
             snapshots: Arc::new(Mutex::new(BTreeMap::new())),
             sequences: Arc::new(Mutex::new(BTreeMap::new())),
             channels: Arc::new(channels),
@@ -245,8 +260,10 @@ fn mirrored_namespaces(input: &str) -> &'static [&'static str] {
 }
 
 async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    let history_worker = state.history.lock().expect("request history lock").start();
     let app = Router::new()
         .route("/api/system/readiness", get(snapshot_system))
+        .route("/api/requests/{request_id}", get(request_status))
         .route("/api/tracking/state", get(snapshot_tracking))
         .route("/api/tracking/pose-source", post(request_pose_source))
         .route("/api/tracking/bindings", post(request_bindings))
@@ -305,6 +322,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
         })
         .await?;
+    history_worker.await?;
     Ok(())
 }
 
@@ -416,6 +434,25 @@ fn validate_request<T: DeserializeOwned>(
                 Json(json!({"original_error": error.to_string()})),
             )
         })
+}
+
+async fn request_status(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let (client, session) = state.history.lock().expect("request history lock").reader();
+    match request_history::read(client, session, &id).await {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "request_id": id, "original_error": "没有该请求记录；请核对请求编号"
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"original_error": format!("请求记录服务不可用：{error}")})),
+        )
+            .into_response(),
+    }
 }
 
 async fn request_motion(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
@@ -568,6 +605,21 @@ async fn forward_value(
     output: &str,
     body: Value,
 ) -> std::result::Result<Value, Response> {
+    let (client, session) = state.history.lock().expect("request history lock").reader();
+    match request_history::reserve(client, session, output, &body).await {
+        Ok(true) => {},
+        Ok(false) => return Err((StatusCode::CONFLICT, Json(json!({
+            "request_id": body["request_id"], "original_error": "该请求编号已有记录，请查询原请求结果；不会重复执行"
+        }))).into_response()),
+        Err(error) => return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "original_error": format!("无法记录请求，尚未下发动作：{error}")
+        }))).into_response()),
+    }
+    state
+        .history
+        .lock()
+        .expect("request history lock")
+        .begin(output, &body);
     let request_id = body
         .get("request_id")
         .and_then(Value::as_str)
@@ -578,12 +630,18 @@ async fn forward_value(
         .requests
         .send(OutgoingRequest {
             output: output.into(),
-            request_id,
+            request_id: request_id.clone(),
             body,
             response: Some(sender),
         })
         .is_err()
     {
+        state.history.lock().expect("request history lock").observe(
+            "request_result",
+            &json!({
+                "request_id": request_id, "original_error": "Dora gateway is stopping"
+            }),
+        );
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"original_error":"Dora gateway is stopping"})),

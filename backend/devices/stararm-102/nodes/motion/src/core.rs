@@ -52,6 +52,51 @@ pub struct Pose {
     pub orientation_xyzw: [f64; 4],
 }
 
+pub fn resolve_tcp_target(
+    current: Pose,
+    target: &robot_arm_messages::TcpMotionTarget,
+) -> eyre::Result<Pose> {
+    use stararm_102_model::{BASE_FRAME, TCP_FRAME};
+    let pose = &target.pose;
+    eyre::ensure!(
+        pose.position_m
+            .iter()
+            .chain(pose.orientation_xyzw.iter())
+            .all(|v| v.is_finite()),
+        "TCP 目标必须是有限数值"
+    );
+    let [x, y, z, w] = pose.orientation_xyzw;
+    let raw = Quaternion::new(w, x, y, z);
+    eyre::ensure!(raw.norm() > 0.0, "TCP 四元数不能为零");
+    let rotation = UnitQuaternion::new_normalize(raw);
+    let (position, rotation) = if target.relative {
+        let current_rotation = quaternion(current.orientation_xyzw);
+        let delta = Vector3::from(pose.position_m);
+        match pose.frame.as_str() {
+            BASE_FRAME => (
+                Vector3::from(current.position_m) + delta,
+                rotation * current_rotation,
+            ),
+            TCP_FRAME => (
+                Vector3::from(current.position_m) + current_rotation * delta,
+                current_rotation * rotation,
+            ),
+            _ => eyre::bail!("相对 TCP 目标必须使用 {BASE_FRAME} 或 {TCP_FRAME} 坐标系"),
+        }
+    } else {
+        eyre::ensure!(
+            pose.frame == BASE_FRAME,
+            "绝对 TCP 目标必须使用 {BASE_FRAME} 坐标系"
+        );
+        (Vector3::from(pose.position_m), rotation)
+    };
+    let q = rotation.quaternion();
+    Ok(Pose {
+        position_m: position.into(),
+        orientation_xyzw: [q.i, q.j, q.k, q.w],
+    })
+}
+
 pub fn target_pose(anchor: Pose, frame: &TransformedControlFrame) -> Pose {
     let anchor_rotation = quaternion(anchor.orientation_xyzw);
     let arc_rotation =
@@ -134,6 +179,39 @@ fn xyzw(value: UnitQuaternion<f64>) -> [f64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_delta_uses_declared_axes_not_a_timed_velocity() {
+        use robot_arm_messages::{TcpMotionTarget, ToolPose};
+        use stararm_102_model::{BASE_FRAME, TCP_FRAME};
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let current = Pose {
+            position_m: [0.1, 0.2, 0.3],
+            orientation_xyzw: [0.0, 0.0, s, s],
+        };
+        let mut target = TcpMotionTarget {
+            relative: true,
+            pose: ToolPose {
+                frame: TCP_FRAME.into(),
+                position_m: [0.02, 0.0, 0.0],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        let result = resolve_tcp_target(current, &target).unwrap();
+        assert!((result.position_m[0] - 0.1).abs() < 1e-12);
+        assert!((result.position_m[1] - 0.22).abs() < 1e-12);
+        target.pose.frame = BASE_FRAME.into();
+        let result = resolve_tcp_target(current, &target).unwrap();
+        assert!((result.position_m[0] - 0.12).abs() < 1e-12);
+        assert!((result.position_m[1] - 0.2).abs() < 1e-12);
+        target.relative = false;
+        assert_eq!(
+            resolve_tcp_target(current, &target).unwrap().position_m,
+            [0.02, 0.0, 0.0]
+        );
+        target.pose.orientation_xyzw = [0.0; 4];
+        assert!(resolve_tcp_target(current, &target).is_err());
+    }
     use approx::assert_abs_diff_eq;
     use robot_arm_messages::{ActuatorActions, SCHEMA_VERSION};
 

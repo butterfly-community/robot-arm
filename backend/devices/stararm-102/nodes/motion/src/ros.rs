@@ -34,6 +34,10 @@ const ALLOWED_COLLISION_MATRIX: u64 = 128;
 
 #[derive(Debug)]
 pub enum RosEvent {
+    ActuatorFinished {
+        request_id: String,
+        result: Result<(), String>,
+    },
     ControllerCommand(Value),
     ServoStatus(Value),
     CurrentPose(ArmState, Result<Pose, String>),
@@ -70,6 +74,7 @@ pub enum MotionResult {
 
 #[derive(Debug)]
 pub struct ManipulationResult {
+    pub cancelled: bool,
     pub message: String,
     pub solution_count: u32,
     pub selected_cost: f64,
@@ -80,19 +85,26 @@ pub struct MotionJob {
     pub cancel: Arc<AtomicBool>,
     pub request_id: String,
     pub current: Vec<f64>,
+    pub measured: Vec<f64>,
     pub target: Vec<f64>,
-    pub actuator: f64,
+    pub tcp_target: Option<robot_arm_messages::TcpMotionTarget>,
+    pub actuator: Option<f64>,
     pub options: BTreeMap<String, f64>,
 }
 
 #[derive(Clone)]
 pub struct ManipulationJob {
+    pub cancel: Arc<AtomicBool>,
     pub request_id: String,
     pub goal: Value,
     pub point_cloud: robot_arm_messages::ScenePointCloud,
 }
 
 enum RosWork {
+    Actuator {
+        request_id: String,
+        position_rad: f64,
+    },
     Motion(MotionJob),
     Manipulation(ManipulationJob),
 }
@@ -109,6 +121,7 @@ pub struct RosInterface {
     switch_controller: Arc<ClientUntyped>,
     pause_servo: Arc<ClientUntyped>,
     forward_kinematics: Arc<ClientUntyped>,
+    inverse_kinematics: Arc<ClientUntyped>,
     state_validity: Arc<ClientUntyped>,
     planning_scene: Arc<ClientUntyped>,
     apply_planning_scene: Arc<ClientUntyped>,
@@ -166,6 +179,11 @@ impl RosInterface {
             "moveit_msgs/srv/GetPositionFK",
             QosProfile::default(),
         )?;
+        let inverse_kinematics = node.create_client_untyped(
+            "/compute_ik",
+            "moveit_msgs/srv/GetPositionIK",
+            QosProfile::default(),
+        )?;
         let state_validity = node.create_client_untyped(
             "/check_state_validity",
             "moveit_msgs/srv/GetStateValidity",
@@ -211,6 +229,7 @@ impl RosInterface {
             switch_controller: Arc::new(switch_controller),
             pause_servo: Arc::new(pause_servo),
             forward_kinematics: Arc::new(forward_kinematics),
+            inverse_kinematics: Arc::new(inverse_kinematics),
             state_validity: Arc::new(state_validity),
             planning_scene: Arc::new(planning_scene),
             apply_planning_scene: Arc::new(apply_planning_scene),
@@ -323,6 +342,15 @@ impl RosInterface {
         }
     }
 
+    pub fn run_actuator(&self, request_id: String, position_rad: f64) -> EyreResult<()> {
+        self.work_sender
+            .send(RosWork::Actuator {
+                request_id,
+                position_rad,
+            })
+            .map_err(|_| eyre!("MoveIt action worker 已结束"))
+    }
+
     pub fn run_manipulation(&self, job: ManipulationJob) {
         if let Err(error) = self.work_sender.send(RosWork::Manipulation(job)) {
             let RosWork::Manipulation(job) = error.0 else {
@@ -346,6 +374,25 @@ impl RosInterface {
         let mut ground_applied = false;
         for work in receiver {
             match work {
+                RosWork::Actuator {
+                    request_id,
+                    position_rad,
+                } => {
+                    let result = action(&mut actions.node, &actions.hand, json!({"trajectory": {
+                        "joint_names": [GRIPPER_JOINT], "points": [{
+                            "positions": [position_rad], "time_from_start": {"nanosec": 10_000_000}
+                        }]
+                    }}), &AtomicBool::new(false)).and_then(|result| {
+                        let value = result.ok_or_else(|| eyre!("夹爪控制器取消了开合请求"))?;
+                        if value["error_code"].as_i64() != Some(0) {
+                            bail!("夹爪执行失败：{} ({})", value["error_string"], value["error_code"]);
+                        }
+                        Ok(())
+                    }).map_err(|error| error.to_string());
+                    let _ = self
+                        .event_sender
+                        .send(RosEvent::ActuatorFinished { request_id, result });
+                }
                 RosWork::Motion(job) => {
                     let request_id = job.request_id.clone();
                     let result = block_on(self.motion(job, &mut actions, &mut ground_applied))
@@ -468,6 +515,49 @@ impl RosInterface {
             self.apply_ground().await?;
             *ground_applied = true;
         }
+        let mut resolved = job.clone();
+        if let Some(target) = &job.tcp_target {
+            let measured_state = json!({"joint_state": {"name": JOINTS, "position": job.measured}, "is_diff": false});
+            let robot_state =
+                json!({"joint_state": {"name": JOINTS, "position": job.current}, "is_diff": false});
+            let fk = call(&self.forward_kinematics, json!({
+                "header": {"frame_id": BASE_FRAME}, "fk_link_names": [TCP_FRAME], "robot_state": measured_state
+            })).await?;
+            let pose = crate::core::resolve_tcp_target(parse_fk(fk)?, target)?;
+            let [x, y, z] = pose.position_m;
+            let [qx, qy, qz, qw] = pose.orientation_xyzw;
+            let ik = call(&self.inverse_kinematics, json!({"ik_request": {
+                "group_name": "arm", "robot_state": robot_state, "avoid_collisions": true,
+                "ik_link_name": TCP_FRAME,
+                "pose_stamped": {"header": {"frame_id": BASE_FRAME}, "pose": {
+                    "position": {"x":x,"y":y,"z":z}, "orientation": {"x":qx,"y":qy,"z":qz,"w":qw}
+                }}, "timeout": {"sec": MOVE_GROUP_DEFAULT_PLANNING_TIME_S as i32}
+            }})).await?;
+            if ik["error_code"]["val"].as_i64() != Some(MOVEIT_SUCCESS) {
+                bail!(
+                    "TCP 目标 IK 失败，MoveIt 错误码 {}",
+                    ik["error_code"]["val"]
+                );
+            }
+            let names = ik["solution"]["joint_state"]["name"]
+                .as_array()
+                .ok_or_else(|| eyre!("IK 缺少关节名称"))?;
+            let positions = ik["solution"]["joint_state"]["position"]
+                .as_array()
+                .ok_or_else(|| eyre!("IK 缺少关节位置"))?;
+            resolved.target = JOINTS
+                .iter()
+                .map(|name| {
+                    names
+                        .iter()
+                        .position(|v| v.as_str() == Some(name))
+                        .and_then(|index| positions.get(index))
+                        .and_then(Value::as_f64)
+                        .ok_or_else(|| eyre!("IK 缺少关节 {name}"))
+                })
+                .collect::<EyreResult<Vec<_>>>()?;
+        }
+        let job = &resolved;
         let collision_pairs = self.collision_pairs(&job.current).await?;
         let matrix = if collision_pairs.is_empty() {
             None
@@ -500,7 +590,9 @@ impl RosInterface {
         if job.cancel.load(Ordering::Relaxed) {
             return Ok(MotionResult::Cancelled);
         }
-        self.publish_actuator(job.actuator)?;
+        if let Some(position) = job.actuator {
+            self.publish_actuator(position)?;
+        }
         let Some(result) = actions.execute(
             json!({
                 "trajectory": trajectory["joint_trajectory"],
@@ -656,6 +748,7 @@ struct MotionActions {
     node: Node,
     move_group: ActionClientUntyped,
     follow_joint_trajectory: ActionClientUntyped,
+    hand: ActionClientUntyped,
     pick_place: r2r::ActionClient<PickPlace::Action>,
 }
 
@@ -673,10 +766,15 @@ impl MotionActions {
         )?;
         let pick_place =
             node.create_action_client::<PickPlace::Action>("/stararm102/pick_place")?;
+        let hand = node.create_action_client_untyped(
+            "/hand_controller/follow_joint_trajectory",
+            "control_msgs/action/FollowJointTrajectory",
+        )?;
         Ok(Self {
             node,
             move_group,
             follow_joint_trajectory,
+            hand,
             pick_place,
         })
     }
@@ -732,11 +830,23 @@ impl MotionActions {
                 w: qw,
             },
         };
-        let (_handle, result, mut feedback) =
+        let (handle, result, mut feedback) =
             spin_until(&mut self.node, self.pick_place.send_goal_request(goal)?)?;
         futures::pin_mut!(result);
+        let mut cancel_sent = false;
         loop {
             self.node.spin_once(Duration::from_millis(10));
+            if !cancel_sent && job.cancel.load(Ordering::Relaxed) {
+                match handle.cancel() {
+                    Ok(response) => {
+                        if let Err(error) = spin_until(&mut self.node, response) {
+                            eprintln!("MTC 取消请求失败，继续等待原任务最终结果：{error}");
+                        }
+                    }
+                    Err(error) => eprintln!("MTC 取消请求失败，继续等待原任务最终结果：{error}"),
+                }
+                cancel_sent = true;
+            }
             while let Some(Some(message)) = feedback.next().now_or_never() {
                 let _ = sender.send(RosEvent::ManipulationFeedback {
                     request_id: job.request_id.clone(),
@@ -750,7 +860,7 @@ impl MotionActions {
                 continue;
             };
             let (status, value) = result?;
-            if status != r2r::GoalStatus::Succeeded {
+            if status != r2r::GoalStatus::Succeeded && status != r2r::GoalStatus::Canceled {
                 bail!(
                     "MTC action ended with {status}, MoveIt/MTC code {}: {}",
                     value.error_code,
@@ -758,6 +868,7 @@ impl MotionActions {
                 );
             }
             return Ok(ManipulationResult {
+                cancelled: status == r2r::GoalStatus::Canceled,
                 message: value.message,
                 solution_count: value.solution_count,
                 selected_cost: value.selected_cost,

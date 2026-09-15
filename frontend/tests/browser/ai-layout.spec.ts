@@ -72,7 +72,7 @@ for (const width of [1600, 390]) {
     await expect(fold("抓放场景").locator("select")).toHaveCount(2);
     await expect(
       fold("抓放场景").locator(".disclosure-content button"),
-    ).toHaveCount(1);
+    ).toHaveCount(3);
     await expect(
       fold("抓放场景").getByRole("button", { name: "启动", exact: true }),
     ).toBeVisible();

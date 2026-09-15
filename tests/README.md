@@ -18,6 +18,29 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`node tests/integration/control-capabilities.mjs motion temp/control-capabilities/browser`
+从正式运动网页执行工作位、小幅 TCP 目标、无效四元数和空载夹爪开合，记录控制器终态及刷新恢复。
+必须先获得真机动作授权，并确认夹爪空载；没有拦截 POST，也不注入反馈。
+整套重启后运行相同命令把 `motion` 换成 `history`，从页面查询之前的编号并断言不发任何动作。
+测试数值仅为本脚本的输入，不进入生产参数。Redis 重复编号、跨会话未知状态和终态持久化另由
+网关 `redis_reserves_once_and_preserves_results_across_sessions` 测试覆盖，需显式提供
+`REDIS_TEST_URL` 并加 `--ignored`；只创建和删除唯一 `test-` 请求记录，不操作机器人。
+
+`node tests/integration/grasp-cancel.mjs observe temp/control-capabilities/grasp` 从网页重新采图、分割和定位。
+核对输出图与实例后，以 `queued` / `planning` / `executing` / `complete` 替换 `observe`，追加明确的
+物体 ID 和放置区 ID，分别测试取消或完整执行。取消按钮走原抓放页面，检查原请求的终态和查询结果；
+此脚本会真实操作机械臂，不能作为无硬件的默认回归。调用前通过工作位按钮准备姿态。
+`queued` 临时降低一次关节运动的速度，通过另一网页排队抓放再取消，最后清空速度覆盖并回工作位。
+先运行 `planning` 生成当前场景候选，再测 `queued`；新候选计算可能比前面的运动更久，
+若请求已开始规划，测试会失败，不能冒充排队取消通过。
+
+`node tests/integration/gripper-hold-ui.mjs OUTPUT OBJECT_ID REGION_ID` 通过同一抓放页面运行任务，
+通过执行页面将保持力度临时改为 20，再恢复原值；记录相机画面及带时间的实际反馈、调节功率。
+只有第一轮改值要求发生在调节期间；恢复可能在正常放置释放之后，不算持物调节证据。
+非零负载仅用于安排测试操作，不能判定抓到物体；必须复核画面与控制器日志。
+脚本结束恢复原配置，异常时取消自身仍活动的抓放，不主动释放或回工作位。
+`request-status.spec.ts` 则是隔离的界面回归，拦截所有写入，只验证结果显示和同编号刷新。
+
 `segmentation-composition.spec.ts` 在 1440/390 像素宽度验证手动框选、中文命名、反向拖动的
 1920 像素坐标换算、保存失败保留草稿、三种来源单独/混用、同模型替换、独立清除、来源型号显示、
 刷新回显与删除。三个折叠状态独立保存；其他模型运行不丢失手动草稿，AI 默认模型不控制分割区可用性。
@@ -34,8 +57,22 @@ HTTP 202 与首条运动反馈之间仍计时并禁用重复启动；仅匹配�
 scene 原生回归核对分割原图像素不变、mask 可用，不再要求已移除的染色 `overlay.png`。
 实际预览回归运行 `node tools/diagnostics/verify-web-depth-preview.mjs --capture=temp/depth-preview`，
 核对两次刷新、载入分割帧及页面重载后深度 PNG 仍可解码；这是正式服务测试，不拦截响应。
-`instruction-flow.test.ts` 验证 AI 复用手动 `startPickPlace`，候选响应推进场景序号时，
-即使独立场景查询仍是旧值也使用响应序号提交；不会调用外部 AI 或真机。
+`ai/robot.test.ts` 与 `ai/runner.test.ts` 验证通用 AI 的 Responses 配置、密钥脱敏、请求关联、
+受理与终态区别、取消和不重放；不调用外部模型或真机。抓放仍复用 `startPickPlace`。
+
+`integration/general-ai.mjs` 从真实网页的通用 AI 入口操作，不拦截或注入任务结果：
+`node tests/integration/general-ai.mjs send temp/general-ai/task "任务文本"`。
+`inspect` 只查看；`camera` 在网页选择可用 RealSense 并保存；`config OUTPUT "" [图片路径] [思考强度]`
+查询模型、保存配置并验证真实文本/图像/工具回传；`stop` 点击停止并等终态。
+浏览器会话默认保存到 temp/general-ai/browser-state.json，丢失时可在网页历史会话中恢复。
+运行输出含原请求、终态和相机连续画面；脚本不把 AI 自报成功计为实际抓放成功。
+`timing.json` 按工具记录起点/时长及整轮时间；整轮减去串行工具时间的余量包含模型等待和本地编排，
+不是模型服务端的纯推理耗时。规划/执行分界可结合 `events.json` 的网页进度核对。
+`AI_RELOAD_AFTER_START=1` 在发送后实际刷新网页，仍跟踪原运行，核对不会重发；
+`new OUTPUT` 从页面新建会话，已有历史仍保留。相机模式会等待当前 AI 任务解除页面互斥。
+`history OUTPUT SESSION_ID` 从网页下拉框重开历史，再用 `send` 可验证历史图片追问。
+图片历史验收：首次 `send OUTPUT "只看附图，不调用工具" IMAGE_PATH`，完成后 `new` → `history`，
+再 `send` 追问且不传 IMAGE_PATH；核对两轮同会话、第二轮 images 为空、回答符合原图，且 calls/requests 均为空。
 `segmentation-models.spec.ts` 从按钮验证启动顺序及新场景序号，所有运动写入均拦截；
 `start-pick-place.test.ts` 补充已有候选复用、候选失败、模式失败及失效选择的测试。
 `segmentation-composition.spec.ts` 的写请求和相机视频均拦截，不运行真实模型或机械臂；

@@ -4,9 +4,12 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <iomanip>
 #include <thread>
+#include <rcpputils/scope_exit.hpp>
+#include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
 
 using namespace stararm_mtc;
 using GoalHandle = rclcpp_action::ServerGoalHandle<PickPlace>;
+using ExecuteSolution = moveit_task_constructor_msgs::action::ExecuteTaskSolution;
 
 namespace {
 std::string failure_summary(const mtc::Task &task,
@@ -50,18 +53,70 @@ public:
           return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
         },
         [](const std::shared_ptr<GoalHandle>) {
-          return rclcpp_action::CancelResponse::REJECT;
+          return rclcpp_action::CancelResponse::ACCEPT;
         },
         [this](const std::shared_ptr<GoalHandle> handle) {
           std::thread([this, handle] { execute(handle); }).detach();
         });
+    cancel_timer_ = create_wall_timer(std::chrono::milliseconds(10), [this] {
+      std::lock_guard<std::mutex> lock(active_mutex_);
+      if (active_task_ && active_handle_->is_canceling()) active_task_->preempt();
+    });
   }
 
   void initialize_planning() {
     resources_ = std::make_shared<PlanningResources>(shared_from_this());
+    execute_client_ = rclcpp_action::create_client<ExecuteSolution>(shared_from_this(), "execute_task_solution");
   }
 
 private:
+  moveit::core::MoveItErrorCode execute_solution(mtc::Task &task, const mtc::SolutionBase &solution,
+                                                const std::shared_ptr<GoalHandle> &handle) {
+    if (handle->is_canceling()) return moveit_msgs::msg::MoveItErrorCodes::PREEMPTED;
+    // Use the same official execution Action as Task::execute. Its convenience
+    // wrapper in the installed MTC reports preemption at cancel acknowledgement
+    // and can throw while spinning its executor. This node already has an
+    // executor: wait for the original Action's terminal result instead.
+    if (!execute_client_->wait_for_action_server(std::chrono::milliseconds(500)))
+      throw std::runtime_error("MTC execute_task_solution action unavailable");
+    ExecuteSolution::Goal goal;
+    solution.toMsg(goal.solution, &task.introspection());
+    const auto execution = execute_client_->async_send_goal(goal).get();
+    if (!execution) throw std::runtime_error("MTC execution goal rejected");
+    auto finished = execute_client_->async_get_result(execution);
+    bool cancel_sent = false;
+    while (finished.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+      if (!cancel_sent && handle->is_canceling()) {
+        cancel_sent = true;
+        try { execute_client_->async_cancel_goal(execution).get(); }
+        catch (const std::exception &error) {
+          RCLCPP_ERROR(get_logger(), "MTC cancel request: %s; waiting for execution result", error.what());
+        }
+      }
+    }
+    const auto result = finished.get();
+    if (result.code == rclcpp_action::ResultCode::CANCELED)
+      return moveit_msgs::msg::MoveItErrorCodes::PREEMPTED;
+    return result.result->error_code;
+  }
+
+  template <class Operation>
+  auto run_task(mtc::Task &task, const std::shared_ptr<GoalHandle> &handle,
+                Operation operation) {
+    if (handle->is_canceling()) throw std::runtime_error("抓放已取消");
+    {
+      std::lock_guard<std::mutex> lock(active_mutex_);
+      active_task_ = &task;
+      active_handle_ = handle;
+    }
+    auto guard = rcpputils::make_scope_exit([this]() noexcept {
+      std::lock_guard<std::mutex> lock(active_mutex_);
+      active_task_ = nullptr;
+      active_handle_.reset();
+    });
+    return operation();
+  }
+
   void feedback(const std::shared_ptr<GoalHandle> &handle,
                 const std::string &state, const std::string &stage,
                 std::size_t solutions = 0, double cost = 0.0) {
@@ -79,6 +134,7 @@ private:
     const std::vector<std::string> temporary_ids{goal->object_id};
     // Include cleanup on both success and exceptions in the same serialization.
     std::unique_lock<std::mutex> planning_lock(planning_mutex_);
+    bool execution_started = false;
     try {
       if (goal->grasp_poses.size() != goal->grasp_confidences.size() ||
           !std::all_of(goal->grasp_confidences.begin(), goal->grasp_confidences.end(),
@@ -87,7 +143,7 @@ private:
       const auto planning_started = std::chrono::steady_clock::now();
       feedback(handle, "planning", "build planning scene");
       auto task = create_task(*goal, *resources_, octomap_resolution_);
-      scene_->apply(*goal, task.getRobotModel());
+      scene_->apply(*goal, task.getRobotModel(), [handle] { return handle->is_canceling(); });
       const auto scene_ready = std::chrono::steady_clock::now();
       // Publish the selected solution and search statistics once below, rather
       // than streaming every iteration. Action feedback still reports progress.
@@ -97,7 +153,8 @@ private:
       // COMPLETE collision-checked pick/place path, not the first valid IK.
       // Failed candidates still lead to the next pose; selected-pose depth
       // refinement below remains exhaustive. No deadline discards an unsolved task.
-      const auto plan_result = task.plan(1);
+      const auto plan_result = run_task(task, handle, [&] { return task.plan(1); });
+      if (handle->is_canceling()) throw std::runtime_error("抓放规划已取消");
       const auto coarse_ready = std::chrono::steady_clock::now();
       result->solution_count = static_cast<std::uint32_t>(task.numSolutions());
       if (!plan_result || task.solutions().empty()) {
@@ -136,7 +193,8 @@ private:
         refinement.stages()->insert(std::make_unique<mtc::stages::FixedState>(
             "current state", frozen_scene), 0);
         refinement.enableIntrospection(false);
-        refinement.plan(0); // Exhaust this finite one-candidate grid, not all candidates.
+        run_task(refinement, handle, [&] { return refinement.plan(0); });
+        if (handle->is_canceling()) throw std::runtime_error("抓放规划已取消");
         std::vector<const mtc::SolutionBase *> refined_solutions;
         for (const auto &complete : refinement.solutions())
           refined_solutions.push_back(complete.get());
@@ -196,29 +254,43 @@ private:
       task.introspection().publishSolution(*solution);
       feedback(handle, "executing", "执行：" + selection.str(),
                task.numSolutions(), best.cost());
-      const auto execute_result = task.execute(*solution);
+      execution_started = true;
+      const auto execute_result = execute_solution(task, *solution, handle);
       result->error_code = execute_result.val;
       result->message =
           execute_result ? "pick and place complete" : "task execution failed";
-      scene_->cleanup(temporary_ids);
+      scene_->cleanup(temporary_ids, handle->is_canceling() && !execute_result);
       if (execute_result) {
         handle->succeed(result);
+      } else if (handle->is_canceling() && execute_result.val == moveit_msgs::msg::MoveItErrorCodes::PREEMPTED) {
+        result->message = "抓放执行已取消；保持当前夹爪状态";
+        handle->canceled(result);
       } else {
         handle->abort(result);
       }
     } catch (const std::exception &error) {
       result->error_code = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
       result->message = error.what();
-      scene_->cleanup(temporary_ids);
-      handle->abort(result);
+      scene_->cleanup(temporary_ids, handle->is_canceling());
+      if (handle->is_canceling() && !execution_started) {
+        result->error_code = moveit_msgs::msg::MoveItErrorCodes::PREEMPTED;
+        handle->canceled(result);
+      } else {
+        handle->abort(result);
+      }
     }
   }
 
   std::unique_ptr<TaskScene> scene_;
   std::shared_ptr<PlanningResources> resources_;
   std::mutex planning_mutex_;
+  std::mutex active_mutex_;
+  mtc::Task *active_task_{nullptr};
+  std::shared_ptr<GoalHandle> active_handle_;
+  rclcpp::TimerBase::SharedPtr cancel_timer_;
   double octomap_resolution_;
   rclcpp_action::Server<PickPlace>::SharedPtr server_;
+  rclcpp_action::Client<ExecuteSolution>::SharedPtr execute_client_;
 };
 
 int main(int argc, char **argv) {

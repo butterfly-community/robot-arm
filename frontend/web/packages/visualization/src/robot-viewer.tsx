@@ -7,6 +7,8 @@ import type {
   MotionState,
   ParameterValue,
   RobotModelInfo,
+  TcpMotionTarget,
+  ToolPose,
 } from "@robot/contracts";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
@@ -14,6 +16,37 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import URDFLoader from "urdf-loader";
 import type { URDFRobot } from "urdf-loader";
+
+// Preview uses the same base/tool delta convention as the motion contract.
+// This is a pose marker, not a browser IK solution or reachability guarantee.
+export function tcpTargetPreview(
+  current: ToolPose,
+  target: TcpMotionTarget,
+  baseFrame: string,
+  tcpFrame: string,
+): ToolPose {
+  const rotation = new THREE.Quaternion(
+    ...target.pose.orientation_xyzw,
+  ).normalize();
+  const position = new THREE.Vector3(...target.pose.position_m);
+  if (target.relative) {
+    const currentRotation = new THREE.Quaternion(
+      ...current.orientation_xyzw,
+    ).normalize();
+    if (target.pose.frame === tcpFrame) {
+      position.applyQuaternion(currentRotation);
+      rotation.premultiply(currentRotation);
+    } else {
+      rotation.multiply(currentRotation);
+    }
+    position.add(new THREE.Vector3(...current.position_m));
+  }
+  return {
+    frame: baseFrame,
+    position_m: position.toArray(),
+    orientation_xyzw: rotation.toArray(),
+  };
+}
 
 type Props = {
   model: RobotModelInfo;
@@ -24,6 +57,7 @@ type Props = {
   execution?: ExecutionInfo;
   parameters: ParameterValue[];
   showLabels: boolean;
+  ariaLabel?: string;
 };
 
 type LinkMaterials = RobotModelInfo["visualization"]["link_materials"];
@@ -164,6 +198,7 @@ export function RobotViewer({
   execution,
   parameters,
   showLabels,
+  ariaLabel = "机械臂三维反馈与目标预览",
 }: Props) {
   const mount = useRef<HTMLDivElement>(null);
   const viewer = useRef<Viewer | undefined>(undefined);
@@ -420,11 +455,7 @@ export function RobotViewer({
   }, [labelMetadataKey, modelsReady, showLabels]);
 
   return (
-    <div
-      className="robot-viewer"
-      ref={mount}
-      aria-label="机械臂三维反馈与目标预览"
-    >
+    <div className="robot-viewer" ref={mount} aria-label={ariaLabel}>
       {loadState?.key !== loadKey ? (
         <p className="robot-load-status" role="status">
           正在加载机械臂模型…
