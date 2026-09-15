@@ -16,6 +16,8 @@ For example, “Place the purple sponge in the center area” can prompt AI to i
 
 The project has completed physical pick-and-place with a StarArm-102 six-axis arm and a RealSense D415 depth camera. It is intended for desktop robotics, interaction research and application development. Results still depend on object material, gripper shape, camera observations and mechanical accuracy.
 
+**No robot arm, depth camera or controller is required to get started.** A complete set of test data and virtual joint feedback lets you explore controls, recognition, calibration and pick-and-place planning on a computer before connecting physical devices.
+
 ### Three ways to operate
 
 | Method | How it works | Typical use |
@@ -35,6 +37,17 @@ All three methods use the same robot planning and execution capabilities. They d
 | Perception | View the camera, identify objects, locate them and issue AI tasks |
 | Motion | Set target poses and plan how the robot reaches them or completes a task |
 | Execution | Connect the physical arm, inspect motor feedback and adjust gripping and device settings |
+
+### Try it without hardware
+
+Once the runtime and model files are ready, the same browser interface and complete software workflow can be used without any external robotics hardware:
+
+- **Simulated camera and complete test data:** a built-in scene with a cube, a basket and the ground includes matching color images, depth data and camera parameters for recognition, 3D localization and point-cloud generation.
+- **Calibration workflow:** matching calibration-board data produces observations as the virtual arm changes pose, allowing image collection and calibration without printing or mounting a physical board.
+- **Virtual joint feedback:** the execution layer supports software simulation, updating joint and gripper state from commanded targets. The 3D robot follows that feedback rather than remaining a static model.
+- **Controls and pick-and-place:** use browser controls or simulated input, select an object and destination in the test scene, and run recognition, localization, path planning and simulated execution. AI operation is also available when a general-purpose model service is configured.
+
+Simulation and hardware share the business workflow, and the page identifies whether feedback comes from software simulation or a physical device. Simulation supports exploration and software verification; it is not a complete physics simulation of friction or slipping and does not replace physical grasp validation.
 
 ## Control Binding
 
@@ -201,7 +214,7 @@ Successful planning means the system found an executable path; it does not guara
 
 ## Execution
 
-Communicate with the physical robot, send planned movement to its motors and report what the hardware actually does.
+Deliver planned movement to the execution device and report joint state. With hardware connected, this comes from actual motor feedback; without hardware, software simulation can provide virtual joint feedback.
 
 ### Connection and actual pose
 
