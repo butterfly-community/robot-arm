@@ -1,6 +1,7 @@
 "use client";
 
 export { RequestStatus } from "./request-status";
+export { EditableSelect } from "./editable-select";
 
 import { virtualFeedbackTarget, type ActionFeedback } from "@robot/contracts";
 import { useGateway, type ConnectionState } from "@robot/gateway-client";

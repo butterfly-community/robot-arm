@@ -9,13 +9,20 @@ import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 const [mode, directory, text = "", imagePath, effort] = process.argv.slice(2);
 if (
-  !["inspect", "camera", "config", "send", "stop", "new", "history"].includes(
-    mode,
-  ) ||
+  ![
+    "inspect",
+    "camera",
+    "settings",
+    "config",
+    "send",
+    "stop",
+    "new",
+    "history",
+  ].includes(mode) ||
   !directory
 )
   throw Error(
-    "Usage: general-ai.mjs inspect|camera|config|send|stop|new|history OUTPUT [TEXT or SESSION_ID] [IMAGE] [EFFORT]",
+    "Usage: general-ai.mjs inspect|camera|settings|config|send|stop|new|history OUTPUT [TEXT or SESSION_ID] [IMAGE] [EFFORT]",
   );
 const output = resolve(directory);
 process.env.TMPDIR = join(output, "browser-temp");
@@ -116,6 +123,106 @@ try {
     await page
       .getByLabel("添加 AI 图片", { exact: true })
       .setInputFiles(resolve(imagePath));
+  if (mode === "settings") {
+    // Real settings round trip only: no task, image upload, or motion request.
+    const toggle = page.getByRole("button", { name: /^模型与思考配置/ });
+    async function openSettings() {
+      if ((await toggle.getAttribute("aria-expanded")) === "false")
+        await toggle.click();
+    }
+    await openSettings();
+    const model = page.getByLabel("通用 AI 模型", { exact: true });
+    const reasoning = page.getByLabel("AI 思考强度", { exact: true });
+    const original = {
+      model: await model.inputValue(),
+      effort: await reasoning.inputValue(),
+    };
+    async function save() {
+      const saved = page.waitForResponse((response) => {
+        const request = response.request();
+        return (
+          new URL(response.url()).pathname === "/perception/api/ai/" &&
+          request.method() === "POST" &&
+          request.postDataJSON()?.action === "settings"
+        );
+      });
+      await page
+        .getByRole("button", { name: "保存 AI 配置", exact: true })
+        .click();
+      expect((await saved).ok()).toBe(true);
+      await expect(
+        page.getByRole("button", { name: "保存 AI 配置", exact: true }),
+      ).toBeEnabled();
+      await expect(page.locator(".ai-task-panel")).not.toContainText(
+        "有未保存修改",
+      );
+    }
+    try {
+      await page
+        .getByRole("button", { name: "选择通用 AI 模型", exact: true })
+        .click();
+      const options = page.getByRole("listbox").getByRole("option");
+      await expect(options.first()).toBeVisible({
+        timeout: 180000,
+      });
+      const offered = await options.allTextContents();
+      console.log("MODEL_OPTIONS", offered.length, JSON.stringify(offered));
+      await options.first().click();
+      await expect(model).not.toHaveValue("");
+      await model.fill("custom-ui-draft");
+      await model.press("Escape");
+      await reasoning.fill("custom-ui-effort");
+      await reasoning.press("Escape");
+      await expect(model).toHaveValue("custom-ui-draft");
+      await expect(reasoning).toHaveValue("custom-ui-effort");
+      await page.reload();
+      await openSettings();
+      await expect(model).toHaveValue(original.model);
+      await expect(reasoning).toHaveValue(original.effort);
+      await page
+        .getByRole("button", { name: "选择AI 思考强度", exact: true })
+        .click();
+      await page.getByRole("option", { name: "模型默认", exact: true }).click();
+      await expect(reasoning).toHaveValue("");
+      await save();
+      await page.reload();
+      await openSettings();
+      await expect(reasoning).toHaveValue("");
+      await model.fill(original.model);
+      await model.press("Escape");
+      await reasoning.fill(original.effort);
+      await reasoning.press("Escape");
+      await save();
+      await page.reload();
+      await openSettings();
+      await expect(model).toHaveValue(original.model);
+      await expect(reasoning).toHaveValue(original.effort);
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: 1000 });
+        await page
+          .getByRole("button", { name: "选择AI 思考强度", exact: true })
+          .click();
+        const popup = page.locator(".editable-select-popup");
+        await expect(popup).toBeVisible();
+        const box = await popup.boundingBox();
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
+        await page.screenshot({
+          path: join(output, `settings-${width}.jpg`),
+          type: "jpeg",
+          quality: 75,
+        });
+        await reasoning.press("Escape");
+      }
+      console.log("SETTINGS_UI_PASS", JSON.stringify(original));
+    } finally {
+      await model.fill(original.model);
+      await model.press("Escape");
+      await reasoning.fill(original.effort);
+      await reasoning.press("Escape");
+      await save();
+    }
+  }
   if (mode === "config") {
     if (
       (await page
@@ -129,9 +236,15 @@ try {
     await expect(
       page.getByRole("button", { name: "刷新通用模型列表", exact: true }),
     ).toBeEnabled({ timeout: 180000 });
-    console.log("MODELS", await page.locator("#ai-model-list").textContent());
-    if (effort !== undefined)
+    await page
+      .getByRole("button", { name: "选择通用 AI 模型", exact: true })
+      .click();
+    console.log("MODELS", await page.getByRole("listbox").innerText());
+    await page.getByLabel("通用 AI 模型", { exact: true }).press("Escape");
+    if (effort !== undefined) {
       await page.getByLabel("AI 思考强度", { exact: true }).fill(effort);
+      await page.getByLabel("AI 思考强度", { exact: true }).press("Escape");
+    }
     await page
       .getByRole("button", { name: "保存 AI 配置", exact: true })
       .click();

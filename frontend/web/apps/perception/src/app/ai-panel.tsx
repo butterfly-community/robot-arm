@@ -5,6 +5,7 @@ import Image from "next/image";
 import {
   Button,
   Disclosure,
+  EditableSelect,
   Field,
   Input,
   KeyValue,
@@ -50,7 +51,10 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
   const [snapshot, setSnapshot] = useState<AISnapshot>();
   const [runs, setRuns] = useState<AIRun[]>([]);
   const [draft, setDraft] = useState<AISettings>();
-  const [models, setModels] = useState<{ id: string; label: string }[]>([]);
+  const [catalog, setCatalog] = useState<{
+    baseURL: string;
+    items: { id: string; label: string }[];
+  }>();
   const [text, setText] = useState("");
   const [images, setImages] = useState<AIImage[]>([]);
   const [pending, setPending] = useState("");
@@ -60,6 +64,33 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
   const [connected, setConnected] = useState(false);
   const current = runs.findLast(activeRun);
   const config = draft ?? snapshot?.settings;
+  const models =
+    catalog?.baseURL === config?.baseURL ? (catalog?.items ?? []) : [];
+  const checkedEfforts = new Set(
+    snapshot?.checks
+      .filter(
+        (c) =>
+          c.baseURL === config?.baseURL &&
+          c.model === config?.model &&
+          c.reportedEffort === c.effort &&
+          !c.error,
+      )
+      .map((c) => c.effort) ?? [],
+  );
+  // Common Responses values, not a claim that every provider/model supports them.
+  const efforts = [
+    ...new Set([
+      "",
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      ...checkedEfforts,
+    ]),
+  ];
   const dirty = Boolean(
     draft && JSON.stringify(draft) !== JSON.stringify(snapshot?.settings),
   );
@@ -133,13 +164,20 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
       setImages([]);
     });
   }
+  async function refreshModels() {
+    if (!config) return;
+    await operation("models", async () => {
+      const items = await request({ action: "models", settings: config });
+      setCatalog({ baseURL: config.baseURL, items });
+    });
+  }
   return (
     <div className="ai-task-panel">
       <div className="ai-task-heading">
         <div>
           <h3>通用 AI 助手</h3>
           <p>
-            看图、对话或组合现有机器人能力。选定的任务和图片将发送到配置的模型服务。
+            可直接读取已连接相机，无需上传图片。任务及使用的画面将发送到配置的模型服务。
           </p>
         </div>
         <StatusBadge tone={connected ? "cyan" : "neutral"}>
@@ -159,49 +197,40 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
                 onChange={(e) => edit("baseURL", e.target.value)}
               />
             </Field>
-            <Field label="通用模型">
-              <Input
-                aria-label="通用 AI 模型"
-                list="ai-model-list"
+            <Field
+              label="通用模型"
+              hint="下拉选择服务提供的模型，或直接输入模型 ID。"
+            >
+              <EditableSelect
+                label="通用 AI 模型"
                 value={config.model}
-                onChange={(e) => edit("model", e.target.value)}
+                onChange={(value) => edit("model", value)}
+                options={models}
+                emptyText={
+                  pending === "models"
+                    ? "正在查询模型…"
+                    : "暂无模型列表，可直接输入或点击刷新"
+                }
+                onOpen={() => {
+                  if (catalog?.baseURL !== config.baseURL && !pending)
+                    void refreshModels();
+                }}
               />
-              <datalist id="ai-model-list">
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label}
-                  </option>
-                ))}
-              </datalist>
             </Field>
             <Field
               label="思考强度"
-              hint="留空使用模型默认。仅列出此模型实测通过的档位；也可手动填写后验证，不支持时保留原始错误。"
+              hint="下拉选择常见档位或直接输入；留空使用模型默认。支持情况取决于模型，可点击验证连接与能力确认。"
             >
-              <Input
-                aria-label="AI 思考强度"
-                list="ai-effort-list"
+              <EditableSelect
+                label="AI 思考强度"
                 placeholder="模型默认"
                 value={config.effort}
-                onChange={(e) => edit("effort", e.target.value)}
+                onChange={(value) => edit("effort", value)}
+                options={efforts.map((id) => ({
+                  id,
+                  label: `${id || "模型默认"}${checkedEfforts.has(id) ? " · 已验证" : ""}`,
+                }))}
               />
-              <datalist id="ai-effort-list">
-                {[
-                  ...new Set(
-                    snapshot?.checks
-                      .filter(
-                        (c) =>
-                          c.baseURL === config.baseURL &&
-                          c.model === config.model &&
-                          c.reportedEffort === c.effort &&
-                          !c.error,
-                      )
-                      .map((c) => c.effort) ?? [],
-                  ),
-                ].map((v) => (
-                  <option key={v} value={v} />
-                ))}
-              </datalist>
             </Field>
           </div>
         )}
@@ -223,13 +252,7 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
           </Button>
           <Button
             disabled={Boolean(pending) || !config}
-            onClick={() =>
-              operation("models", async () =>
-                setModels(
-                  await request({ action: "models", settings: config }),
-                ),
-              )
-            }
+            onClick={refreshModels}
           >
             {pending === "models" ? "查询中…" : "刷新通用模型列表"}
           </Button>
@@ -281,7 +304,7 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
       </Field>
       <div className="card-actions">
         <label className="ai-upload">
-          添加图片
+          添加参考图片（可选）
           <input
             aria-label="添加 AI 图片"
             type="file"

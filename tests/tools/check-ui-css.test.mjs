@@ -13,6 +13,11 @@ test("shared CSS references declared tokens, not removed migration names", () =>
   // Runtime values supplied by VirtualFeedback (inline style) and Radix.
   declared.add("--feedback-value");
   declared.add("--radix-collapsible-content-height");
+  // Base UI Autocomplete.Positioner measures these at runtime.
+  // https://base-ui.com/react/components/autocomplete#positioner
+  declared.add("--anchor-width");
+  declared.add("--available-width");
+  declared.add("--available-height");
   const missing = [...css.matchAll(/var\((--[\w-]+)/g)]
     .map((match) => match[1])
     .filter((name) => !declared.has(name));
