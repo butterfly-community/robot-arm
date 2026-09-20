@@ -2,276 +2,287 @@ English | [简体中文](README.zh-CN.md)
 
 # Robot Arm
 
-An intelligent control platform for physical robot arms. Connect devices, observe the workspace and control movement in a browser—or describe a task and let AI coordinate picking and placing.
+A robot control platform centered on AI-driven pick-and-place, integrating natural-language tasks, visual recognition, 3D localization, motion planning and physical execution.
 
-[Control Binding](#control-binding) · [Space](#space) · [Perception](#perception) · [Motion](#motion) · [Execution](#execution)
+[AI Pick-and-Place](#ai-driven-pick-and-place) · [Control Binding](#control-binding) · [Space](#space) · [Perception](#perception) · [Motion](#motion) · [Execution](#execution)
 
-![Robot controls with joint adjustment and a 3D pose preview](.github/media/motion.jpg)
+## AI-Driven Pick-and-Place
 
-## Overview
+Robot Arm translates natural-language instructions into physical object-manipulation tasks. AI identifies grasp targets and placement regions from camera images, invokes localization and grasp planning, and follows robot execution results. Conversations, segmentation results, live video and task progress are presented in a unified browser interface.
 
-Robot Arm brings the robot, depth camera, controllers and AI into one interface. You can operate the arm step by step, or describe a task and have the system coordinate observation, object location, path planning and execution.
+The core workflow comprises six stages:
 
-For example, “Place the purple sponge in the center area” can prompt AI to inspect the camera image, identify and locate the target, then start a pick-and-place task. The page shows progress, robot feedback and the result. AI uses the same functions available in the interface, so its operations can be inspected or performed directly by the user.
+1. **Task interpretation:** identify the object, destination and sequence of operations.
+2. **Visual recognition:** acquire camera images and identify targets through model recognition or image-region selection.
+3. **3D localization:** combine corresponding depth data and calibration to locate objects and destinations.
+4. **Grasp planning:** generate candidates and check reachability, environmental collisions and complete transport paths.
+5. **Execution:** perform approach, gripping, transport, release and return to the working pose.
+6. **Result inspection:** use task state, joint feedback and subsequent images to assess the outcome and inform further steps.
 
-The project has completed physical pick-and-place with a StarArm-102 six-axis arm and a RealSense D415 depth camera. It is intended for desktop robotics, interaction research and application development. Results still depend on object material, gripper shape, camera observations and mechanical accuracy.
+### Physical task example
 
-**No robot arm, depth camera or controller is required to get started.** A complete set of test data and virtual joint feedback lets you explore controls, recognition, calibration and pick-and-place planning on a computer before connecting physical devices.
+> Place the purple object in the red frame, then move it from there to the center.
 
-### Three ways to operate
+![Two AI-driven pick-and-place operations with conversation, segmentation and live video](.github/media/ai-pick-place.png)
 
-| Method | How it works | Typical use |
+User-provided screenshot of a physical operation. The left panel records recognition, region selection, manipulation and image checks. The large image on the right is the segmentation frame used for localization; the upper-right video shows the later state. The record retains the first placement's deviation outside the red frame, followed by another grasp and placement at the center as instructed.
+
+AI coordinates existing platform functions; dedicated modules handle robot planning and execution. Model replies, software task states and physical outcomes are reported separately, distinguishing conversation completion from completed robot movement.
+
+## Platform Capabilities
+
+The platform supports AI pick-and-place through camera management, automatic calibration, multi-source segmentation, motion control, continuous gripping and device feedback. Physical manipulation has been completed with a StarArm-102 six-axis arm and a RealSense D415 depth camera.
+
+**Hardware-free operation is supported.** Complete test data and virtual joint feedback cover recognition, calibration, grasp planning and simulated execution without a robot arm, depth camera or controller.
+
+### Control interfaces
+
+| Interface | Operation | Scope |
 | --- | --- | --- |
-| Natural language | Describe a task; AI calls platform functions | Observe a scene, query state, move the arm or pick and place |
-| Browser controls | Inspect the image, select a target and execute | Control individual steps or work without a general-purpose AI model |
-| Gamepads and spatial controllers | Use buttons, sticks or tracked movement | Continuously adjust position, orientation and gripper opening |
+| Natural language | Task instructions interpreted through AI tool calls | Scene inspection, state queries, movement and pick-and-place |
+| Browser controls | Image inspection, target selection and explicit execution | Individual operations, configuration and manipulation without general-purpose AI |
+| Gamepads and spatial controllers | Buttons, sticks and tracked movement | Continuous position, orientation and gripper control |
 
-All three methods use the same robot planning and execution capabilities. They do not require three separate robot systems.
+All interfaces share robot planning and execution capabilities.
 
 ### Five modules
 
-| Module | Purpose |
+| Module | Responsibility |
 | --- | --- |
-| Control Binding | Choose which device or button controls each action |
-| Space | Define how device movement translates into robot movement |
-| Perception | View the camera, identify objects, locate them and issue AI tasks |
-| Motion | Set target poses and plan how the robot reaches them or completes a task |
-| Execution | Connect the physical arm, inspect motor feedback and adjust gripping and device settings |
+| Control Binding | Input-device selection, action bindings and feedback configuration |
+| Space | Direction mapping, movement scale and position/orientation transforms |
+| Perception | Camera management, calibration, recognition, localization and AI tasks |
+| Motion | Target poses, path planning and complete manipulation tasks |
+| Execution | Device connections, joint feedback, continuous gripping and motor parameters |
 
-### Try it without hardware
+### Hardware-free operation and test data
 
-Once the runtime and model files are ready, the same browser interface and complete software workflow can be used without any external robotics hardware:
+With runtime dependencies and model files installed, the complete software workflow operates without external robotics hardware:
 
-- **Simulated camera and complete test data:** a built-in scene with a cube, a basket and the ground includes matching color images, depth data and camera parameters for recognition, 3D localization and point-cloud generation.
-- **Calibration workflow:** matching calibration-board data produces observations as the virtual arm changes pose, allowing image collection and calibration without printing or mounting a physical board.
-- **Virtual joint feedback:** the execution layer supports software simulation, updating joint and gripper state from commanded targets. The 3D robot follows that feedback rather than remaining a static model.
-- **Controls and pick-and-place:** use browser controls or simulated input, select an object and destination in the test scene, and run recognition, localization, path planning and simulated execution. AI operation is also available when a general-purpose model service is configured.
+- **Simulated camera and complete test data:** a scene containing a cube, basket and ground provides matching color images, depth data and camera parameters for recognition, localization and point-cloud generation.
+- **Simulated calibration:** calibration-board data generates observations from virtual arm poses, supporting sampling and calibration without a physical board.
+- **Virtual joint feedback:** software execution updates joint and gripper state from commanded targets and drives the 3D robot visualization.
+- **Manipulation workflow:** browser controls and simulated input support target selection, recognition, localization, planning and simulated execution. A configured general-purpose model service enables AI task orchestration.
 
-Simulation and hardware share the business workflow, and the page identifies whether feedback comes from software simulation or a physical device. Simulation supports exploration and software verification; it is not a complete physics simulation of friction or slipping and does not replace physical grasp validation.
+Simulation and hardware share the business workflow, with their feedback sources explicitly identified in the interface. Simulation verifies software behavior; it does not fully model friction or slipping and does not replace physical grasp validation.
 
 ## Control Binding
 
-Assign buttons, sticks and tracked movements to robot actions. When changing controllers, bindings can be adjusted without rewriting the robot's motion logic.
+Manage the relationship between buttons, sticks, tracked movement and robot actions. Device bindings remain independent of motion logic, allowing controller changes through configuration.
 
-### Choose input devices
+### Device integration
 
-- Supports gamepads through SDL3 and NOLO CV1 spatial tracking devices.
-- Displays device names, connection state and available buttons, axes, position and orientation data.
-- Allows one device to control position and another to control orientation, or one device to handle both.
-- Provides on-screen direction controls for translation and rotation without an external controller.
-- Saves device names and bindings for subsequent use.
+- SDL3 gamepad input and NOLO CV1 spatial tracking.
+- Device names, connection state and available buttons, axes, position and orientation data.
+- Independent position and orientation sources or combined input from one device.
+- Browser translation and rotation controls without an external controller.
+- Persistent device names and bindings.
 
-### Assign actions
+### Action bindings
 
-A button can trigger an action, a stick can provide continuous control, and two buttons can represent opposite directions. For example, a pair of buttons can open and close the gripper, while a stick moves the arm forward and backward. Individual bindings can be inverted when their direction does not match the preferred interaction.
+Bindings support single-button triggers, continuous axes and positive/negative button pairs. Actions such as gripper opening, closing and translation receive explicit input assignments, with direction inversion configured per binding.
 
-Available actions include translation, movement along an arc, rotation of the gripper itself, movement along the direction it points, and gripper opening and closing. Compatible vibration devices can also receive gripping-load feedback.
+Available actions include translation, arc movement, gripper rotation, movement along the gripper's pointing direction, and opening or closing. Compatible vibration devices receive gripping-load feedback.
 
 ![Button, direction and feedback-device bindings](.github/media/control-bindings.jpg)
 
-### Check the input before moving
+### Input inspection
 
-The page shows actual button, stick and tracking input. This makes it possible to check device detection and control directions before operating the arm. Simulated input can also be used to inspect bindings and direction settings when physical controllers are unavailable.
+The interface displays actual button, stick and tracking input for device, binding and direction checks. Simulated input supports configuration verification without physical controllers.
 
 ![Browser direction controls, device selection and input state](.github/media/tracking.jpg)
 
 ## Space
 
-Define how controller movement corresponds to robot movement: which way the arm should move, how far it should travel, and whether turning a device changes the gripper's position or its orientation.
+Configure direction mappings, displacement scale and rotation behavior between input devices and the robot. These settings define how device movement affects arm position and gripper orientation.
 
-### Set directions and movement scale
+### Direction mapping and movement scale
 
-- Map input-device directions to forward/backward, left/right and up/down robot movement.
-- Adjust movement scale so a larger hand movement produces a smaller robot displacement, or vice versa.
-- Establish a relative reference when taking control, then use changes from that reference.
-- Use buttons or sticks for continuous movement when a controller has no spatial tracking.
-- Save the configuration and inspect direction relationships in a 3D view.
+- Map input directions to forward/backward, left/right and up/down robot movement.
+- Scale the relationship between device displacement and robot displacement.
+- Establish a relative reference at control takeover and use subsequent pose changes.
+- Generate continuous movement from buttons or sticks on devices without spatial tracking.
+- Save spatial settings and inspect direction relationships in a 3D view.
 
 ![Spatial directions and movement-scale settings](.github/media/spatial.jpg)
 
-### Separate position from orientation
+### Position and orientation control
 
-Moving the gripper and turning it are different operations. Raising the gripper does not necessarily mean tilting it, and changing its direction does not necessarily require changing its position.
+Position and orientation are processed independently. Translation with a maintained orientation and rotation at a fixed location represent distinct control modes.
 
-The platform supports straight movement, movement along an arc, orientation changes at the current location, rotation around the gripper's own axis and movement along that axis. These components can be enabled independently and combined for the intended interaction.
+Supported components include straight movement, arc movement, orientation changes at the current location, rotation around the gripper's own axis and movement along that axis. Components support independent activation and combined configuration.
 
-The 3D view offers several viewing directions and displays current displacement and rotation. More detailed coordinate settings remain available in the page, but do not need to be adjusted repeatedly during everyday operation.
+The 3D view provides multiple viewing directions and current displacement and rotation values. Saved coordinate mappings remain active across subsequent operations.
 
 ![Coordinate mapping and independently selectable movement types](.github/media/spatial-mapping.jpg)
 
 ## Perception
 
-Determine what is visible, where objects are and which one to manipulate. Camera setup, calibration, object selection and AI tasks share one page. They can be used independently or combined for pick-and-place.
+Provide image observations, object recognition and spatial localization for AI manipulation. Camera, calibration, segmentation and AI functions share one page, with independent invocation and task-level composition.
 
-### View and configure the camera
+### Camera management and acquisition
 
-The page displays the camera source, device information, color images and depth data. Color images show appearance; depth data measures distance to visible surfaces, helping convert a location in the image into a position in the physical workspace.
+The interface presents camera sources, device information, color images and depth data. Color supplies object appearance; depth supplies distance to visible surfaces. Together they support recognition and 3D localization.
 
-- Select resolutions and frame rates from the device's reported capabilities; unavailable combinations remain visible but cannot be selected.
-- Configure capture rate separately from the rate supplied for further processing. The camera can keep capturing while recognition uses frames only as needed.
-- Inspect active resolution, frame rate and capture state, distinguishing selected settings from those currently in use.
-- Observe the workspace through a draggable, collapsible color-video window and refresh the depth preview independently.
-- Inspect camera-driver settings and save the device configuration.
+- Resolution and frame-rate selection based on reported device capabilities, with unavailable configurations disabled.
+- Independent capture and downstream sampling rates, separating continuous acquisition from on-demand recognition.
+- Active resolution, frame rate and capture state, distinguished from selected configuration.
+- A draggable, collapsible color-video window and independently refreshed depth preview.
+- Camera-driver parameter editing and persistent device configuration.
 
 ![Camera resolution, frame rate and live capture state](.github/media/camera-streams.jpg)
 
-### Relate the camera to the robot: calibration
+### Camera-to-robot calibration
 
-The camera locates an object relative to itself, while the robot needs a position relative to its base. Calibration establishes the relationship between the two.
+Calibration establishes the camera's position and orientation relative to the robot base, converting observed object locations into the spatial reference required for movement.
 
-The platform uses a ChArUco board with a black-and-white pattern. Once the board is mounted, the robot moves through predefined poses while the camera captures images. The system combines those observations with actual motor feedback to calculate the camera's position and orientation relative to the robot. The page shows the current pose, collected samples and calculated result.
+The workflow uses a ChArUco black-and-white board. It moves the arm through predefined poses, collects images and combines them with actual motor angles to calculate the camera-to-robot relationship. Current pose, collected samples and results remain visible in the page.
 
-The workflow includes movement, image collection, calculation and return to the working pose. The user can inspect the fitting error before applying the result. A saved calibration remains available after a page refresh or service restart; recalibration can be started when needed.
+Stages include movement, sampling, calculation and return to the working pose. Fitting error is available for review before application. Saved results remain valid across page refreshes and service restarts; recalibration has a dedicated control.
 
-Fitting error describes how consistently the collected samples agree. It is not a measure of every source of error in the final robot operation. Board dimensions, depth quality and mechanical accuracy also affect positioning.
+Fitting error measures sample consistency, not overall manipulation accuracy. Board dimensions, camera depth quality and mechanical accuracy also affect final positioning.
 
 ![Camera selection and the automatic calibration workflow](.github/media/perception.jpg)
 
-### Three ways to select objects
+### Multi-source segmentation
 
-Segmentation means selecting an object or region within an image. The platform offers three methods that can be used individually or together:
+Segmentation extracts objects or regions from an image. Three independent, composable sources are supported:
 
-| Method | How to use it |
+| Source | Input and purpose |
 | --- | --- |
-| Prompt-based segmentation | Describe the object, or provide a region in a reference image, and let the model find a matching target |
-| Automatic segmentation | Run the model without supplying an object description |
-| Manual segmentation | Draw a box around an object or placement area and give it a name |
+| Prompt-based segmentation | Object descriptions or reference-image regions identify matching targets |
+| Automatic segmentation | The model generates results without an object description |
+| Manual segmentation | Image boxes specify objects or destinations and their names |
 
-Results appear together on the original image, with labels identifying their model or manual source. Click a label to inspect details. The manual editor shows only manual annotations, keeping editing separate from model results.
+Results appear on the original image with model names or manual-source labels. Labels provide access to details, while the manual editor displays only manual annotations.
 
-Each source can be run or cleared independently. Changing the prompt-based model does not require disabling automatic segmentation or deleting manual regions. If the model does not identify a suitable destination, the user can draw one directly.
+Each source supports independent execution and clearing. Model changes do not alter results from other sources. Manual selection provides explicit object and destination regions.
 
 ![Automatic, prompt-based and manual segmentation controls](.github/media/segmentation-controls.jpg)
 
 ![Object recognition and a placement region in the same image](.github/media/segmentation.jpg)
 
-In this image, the grasp target was identified by a model and the center placement region was drawn manually. They are not both automatic detections.
+In this image, the grasp target originates from model recognition and the center destination from manual annotation.
 
-### From an image selection to physical manipulation
+### 3D localization and grasp candidates
 
-After target selection, the system uses the corresponding depth image to calculate a 3D position and generates several possible grasp poses. Motion planning then searches for a pose the robot can reach while also completing the subsequent carry and placement.
+The system calculates object position from corresponding depth data and generates grasp-pose candidates. Motion planning selects a complete solution based on reachability and subsequent transport requirements.
 
-Recognition, 3D localization and pick-and-place can be triggered separately. Viewing segmentation results does not require a connected robot or a completed calibration. Physical pick-and-place requires valid spatial information and a robot connection.
+Recognition, localization and manipulation are triggered independently. Image recognition does not require a robot connection or extrinsic calibration; physical manipulation requires valid spatial localization and a hardware connection.
 
-For manual pick-and-place, inspect the results, select the object and destination, then start the task. The page continues to report candidate preparation, planning, execution and the final result rather than stopping at request submission.
+Manual pick-and-place consists of result inspection, target selection and task initiation. The page follows candidate preparation, planning, execution and the final state.
 
-### Use natural language
+### AI tasks and model configuration
 
-AI is not limited to pick-and-place. It can inspect camera images, read robot state, invoke segmentation and localization, move the arm, adjust the gripper and query task progress.
+Beyond the core manipulation workflow, AI tools cover image inspection, state queries, segmentation, localization, arm movement, gripper adjustment and progress queries.
 
-Examples include:
+Representative instructions:
 
 - “Look at the current image and describe the objects.”
 - “Return the arm to its working pose.”
 - “Move forward one centimeter along the gripper's current direction.”
 - “Place the purple sponge in the center area.”
 
-AI can use images directly from the system camera or receive reference images uploaded by the user. Conversations support follow-up messages, history and new sessions. Tool operations and associated robot tasks can be expanded for inspection.
+Image input supports system-camera observations and uploaded references. Conversations retain multi-turn context, session history and new-session controls, with linked tool and robot-task details.
 
-Model names and reasoning effort can be selected from lists or entered manually. Reasoning effort requests different levels of model deliberation; support depends on the model service. The platform connects through the OpenAI-compatible Responses API to model services that support images and tool use. The service may run on the local network or remotely. Task text and the images used are sent to the configured service; credentials remain on the server.
+Model names and reasoning effort support selection and manual entry. Reasoning effort requests a level of model deliberation, subject to provider support. The platform uses an OpenAI-compatible Responses interface for models with image and tool capabilities, hosted locally or remotely. Task text and selected images are sent to the configured service; credentials remain server-side.
 
-AI replies and robot execution results are displayed separately. A finished reply does not mean the robot has completed its movement. The user can inspect task progress and actual feedback, or stop the current AI and action.
-
-### Example: AI-driven pick-and-place
-
-Task: “Place the purple object in the red frame, then move it from there to the center.”
-
-![Two AI-driven pick-and-place operations with conversation, segmentation and live video](.github/media/ai-pick-place.png)
-
-A user-provided screenshot of an actual operation. The conversation records recognition, region selection, manipulation and image checks. The large image on the right is the segmentation frame used for localization; the live video above it shows the later object state. The record also acknowledges that the first placement extended outside the red frame, followed by another grasp and placement at the center as instructed.
+AI replies and robot execution results are distinct. The page provides task progress, actual feedback and controls to stop the current AI and action.
 
 ## Motion
 
-Turn a desired destination into robot movement. The module supports both manual targets and complete pick-and-place tasks based on visual observations.
+Handle target-pose solving, path planning and task execution across manual targets, continuous control and complete vision-driven manipulation.
 
-### Preview before executing
+![Robot controls with joint adjustment and a 3D pose preview](.github/media/motion.jpg)
 
-Editing joint angles does not immediately move the robot. The page shows the actual feedback pose alongside the pending target so the effect of an edit can be inspected before execution.
+### Target configuration and execution preview
 
-In addition to joint angles, users can specify the gripper endpoint's position and orientation or move it relative to its current pose. Relative movement can follow the robot base's directions or the gripper's own directions. “Move forward” and “advance along the gripper's pointing direction” can therefore be expressed distinctly.
+Joint editing is separate from execution. The interface displays actual feedback and pending targets together; edited targets are submitted through the execution button.
 
-The platform provides presets such as the working pose, independent gripper controls and continuous hold-to-move/release-to-stop operation. The target preview shows the requested pose; planning determines whether it is reachable and whether a usable path exists.
+Targets include joint angles, gripper-endpoint position and orientation, and relative movement. Relative commands distinguish robot-base directions from gripper-local directions for workspace adjustment and tool-directed approach.
 
-The working pose is a predefined set of joint positions used as a starting or ending position for operations.
+Presets such as the working pose, independent gripper controls and hold-to-move/release-to-stop control are supported. The preview represents the requested pose; planning determines reachability and path validity.
 
-### Choose an executable grasp
+The working pose is a predefined set of joint positions used at the start or end of operations.
 
-The system considers multiple grasp poses rather than simply executing the model's highest-scoring proposal. It checks whether the arm can reach the object, whether the gripper can approach it appropriately and whether the robot can carry and place it afterward.
+### Complete manipulation planning
 
-Path planning uses MoveIt. It checks movement using the robot's dimensions, joint ranges and the surrounding scene observed by the camera. After grasping, collision checking also includes the carried object's volume, not just the robot itself.
+Planning selects complete executable solutions from multiple grasp candidates rather than relying on model score alone. Checks cover reachability, gripper approach, carrying and placement.
 
-Grasp depth is refined using the gripper's shape and executable paths. Finger contact with the target is part of grasping; the system does not simply treat every contact as an obstacle.
+MoveIt evaluates paths against robot geometry, joint ranges and the observed environment. Collision checking during transport includes the carried object's volume.
+
+Grasp-depth refinement uses gripper geometry and complete-path validity. Collision handling distinguishes necessary finger/target contact from environmental collisions.
 
 ![Motion modes, planning state and configuration](.github/media/motion-planning.jpg)
 
-### Follow the complete operation
+### Execution stages and results
 
-A complete task includes preparing the gripper, approaching the target, closing and holding, carrying through the working pose, moving to the destination, releasing and returning to the working pose. The page displays the current stage and supports result inspection and cancellation.
+Complete manipulation includes gripper preparation, approach, closing and holding, carrying through the working pose, transport to the destination, release and return. The interface reports the active stage and provides result inspection and cancellation.
 
-Users can distinguish completed planning from active execution and inspect the final state. A separate 3D planning view is also available for examining the robot, environment and paths.
+Planning, execution and terminal states are identified separately. A 3D planning view supports inspection of the robot, environment and paths.
 
-Successful planning means the system found an executable path; it does not guarantee that an object cannot slip. Physical success still needs to be judged using camera observations and gripping feedback.
+Planning success establishes an executable path, not a physically successful grasp. Physical outcomes require camera observations and gripping feedback.
 
 ## Execution
 
-Deliver planned movement to the execution device and report joint state. With hardware connected, this comes from actual motor feedback; without hardware, software simulation can provide virtual joint feedback.
+Dispatch planned actions and read joint state. Physical operation uses actual motor feedback; hardware-free operation uses virtual joint feedback from software simulation.
 
 ### Connection and actual pose
 
-- Select a device from the serial-port list or enter a connection path manually.
-- Inspect the current connection, disconnection reasons and device errors.
-- Display robot posture from motor-reported angles rather than merely playing a planned animation.
-- Compare actual pose, commanded targets and gripper state to check whether movement has reached its destination.
-- Adjust the feedback interval and enable or release torque for all motors together.
+- Serial-port selection and manually entered connection paths.
+- Connection state, disconnection reasons and device errors.
+- Robot-pose updates from motor-reported angles.
+- Comparison of actual pose, commanded targets and gripper state.
+- Configurable feedback intervals and whole-arm torque enable/release.
 
-Enabling torque makes the motors hold position; releasing it removes that holding effort. Historical readings after disconnection are distinguished from current feedback so an old pose is not presented as live state.
+Torque enable activates position holding; torque release removes holding effort. The interface distinguishes historical readings from live feedback and identifies interrupted connections.
 
 ![Device connection, actual robot pose and gripping settings](.github/media/arm-execution.jpg)
 
-### Regulate gripping throughout the task
+### Continuous gripping control
 
-Gripping is not simply closing to an angle and leaving it unchanged. The platform reads load feedback from the motor driving the gripper—the servo—and continues adjusting output during holding and transport toward the selected holding target.
+The platform reads gripper-servo load feedback and adjusts output throughout holding and transport to track the selected target. The angle at first reaching the target is not latched as a fixed holding position.
 
-The target uses a 0–100 feedback scale. The page shows the target, measured load and regulation state. Explicitly opening the gripper or releasing torque ends holding regulation.
+The holding target uses a 0–100 feedback scale. Target value, measured load and regulation state are displayed. Explicit gripper opening or torque release ends holding regulation.
 
-This value is not contact force measured in newtons. Soft objects, smooth objects and rigid boxes can behave differently and may require adjustment. Load changes help assess gripping, but a single reading cannot prove that an object is securely held.
+This scale represents load feedback, not contact force in newtons. Settings depend on object material, surface friction and deformation. Load readings assist assessment but do not independently establish a stable grasp.
 
-### Inspect motor information and settings
+### Motor information and parameters
 
-The page provides reported angles, state, voltage, current, power, raw temperature data and firmware information without opening a separate vendor application. Parameter descriptions explain purpose, units, write availability and when a change takes effect.
+The page presents reported angles, status, voltage, current, power, raw temperature data and firmware information. Parameter descriptions cover purpose, units, write availability and application behavior.
 
-Supported settings can be read and changed, with progress, latest values and errors displayed. Some changes apply immediately; others require a power cycle. A successful write and an effective setting are distinguished according to the parameter's documented behavior.
+Reading and editing operations expose progress, latest values and errors. Descriptions distinguish immediate changes from those requiring a power cycle; write confirmation does not replace application-condition checks.
 
 ![Actual motor feedback and operating data](.github/media/servo-telemetry.jpg)
 
 ![Device information, parameter descriptions and editing controls](.github/media/servo-parameters.jpg)
 
-## Everyday use and scope
+## Runtime and Scope
 
-### Saved settings and history
+### Configuration and history
 
-Device bindings, spatial settings, camera configuration and confirmed calibrations can be saved. AI conversations and task records are also retained so users can resume inspection after a refresh without repeating an action.
+Device bindings, spatial settings, camera configuration, confirmed calibration, AI sessions and task records are persisted. Page refreshes resume state inspection without repeating actions.
 
-The interface distinguishes an edited target, active settings and actual device feedback. Task state describes software progress; camera images help confirm whether the object was physically picked up and placed.
+Target drafts, active configuration and device feedback are presented separately. Task state reports software progress; camera images support verification of physical grasping and placement.
 
-### Work without an external AI service
+### Local operation and model services
 
-Once dependencies and model files are available, browser control, local object recognition and pick-and-place do not depend on an external language-model service. Natural-language operation requires a working model service; internet access depends on where that service runs.
+With dependencies and model files available, browser controls, local recognition and manipulation do not depend on an external language-model service. Natural-language operation requires an available model service; internet requirements depend on its deployment location.
 
-### Currently integrated hardware
+### Integrated hardware
 
-The current integration uses a StarArm-102 six-axis arm, RA8-U35H-M servos and a RealSense D415 depth camera, with SDL3 gamepad and NOLO CV1 input support. Other devices require suitable adapters and validation; this is not a claim of out-of-the-box support for every robot or camera.
+The current integration includes a StarArm-102 six-axis arm, RA8-U35H-M servos and a RealSense D415 depth camera, with SDL3 gamepad and NOLO CV1 input support. Additional devices require adaptation and validation; support is not universal across robot and camera models.
 
-The project has completed physical manipulation, but it is not an industrial precision system. Camera visibility, occlusion, transparent or reflective surfaces, calibration error, mechanical play and contact between an object and the gripper can all affect results.
+The platform has completed physical manipulation but is not an industrial precision system. Field of view, occlusion, transparent or reflective surfaces, calibration error, mechanical play and gripper contact conditions affect results.
 
-## Technology and further reading
+## Technology and Documentation
 
-The interface uses Next.js, React and Three.js. Device and application services primarily use Rust and Dora. YOLOE provides image recognition, GraspGenX generates grasp poses, and ROS 2 with MoveIt handles motion planning. Service environments are managed through Docker.
+The interface uses Next.js, React and Three.js. Device and application services primarily use Rust and Dora. YOLOE provides image recognition, GraspGenX generates grasp poses, and ROS 2 with MoveIt handles motion planning. Docker manages service environments.
 
-Implementation details, device parameters and deployment instructions are available in:
+Implementation, device and deployment references:
 
 - [Architecture and call chains](docs/BACKEND.md)
 - [Robot integration, servo parameters and accuracy](docs/STARARM-102.md)
 - [Docker and service deployment](docs/DOCKER.md)
 
-These technical documents are currently in Chinese. Screenshots show the running interface, with the 3D robot following hardware feedback. Captured values reflect the state at capture time, not default settings.
+Technical references are currently in Chinese. Screenshots show the running interface and a 3D robot driven by device feedback. Captured readings represent runtime state, not default configuration.
