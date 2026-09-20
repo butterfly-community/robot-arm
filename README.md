@@ -45,6 +45,17 @@ The platform supports AI pick-and-place through camera management, automatic cal
 
 All interfaces share robot planning and execution capabilities.
 
+### Key technologies
+
+| Capability | Implementation | Purpose |
+| --- | --- | --- |
+| Multiple motion-control modes | Joint targets, absolute/relative endpoint targets and MoveIt Servo | Unify direct control, spatial interaction and task movement |
+| Automatic hand–eye calibration | ChArUco detection, PnP, actual joint feedback and OpenCV SHAH | Relate a fixed camera, robot base and tool-mounted board |
+| RGB-D reconstruction | SDK depth alignment, depth-unit conversion, distortion handling and point clouds | Convert image selections into 3D objects in robot coordinates |
+| Vision-guided manipulation | YOLOE segmentation, GraspGenX candidates and MoveIt/MTC | Combine recognition, grasp poses, reachability and transport planning |
+| Environment collision checking | Octomap, target-contact rules and attached-object geometry | Distinguish obstacles, finger contact and carried-object volume |
+| Continuous gripping feedback | Rust execution, servo load readings and dynamic output regulation | Track the holding-load target throughout gripping and transport |
+
 ### Five modules
 
 | Module | Responsibility |
@@ -114,6 +125,12 @@ Supported components include straight movement, arc movement, orientation change
 
 The 3D view provides multiple viewing directions and current displacement and rotation values. Saved coordinate mappings remain active across subsequent operations.
 
+### Spatial transforms and control quantities
+
+The spatial layer uses a direction-mapping matrix, displacement scale and the reference pose captured at takeover to produce unified control quantities. Position and rotation changes are calculated separately, with quaternion orientation representation.
+
+Tracking devices supply changes relative to the reference pose. Button and stick inputs are integrated over elapsed time into displacement and angular changes. Independently configurable components cover base translation, horizontal/vertical arcs, rotation at the tool, tool-axis translation and helical movement.
+
 ![Coordinate mapping and independently selectable movement types](.github/media/spatial-mapping.jpg)
 
 ## Perception
@@ -132,7 +149,20 @@ The interface presents camera sources, device information, color images and dept
 
 ![Camera resolution, frame rate and live capture state](.github/media/camera-streams.jpg)
 
-### Camera-to-robot calibration
+### Depth alignment and 3D reconstruction
+
+Depth processing retains the actual resolution, camera intrinsics and depth units. Spatial scale is not inferred from the size of a browser preview.
+
+1. **Color/depth alignment:** the RealSense adapter uses SDK Align to map depth into color-image pixel coordinates for correspondence with segmentation results.
+2. **Frame association:** color, aligned depth, intrinsics, depth scale and applied extrinsics travel together. Localization uses the fixed observation associated with the segmentation.
+3. **Depth to point clouds:** Z16 values are converted to meters using the device-reported scale. Intrinsics and distortion handling recover spatial points, and extrinsics transform them into the robot-base frame. Invalid depth is excluded from object localization.
+4. **Object/environment separation:** segmentation masks and depth-connected regions extract target points. Remaining valid points form the environment observation, supporting grasp inference and collision planning.
+
+The image pipeline uses RGB, with conversion only at OpenCV boundaries that require BGR. Point clouds use binary transport rather than large browser-side JSON arrays. Live video and lower-frequency perception sampling are throttled independently; model inference is not triggered automatically for every video frame.
+
+Camera acquisition, SDK alignment and calibration run in Tokio worker tasks, while the node event loop handles commands and state. Vision models remain loaded in the compute service instead of being reinitialized for each request.
+
+### Automatic hand–eye calibration: fixed camera and tool-mounted board
 
 Calibration establishes the camera's position and orientation relative to the robot base, converting observed object locations into the spatial reference required for movement.
 
@@ -141,6 +171,16 @@ The workflow uses a ChArUco black-and-white board. It moves the arm through pred
 Stages include movement, sampling, calculation and return to the working pose. Fitting error is available for review before application. Saved results remain valid across page refreshes and service restarts; recalibration has a dedicated control.
 
 Fitting error measures sample consistency, not overall manipulation accuracy. Board dimensions, camera depth quality and mechanical accuracy also affect final positioning.
+
+The **eye-to-hand** arrangement uses a fixed camera and a calibration board moving with the tool:
+
+- **Board-pose detection:** OpenCV ChArUco detects corners, then PnP estimates the board pose using the active color intrinsics and distortion parameters.
+- **Tool-pose calculation:** each captured image is paired with fresh actual motor-angle feedback. Robot-specific angle mapping and forward kinematics (FK) produce the tool pose; commanded angles do not substitute for observations.
+- **Simultaneous transform estimation:** OpenCV `calibrateRobotWorldHandEye` with SHAH estimates both the camera-to-base and board-to-tool fixed transforms.
+- **Result inspection:** image reprojection error in pixels and per-pose translation/rotation residuals distinguish detection quality from spatial fit consistency.
+- **Sample traceability:** image and joint-feedback sequence identifiers and sampling times identify corresponding observations. This is software-level sample association, not hardware synchronization between camera and motors.
+
+Camera intrinsics and depth units come from the selected capture configuration. Hand–eye calibration estimates external spatial transforms; it is not an intrinsic-camera recalibration procedure.
 
 ![Camera selection and the automatic calibration workflow](.github/media/perception.jpg)
 
@@ -172,6 +212,10 @@ Recognition, localization and manipulation are triggered independently. Image re
 
 Manual pick-and-place consists of result inspection, target selection and task initiation. The page follows candidate preparation, planning, execution and the final state.
 
+Grasp computation uses target points, non-target environment points and the current gripper's geometry assets. RGB supports upstream segmentation; the GraspGenX grasp network itself uses point clouds and gripper geometry. Environment-distance filtering is followed by clustering similar poses using gripper-geometry displacement. Up to 100 original representative poses and model scores are retained.
+
+Model score and robot executability are evaluated separately: perception generates proposals, while motion checks robot-specific IK, collisions and complete tasks. Segmentation, localization and candidates retain their observation sequence, preventing image, depth and target results from different frames from being combined.
+
 ### AI tasks and model configuration
 
 Beyond the core manipulation workflow, AI tools cover image inspection, state queries, segmentation, localization, arm movement, gripper adjustment and progress queries.
@@ -189,6 +233,8 @@ Model names and reasoning effort support selection and manual entry. Reasoning e
 
 AI replies and robot execution results are distinct. The page provides task progress, actual feedback and controls to stop the current AI and action.
 
+General-purpose AI runs a tool-calling loop through AI SDK on the Next.js server. Tools wrap the same business interfaces used by the browser and await results under the original request identifier. The language model interprets and coordinates tasks, local vision models produce recognition and grasp proposals, and robot modules handle kinematics and execution. The language model does not replace image or point-cloud processing.
+
 ## Motion
 
 Handle target-pose solving, path planning and task execution across manual targets, continuous control and complete vision-driven manipulation.
@@ -205,6 +251,20 @@ Presets such as the working pose, independent gripper controls and hold-to-move/
 
 The working pose is a predefined set of joint positions used at the start or end of operations.
 
+### Control modes and coordinate semantics
+
+| Mode | Input | Solving and execution |
+| --- | --- | --- |
+| Joint targets | Joint angles and named presets | MoveGroup plans to the requested joint configuration |
+| Endpoint targets | Tool center point (TCP) position and orientation | IK produces joint solutions, followed by complete-path planning |
+| Relative endpoint movement | Base-frame or tool-frame displacement and rotation | The start pose comes from actual feedback when the task begins; the selected frame determines the target |
+| Continuous control | Pose targets from controllers, tracking or browser input | MoveIt Servo receives pose commands stamped with current ROS time |
+| Visual manipulation | Object, destination, candidates and environment | MTC plans stages and executes a complete pick-and-place solution |
+
+Tool-frame translation follows the endpoint's current orientation; base-frame translation follows fixed workspace directions. Position and orientation are processed separately, avoiding implicit position changes in endpoint rotation commands.
+
+One motion node coordinates continuous control and discrete tasks. Servo target publication pauses during discrete execution and resumes afterward. Robot models and planner resources remain initialized; individual tasks update the scene and construct the required stages.
+
 ### Complete manipulation planning
 
 Planning selects complete executable solutions from multiple grasp candidates rather than relying on model score alone. Checks cover reachability, gripper approach, carrying and placement.
@@ -212,6 +272,14 @@ Planning selects complete executable solutions from multiple grasp candidates ra
 MoveIt evaluates paths against robot geometry, joint ranges and the observed environment. Collision checking during transport includes the carried object's volume.
 
 Grasp-depth refinement uses gripper geometry and complete-path validity. Collision handling distinguishes necessary finger/target contact from environmental collisions.
+
+### Scene collisions and grasp-depth refinement
+
+- **Environment map:** camera points form a task snapshot through MoveIt's Octomap component. Observed structures are retained instead of representing every object as a solid box.
+- **Target contact:** the grasp target is managed separately, with necessary finger contact handled through allowed-collision configuration. Environment obstacles remain checked.
+- **Carried geometry:** the grasped target is attached to the tool for planning, avoiding duplicate treatment as both an obstacle at its original location and a carried body.
+- **Depth refinement:** deeper positions along the candidate approach direction are searched. Each variant must support approach, gripping and subsequent transport as a complete solution; approach distance is not limited solely by the object's vertical size.
+- **One complete execution:** after an initial complete solution, the selected candidate is refined against the same scene. One final solution is executed, without a new image capture and implicit target switch after approach.
 
 ![Motion modes, planning state and configuration](.github/media/motion-planning.jpg)
 
@@ -246,6 +314,14 @@ The platform reads gripper-servo load feedback and adjusts output throughout hol
 The holding target uses a 0–100 feedback scale. Target value, measured load and regulation state are displayed. Explicit gripper opening or torque release ends holding regulation.
 
 This scale represents load feedback, not contact force in newtons. Settings depend on object material, surface friction and deformation. Load readings assist assessment but do not independently establish a stable grasp.
+
+The regulator updates output power from fresh servo-monitoring samples throughout holding. Target load, measured load, actual control output and sampling time are recorded separately. Neither a fixed angle nor a fixed power level is treated as constant holding force.
+
+### Serial scheduling and feedback consistency
+
+The Rust execution node owns motion commands, state reads and parameter access on one serial port. Queries and replies are serialized as transactions, with only the latest pending movement target retained during waits. Independent asynchronous tasks do not interleave reads from the same bus.
+
+Actual motor angles and commanded targets are stored separately. Disconnection clears pending targets, and reconnection does not replay queued movement. An unavailable selected hardware endpoint reports an error rather than masquerading as software feedback. Virtual joint feedback belongs only to the explicit software-simulation state.
 
 ### Motor information and parameters
 
