@@ -1448,32 +1448,3 @@ test("motion actuator target executes only by button and restores a software com
       .toBeLessThanOrEqual((2 * Math.PI) / 180);
   }
 });
-
-test("execution serial discovery is explicit and connection errors stay visible", async ({
-  page,
-  request,
-}) => {
-  await request.post("/api/arm-execution/disconnect", {
-    data: {
-      schema_version: 3,
-      request_id: "browser-error-disconnect",
-      action: "disconnect",
-      fields: {},
-    },
-  });
-  await page.goto("/arm-execution/");
-  await page.getByRole("button", { name: "刷新串口", exact: true }).click();
-  await expect
-    .poll(async () => {
-      const state = await (
-        await request.get("/api/arm-execution/state")
-      ).json();
-      return {
-        action: state.values.execution_request_result?.acknowledged_action,
-        error: state.values.execution_request_result?.original_error,
-      };
-    })
-    .toEqual({ action: "discover", error: null });
-  await page.getByRole("button", { name: "连接真机", exact: true }).click();
-  await expect(page.locator(".error")).toContainText("连接请求缺少 port 字段");
-});

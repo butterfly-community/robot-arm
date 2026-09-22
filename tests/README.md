@@ -18,6 +18,12 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`cd frontend && pnpm exec playwright test execution-mode.spec.ts` 从真实执行页面切换“模拟器模式 / 真机执行反馈模式”，
+通过不存在的串口复现连接失败，检查显式返回模拟器、刷新保留、反馈来源与桌面/窄屏布局，
+再从运动页面执行一个模拟关节目标并等待完成。不拦截请求或伪造反馈，结束保留模拟器模式；
+该用例改变正式执行配置，不应与人工操作并行，不验证真机运动。
+同文件另有拦截写入与状态的补充回归，只检查切换中的禁用状态、保存失败保留原模式及重试，不作为真实链路证据。
+
 `node tests/integration/control-capabilities.mjs motion temp/control-capabilities/browser`
 从正式运动网页执行工作位、小幅 TCP 目标、无效四元数和空载夹爪开合，记录控制器终态及刷新恢复。
 必须先获得真机动作授权，并确认夹爪空载；没有拦截 POST，也不注入反馈。

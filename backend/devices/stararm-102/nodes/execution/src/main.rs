@@ -493,6 +493,15 @@ impl StarArmExecution {
         } else {
             self.disconnect();
             self.transport.selected_endpoint = None;
+            // Explicit mode change: seed the simulator from the last observed
+            // pose, never from an old command or by replaying a hardware move.
+            self.transport.last_command = None;
+            self.state.feedback_source = FeedbackSource::Software;
+            self.state.sequence = self.next_sequence;
+            self.state.sample_time_ns = now_ns();
+            self.next_sequence += 1;
+            self.transport.feedback_summary =
+                Some(format!("sequence={} source=software", self.state.sequence));
             Ok(())
         }
     }
@@ -1360,6 +1369,40 @@ mod tests {
         assert_eq!(disconnected.selected_endpoint, None);
         assert_eq!(disconnected.config_version, 3);
         assert_eq!(execution.transport.selected_endpoint, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn explicit_simulator_mode_preserves_observed_pose_without_replaying_commands() {
+        let path = config_path();
+        let mut execution = StarArmExecution::with_config(path.clone(), ExecutionConfig::default());
+        execution.transport.selected_endpoint = Some("/dev/stopped".into());
+        execution.transport.last_error = Some("connection lost".into());
+        execution.state.feedback_source = FeedbackSource::Hardware;
+        let observed = execution.state.clone();
+        let pending = command(vec![0.2, 0.2, -0.2, 0.2, 0.2, 0.2], 0.4);
+        execution.transport.last_command = Some(pending.clone());
+
+        let result = execution.handle_request(ExecutionRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "switch-to-simulator".into(),
+            action: RequestAction::Disconnect,
+            fields: BTreeMap::new(),
+        });
+        assert!(result.original_error.is_none());
+        assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
+        assert_eq!(execution.state.joints_rad, observed.joints_rad);
+        assert_eq!(execution.state.actuators_rad, observed.actuators_rad);
+        assert!(execution.state.sequence > observed.sequence);
+        assert!(execution.transport.last_command.is_none());
+        assert!(execution.transport.last_error.is_none());
+        assert!(execution.transport.selected_endpoint.is_none());
+        let saved: ExecutionConfig = load_or_default(&path).unwrap();
+        assert!(saved.selected_endpoint.is_none());
+
+        execution.apply_command(pending.clone());
+        assert_eq!(execution.state.joints_rad, pending.joints_rad);
+        assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
         std::fs::remove_file(path).unwrap();
     }
 

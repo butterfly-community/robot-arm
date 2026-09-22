@@ -60,6 +60,11 @@ export default function Page() {
   const execution = values.execution_info as unknown as
     ExecutionInfo | undefined;
   const transport = (values.transport_state ?? {}) as Record<string, unknown>;
+  const connected = Boolean(transport.connected);
+  const hardwareSelected = transport.selected_endpoint != null;
+  const [executionMode, setExecutionMode] = useDraftValue(
+    hardwareSelected ? "hardware" : "software",
+  );
   const parameters = (transport.parameter_values ?? []) as ParameterValue[];
   const readingInformation = Boolean(transport.parameter_reading);
   const servoTelemetry = transport.arm_telemetry as
@@ -162,8 +167,6 @@ export default function Page() {
     }
   }
 
-  const connected = Boolean(transport.connected);
-  const hardwareSelected = transport.selected_endpoint != null;
   const connectionError =
     !connected && hardwareSelected
       ? String(transport.last_error ?? "无法取得新的电机反馈")
@@ -230,7 +233,7 @@ export default function Page() {
           </strong>
           <p>{connectionError}</p>
           <p>
-            设备恢复后，请在下方“执行连接”栏目点击“连接真机”。连接不会重新执行之前的运动任务。
+            设备恢复后可点击“连接真机”；如需模拟运行，请选择“模拟器模式”并点击“应用执行模式”。连接不会重新执行之前的运动任务。
           </p>
         </div>
       )}
@@ -348,6 +351,28 @@ export default function Page() {
               </StatusBadge>
             }
           >
+            <Field label="执行模式">
+              <select
+                aria-label="执行模式"
+                value={executionMode}
+                disabled={!execution || Boolean(pendingAction)}
+                onChange={(event) =>
+                  setExecutionMode(event.currentTarget.value)
+                }
+              >
+                <option value="software">模拟器模式</option>
+                <option value="hardware">真机执行反馈模式</option>
+              </select>
+            </Field>
+            <KeyValue
+              label="当前生效模式"
+              value={hardwareSelected ? "真机执行反馈模式" : "模拟器模式"}
+            />
+            <p className="status">
+              {executionMode === "software"
+                ? "模拟器模式使用虚拟关节反馈，不发送真机指令。切换后点击“应用执行模式”生效。"
+                : "真机执行反馈模式通过所选串口发送指令并读取电机反馈。停止或掉线不会自动切换到模拟器。"}
+            </p>
             {connected ? (
               <>
                 <KeyValue
@@ -360,49 +385,67 @@ export default function Page() {
                 />
               </>
             ) : null}
-            <div className="card-stack">
-              {execution?.connection_fields.map((field) => (
-                <div key={field.key} className="card-stack">
-                  {field.field_type === "endpoint" ? (
-                    <>
-                      <Field label={`${field.label}选择`}>
-                        <select
-                          aria-label={`${field.label}选择`}
-                          disabled={connected || Boolean(pendingAction)}
-                          value={
-                            discoveredEndpoints.some(
-                              (endpoint) =>
-                                endpoint.key === resolvedConnectionFields.port,
-                            )
-                              ? resolvedConnectionFields.port
-                              : ""
-                          }
-                          onChange={(event) =>
-                            setConnectionFields({
-                              ...connectionFields,
-                              [field.key]: event.currentTarget.value,
-                            })
-                          }
-                        >
-                          <option value="" disabled>
-                            {discoveredEndpoints.length
-                              ? "选择串口，或在下方手动输入"
-                              : "未枚举到串口，可刷新或手动输入"}
-                          </option>
-                          {discoveredEndpoints.map((endpoint) => (
-                            <option key={endpoint.key} value={endpoint.key}>
-                              {endpoint.label}
+            {executionMode === "hardware" && (
+              <div className="card-stack">
+                {execution?.connection_fields.map((field) => (
+                  <div key={field.key} className="card-stack">
+                    {field.field_type === "endpoint" ? (
+                      <>
+                        <Field label={`${field.label}选择`}>
+                          <select
+                            aria-label={`${field.label}选择`}
+                            disabled={connected || Boolean(pendingAction)}
+                            value={
+                              discoveredEndpoints.some(
+                                (endpoint) =>
+                                  endpoint.key ===
+                                  resolvedConnectionFields.port,
+                              )
+                                ? resolvedConnectionFields.port
+                                : ""
+                            }
+                            onChange={(event) =>
+                              setConnectionFields({
+                                ...connectionFields,
+                                [field.key]: event.currentTarget.value,
+                              })
+                            }
+                          >
+                            <option value="" disabled>
+                              {discoveredEndpoints.length
+                                ? "选择串口，或在下方手动输入"
+                                : "未枚举到串口，可刷新或手动输入"}
                             </option>
-                          ))}
-                        </select>
-                      </Field>
-                      <Field label={`${field.label}路径（可手动输入）`}>
+                            {discoveredEndpoints.map((endpoint) => (
+                              <option key={endpoint.key} value={endpoint.key}>
+                                {endpoint.label}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label={`${field.label}路径（可手动输入）`}>
+                          <Input
+                            aria-label={`${field.label}路径（可手动输入）`}
+                            required={field.required}
+                            disabled={connected || Boolean(pendingAction)}
+                            placeholder="/dev/ttyUSB0 或 /dev/serial/by-id/…"
+                            value={resolvedConnectionFields.port}
+                            onChange={(event) =>
+                              setConnectionFields({
+                                ...connectionFields,
+                                [field.key]: event.currentTarget.value,
+                              })
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : (
+                      <Field label={field.label}>
                         <Input
-                          aria-label={`${field.label}路径（可手动输入）`}
+                          aria-label={field.label}
                           required={field.required}
                           disabled={connected || Boolean(pendingAction)}
-                          placeholder="/dev/ttyUSB0 或 /dev/serial/by-id/…"
-                          value={resolvedConnectionFields.port}
+                          value={connectionFields[field.key] ?? ""}
                           onChange={(event) =>
                             setConnectionFields({
                               ...connectionFields,
@@ -411,29 +454,14 @@ export default function Page() {
                           }
                         />
                       </Field>
-                    </>
-                  ) : (
-                    <Field label={field.label}>
-                      <Input
-                        aria-label={field.label}
-                        required={field.required}
-                        disabled={connected || Boolean(pendingAction)}
-                        value={connectionFields[field.key] ?? ""}
-                        onChange={(event) =>
-                          setConnectionFields({
-                            ...connectionFields,
-                            [field.key]: event.currentTarget.value,
-                          })
-                        }
-                      />
-                    </Field>
-                  )}
-                </div>
-              ))}
-              <p className="status">
-                选择和手动输入使用同一个路径，连接时保存；已连接时请先断开再更换串口。
-              </p>
-            </div>
+                    )}
+                  </div>
+                ))}
+                <p className="status">
+                  选择和手动输入使用同一个路径，点击“连接真机”时保存并生效。主动断开会恢复模拟器模式。
+                </p>
+              </div>
+            )}
             <Field label="真机反馈周期（ms）">
               <Input
                 aria-label="真机反馈周期（ms）"
@@ -501,21 +529,37 @@ export default function Page() {
               </div>
             </Field>
             <div className="card-actions">
-              <Button
-                variant={connected ? "danger" : "default"}
-                disabled={Boolean(pendingAction)}
-                onClick={() =>
-                  requestExecution(connected ? "disconnect" : "connect")
-                }
-              >
-                {pendingAction === "connect"
-                  ? "正在连接…"
-                  : pendingAction === "disconnect"
-                    ? "正在断开…"
-                    : connected
-                      ? "断开"
-                      : "连接真机"}
-              </Button>
+              {executionMode === "software" ? (
+                <Button
+                  disabled={
+                    !execution || !hardwareSelected || Boolean(pendingAction)
+                  }
+                  onClick={() => requestExecution("disconnect")}
+                >
+                  {pendingAction === "disconnect"
+                    ? "正在切换…"
+                    : hardwareSelected
+                      ? "应用执行模式"
+                      : "模拟器已启用"}
+                </Button>
+              ) : (
+                <Button
+                  variant={connected ? "danger" : "default"}
+                  disabled={Boolean(pendingAction)}
+                  title={connected ? "断开真机连接并切换到软件模拟" : undefined}
+                  onClick={() =>
+                    requestExecution(connected ? "disconnect" : "connect")
+                  }
+                >
+                  {pendingAction === "connect"
+                    ? "正在连接…"
+                    : pendingAction === "disconnect" && connected
+                      ? "正在断开…"
+                      : connected
+                        ? "断开"
+                        : "连接真机"}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 disabled={Boolean(pendingAction)}
