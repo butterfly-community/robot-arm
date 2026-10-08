@@ -155,6 +155,12 @@ controller-input、camera 和 stararm-102-execution 统一引用 Compose 的
 只修改这项 Compose 权限不需要重编镜像；更新配置后整套 `docker compose down`，再执行
 `docker compose up -d --no-build`，不要只运行 `restart`，因为它不会更新容器设备规则。
 设备文件能被 `ls` 看见不代表可以打开；权限检查通过不等于手柄输入、相机采集或串口通信已通过验收。
+controller-input 设置 `SDL_JOYSTICK_DISABLE_UDEV=1`、`SDL_HIDAPI_UDEV=0`，让 SDL 自身通过
+inotify/轮询发现 evdev 与 HIDAPI 设备。Docker 网络命名空间不能接收主机的 udev 热插拔通知，
+仅挂载 `/run/udev` 不会转发通知；默认 udev 发现可能表现为启动前插入可见、启动后插入不可见。
+保留 udev 数据挂载用于设备属性读取，不禁用 HIDAPI、传感器或震动，也不增加自定义设备扫描路径。
+依据：[SDL Linux 手柄发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/joystick/linux/SDL_sysjoystick.c)、
+[SDL HIDAPI 发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/hidapi/SDL_hidapi.c)。
 相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D
 不经过 ROS。
 

@@ -60,6 +60,10 @@ services:
       <<: *dora-environment
       DORA_MACHINE_ID: controller-input
       CONTROLLER_INPUT_CONFIG: /config/controller-input.json
+      # Docker's network namespace cannot receive host udev hotplug events.
+      # Use SDL's own inotify/polling discovery for evdev and HIDAPI instead.
+      SDL_JOYSTICK_DISABLE_UDEV: "1"
+      SDL_HIDAPI_UDEV: "0"
     volumes:
       - ./backend/config/runtime:/config
       - /dev:/dev
