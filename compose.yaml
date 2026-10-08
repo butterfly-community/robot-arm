@@ -60,8 +60,10 @@ services:
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro
     device_cgroup_rules:
-      - "c 13:* rwm"
-      - "c 189:* rwm"
+      # SDL uses evdev, USB and hidraw. hidraw has a host-assigned major;
+      # allow character-device I/O, including hotplug, without privileged mode.
+      # This also permits other character devices in the existing /dev mount.
+      - "c *:* rw"
 
   spatial-transform:
     <<: *dora-daemon

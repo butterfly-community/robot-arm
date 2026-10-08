@@ -143,7 +143,17 @@ Compose 只把 `temp/recordings` 作为录制输出，以及测试 profile 的�
 自动分割权重 `yoloe-26x-seg-pf.pt` 由计算服务应用 Dockerfile 从 Ultralytics 官方资产下载，
 固定 SHA256 并打入该服务镜像；新增它不要求重建全局基础镜像或其他服务的环境。
 
-controller-input、camera 和 execution 只挂载各自需要的 `/dev`、udev/sysfs 和 cgroup 规则。
+controller-input、camera 和 execution 分别声明 `/dev`、udev/sysfs 挂载与设备访问规则。
+controller-input 使用 `c *:* rw` 放行字符设备读写，覆盖 SDL 的 evdev（`event*`）、
+joystick（`js*`）、USB 和 `hidraw*`；保留整个 `/dev` 挂载以支持热插拔。
+`hidraw` 主设备号由主机动态分配，不能固定为某台机器的编号。
+这项授权也覆盖输入容器可见的其他字符设备，但不放行块设备、不启用 `privileged`，
+不修改 camera/execution 的规则；文件权限与主机其他访问控制仍然有效。
+依据：[Linux hidraw](https://www.kernel.org/doc/html/latest/hid/hidraw.html)、
+[Compose 设备规则](https://docs.docker.com/reference/compose-file/services/#device_cgroup_rules)。
+只修改这项 Compose 权限不需要重编镜像；更新配置后整套 `docker compose down`，再执行
+`docker compose up -d --no-build`，不要只运行 `restart`，因为它不会更新容器设备规则。
+设备文件能被 `ls` 看见不代表可以打开；权限检查通过也不等于 SDL 枚举、按键和传感器已通过验收。
 相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D
 不经过 ROS。
 
