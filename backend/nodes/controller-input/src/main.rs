@@ -1387,10 +1387,7 @@ impl ImuFusion {
 fn spawn_nolo_driver(sender: Sender<DriverEvent>) {
     thread::spawn(move || {
         if let Err(error) = run_nolo_driver(&sender) {
-            let _ = sender.send(DriverEvent::Error {
-                driver_id: NOLO_DRIVER_ID.into(),
-                message: error.to_string(),
-            });
+            report_driver_stopped(&sender, NOLO_DRIVER_ID, "NOLO CV1 direct HID", error);
         }
     });
 }
@@ -1547,20 +1544,47 @@ struct SdlGamepadState {
 fn spawn_sdl_driver(sender: Sender<DriverEvent>, haptic: Receiver<HapticCommand>) {
     thread::spawn(move || {
         if let Err(error) = run_sdl_driver(&sender, &haptic) {
-            let _ = sender.send(DriverEvent::Error {
-                driver_id: SDL_DRIVER_ID.into(),
-                message: error.to_string(),
-            });
+            report_driver_stopped(&sender, SDL_DRIVER_ID, "SDL3 gamepad", error);
         }
     });
 }
 
+fn report_driver_stopped(
+    sender: &Sender<DriverEvent>,
+    driver_id: &str,
+    display_name: &str,
+    error: eyre::Report,
+) {
+    let message = format!("{display_name} 采集线程已停止：{error:#}");
+    // A stopped worker cannot keep advertising its previous devices as active.
+    let _ = sender.send(DriverEvent::Sources {
+        driver: driver_info(driver_id, display_name, Some(message.clone())),
+        sources: vec![],
+    });
+    let _ = sender.send(DriverEvent::Error {
+        driver_id: driver_id.into(),
+        message,
+    });
+}
+
 fn run_sdl_driver(sender: &Sender<DriverEvent>, haptic: &Receiver<HapticCommand>) -> Result<()> {
-    let sdl = sdl3::init().map_err(|error| eyre!(error))?;
-    let subsystem = sdl.gamepad().map_err(|error| eyre!(error))?;
-    let mut events = sdl.event_pump().map_err(|error| eyre!(error))?;
+    let sdl = sdl3::init()
+        .map_err(|error| eyre!(error))
+        .context("SDL 初始化失败")?;
+    let subsystem = sdl
+        .gamepad()
+        .map_err(|error| eyre!(error))
+        .context("SDL 手柄子系统初始化失败")?;
+    let mut events = sdl
+        .event_pump()
+        .map_err(|error| eyre!(error))
+        .context("SDL 事件循环初始化失败")?;
     let mut gamepads = HashMap::<u32, SdlGamepadState>::new();
-    for id in subsystem.gamepads().map_err(|error| eyre!(error))? {
+    for id in subsystem
+        .gamepads()
+        .map_err(|error| eyre!(error))
+        .context("SDL 手柄枚举失败")?
+    {
         open_sdl_gamepad(&subsystem, id, &mut gamepads)?;
     }
     publish_sdl_sources(sender, &gamepads)?;
@@ -1658,16 +1682,28 @@ fn open_sdl_gamepad(
     if gamepads.contains_key(&raw_id) {
         return Ok(());
     }
-    let gamepad = subsystem.open(id).map_err(|error| eyre!(error))?;
+    let gamepad = subsystem
+        .open(id)
+        .map_err(|error| eyre!(error))
+        .with_context(|| format!("打开 SDL 手柄失败（当前连接实例 {raw_id}）"))?;
+    let device_label = format!(
+        "{}，{}",
+        gamepad.name().unwrap_or_else(|| "未命名手柄".into()),
+        gamepad
+            .path()
+            .unwrap_or_else(|| format!("连接实例 {raw_id}"))
+    );
     let has_gyro = unsafe { gamepad.has_sensor(SensorType::Gyroscope) };
     let has_acceleration = unsafe { gamepad.has_sensor(SensorType::Accelerometer) };
     if has_gyro && has_acceleration {
         gamepad
             .sensor_set_enabled(SensorType::Gyroscope, true)
-            .map_err(|error| eyre!(error.to_string()))?;
+            .map_err(|error| eyre!(error.to_string()))
+            .with_context(|| format!("启用陀螺仪失败（{device_label}）"))?;
         gamepad
             .sensor_set_enabled(SensorType::Accelerometer, true)
-            .map_err(|error| eyre!(error.to_string()))?;
+            .map_err(|error| eyre!(error.to_string()))
+            .with_context(|| format!("启用加速度计失败（{device_label}）"))?;
     }
     let serial = gamepad.serial_number();
     let device_id = sdl_device_id(serial.as_deref(), gamepad.path().as_deref(), raw_id);
@@ -1873,6 +1909,43 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_driver_reports_context_and_removes_stale_devices_only_for_that_driver() {
+        let (sender, receiver) = mpsc::channel();
+        let (haptic, _commands) = mpsc::channel();
+        let mut input = ControllerInput::new(receiver, haptic);
+        let mut pad = source("fixture", false, true);
+        pad.driver_id = SDL_DRIVER_ID.into();
+        input.replace_driver_sources(driver_info(SDL_DRIVER_ID, "SDL3 gamepad", None), vec![pad]);
+        input.replace_driver_sources(driver_info(NOLO_DRIVER_ID, "NOLO", None), vec![]);
+        input.samples = sample(&[("axis/left_x", 0.5)]);
+        let error = eyre!("Permission denied").wrap_err("打开 SDL 手柄失败（当前连接实例 42）");
+        report_driver_stopped(&sender, SDL_DRIVER_ID, "SDL3 gamepad", error);
+        input.drain();
+        let state = input.discovery_state();
+        let driver = state
+            .drivers
+            .iter()
+            .find(|driver| driver.driver_id == SDL_DRIVER_ID)
+            .unwrap();
+        let error = driver.original_error.as_deref().unwrap();
+        assert!(error.contains("采集线程已停止"));
+        assert!(error.contains("打开 SDL 手柄失败"));
+        assert!(error.contains("Permission denied"));
+        assert!(state.sources.is_empty());
+        assert!(input.samples.is_empty());
+        assert!(
+            state
+                .drivers
+                .iter()
+                .find(|driver| driver.driver_id == NOLO_DRIVER_ID)
+                .unwrap()
+                .original_error
+                .is_none()
+        );
+        assert_eq!(input.last_error.as_deref(), Some(error));
+    }
 
     #[test]
     fn user_edits_during_simulation_do_not_save_or_restore_generated_bindings() {

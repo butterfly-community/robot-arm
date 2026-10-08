@@ -28,6 +28,12 @@ x-web-app: &web-app
   image: robot-arm-services-frontend
   networks: [robot-services]
 
+# Hardware services: read/write all character devices (USB, HID, cameras,
+# serial ports), including hotplug and host-assigned device numbers.
+# Paired with /dev mounts below; no block-device access or privileged mode.
+x-hardware-device-rules: &hardware-device-rules
+  - "c *:* rw"
+
 services:
   redis:
     image: redis:8.6.3
@@ -59,11 +65,7 @@ services:
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro
-    device_cgroup_rules:
-      # SDL uses evdev, USB and hidraw. hidraw has a host-assigned major;
-      # allow character-device I/O, including hotplug, without privileged mode.
-      # This also permits other character devices in the existing /dev mount.
-      - "c *:* rw"
+    device_cgroup_rules: *hardware-device-rules
 
   spatial-transform:
     <<: *dora-daemon
@@ -106,10 +108,7 @@ services:
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro
-    device_cgroup_rules:
-      - "c 81:* rwm"
-      - "c 189:* rwm"
-      - "c 235:* rwm"
+    device_cgroup_rules: *hardware-device-rules
 
   perception:
     <<: *dora-daemon
@@ -153,8 +152,7 @@ services:
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - /sys:/sys:ro
-    device_cgroup_rules:
-      - "c 188:* rwm"
+    device_cgroup_rules: *hardware-device-rules
 
   web-gateway:
     <<: *dora-daemon

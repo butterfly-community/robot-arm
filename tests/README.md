@@ -18,6 +18,12 @@ Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成
 
 ## 前端
 
+`pnpm --dir frontend exec playwright test input-discovery.spec.ts` 在无 SDL 手柄的运行环境中，
+从真实输入页检查未发现提示、栏目展开/收起、刷新和窄屏布局，不修改配置或发送运动命令。
+同文件的注入回归仅验证驱动打开/传感器错误及状态恢复展示，不代表 PS5 硬件验收。
+`input-discovery.test.ts` 覆盖连接状态、初始化、模拟源不掩盖实体手柄缺失及原始错误展示；
+输入节点原生测试覆盖线程退出后仅撤销所属驱动的旧设备与采样。
+
 `cd frontend && pnpm exec playwright test execution-mode.spec.ts` 从真实执行页面切换“模拟器模式 / 真机执行反馈模式”，
 通过不存在的串口复现连接失败，检查显式返回模拟器、刷新保留、反馈来源与桌面/窄屏布局，
 再从运动页面执行一个模拟关节目标并等待完成。不拦截请求或伪造反馈，结束保留模拟器模式；

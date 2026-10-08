@@ -32,6 +32,7 @@ import {
 } from "@robot/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MouseControl } from "./mouse-control";
+import { inputDiscoveryNotices } from "./input-discovery";
 
 type InputMode = "button" | "buttons" | "axis";
 type ActionDefinition = (typeof inputActionCatalog)[number];
@@ -201,6 +202,10 @@ export default function Page() {
     ControlInputFrame | undefined;
   const sources = (discovery.sources ?? []) as Array<Record<string, unknown>>;
   const drivers = (discovery.drivers ?? []) as Array<Record<string, unknown>>;
+  const discoveryNotices = inputDiscoveryNotices(
+    connection,
+    values.discovery_state as Record<string, unknown> | undefined,
+  );
   const bindingStates = (discovery.bindings ?? []) as Array<
     Record<string, unknown>
   >;
@@ -630,6 +635,20 @@ export default function Page() {
             )}
           />
           <div className="source-list">
+            {discoveryNotices.map((notice) => (
+              <div
+                className="source-item"
+                key={notice.id}
+                role={notice.error ? "alert" : "status"}
+                style={{
+                  overflowWrap: "anywhere",
+                  whiteSpace: "pre-wrap",
+                  color: notice.error ? "#ffc0c5" : undefined,
+                }}
+              >
+                {notice.message}
+              </div>
+            ))}
             {sources.map((source) => {
               const positionCurrent =
                 source.source_id === discovery.position_source_id;
