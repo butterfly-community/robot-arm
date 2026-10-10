@@ -1239,7 +1239,7 @@ input[type="range"] {
   display: grid;
   gap: 16px;
   min-width: 0;
-  border: 1px solid var(--border, #28313a);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 20px;
 }

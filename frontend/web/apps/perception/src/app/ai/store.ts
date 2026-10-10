@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import sharp from "sharp";
 import type { ModelMessage } from "ai";
+import { modelContext } from "./context";
 import {
   activeRun,
   type AIImage,
@@ -265,13 +266,17 @@ async function transform(value: unknown, hydrate: boolean): Promise<unknown> {
 }
 export async function messages(sessionId: string): Promise<ModelMessage[]> {
   return (await transform(
-    (await readJSON(`session:${sessionId}:messages`)) ?? [],
+    modelContext(
+      (await readJSON<ModelMessage[]>(`session:${sessionId}:messages`)) ?? [],
+    ),
     true,
   )) as ModelMessage[];
 }
-export async function saveMessages(sessionId: string, value: ModelMessage[]) {
-  await writeJSON(
-    `session:${sessionId}:messages`,
-    await transform(value, false),
-  );
+export async function appendMessages(sessionId: string, value: ModelMessage[]) {
+  // register() permits one active run. Append only its new messages; old image
+  // references and complete history stay untouched by model input projection.
+  const key = `session:${sessionId}:messages`;
+  const previous = (await readJSON<ModelMessage[]>(key)) ?? [];
+  const added = (await transform(value, false)) as ModelMessage[];
+  await writeJSON(key, [...previous, ...added]);
 }

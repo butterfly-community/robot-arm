@@ -10,7 +10,7 @@ A robot control platform centered on AI-driven pick-and-place, integrating natur
 
 Robot Arm translates natural-language instructions into physical object-manipulation tasks. AI identifies grasp targets and placement regions from camera images, invokes localization and grasp planning, and follows robot execution results. Conversations, segmentation results, live video and task progress are presented in a unified browser interface.
 
-The core workflow comprises six stages:
+With a depth camera, the core workflow comprises six stages:
 
 1. **Task interpretation:** identify the object, destination and sequence of operations.
 2. **Visual recognition:** acquire camera images and identify targets through model recognition or image-region selection.
@@ -18,6 +18,11 @@ The core workflow comprises six stages:
 4. **Grasp planning:** generate candidates and check reachability, environmental collisions and complete transport paths.
 5. **Execution:** perform approach, gripping, transport, release and return to the working pose.
 6. **Result inspection:** use task state, joint feedback and subsequent images to assess the outcome and inform further steps.
+
+**RGB-only operation** uses external and wrist-mounted ordinary cameras. AI combines successive
+images and actual joint/TCP feedback with existing movement, gripping and working-pose tools,
+without depth reconstruction or GraspGenX. Both modes share motion and execution services.
+Camera binding does not generate depth or calibration; RGB-only results depend on image quality and model judgment.
 
 ### Physical task example
 
@@ -139,6 +144,10 @@ Provide image observations, object recognition and spatial localization for AI m
 
 ### Camera management and acquisition
 
+One camera service manages depth, external and wrist roles with persistent device bindings,
+individual stream profiles and capture switches. Each live role has its own floating preview.
+Capture can alternate when shared USB bandwidth is insufficient; AI uses the same switches and snapshot interface.
+
 The interface presents camera sources, device information, color images and depth data. Color supplies object appearance; depth supplies distance to visible surfaces. Together they support recognition and 3D localization.
 
 - Resolution and frame-rate selection based on reported device capabilities, with unavailable configurations disabled.
@@ -208,7 +217,7 @@ In this image, the grasp target originates from model recognition and the center
 
 The system calculates object position from corresponding depth data and generates grasp-pose candidates. Motion planning selects a complete solution based on reachability and subsequent transport requirements.
 
-Recognition, localization and manipulation are triggered independently. Image recognition does not require a robot connection or extrinsic calibration; physical manipulation requires valid spatial localization and a hardware connection.
+Recognition, localization and manipulation are triggered independently. Image recognition does not require a robot connection or extrinsic calibration; depth-based physical manipulation requires valid spatial localization and a hardware connection.
 
 Manual pick-and-place consists of result inspection, target selection and task initiation. The page follows candidate preparation, planning, execution and the final state.
 

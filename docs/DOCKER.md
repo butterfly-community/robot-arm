@@ -24,7 +24,7 @@ docker compose down
 根上下文与计算基础上下文同时排除独立 `tools/` 及嵌套 `.git`。
 正式夹爪资产生成器位于 `backend/services/perception-compute/build-description.py`；设备自己的
 `backend/devices/stararm-102/tools/` 仍属于生产构建输入，不能和根目录工具仓库一并排除。
-不维护未被构建入口使用的 `backend/.dockerignore`。正式标定配置只由 Compose 挂载，不打进镜像。
+正式标定配置只由 Compose 挂载，不打进镜像。
 规则按 [Docker 构建上下文约定](https://docs.docker.com/build/concepts/context/#dockerignore-files) 生效，
 不是 Git 忽略规则的继承。
 
@@ -126,8 +126,8 @@ dataflow 不单独自动重启某个节点。只读审查或不改变行为的�
 需要部署应用变化时再使用上述完整流程。
 Rust 构建目标中的测试复用该服务环境，Python 运行测试用计算运行镜像，夹爪生成测试用含官方向导的计算构建镜像。
 不要把“精简运行镜像没有构建向导”或“构建镜像未安装显示运行库”错误地补成第二套运行环境。
-自然语言 API 的地址、模型和密钥只通过根目录
-`.env` 注入 `web-perception`；它们不进入镜像层或浏览器 bundle。
+自然语言 API 的地址、模型和思考强度由网页保存到 Redis，根目录 `.env` 只提供初始默认值。
+密钥只通过服务端环境注入 `web-perception`，不进入镜像层或浏览器 bundle。
 
 本地感知、候选生成、MoveIt 规划和执行不依赖该外部自然语言入口。
 已有镜像和正式配置准备好后，离线验收用 `--no-build --pull never` 整套冷启动，

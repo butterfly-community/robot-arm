@@ -1,230 +1,140 @@
 # 回归测试
 
-`node tests/integration/control-capabilities.mjs work temp/control-work` 仅从运动页点击工作位，
-等待同请求终态并保存截图；不会执行其余 TCP/夹爪测试动作。运行前确认用户授权真机回位。
-AI 单测覆盖深度/纯视觉提示词选择、历史图像窗口不丢文字与推理、运动后取图、相机独占切换，
-以及取图失败不把已完成运动当作失败重放。实际模型行为仍用下述 general-ai 网页流程验收。
+测试入口按影响范围选择，不默认运行所有硬件测试。网页功能必须通过真实页面完成选择、
+保存、运行、等待与结果核对；单元测试、Mock 和接口检查仅作补充。
+控制器终态、视觉确认和人工验收是不同证据，不能互相替代。
 
-`cd frontend && pnpm exec playwright test camera-bindings.spec.ts` 从真实采集页面绑定两个模拟来源，
-核对独立视频、拖动/收起、刷新持久化、窄屏布局与解除绑定，不拦截请求，不操作机械臂。
-`CAMERA_BINDINGS_KEEP=1 CAMERA_AI_TEST=1` 额外通过网页向当前模型服务发送两路模拟图像，
-验证 AI 的角色取图工具；运行前须已授权图像发送。仅设置 KEEP 可保留绑定用于整套重启复验。
-该测试不证明实体 UVC 采集或腕部纯视觉抓放，实体设备需另从同一页面完成绑定与预览验收。
-相机节点单测覆盖绑定持久化、离线配置保留、快照等待新帧、元数据/像素一致和 RGB 解码。
+Host 只运行 Node/Git/Docker；ROS、OpenCV、SDL、RealSense 和模型测试在所属镜像中运行。
+输出统一放根目录 `temp/`，测试自行创建目录，不依赖旧输出。独立 `tools/` 保存工具和可复用夹具，
+生产构建不依赖它。服务地址默认 `http://192.168.100.10:8765`；重启始终整套关闭、整套启动。
 
-实体相机使用 `node tests/integration/camera-bindings.mjs discover temp/camera-check`
-从网页刷新并列出设备与支持的流配置。使用 `bind OUTPUT external|wrist SOURCE PROFILE`
-从同一页面选择、保存并检查出图，保存页面截图与原始画布像素；`unbind OUTPUT ROLE`
-从页面解除绑定。`off OUTPUT ROLE` 关闭采集但保留绑定，`on OUTPUT ROLE` 按保存配置重新开启。
-共享 USB 带宽不足时先 off 一路再 on 另一路，验收须核对两路分别收到开启之后的新图，
-不能把一次快照成功当成同时采集成功。设备与配置参数必须来自实际枚举，不使用固定 video 编号。
-`cycle OUTPUT` 对已保存的两路绑定从网页连续切换两轮，检查新帧时间、唯一活动采集、配置保留
-与刷新后的关闭状态；此模式会切换真实采集，但不改变分辨率、不操作机械臂。
-`node tests/integration/connect-execution.mjs ENDPOINT temp/execution-check` 通过执行页面连接
-所选真实串口并核对硬件反馈，不发送运动命令。
-`node tests/integration/general-ai.mjs model temp/ai-model MODEL` 通过页面保存模型名称，
-刷新后核对持久化；`send` 模式记录所有已出图的相机角色，不将 AI 回复成功当作抓放成功。
+## 源码与前端检查
 
-生产逻辑在各服务/crate 中，纯函数回归随模块维护；本目录只放跨服务测试和输入夹具。
-临时输出统一根目录 `temp/`。软件反馈测试不证明真机夹持、力度或实际定位精度。
-服务停止后 `temp/` 可以随时清空；测试自行创建结果目录，正式夹具不在其中。
-
-跨服务测试需要独立 `tools/` 仓库位于工程根目录；生产构建不依赖它。
-文档检查同时枚举主仓库和工具仓库，忽略 `tools/` 不等于跳过其中链接。
-
-文档整理后在根目录运行 `node tools/check-doc-links.mjs` 检查本地内联链接目标；
-此检查不访问服务、不发控制请求，也不验证外部网页和标题锚点。
-检查器本身的回归运行 `node --test tests/tools/check-doc-links.test.mjs`；
-Docker 忽略规则运行 `node tools/check-build-context.mjs`，只使用合成输入，不构建基础镜像。
-
-`node --test tests/tools/pick-place-routing.test.mjs` 确认抓放只经场景节点绑定快照后到运动节点，
-不恢复独立点云订阅与请求之间的时序竞争。消息 crate 测试覆盖绑定消息的二进制点云往返、
-场景后续变化不修改已绑定快照及缺失/损坏点云；运动测试使用相同绑定消息进入正常任务转换。
-
-## 前端
-
-`pnpm --dir frontend exec playwright test input-discovery.spec.ts` 在无 SDL 手柄的运行环境中，
-从真实输入页检查未发现提示、栏目展开/收起、刷新和窄屏布局，不修改配置或发送运动命令。
-同文件的注入回归仅验证驱动打开/传感器错误及状态恢复展示，不代表 PS5 硬件验收。
-`input-discovery.test.ts` 覆盖连接状态、初始化、模拟源不掩盖实体手柄缺失及原始错误展示；
-输入节点原生测试覆盖线程退出后仅撤销所属驱动的旧设备与采样。
-
-连接实体手柄后，在 `frontend` 中运行
-`INPUT_GAMEPAD_NAME='Xbox One S Controller' pnpm exec playwright test input-gamepad.spec.ts`，
-从实际输入页验证发现、名称编辑/保存/刷新、持续采样，结束恢复原名称；不改动作绑定、不发机械臂命令。
-手柄名称须使用实际 SDL 名称。额外设置 `INPUT_GAMEPAD_USB_INTERFACE` 为当前 Xbox 的 USB 接口，
-可执行同页移除/重新发现回归：脚本核对 Microsoft/xpad，再经 `sudo -n` 解绑/绑定该接口，
-不重启服务、不重置其他 USB 设备，异常时恢复绑定。该硬件测试会短暂断开手柄，不应与人工控制并行。
-接口由主机实际枚举确定，不在生产配置写死；不提供参数时对应硬件用例明确跳过。
-
-`cd frontend && pnpm exec playwright test execution-mode.spec.ts` 从真实执行页面切换“模拟器模式 / 真机执行反馈模式”，
-通过不存在的串口复现连接失败，检查显式返回模拟器、刷新保留、反馈来源与桌面/窄屏布局，
-再从运动页面执行一个模拟关节目标并等待完成。不拦截请求或伪造反馈，结束保留模拟器模式；
-该用例改变正式执行配置，不应与人工操作并行，不验证真机运动。
-同文件另有拦截写入与状态的补充回归，只检查切换中的禁用状态、保存失败保留原模式及重试，不作为真实链路证据。
-
-`node tests/integration/control-capabilities.mjs motion temp/control-capabilities/browser`
-从正式运动网页执行工作位、小幅 TCP 目标、无效四元数和空载夹爪开合，记录控制器终态及刷新恢复。
-必须先获得真机动作授权，并确认夹爪空载；没有拦截 POST，也不注入反馈。
-整套重启后运行相同命令把 `motion` 换成 `history`，从页面查询之前的编号并断言不发任何动作。
-测试数值仅为本脚本的输入，不进入生产参数。Redis 重复编号、跨会话未知状态和终态持久化另由
-网关 `redis_reserves_once_and_preserves_results_across_sessions` 测试覆盖，需显式提供
-`REDIS_TEST_URL` 并加 `--ignored`；只创建和删除唯一 `test-` 请求记录，不操作机器人。
-
-`node tests/integration/grasp-cancel.mjs observe temp/control-capabilities/grasp` 从网页重新采图、分割和定位。
-核对输出图与实例后，以 `queued` / `planning` / `executing` / `complete` 替换 `observe`，追加明确的
-物体 ID 和放置区 ID，分别测试取消或完整执行。取消按钮走原抓放页面，检查原请求的终态和查询结果；
-此脚本会真实操作机械臂，不能作为无硬件的默认回归。调用前通过工作位按钮准备姿态。
-`queued` 临时降低一次关节运动的速度，通过另一网页排队抓放再取消，最后清空速度覆盖并回工作位。
-先运行 `planning` 生成当前场景候选，再测 `queued`；新候选计算可能比前面的运动更久，
-若请求已开始规划，测试会失败，不能冒充排队取消通过。
-
-`node tests/integration/gripper-hold-ui.mjs OUTPUT OBJECT_ID REGION_ID` 通过同一抓放页面运行任务，
-通过执行页面将保持力度临时改为 20，再恢复原值；记录相机画面及带时间的实际反馈、调节功率。
-只有第一轮改值要求发生在调节期间；恢复可能在正常放置释放之后，不算持物调节证据。
-非零负载仅用于安排测试操作，不能判定抓到物体；必须复核画面与控制器日志。
-脚本结束恢复原配置，异常时取消自身仍活动的抓放，不主动释放或回工作位。
-`request-status.spec.ts` 则是隔离的界面回归，拦截所有写入，只验证结果显示和同编号刷新。
-
-`segmentation-composition.spec.ts` 在 1440/390 像素宽度验证手动框选、中文命名、反向拖动的
-1920 像素坐标换算、保存失败保留草稿、三种来源单独/混用、同模型替换、独立清除、来源型号显示、
-刷新回显与删除。三个折叠状态独立保存；其他模型运行不丢失手动草稿，AI 默认模型不控制分割区可用性。
-结果使用原始彩色图和框线，不染色或高亮；测试实际点击三种来源的图上标题、详情置信度、Escape 关闭、删除后关闭旧详情，
-并核对手动编辑图不显示模型标注。覆盖桌面及窄屏，框坐标仍对应原图而非 CSS 缩放尺寸。
-保存回显改变 JSON 字段顺序/浮点尾数时，成功确认仍释放手动草稿并启用三维定位；失败则保留草稿。
-置灰原因在按钮旁明确显示，不再只有无说明的禁用状态。
-三种分割都在顶部 AI 栏目内；“抓放场景”单独折叠，有两个选择框、启动和同请求实时进度。
-`pick-place-progress.spec.ts` 覆盖候选等待、模式切换、规划、执行、刷新后继续显示和失败，
-并核对桌面/窄屏无横向溢出。它拦截写请求，只证明状态展示，不作为实际抓放成绩。
-HTTP 202 与首条运动反馈之间仍计时并禁用重复启动；仅匹配请求的终态结束等待，不使用旧任务状态。
-`ai-layout.spec.ts` 核对相机/标定第一行、AI 双栏第二行，深度/内外参/结果折叠项的归属，
-以及桌面和窄屏的宽度、间距、展开和刷新保持。旧的独立结果卡片不能重新出现。
-scene 原生回归核对分割原图像素不变、mask 可用，不再要求已移除的染色 `overlay.png`。
-实际预览回归运行 `node tools/diagnostics/verify-web-depth-preview.mjs --capture=temp/depth-preview`，
-核对两次刷新、载入分割帧及页面重载后深度 PNG 仍可解码；这是正式服务测试，不拦截响应。
-`ai/robot.test.ts` 与 `ai/runner.test.ts` 验证通用 AI 的 Responses 配置、密钥脱敏、请求关联、
-受理与终态区别、取消和不重放；不调用外部模型或真机。抓放仍复用 `startPickPlace`。
-
-`integration/general-ai.mjs` 从真实网页的通用 AI 入口操作，不拦截或注入任务结果：
-`node tests/integration/general-ai.mjs send temp/general-ai/task "任务文本"`。
-`node tests/integration/general-ai.mjs settings temp/general-ai/settings` 实测模型/思考强度下拉、
-手动输入、保存与刷新及窄屏布局，结束恢复原配置，不发送任务、图片或运动指令。
-`reply-layout OUTPUT` 只读复查当前会话最后一条已完成的多轮回复：桌面/窄屏折叠框间距、
-段落换行及刷新后的保留。先用 `send` 完成一个工具调用前后都有文本的只读任务。
-`inspect` 只查看；`camera` 在网页选择可用 RealSense 并保存；`config OUTPUT "" [图片路径] [思考强度]`
-查询模型、保存配置并验证真实文本/图像/工具回传；`stop` 点击停止并等终态。
-浏览器会话默认保存到 temp/general-ai/browser-state.json，丢失时可在网页历史会话中恢复。
-运行输出含原请求、终态和相机连续画面；脚本不把 AI 自报成功计为实际抓放成功。
-`timing.json` 按工具记录起点/时长及整轮时间；整轮减去串行工具时间的余量包含模型等待和本地编排，
-不是模型服务端的纯推理耗时。规划/执行分界可结合 `events.json` 的网页进度核对。
-`watch OUTPUT RUN_ID` 只读跟踪当前会话已有任务，不再次提交指令；`AI_WAIT_TIMEOUT_MS`
-设置测试等待时间，不限制后端任务。`send` 与 `watch` 将页面收到的实际夹爪反馈、功率和
-最后执行命令写入 `execution-feedback.jsonl`，不额外轮询硬件，不以负载代替图像验收。
-`node tests/integration/execution-hold.mjs OUTPUT` 从执行页面点击全部上力并读取全部信息，
-用于已授权的当前位置锁力恢复；会操作真实电机，不修改固件参数，不释放或回工作位。
-
-`ai-history-audit.mjs` 对照工具返回的原图 ID 检查历史图片完整性。在 perception 镜像内运行：
-`docker compose exec -T -w /workspace/web/apps/perception web-perception node --input-type=module - SESSION_ID < tests/integration/ai-history-audit.mjs`。
-默认只读；追加 `repair` 仅恢复可证明为同次完整原图前缀的损坏引用，先备份历史并检查并发改动。
-修复应在该会话无活动任务时进行；不会使用新图替代旧图，也不发送机器人或模型请求。
-图片存储单测使用超过 512 KiB 的 1080p 图像并发读写，核对原子发布与完整历史往返。
-`AI_RELOAD_AFTER_START=1` 在发送后实际刷新网页，仍跟踪原运行，核对不会重发；
-`new OUTPUT` 从页面新建会话，已有历史仍保留。相机模式会等待当前 AI 任务解除页面互斥。
-`history OUTPUT SESSION_ID` 从网页下拉框重开历史，再用 `send` 可验证历史图片追问。
-图片历史验收：首次 `send OUTPUT "只看附图，不调用工具" IMAGE_PATH`，完成后 `new` → `history`，
-再 `send` 追问且不传 IMAGE_PATH；核对两轮同会话、第二轮 images 为空、回答符合原图，且 calls/requests 均为空。
-`segmentation-models.spec.ts` 从按钮验证启动顺序及新场景序号，所有运动写入均拦截；
-`start-pick-place.test.ts` 补充已有候选复用、候选失败、模式失败及失效选择的测试。
-`segmentation-composition.spec.ts` 的写请求和相机视频均拦截，不运行真实模型或机械臂；
-与上面的实际预览脚本、未拦截模型调用的工具验收分开报告。
-运行：`pnpm --dir frontend exec playwright test tests/browser/segmentation-composition.spec.ts`。
-Rust `scene-node` 的 `stage_tests` 补充同帧 RGB、掩膜像素、1280/1920 尺寸、重复标注编号、
-过期序号和三种来源经同一深度重建的回归，在 scene 构建镜像运行 `cargo test -p scene-node`。
-
-`grasp-selection.spec.ts` 核对任务已接收的实例选择随快照更新，但不覆盖用户随后编辑的放置选择。
-所有 POST 被拦截，不发实际抓放；可单独运行 `pnpm --dir frontend exec playwright test tests/browser/grasp-selection.spec.ts`。
-
-`node --test tests/tools/check-ui-css.test.mjs` 检查共享 CSS 不引用未定义的旧变量；
-属于源码检查，不依赖服务。实际控件间距另由下面的浏览器回归验证。
-
-`layout-spacing.spec.ts` 从全部五个真实网页展开/收起栏目，在桌面、平板和窄屏测量实际边框。
-拦截业务写请求，不改变硬件或配置；覆盖“错误行底线紧贴深度折叠框”和关节/夹爪框等回归。
-此检查包含正常信息行到独立框的距离，不只检查按钮和页面溢出。共享块分组间距为 20 px、
-控制框组为 12 px，连续表格行不额外插入分组空白。
-
-`form-sync.spec.ts` 覆盖网页编辑值与已生效配置的区分、保存失败不继续运行、保存后的实时回显、
-未保存编辑保留（包括控制绑定），以及切换相机 profile 后低频上送保持、首次深度预览更新。
-它拦截所有业务写请求，不触发真机动作。
-布局审查从实际网页开始，使用 [网页审查脚本](../tools/diagnostics/audit-web-layout.mjs)；
-状态注入只用于故障和交互回归，不能代替真实页面连接、预览与跨窗口同步检查。
-
-`calibration-persistence.spec.ts` 在真实页面拦截标定 POST，覆盖历史数值、刷新保留、已标定按钮锁定、
-重新标定/取消保留旧结果及确认后替换；不会控制机械臂。部署后另从未连接状态打开网页，检查来源
-自动可选、历史标定可见，再连接实际相机并刷新验证。不要把这项界面回归当作重新完成真机标定。
-
-在 `frontend` 执行 `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`。
-`lint` 覆盖 `web/apps` 和 `web/packages`，不能只检查有独立脚本的应用而遗漏共享库。
-服务启动后执行 `pnpm test:e2e`，使用正式页面、模型与软件反馈；部分测试会断开执行器、
-运行模型、切换相机和改变模拟姿态，不能和人工操作并行。测试中的拦截只用于浏览器故障回归，
-不会进入生产链路。截图在 `temp/playwright/`。
-
-只验证分割模型配置切换可执行
-`pnpm --dir frontend exec playwright test tests/browser/segmentation-models.spec.ts`。
-该测试截获全部 POST，验证自动/提示词两个入口始终可用、AI 默认模型不隐藏它们、视觉示例保存
-不自动运行模型，以及启动按新候选响应序号提交抓放；不操作真机。
-
-## 正式软件调用链
-
-在根目录执行，默认访问 `http://192.168.100.10:8765`：
-
-| 命令 | 验证范围 |
-| --- | --- |
-| `node tests/integration/repository-audit.mjs` | 非法请求、真实 ROS cancel、请求 ID 隔离、取消后恢复、夹爪模式拒绝、抓放接收确认 |
-| `node tests/integration/mouse-control.mjs` | 十二方向经过绑定/空间/Servo/软件反馈，停止和配置恢复 |
-| `node tests/integration/software-flow.mjs` | 相机/视频/提示词、两分辨率九姿态自动标定、三维场景、MTC 软件抓放、配置与控制 |
-
-前两项要求执行器未选端点且为 software；第三项会显式断开执行器。
-按顺序单独运行，不和真机或其他测试争用状态。前两项 finally 恢复姿态/模式；全链路脚本有
-显式配置恢复步骤，若断言提前失败须核对最后状态再继续，不能假定它已复原。
-`SERVICES_BASE_URL` 可更改访问地址。
-
-Compose 的 `integration-test` profile 挂载测试、分步请求辅助模块、全部相机资产和 `temp/`：
+在根目录执行：
 
 ```bash
-docker compose run --rm integration-test
+pnpm --dir frontend format:check
+pnpm --dir frontend lint
+pnpm --dir frontend typecheck
+pnpm --dir frontend test
+node tools/check-doc-links.mjs
+node tools/check-git-ignore.mjs
+node tools/check-build-context.mjs
+node --test tests/tools/*.test.mjs
 ```
 
-## Rust 原生测试
+链接检查覆盖主仓库与 tools 的本地路径；构建上下文检查需要 Docker，只用合成输入。
+前端单测覆盖业务提交、请求终态、Responses 上下文、图片持久化与 RGB 像素一致性。
+消息/场景/运动回归确认抓放使用绑定同次快照的单条请求，不靠独立点云订阅拼接。
 
-Host 不安装 ROS/OpenCV/SDL/librealsense。以对应服务 Dockerfile 的 `build` 目标生成临时测试镜像，
-复用已验证基础标签和 Docker 缓存；不重新发布基础镜像。例：
+## 浏览器回归
+
+在 `frontend` 中执行 `pnpm exec playwright test 文件名.spec.ts`。不要在真机工作期间直接运行
+整个 `test:e2e`：部分用例会修改正式配置、断开执行器、调用模型或执行运动。
+
+| 用例 | 范围与副作用 |
+| --- | --- |
+| `ai-layout`、`layout-spacing` | 五页栏目归属、折叠、桌面/窄屏间距；拦截业务写入 |
+| `form-sync`、`request-status`、`pick-place-progress` | 草稿/生效值、失败保留、同请求进度与刷新；拦截写入 |
+| `segmentation-composition`、`segmentation-models`、`grasp-selection` | 三种分割组合、原图框选、来源与实例选择；拦截写入，不运行实体抓放 |
+| `calibration-persistence` | 已保存外参、重新标定/取消、刷新回显；拦截标定请求，不证明真实标定精度 |
+| `input-discovery` | 实际未发现提示与布局；注入故障用例只验证错误显示 |
+| `input-gamepad` | 实体手柄发现、编辑/保存/刷新与采样；恢复原名称，不发运动 |
+| `camera-bindings` | 网页绑定两个模拟来源、出图、拖动/收起、持久化与解除；不拦截，不发运动 |
+| `execution-mode` | 实际切换模拟/真机模式、错误串口、软件关节运动，结束保留模拟器；另含拦截式故障回归 |
+
+手柄测试用 `INPUT_GAMEPAD_NAME` 指定实际 SDL 名称。可选 `INPUT_GAMEPAD_USB_INTERFACE`
+启用 USB 解绑/重绑测试（会短暂断开该手柄），脚本核对设备类型并恢复；未提供时明确跳过。
+相机绑定测试加 `CAMERA_AI_TEST=1` 可通过已配置模型验证角色取图，须已授权发送图片；
+`CAMERA_BINDINGS_KEEP=1` 保留测试绑定。模拟来源不证明实体 UVC 采集或真机抓放。
+
+## 真实页面操作
+
+以下从根目录运行 `node tests/integration/文件名.mjs 参数`。
+写配置、标定和运动测试必须串行，不与人工操作争用设备；实体抓放前取下标定板。
+
+| 入口与参数 | 用途与副作用 |
+| --- | --- |
+| `camera-bindings discover OUTPUT` | 页面刷新并列出设备/profile |
+| `camera-bindings bind OUTPUT ROLE SOURCE PROFILE` | 选择、保存并核对新图；ROLE 为 external 或 wrist |
+| `camera-bindings on\|off\|unbind OUTPUT ROLE` | 开关采集或解除绑定；关闭保留配置 |
+| `camera-bindings cycle OUTPUT` | 已绑定两路轮流切换并核对新帧、刷新持久化；不改分辨率、不运动 |
+| `connect-execution ENDPOINT OUTPUT` | 页面连接真实串口并核对反馈，不发运动 |
+| `control-capabilities work OUTPUT` | 只点击工作位并等原请求终态，会运动 |
+| `control-capabilities motion OUTPUT` | 工作位、TCP、无效参数与空载夹爪；会运动 |
+| `control-capabilities history OUTPUT` | 查询先前请求并确认不重发，不运动 |
+| `grasp-cancel observe OUTPUT` | 新帧、分割、定位，不抓放 |
+| `grasp-cancel queued\|planning\|executing\|complete OUTPUT OBJECT_ID REGION_ID` | 实际抓放/取消并跟踪原请求终态，会运动 |
+| `gripper-hold-ui OUTPUT OBJECT_ID REGION_ID` | 实际抓放并临时调整保持力度，结束恢复原配置 |
+| `execution-hold OUTPUT` | 全部上力并读取信息，会操作真实电机，不写固件参数 |
+
+`queued` 用例先准备当前候选，再临时降速排队测试，结束恢复；若任务已进入规划，不能计为排队取消通过。
+力度测试须核对画面和实际反馈，非零负载不证明抓到物体；异常时取消自身活动任务，不主动松爪或回位。
+相机 profile 来自实际枚举，不写死 video 编号；共享 USB 带宽不足时先关闭另一路再开启目标相机。
+
+### 通用 AI
+
+`node tests/integration/general-ai.mjs MODE OUTPUT [参数]` 操作正式通用 AI 页面，不拦截或注入结果。
+使用当前网页保存的模型设置；任务和图片会发送给该模型服务。
+
+| MODE | 参数 / 行为 |
+| --- | --- |
+| `send` | `"任务文本" [IMAGE_PATH]`，实际发送并等同一运行终态 |
+| `watch` | `RUN_ID`，仅跟踪已有任务 |
+| `inspect`、`reply-layout` | 只读查看状态 / 当前会话段落、间距与刷新 |
+| `settings` | 下拉/手输模型与思考强度、保存/刷新，结束恢复原设置 |
+| `model` | `MODEL`，从页面保存模型并验证持久化 |
+| `config` | `"" [IMAGE_PATH] [EFFORT]`，保存配置并验证模型文本/图像/工具能力 |
+| `new`、`history` | 新会话 / `SESSION_ID` 重开历史 |
+| `stop` | 点击停止并等终态 |
+| `camera` | 选择并启用可用 RealSense，会改变当前相机选择 |
+
+`AI_RELOAD_AFTER_START=1` 实测发送后刷新仍跟踪原运行，不重发。
+`AI_WAIT_TIMEOUT_MS` 只设置测试等待时间，不限制后端任务。
+浏览器状态在 `temp/general-ai/browser-state.json`，丢失后通过网页历史会话恢复。
+输出包含请求终态、相机画面、网页执行反馈及耗时；AI 自报成功不算实际抓放成功。
+`timing.json` 的整轮减串行工具时间包含网络等待和本地编排，不是纯模型推理耗时。
+
+图片历史验收：发送附图任务 → 新会话 → 重开原会话 → 不附图追问，核对原图内容及请求记录。
+只读完整性检查在 perception 镜像中执行，验证历史图片哈希、解码、尺寸，不改历史或发任务：
 
 ```bash
-docker build -f backend/nodes/camera/Dockerfile --target build -t robot-arm-camera-audit-build .
-docker run --rm -v "$PWD":/workspace -w /workspace/backend \
-  -e TMPDIR=/workspace/temp -e CARGO_TARGET_DIR=/src/target robot-arm-camera-audit-build \
-  bash -c 'mkdir -p /workspace/temp && cargo test --release --locked -p camera-node --features realsense-runtime,opencv-runtime'
+docker compose exec -T -w /workspace/web/apps/perception web-perception \
+  node --input-type=module - SESSION_ID < tests/integration/ai-history-audit.mjs
 ```
 
-| 所属环境 | 测试包/准备 |
+## 软件链路与原生模块
+
+| 入口 | 范围与副作用 |
 | --- | --- |
-| 公共后端构建镜像 | messages、json-config-store、spatial-core、型号库、fashionstar-uart、nolo-cv1、网关、状态、空间、execution |
-| controller-input 的 build 目标 | `controller-input-node`（SDL/HID） |
-| camera 的 build 目标 | `camera-node` 的两 runtime features、`camera-calibration`、`realsense-camera --features runtime` |
-| scene 的 build 目标 | `scene-node`、`scene-core`（OpenCV） |
-| motion 的 build 目标 | source `/opt/ros/lyrical/setup.bash`、`/opt/moveit_ws/install/setup.bash`、`/opt/devices/stararm-102/ros_ws/install/setup.bash`；`stararm-102-motion-node --no-default-features --features ros-runtime` |
+| `node tests/integration/repository-audit.mjs` | API/ROS 取消、请求隔离与恢复；要求 software 执行，不替代网页验收 |
+| `node tests/integration/mouse-control.mjs` | 鼠标十二方向经绑定、空间、Servo、软件反馈；要求 software，恢复配置 |
+| `node tests/integration/software-flow.mjs` | 模拟 RGB-D、1280/1920 标定、三维场景、MTC；会断开真机，成功时恢复配置 |
+| `docker compose run --rm integration-test` | Compose 隔离集成测试入口 |
 
-同一环境、同一 features 下运行 `cargo clippy … -- -D warnings` 和 `cargo fmt --all -- --check`。
-不能用不启用 runtime features 的编译冒充原生驱动验收。没有安装 `cargo-machete` 时不声称其通过。
+失败后先核对正式配置和设备状态，不能假定恢复步骤已执行。可用 `SERVICES_BASE_URL` 修改地址。
+模拟输入经过正式链路，但不证明实物夹持或真机精度。
 
-## Python 模型与资产
+Rust 使用对应 Dockerfile 的 `build` 目标，设置 `TMPDIR=/workspace/temp`，先创建输出目录。
+同时运行 `cargo fmt --all -- --check` 与相同 features 的 `cargo clippy … -- -D warnings`。
 
-挂载仓库到 `/workspace`，设置 `PYTHONPATH=/workspace/backend/services/perception-compute/src`、
-`TMPDIR=/workspace/temp`、`PYTHONDONTWRITEBYTECODE=1`，使用镜像内 `/opt/compute-venv/bin/python -m pytest -p no:cacheprovider`：
-运行前 `mkdir -p /workspace/temp`，不要依赖上一次测试已创建目录。
+| 构建环境 | 测试包与依赖 |
+| --- | --- |
+| 公共后端 | messages、json-config-store、spatial-core、型号库、fashionstar-uart、nolo-cv1、网关、状态、空间、execution |
+| controller-input | `controller-input-node`，实际 SDL/HID 依赖 |
+| camera | `camera-node --features realsense-runtime,opencv-runtime`、camera-calibration、uvc-camera、realsense-camera 的 runtime |
+| scene | scene-node、scene-core，实际 OpenCV |
+| motion | source ROS、MoveIt、型号三个工作区；`stararm-102-motion-node --no-default-features --features ros-runtime` |
 
-- 计算**运行镜像**：`/workspace/backend/services/perception-compute/tests`、`/workspace/tools/graspgenx/tests/test_contact_geometry.py`。
-- 计算**构建镜像**：`/workspace/tools/graspgenx/tests/test_description.py`，需要官方生成向导与补丁厂商 URDF。
+Redis 请求持久化测试显式设置 `REDIS_TEST_URL` 并使用 `--ignored`，只操作唯一 test 请求，不操作机器人。
+不能用未启用 runtime features 的编译冒充驱动验收。
 
-运行镜像故意不含生成向导，构建镜像不是 GUI 运行环境；不要为混跑测试向两边补入不属于它们的依赖。
-复测结果写 `temp/`，不依赖历史运行记录；真实精度边界见[型号说明](../docs/STARARM-102.md#真机精度与适用限制)。
+Python 测试使用计算镜像的 `/opt/compute-venv/bin/python -m pytest -p no:cacheprovider`，
+挂载仓库，设置 `PYTHONPATH=/workspace/backend/services/perception-compute/src`、
+`TMPDIR=/workspace/temp`、`PYTHONDONTWRITEBYTECODE=1`：
+
+- 运行镜像：计算服务 `tests/` 和 `tools/graspgenx/tests/test_contact_geometry.py`。
+- 构建镜像：`tools/graspgenx/tests/test_description.py`，依赖官方资产生成向导。
+
+更多诊断入口见 [tools](../tools/README.md)，当前架构与参数见 [BACKEND](../docs/BACKEND.md)，
+硬件精度边界见 [型号说明](../docs/STARARM-102.md)。

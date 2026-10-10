@@ -27,7 +27,7 @@ import {
   release,
   runtime,
   saveCheck,
-  saveMessages,
+  appendMessages,
   saveRun,
   settings,
 } from "./store";
@@ -125,7 +125,6 @@ export async function createRun(input: z.infer<typeof startSchema>) {
 export async function executeRun(run: AIRun) {
   const controller = runtime().controllers.get(run.id)!;
   try {
-    const history = await messages(run.sessionId);
     const input: ModelMessage = {
       role: "user",
       content: [
@@ -133,8 +132,8 @@ export async function executeRun(run: AIRun) {
         ...(await Promise.all(run.images.map(imagePart))),
       ],
     };
-    const conversation: ModelMessage[] = [...history, input];
-    await saveMessages(run.sessionId, conversation);
+    await appendMessages(run.sessionId, [input]);
+    const conversation = await messages(run.sessionId);
     if (controller.signal.aborted) throw Error("AI 已停止");
     const [snapshot, robot] = await Promise.all([
       perceptionSnapshot(),
@@ -171,8 +170,7 @@ export async function executeRun(run: AIRun) {
           inputTokens: step.usage.inputTokens,
           outputTokens: step.usage.outputTokens,
         });
-        conversation.push(...step.response.messages);
-        await saveMessages(run.sessionId, conversation);
+        await appendMessages(run.sessionId, step.response.messages);
         if (step.response.id) run.responseIds.push(step.response.id);
         if (step.response.modelId)
           run.responseModels.push(step.response.modelId);
@@ -237,12 +235,12 @@ export async function executeRun(run: AIRun) {
     }
     run.endedAt = Date.now();
     if (run.state !== "succeeded") {
-      const history = await messages(run.sessionId);
-      history.push({
-        role: "assistant",
-        content: `运行已结束：${run.state}。${run.error ?? ""}。原机器人请求：${JSON.stringify(requestSummary(run.requests))}。不得自动重放此前指令，后续只处理用户的新请求。`,
-      });
-      await saveMessages(run.sessionId, history);
+      await appendMessages(run.sessionId, [
+        {
+          role: "assistant",
+          content: `运行已结束：${run.state}。${run.error ?? ""}。原机器人请求：${JSON.stringify(requestSummary(run.requests))}。不得自动重放此前指令，后续只处理用户的新请求。`,
+        },
+      ]);
     }
     await saveRun(run);
     runtime().controllers.delete(run.id);
