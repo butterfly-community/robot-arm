@@ -1,5 +1,10 @@
 # 回归测试
 
+`node tests/integration/control-capabilities.mjs work temp/control-work` 仅从运动页点击工作位，
+等待同请求终态并保存截图；不会执行其余 TCP/夹爪测试动作。运行前确认用户授权真机回位。
+AI 单测覆盖深度/纯视觉提示词选择、历史图像窗口不丢文字与推理、运动后取图、相机独占切换，
+以及取图失败不把已完成运动当作失败重放。实际模型行为仍用下述 general-ai 网页流程验收。
+
 `cd frontend && pnpm exec playwright test camera-bindings.spec.ts` 从真实采集页面绑定两个模拟来源，
 核对独立视频、拖动/收起、刷新持久化、窄屏布局与解除绑定，不拦截请求，不操作机械臂。
 `CAMERA_BINDINGS_KEEP=1 CAMERA_AI_TEST=1` 额外通过网页向当前模型服务发送两路模拟图像，
@@ -112,6 +117,17 @@ scene 原生回归核对分割原图像素不变、mask 可用，不再要求已
 运行输出含原请求、终态和相机连续画面；脚本不把 AI 自报成功计为实际抓放成功。
 `timing.json` 按工具记录起点/时长及整轮时间；整轮减去串行工具时间的余量包含模型等待和本地编排，
 不是模型服务端的纯推理耗时。规划/执行分界可结合 `events.json` 的网页进度核对。
+`watch OUTPUT RUN_ID` 只读跟踪当前会话已有任务，不再次提交指令；`AI_WAIT_TIMEOUT_MS`
+设置测试等待时间，不限制后端任务。`send` 与 `watch` 将页面收到的实际夹爪反馈、功率和
+最后执行命令写入 `execution-feedback.jsonl`，不额外轮询硬件，不以负载代替图像验收。
+`node tests/integration/execution-hold.mjs OUTPUT` 从执行页面点击全部上力并读取全部信息，
+用于已授权的当前位置锁力恢复；会操作真实电机，不修改固件参数，不释放或回工作位。
+
+`ai-history-audit.mjs` 对照工具返回的原图 ID 检查历史图片完整性。在 perception 镜像内运行：
+`docker compose exec -T -w /workspace/web/apps/perception web-perception node --input-type=module - SESSION_ID < tests/integration/ai-history-audit.mjs`。
+默认只读；追加 `repair` 仅恢复可证明为同次完整原图前缀的损坏引用，先备份历史并检查并发改动。
+修复应在该会话无活动任务时进行；不会使用新图替代旧图，也不发送机器人或模型请求。
+图片存储单测使用超过 512 KiB 的 1080p 图像并发读写，核对原子发布与完整历史往返。
 `AI_RELOAD_AFTER_START=1` 在发送后实际刷新网页，仍跟踪原运行，核对不会重发；
 `new OUTPUT` 从页面新建会话，已有历史仍保留。相机模式会等待当前 AI 任务解除页面互斥。
 `history OUTPUT SESSION_ID` 从网页下拉框重开历史，再用 `send` 可验证历史图片追问。

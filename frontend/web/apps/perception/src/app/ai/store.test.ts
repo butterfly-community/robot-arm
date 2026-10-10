@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import type { ModelMessage } from "ai";
 const data = vi.hoisted(() => new Map<string, string>());
@@ -98,5 +99,27 @@ describe("complete local Responses context", () => {
       mediaType: "image/jpeg",
     });
     expect((await getImage(image.id)).bytes).toEqual(bytes);
+  });
+  it("never publishes partial large images during concurrent history saves and reads", async () => {
+    const bytes = await sharp(randomBytes(1920 * 1080 * 3), {
+      raw: { width: 1920, height: 1080, channels: 3 },
+    })
+      .png()
+      .toBuffer();
+    expect(bytes.length).toBeGreaterThan(512 * 1024);
+    const image = await putImage(bytes);
+    await Promise.all([
+      ...Array.from({ length: 8 }, () => putImage(bytes)),
+      ...Array.from({ length: 8 }, async () => {
+        for (let i = 0; i < 8; i++) {
+          expect((await getImage(image.id)).bytes.equals(bytes)).toBe(true);
+        }
+      }),
+    ]);
+    const history: ModelMessage[] = [
+      { role: "user", content: [await imagePart(image.id)] },
+    ];
+    await saveMessages("large", history);
+    expect(await messages("large")).toEqual(history);
   });
 });

@@ -1,9 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
 import { perceptionSnapshot, cameraImage } from "./robot";
 vi.mock("./store", () => ({
   saveRun: vi.fn(async () => {}),
+  getImage: vi.fn(async (id) => ({
+    id,
+    width: 1920,
+    height: 1080,
+    mediaType: "image/png",
+    bytes: Buffer.from("original"),
+  })),
   putImage: vi.fn(async () => ({
     id: "fixture-image",
     width: 1920,
@@ -26,6 +33,21 @@ vi.mock("./robot", async (original) => ({
       pixel_format: "rgb8",
     },
   })),
+  readRobot: vi.fn(async () => ({
+    connected: true,
+    force: { target: 30, feedback: 29 },
+    motion: { current_tool_pose: { position_m: [0, 0, 0] } },
+  })),
+  robotModel: vi.fn(async () => ({
+    model_revision: "test-model",
+    named_targets: [
+      {
+        key: "work",
+        joint_positions_rad: { j1: 0 },
+        actuator_positions_rad: { gripper: 0 },
+      },
+    ],
+  })),
   perceptionSnapshot: vi.fn(async () => ({
     values: {
       perception_state: {
@@ -47,6 +69,116 @@ function setup() {
   return { command, tools: robotTools(context) };
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("recalls the original without capturing new pixels or moving", async () => {
+    const { command, tools } = setup();
+    const result = await tools.recall_image.execute!(
+      { image_id: "old-frame" },
+      { toolCallId: "recall", messages: [], context: {} },
+    );
+    expect(result).toMatchObject({
+      image_id: "old-frame",
+      width: 1920,
+      height: 1080,
+    });
+    expect(result).not.toHaveProperty("bytes");
+    expect(cameraImage).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
+  });
+  it("does not restart a camera that is already exclusively streaming", async () => {
+    const { command, tools } = setup();
+    vi.mocked(perceptionSnapshot).mockResolvedValueOnce({
+      values: {
+        camera_state: {
+          bindings: [
+            { role: "external", enabled: true, streaming: true },
+            { role: "wrist", enabled: false, streaming: false },
+          ],
+        },
+      },
+    } as never);
+    await tools.observe_camera.execute!(
+      { role: "external", exclusive: true },
+      { toolCallId: "no-switch", messages: [], context: {} },
+    );
+    expect(command).not.toHaveBeenCalled();
+    expect(cameraImage).toHaveBeenCalledTimes(1);
+  });
+  it("returns post-motion camera and real feedback in one tool turn, after completion", async () => {
+    const { command, tools } = setup();
+    const result = await tools.move_tcp_relative.execute!(
+      {
+        frame: "base",
+        translation_delta_m: [0, 0, 0.03],
+        rotation_delta_xyzw: [0, 0, 0, 1],
+        observe_role: "external",
+      },
+      { toolCallId: "move-see", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c[2])).toEqual([
+      "/api/motion/mode",
+      "/api/motion/request",
+    ]);
+    expect(command.mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(cameraImage).mock.invocationCallOrder[0],
+    );
+    expect(result).toMatchObject({
+      image_id: "fixture-image",
+      role: "external",
+      robot: { force: { target: 30, feedback: 29 } },
+      result: { value: { last_segmentation_sequence: 43 } },
+    });
+  });
+  it("does not misreport an executed motion as failed when the subsequent camera fails", async () => {
+    const { command, tools } = setup();
+    vi.mocked(cameraImage).mockRejectedValueOnce(Error("camera disconnected"));
+    const result = await tools.gripper.execute!(
+      { actuator_key: "gripper", position_rad: 0, observe_role: "wrist" },
+      { toolCallId: "close-see", messages: [], context: {} },
+    );
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command.mock.calls[0][3]).not.toHaveProperty("observe_role");
+    expect(result).toMatchObject({
+      result: { value: { last_segmentation_sequence: 43 } },
+      observation_error: "camera disconnected",
+    });
+    expect(result).not.toHaveProperty("error");
+  });
+  it("does not capture an after-frame after failed planning or issue the action twice", async () => {
+    const { command, tools } = setup();
+    command.mockRejectedValueOnce(Error("IK failed"));
+    const result = await tools.move_joints.execute!(
+      { joints: [], observe_role: "external" },
+      { toolCallId: "failed", messages: [], context: {} },
+    );
+    expect(result).toMatchObject({ error: "IK failed" });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(cameraImage).not.toHaveBeenCalled();
+  });
+  it("switches an exclusive observation sequentially through the same camera API", async () => {
+    const { command, tools } = setup();
+    vi.mocked(perceptionSnapshot).mockResolvedValueOnce({
+      values: {
+        camera_state: {
+          bindings: [
+            { role: "external", enabled: true, streaming: true },
+            { role: "wrist", enabled: false, streaming: false },
+          ],
+        },
+      },
+    } as never);
+    await tools.observe_camera.execute!(
+      { role: "wrist", exclusive: true },
+      { toolCallId: "switch-see", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c.slice(2, 4))).toEqual([
+      ["/api/perception/camera", { role: "external", action: "disconnect" }],
+      ["/api/perception/camera", { role: "wrist", action: "connect" }],
+    ]);
+    expect(command.mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(cameraImage).mock.invocationCallOrder[0],
+    );
+  });
   it("switches capture through the same camera request without rebinding or moving", async () => {
     const { command, tools } = setup();
     const bindings = [{ role: "external", enabled: false }];

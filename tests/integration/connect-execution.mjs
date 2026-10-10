@@ -27,7 +27,7 @@ try {
     (process.env.SERVICES_BASE_URL ?? "http://192.168.100.10:8765") +
       "/arm-execution/",
   );
-  await expect.poll(() => Boolean(transport)).toBe(true);
+  await expect.poll(() => Boolean(transport), { timeout: 60000 }).toBe(true);
   const toggle = page.getByRole("button", { name: /执行连接/ });
   if ((await toggle.getAttribute("aria-expanded")) === "false")
     await toggle.click();

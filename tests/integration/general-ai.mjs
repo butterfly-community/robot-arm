@@ -6,7 +6,7 @@ import {
 } from "../../frontend/node_modules/@playwright/test/index.mjs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, createWriteStream } from "node:fs";
 const [mode, directory, text = "", imagePath, effort] = process.argv.slice(2);
 if (
   ![
@@ -16,6 +16,7 @@ if (
     "reply-layout",
     "config",
     "send",
+    "watch",
     "stop",
     "new",
     "history",
@@ -24,12 +25,17 @@ if (
   !directory
 )
   throw Error(
-    "Usage: general-ai.mjs inspect|camera|settings|reply-layout|config|send|stop|new|history|model OUTPUT [TEXT or SESSION_ID or MODEL] [IMAGE] [EFFORT]",
+    "Usage: general-ai.mjs inspect|camera|settings|reply-layout|config|send|watch|stop|new|history|model OUTPUT [TEXT or SESSION_ID or RUN_ID or MODEL] [IMAGE] [EFFORT]",
   );
 const output = resolve(directory);
 process.env.TMPDIR = join(output, "browser-temp");
 await mkdir(process.env.TMPDIR, { recursive: true });
 const browser = await chromium.launch({ headless: true });
+// Record the same feedback delivered to the UI, without extra device polling.
+const telemetry = ["send", "watch"].includes(mode)
+  ? createWriteStream(join(output, "execution-feedback.jsonl"))
+  : undefined;
+let feedbackTime;
 const events = [];
 let latest,
   started,
@@ -64,6 +70,28 @@ try {
       try {
         const v = JSON.parse(message.payload).values;
         if (v?.perception_state) latest = v;
+        const t = v?.transport_state;
+        if (
+          telemetry &&
+          t?.gripper_feedback_time_ns != null &&
+          t.gripper_feedback_time_ns !== feedbackTime
+        ) {
+          feedbackTime = t.gripper_feedback_time_ns;
+          telemetry.write(
+            JSON.stringify({
+              at: Date.now(),
+              sample_time_ns: feedbackTime,
+              target: t.gripper_strength_percent,
+              feedback: t.gripper_strength_feedback_percent,
+              control_power_mw: t.gripper_control_power_mw,
+              gripper: t.gripper_feedback_telemetry,
+              command_sequence: t.last_command?.sequence,
+              command_actuators_rad: t.last_command?.actuators_rad,
+              arm: v.arm_state,
+              error: t.last_error,
+            }) + "\n",
+          );
+        }
       } catch {}
     }),
   );
@@ -80,7 +108,7 @@ try {
     exact: true,
   });
   const previews = page.locator(".floating-camera-monitor");
-  if (["inspect", "camera", "send"].includes(mode)) {
+  if (["inspect", "camera", "send", "watch"].includes(mode)) {
     for (const preview of await previews.all()) {
       const expand = preview.getByRole("button", { name: "展开", exact: true });
       if (await expand.isVisible()) await expand.click();
@@ -349,14 +377,27 @@ try {
     ).toBeEnabled({ timeout: 300000 });
     console.log("CONFIG", await page.locator(".ai-task-panel").innerText());
   }
-  if (mode === "send") {
-    await screenshot("before");
-    await page.getByLabel("AI 任务", { exact: true }).fill(text);
-    await page
-      .getByRole("button", { name: "发送 AI 任务", exact: true })
-      .click();
-    await expect.poll(() => started?.id).toBeTruthy();
-    console.log("START", started.id);
+  if (["send", "watch"].includes(mode)) {
+    if (mode === "send") {
+      await screenshot("before");
+      await page.getByLabel("AI 任务", { exact: true }).fill(text);
+      await page
+        .getByRole("button", { name: "发送 AI 任务", exact: true })
+        .click();
+      await expect.poll(() => started?.id).toBeTruthy();
+      console.log("START", started.id);
+    } else {
+      if (!text)
+        throw Error("watch requires the existing run ID; no task is submitted");
+      const snapshot = await page.evaluate(async () => {
+        const session = localStorage.getItem("robot-arm:ai-session");
+        return (await fetch("/perception/api/ai/?session=" + session)).json();
+      });
+      started = snapshot.runs.find((item) => item.id === text);
+      if (!started)
+        throw Error("The requested run is not in the current UI session");
+      console.log("WATCH", started.id);
+    }
     if (process.env.AI_RELOAD_AFTER_START === "1") {
       await page.reload();
       await expect(page.getByLabel("AI 任务", { exact: true })).toBeVisible();
@@ -388,7 +429,7 @@ try {
       await expect(run).toHaveAttribute(
         "data-run-state",
         /^(succeeded|failed|cancelled|interrupted)$/,
-        { timeout: 1800000 },
+        { timeout: Number(process.env.AI_WAIT_TIMEOUT_MS ?? 1800000) },
       );
       console.log("RESULT", await run.innerText());
       await screenshot("after");
@@ -478,6 +519,7 @@ try {
     console.log((await page.locator("body").innerText()).slice(0, 16000));
   }
 } finally {
+  telemetry?.end();
   await context.storageState({ path: browserState });
   await browser.close();
 }

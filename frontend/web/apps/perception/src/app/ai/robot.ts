@@ -41,10 +41,24 @@ export async function imageBytes(key: "color.png" | "segmentation-color.png") {
 export async function cameraImage(role: CameraRole, signal?: AbortSignal) {
   const cameraBase =
     process.env.CAMERA_INTERNAL_URL?.replace(/\/$/, "") ?? "http://camera:8081";
-  const response = await fetch(`${cameraBase}/snapshot?role=${role}`, {
-    cache: "no-store",
-    signal,
-  });
+  let response: Response;
+  for (;;) {
+    signal?.throwIfAborted();
+    response = await fetch(`${cameraBase}/snapshot?role=${role}`, {
+      cache: "no-store",
+      signal,
+    });
+    if (response.status !== 503 || role === "depth") break;
+    const binding = (
+      await perceptionSnapshot()
+    ).values.camera_state?.bindings?.find((binding) => binding.role === role);
+    // Opening the device completes before its first video frame. Wait only
+    // while that same capture is active, not after a disconnect/driver error.
+    if (!binding?.enabled || !binding.streaming || binding.original_error)
+      break;
+    await response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   if (!response.ok) throw Error(`相机 ${role}：${await response.text()}`);
   const metadata = JSON.parse(
     response.headers.get("x-camera-frame") ?? "null",
@@ -69,6 +83,35 @@ export async function perceptionSnapshot(): Promise<{
   };
 }> {
   return gateway("/api/perception/state");
+}
+export async function readRobot() {
+  const [motionState, executionState] = await Promise.all([
+    gateway("/api/motion/state"),
+    gateway("/api/arm-execution/state"),
+  ]);
+  const motion = motionState.values;
+  const transport = executionState.values.transport_state;
+  const model = motion.robot_model_info;
+  return {
+    model: model && {
+      model_revision: model.model_revision,
+      base_frame: model.base_frame,
+      tcp_frame: model.tcp_frame,
+      joints: model.joints,
+      tool_actuators: model.tool_actuators,
+      named_targets: model.named_targets,
+    },
+    arm: motion.arm_state,
+    motion: motion.motion_state,
+    connected: transport?.connected,
+    force: {
+      target: transport?.gripper_strength_percent,
+      feedback: transport?.gripper_strength_feedback_percent,
+      control_power_mw: transport?.gripper_control_power_mw,
+      telemetry: transport?.gripper_feedback_telemetry,
+    },
+    error: transport?.last_error,
+  };
 }
 export async function scene(
   expectedSequence?: number | null,
@@ -245,6 +288,18 @@ export class RobotToolsContext {
     });
     if (result.state !== "succeeded")
       throw Error(result.original_error ?? `机器人任务 ${id} ${result.state}`);
+    if (path === "/api/perception/camera") {
+      const version = (result.value as unknown as CameraCaptureState).service
+        .config_version;
+      // Acknowledgements and state snapshots arrive independently. A following
+      // observation must not mistake the pre-connect snapshot for a disconnect.
+      for (;;) {
+        this.signal.throwIfAborted();
+        const camera = (await perceptionSnapshot()).values.camera_state;
+        if (camera && camera.service.config_version >= version) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
     return { value: result.value, request_id: id };
   }
 }

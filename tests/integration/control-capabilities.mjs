@@ -9,8 +9,8 @@ import { resolve, join } from "node:path";
 
 const [mode = "motion", destination = "temp/control-capabilities/browser"] =
   process.argv.slice(2);
-if (!["motion", "gripper", "history"].includes(mode))
-  throw Error("Use motion, gripper or history");
+if (!["motion", "gripper", "history", "work"].includes(mode))
+  throw Error("Use motion, gripper, history or work (return only)");
 const output = resolve(destination);
 await mkdir(output, { recursive: true });
 process.env.TMPDIR = join(output, "browser-temp");
@@ -185,22 +185,24 @@ try {
       );
       await card.getByRole("button", { name: "恢复当前 TCP" }).click();
     }
-    await expand("关节与夹爪状态 / 手动目标");
-    const grip = page.getByRole("slider").last();
-    for (const angle of [10, 0]) {
-      await grip.press("Home");
-      if (angle) for (let i = 0; i < 10; i++) await grip.press("ArrowRight");
-      const previous = id;
-      await page
-        .getByRole("button", { name: "仅执行夹爪目标", exact: true })
-        .click();
-      await expect.poll(() => id !== previous).toBe(true);
+    if (mode !== "work") {
+      await expand("关节与夹爪状态 / 手动目标");
+      const grip = page.getByRole("slider").last();
+      for (const angle of [10, 0]) {
+        await grip.press("Home");
+        if (angle) for (let i = 0; i < 10; i++) await grip.press("ArrowRight");
+        const previous = id;
+        await page
+          .getByRole("button", { name: "仅执行夹爪目标", exact: true })
+          .click();
+        await expect.poll(() => id !== previous).toBe(true);
+        results.push(await result(id));
+      }
+      const beforeReturn = id;
+      await page.getByRole("button", { name: "工作位", exact: true }).click();
+      await expect.poll(() => id !== beforeReturn).toBe(true);
       results.push(await result(id));
     }
-    const beforeReturn = id;
-    await page.getByRole("button", { name: "工作位", exact: true }).click();
-    await expect.poll(() => id !== beforeReturn).toBe(true);
-    results.push(await result(id));
     await writeFile(
       join(output, "results.json"),
       JSON.stringify({ results, posts, errors, initial }, null, 2),

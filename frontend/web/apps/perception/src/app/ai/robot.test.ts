@@ -40,6 +40,47 @@ const response = (state = "succeeded") =>
     }),
   );
 describe("AI uses the same persisted robot requests", () => {
+  it("waits for the acknowledged camera version before a following observation", async () => {
+    const snapshot = (version: number) =>
+      Response.json({
+        values: {
+          camera_state: { service: { config_version: version } },
+        },
+      });
+    const acknowledged = { service: { config_version: 2 } };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({}))
+      .mockResolvedValueOnce(
+        Response.json({
+          state: "succeeded",
+          terminal: true,
+          value: acknowledged,
+        }),
+      )
+      .mockResolvedValueOnce(snapshot(1))
+      .mockResolvedValueOnce(snapshot(2));
+    vi.stubGlobal("fetch", fetcher);
+    const pending = new RobotToolsContext(
+      run(),
+      new AbortController().signal,
+    ).command(
+      "camera",
+      0,
+      "/api/perception/camera",
+      { role: "external", action: "connect" },
+      "camera",
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await pending).toEqual({
+      value: acknowledged,
+      request_id: "run:camera:0",
+    });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(
+      fetcher.mock.calls.filter(([, options]) => options?.method === "POST"),
+    ).toHaveLength(1);
+  });
   it("waits for the acknowledged scene version instead of returning the stale empty scene", async () => {
     const snapshot = (sequence: number) =>
       new Response(

@@ -1,38 +1,105 @@
 import { describe, expect, it, vi } from "vitest";
-import { TypeValidationError } from "ai";
+import {
+  TypeValidationError,
+  streamText,
+  simulateReadableStream,
+  type ModelMessage,
+} from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import {
   appendReplyText,
-  instructions,
   providerOptions,
   publicError,
   responseEffort,
 } from "./runner";
 import { settingsSchema, startSchema } from "./types";
+import {
+  depthInstructions,
+  visionInstructions,
+  promptMode,
+  taskInstructions,
+  runPrompt,
+} from "./prompts";
+import type { CameraCaptureState } from "@robot/contracts";
 vi.mock("./store", () => ({}));
 describe("Responses configuration", () => {
-  it("directs visual approach from coarse motion to contact refinement without fixed steps or invented coordinates", () => {
-    expect(instructions).toContain("应先大幅接近目标位置");
-    expect(instructions).toContain("即将接触时才转为小幅精调");
-    expect(instructions).toContain("不预设固定步长或接近姿态");
-    expect(instructions).toContain("不把像素直接当米，不臆造相机外参");
-    expect(instructions).toContain("每段运动完成后观察结果");
-    expect(instructions).toContain("仍由现有规划与执行工具完成运动");
+  it("passes live state through SDK instructions without system messages or mutable history", async () => {
+    const conversation: ModelMessage[] = [
+      { role: "user", content: "inspect only" },
+    ];
+    const prompt = runPrompt("vision", conversation, {
+      camera: { selected_source_id: null },
+    });
+    conversation.push({ role: "assistant", content: "saved later" });
+    expect(prompt.messages).toHaveLength(1);
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "t" },
+            { type: "text-delta", id: "t", delta: "ok" },
+            { type: "text-end", id: "t" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: undefined },
+              usage: {
+                inputTokens: {
+                  total: 1,
+                  noCache: 1,
+                  cacheRead: undefined,
+                  cacheWrite: undefined,
+                },
+                outputTokens: { total: 1, text: 1, reasoning: undefined },
+              },
+            },
+          ],
+        }),
+      }),
+    });
+    const response = streamText({ model, ...prompt });
+    await response.consumeStream();
+    expect(await response.text).toBe("ok");
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(JSON.stringify(model.doStreamCalls[0].prompt)).toContain("实时状态");
+    expect(JSON.stringify(model.doStreamCalls[0].prompt)).not.toContain(
+      "saved later",
+    );
+  });
+  it("selects separate workflows by depth selection, not temporary signal loss", () => {
+    expect(promptMode(undefined)).toBe("vision");
+    expect(promptMode({ selected_source_id: null } as CameraCaptureState)).toBe(
+      "vision",
+    );
+    expect(
+      promptMode({
+        selected_source_id: "depth",
+        streaming: false,
+      } as CameraCaptureState),
+    ).toBe("depth");
+    expect(taskInstructions("depth")).toBe(depthInstructions);
+    expect(taskInstructions("vision")).toBe(visionInstructions);
+    expect(depthInstructions).toContain(
+      "capture_segmentation → segment 或 annotate → reconstruct → pick_place",
+    );
+    expect(visionInstructions).not.toContain("capture_segmentation →");
+    expect(visionInstructions).toContain("先粗后细");
+    expect(visionInstructions).toContain("不固定小步长");
+    expect(visionInstructions).toContain("不把像素当米或臆造相机外参");
   });
   it("preserves approach progress across turns and avoids redundant camera switching", () => {
-    expect(instructions).toContain("不因对话续轮而重新回工作位");
-    expect(instructions).toContain("不机械地在每次移动前后切换两台相机");
-    expect(instructions).toContain("所需相机已经正常采集时直接观察");
-    expect(instructions).toContain("不重复从头探测");
-    expect(instructions).toContain("力/速度");
+    expect(visionInstructions).toContain("续轮不是重新开始");
+    expect(visionInstructions).toContain("之后复用，不从头试探");
+    expect(visionInstructions).toContain("不反复切换视角确认");
+    expect(visionInstructions).toContain("保持既有力度和速度");
+    expect(visionInstructions).toContain("observe_role");
+    for (const prompt of [visionInstructions, depthInstructions])
+      expect(prompt).toContain("释放物体、撤开夹爪、回到工作位");
   });
   it("authorizes task-scoped tools and visual annotation without repeated permission, while respecting read-only requests", () => {
-    expect(instructions).toContain(
-      "用户提交任务即授权你使用已提供工具完成该任务",
-    );
-    expect(instructions).toContain("调用 annotate 补充像素框，无需额外授权");
-    expect(instructions).toContain("三维位置仍由重建工具计算");
-    expect(instructions).toContain("用户只问问题或观察时不运动");
-    expect(instructions).not.toContain("仅在用户请求框选或明确允许时使用");
+    expect(depthInstructions).toContain("任务内无需重复征求授权");
+    expect(depthInstructions).toContain("基于当前图像补框");
+    expect(depthInstructions).toContain("三维坐标由重建计算");
+    expect(depthInstructions).toContain("提问或观察请求不运动");
   });
   it("separates model turns without breaking streamed words or adding empty tool-only paragraphs", () => {
     let text = appendReplyText("", "我先", true);

@@ -1,6 +1,6 @@
 import { createClient } from "redis";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import sharp from "sharp";
 import type { ModelMessage } from "ai";
@@ -180,7 +180,15 @@ export async function putImage(bytes: Buffer): Promise<AIImage> {
     mediaType: metadata.format === "jpeg" ? "image/jpeg" : "image/png",
   };
   await mkdir(imagesDirectory(), { recursive: true });
-  await writeFile(join(imagesDirectory(), id), data);
+  // History persistence and tool output can access the same content-addressed
+  // image concurrently. Never truncate its published file during a rewrite.
+  const staging = join(imagesDirectory(), `.${id}.${randomUUID()}`);
+  try {
+    await writeFile(staging, data);
+    await rename(staging, join(imagesDirectory(), id));
+  } finally {
+    await rm(staging, { force: true });
+  }
   await writeJSON(`image:${id}`, info);
   return info;
 }

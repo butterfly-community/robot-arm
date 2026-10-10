@@ -10,6 +10,7 @@ import {
   imageBytes,
   perceptionSnapshot,
   robotModel,
+  readRobot,
   namedTargetRequest,
   tcpRequest,
   scene,
@@ -25,6 +26,20 @@ function perceptionResult(result: unknown): PerceptionState {
 
 export function robotTools(context: RobotToolsContext): ToolSet {
   let serial = Promise.resolve();
+  const observeRole = z
+    .enum(["depth", "external", "wrist"])
+    .nullish()
+    .describe(
+      "需要动作后的新图时填写角色；无需观察则省略或 null，不增加模型往返",
+    );
+  async function observe(role: "depth" | "external" | "wrist") {
+    const captured = await cameraImage(role, context.signal);
+    const [image, robot] = await Promise.all([
+      putImage(captured.bytes),
+      readRobot(),
+    ]);
+    return { image_id: image.id, ...image, ...captured.metadata, robot };
+  }
   function define<T>(
     name: string,
     description: string,
@@ -63,8 +78,25 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           const result = await action(input, (path, fields, label = name) =>
             context.command(toolCallId, index++, path, fields, label),
           );
-          call.result = result;
-          return result;
+          const role = (
+            input as { observe_role?: "depth" | "external" | "wrist" }
+          ).observe_role;
+          let output = result;
+          if (role) {
+            try {
+              output = { result, ...(await observe(role)) };
+            } catch (error) {
+              // An observation failure cannot undo a successful physical action.
+              // Preserve its terminal result so the model does not repeat it.
+              output = {
+                result,
+                observation_error: errorText(error),
+                note: "动作已完成，不重放；如需图像只重试观察。",
+              };
+            }
+          }
+          call.result = output;
+          return output;
         } catch (error) {
           call.error = errorText(error);
           return {
@@ -112,32 +144,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
       "read_robot",
       "读取实际关节、TCP、模型关节键/范围、夹爪及力度反馈。只读，不运动。",
       empty,
-      async () => {
-        const motion = (await gateway("/api/motion/state")).values;
-        const execution = (await gateway("/api/arm-execution/state")).values;
-        const model = motion.robot_model_info;
-        const transport = execution.transport_state;
-        return {
-          model: {
-            model_revision: model?.model_revision,
-            base_frame: model?.base_frame,
-            tcp_frame: model?.tcp_frame,
-            joints: model?.joints,
-            tool_actuators: model?.tool_actuators,
-            named_targets: model?.named_targets,
-          },
-          arm: motion.arm_state,
-          motion: motion.motion_state,
-          connected: transport?.connected,
-          force: {
-            target: transport?.gripper_strength_percent,
-            feedback: transport?.gripper_strength_feedback_percent,
-            control_power_mw: transport?.gripper_control_power_mw,
-            telemetry: transport?.arm_telemetry,
-          },
-          note: "负载和控制器成功不等于视觉确认抓住物体",
-        };
-      },
+      readRobot,
     ),
     read_scene: define(
       "read_scene",
@@ -156,7 +163,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     set_camera_capture: define(
       "set_camera_capture",
-      "开启或关闭已绑定的外部/腕部摄像头采集，与网页开关相同。关闭会等待释放 USB 设备但保留绑定与分辨率；开启使用已保存配置。共享 USB 带宽不足时，先关闭另一台，等待完成后开启要观察的一台，再 observe_camera 获取新图。不开启或关闭深度相机，不运动。",
+      "用户单独要求开关采集时使用，与网页开关相同。仅为切换视角看图时直接用 observe_camera(exclusive=true)，不要拆成关闭、开启、观察三轮。保留绑定和分辨率，不运动。",
       z.object({ role: z.enum(["external", "wrist"]), enabled: z.boolean() }),
       async ({ role, enabled }, post) => {
         const result = (await post("/api/perception/camera", {
@@ -174,16 +181,48 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     observe_camera: define(
       "observe_camera",
-      "按角色读取请求之后的新 RGB 图像：depth=深度相机彩色图，external=外部摄像头，wrist=腕部摄像头。先 read_scene 查询绑定；每路独立采集，不宣称同步双目。无需深度、内参、标定或分割，不运动。",
-      z.object({ role: z.enum(["depth", "external", "wrist"]) }),
-      async ({ role }) => {
-        const captured = await cameraImage(role, context.signal);
-        const image = await putImage(captured.bytes);
+      "读取指定角色的新原分辨率 RGB 图和实际机器人反馈，不运动。exclusive=true 时先关闭另一路普通相机并开启本路，复用网页开关，缓解共享带宽；不改变绑定或分辨率。",
+      z.object({
+        role: z.enum(["depth", "external", "wrist"]),
+        exclusive: z.boolean().nullish(),
+      }),
+      async ({ role, exclusive }, post) => {
+        if (exclusive && role !== "depth") {
+          const bindings =
+            (await perceptionSnapshot()).values.camera_state?.bindings ?? [];
+          for (const binding of bindings) {
+            if (
+              binding.role !== "depth" &&
+              binding.role !== role &&
+              (binding.enabled || binding.streaming)
+            ) {
+              await post("/api/perception/camera", {
+                role: binding.role,
+                action: "disconnect",
+              });
+            }
+          }
+          const current = bindings.find((b) => b.role === role);
+          if (!current?.enabled || !current.streaming)
+            await post("/api/perception/camera", { role, action: "connect" });
+        }
+        return observe(role);
+      },
+      true,
+    ),
+    recall_image: define(
+      "recall_image",
+      "按历史工具返回的 image_id 调回原图，不拍新图、不运动。用于回顾被新帧替代的历史画面。",
+      z.object({ image_id: z.string() }),
+      async ({ image_id }) => {
+        const image = await getImage(image_id);
         return {
-          image_id: image.id,
-          ...image,
-          ...captured.metadata,
-          note: "角色绑定不是几何标定；相机原始 RGB，像素位置不是空间坐标。动作后重新观察并读取机器人反馈。",
+          image_id,
+          id: image.id,
+          width: image.width,
+          height: image.height,
+          mediaType: image.mediaType,
+          note: "历史原图，不是当前画面",
         };
       },
       true,
@@ -331,17 +370,19 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     work_pose: define(
       "work_pose",
       "使用系统已定义的工作位，等待实际运动完成。与网页工作位按钮相同。",
-      empty,
+      z.object({ observe_role: observeRole }),
       async (_, post) => {
         const target = namedTargetRequest(await robotModel(), "work");
         await post("/api/motion/mode", { mode: "manual" });
         return post("/api/motion/request", target, "回工作位");
       },
+      true,
     ),
     move_joints: define(
       "move_joints",
       "通过已有 MoveIt 规划执行关节目标；joint_key 来自 read_robot，position_rad 为弧度。未指定的关节保持，不附带夹爪动作。",
       z.object({
+        observe_role: observeRole,
         joints: z.array(
           z.object({ joint_key: z.string(), position_rad: z.number() }),
         ),
@@ -357,11 +398,13 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           options: {},
         });
       },
+      true,
     ),
     move_tcp_absolute: define(
       "move_tcp_absolute",
       "TCP 绝对目标：底座坐标中的目标位置（米）和目标朝向（xyzw），不是位移增量。由实际反馈 FK、MoveIt IK/碰撞/执行。",
       z.object({
+        observe_role: observeRole,
         frame: z.string(),
         position_m: z.tuple([z.number(), z.number(), z.number()]),
         orientation_xyzw: z.tuple([
@@ -385,11 +428,13 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           ),
         );
       },
+      true,
     ),
     move_tcp_relative: define(
       "move_tcp_relative",
       "TCP 增量运动：只填位移和旋转增量，不填当前位姿或最终绝对位置。底座 Z 向上 1 厘米是 translation_delta_m=[0,0,0.01]；保持朝向 rotation_delta_xyzw=[0,0,0,1]。底座表达 p'=p+dp,R'=dR*R；工具表达 p'=p+R*dp,R'=R*dR。复用同一运动接口。",
       z.object({
+        observe_role: observeRole,
         frame: z.string().describe("read_robot 返回的 base_frame 或 tcp_frame"),
         translation_delta_m: z
           .tuple([z.number(), z.number(), z.number()])
@@ -412,16 +457,23 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           ),
         );
       },
+      true,
     ),
     gripper: define(
       "gripper",
       "独立执行夹爪驱动关节目标（弧度），等待控制器终态。驱动关节角不是两指总开角。闭合后的保持力仍由执行层持续调节。",
-      z.object({ actuator_key: z.string(), position_rad: z.number() }),
+      z.object({
+        actuator_key: z.string(),
+        position_rad: z.number(),
+        observe_role: observeRole,
+      }),
       async (input, post) =>
         post("/api/motion/actuator", {
-          ...input,
+          actuator_key: input.actuator_key,
+          position_rad: input.position_rad,
           model_revision: (await robotModel()).model_revision,
         }),
+      true,
     ),
     set_grip_force: define(
       "set_grip_force",

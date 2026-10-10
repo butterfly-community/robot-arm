@@ -58,6 +58,14 @@ export interface AIRun {
   reportedEfforts?: string[];
   usage?: unknown;
   warnings: string[];
+  promptMode?: "depth" | "vision";
+  steps?: {
+    responseId?: string;
+    responseMs: number;
+    stepMs: number;
+    inputTokens?: number;
+    outputTokens?: number;
+  }[];
 }
 export interface CapabilityCheck {
   baseURL: string;
