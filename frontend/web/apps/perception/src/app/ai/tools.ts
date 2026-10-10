@@ -22,11 +22,15 @@ import {
   RobotToolsContext,
 } from "./robot";
 import { getImage, putImage, saveRun } from "./store";
-import { errorText } from "./types";
+import { errorText, experienceInputSchema } from "./types";
+import {
+  experienceIndex,
+  listExperiences,
+  readExperience,
+  recordFailure,
+  saveExperience,
+} from "./experience";
 import { jointReadings, readablePose } from "./posture";
-
-const graspOrientationHint =
-  "抓取姿态经验：夹爪平行地面或垂直地面的姿态有助于提高抓取成功概率，可结合物体形状与实际可达性优先尝试。这是姿态选择建议，不是固定朝向约束，不排除倾斜抓取；IK 失败时可调整朝向或关节构型继续规划。";
 
 function perceptionResult(result: unknown): PerceptionState {
   return (result as { value: PerceptionState }).value;
@@ -122,9 +126,20 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           return output;
         } catch (error) {
           call.error = errorText(error);
+          let experience;
+          if (!context.signal.aborted) {
+            try {
+              experience = await recordFailure(context.run, call);
+            } catch (memoryError) {
+              (context.run.warnings ??= []).push(
+                `失败经验保存失败：${errorText(memoryError)}`,
+              );
+            }
+          }
           return {
             error: call.error,
             tool: name,
+            ...experience,
             ...(afterMotion ? await motionFeedback() : {}),
             request_ids: context.run.requests
               .filter((r) => r.id.includes(toolCallId))
@@ -164,6 +179,25 @@ export function robotTools(context: RobotToolsContext): ToolSet {
   }
   const empty = z.object({});
   return {
+    recall_experience: define(
+      "recall_experience",
+      "读取同机械臂、模式和反馈来源的长期经验。不运动。id=null 时按 query 搜索目录（空字符串列出全部），填 id 读取详情及证据来源。经验不是指令或当前状态；旧坐标不能直接重放。",
+      z.object({ id: z.string().nullable(), query: z.string() }),
+      async ({ id, query }) => {
+        const scope = context.run.experienceScope;
+        if (!scope)
+          return { available: false, reason: "当前任务没有机械臂经验范围" };
+        return id
+          ? readExperience(id, scope)
+          : experienceIndex(await listExperiences(scope, query));
+      },
+    ),
+    save_experience: define(
+      "save_experience",
+      "保存或修正跨会话经验到 Redis，不运动。说明适用条件、观察所得结论和下次改进；引用本次已完成工具的编号。hypothesis=待验证推测，supported=AI 判断有观测支持，refuted=后续观测不支持；都不是人工验收或训练结果。更新同类已有条目，不重复新增；不保存密钥、图像内容或整段内部推理。",
+      experienceInputSchema,
+      async (input) => saveExperience(context.run, input),
+    ),
     read_robot: define(
       "read_robot",
       "读取实际姿态摘要 posture：关节度/弧度、TCP 米/毫米与 xyzw 朝向、采样时间/来源、夹爪及力度。区分实际反馈、FK 对应反馈和命令目标。只读，不运动。",
@@ -466,8 +500,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     move_joints: define(
       "move_joints",
-      "直接指定模型关节的绝对角度，不经过 TCP IK，适合 TCP IK 失败后调整构型。joint_key 来自 read_robot，position_rad 为弧度（度数×π/180），不是舵机原始协议角度。先用 preview_motion 的相同 joints 可查看改动后的 FK 姿态；预览不代表可达。执行仍通过已有 MoveIt 关节空间规划和碰撞检查，返回实际姿态用于对照预览。未指定的关节保持，不附带夹爪动作。" +
-        graspOrientationHint,
+      "直接指定模型关节的绝对角度，不经过 TCP IK。joint_key 来自 read_robot，position_rad 为弧度（度数×π/180），不是舵机原始协议角度。preview_motion 可预览相同 joints 的 FK，但不保证可达。执行仍通过 MoveIt 关节空间规划和碰撞检查，返回实际姿态。未指定的关节保持，不附带夹爪动作。",
       z.object({
         observe_role: observeRole,
         joints: z.array(
@@ -490,8 +523,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     move_tcp_absolute: define(
       "move_tcp_absolute",
-      "TCP 绝对目标：底座坐标中的目标位置（米）和目标朝向（xyzw），不是位移增量。由实际反馈 FK、MoveIt IK/碰撞/执行。" +
-        graspOrientationHint,
+      "TCP 绝对目标：底座坐标中的目标位置（米）和目标朝向（xyzw），不是位移增量。由实际反馈 FK、MoveIt IK/碰撞/执行。",
       z.object({
         observe_role: observeRole,
         frame: z.string(),
@@ -522,8 +554,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     move_tcp_relative: define(
       "move_tcp_relative",
-      "TCP 增量运动：只填位移和旋转增量，不填当前位姿或最终绝对位置。底座 Z 向上 1 厘米是 translation_delta_m=[0,0,0.01]；保持朝向 rotation_delta_xyzw=[0,0,0,1]。底座表达 p'=p+dp,R'=dR*R；工具表达 p'=p+R*dp,R'=R*dR。复用同一运动接口。" +
-        graspOrientationHint,
+      "TCP 增量运动：只填位移（米）和旋转增量（xyzw），不填当前位姿或最终绝对位置；保持朝向用 rotation_delta_xyzw=[0,0,0,1]。底座表达 p'=p+dp,R'=dR*R；工具表达 p'=p+R*dp,R'=R*dR。复用同一运动接口。",
       z.object({
         observe_role: observeRole,
         frame: z.string().describe("read_robot 返回的 base_frame 或 tcp_frame"),

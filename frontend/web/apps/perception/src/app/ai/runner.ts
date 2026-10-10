@@ -19,6 +19,7 @@ import {
 } from "./robot";
 import { runPrompt, promptMode } from "./prompts";
 import { modelContext, requestSummary } from "./context";
+import { experienceIndex, listExperiences } from "./experience";
 import {
   getRun,
   imagePart,
@@ -141,13 +142,36 @@ export async function executeRun(run: AIRun) {
     ]);
     const camera = compactCamera(snapshot.values.camera_state);
     run.promptMode = promptMode(snapshot.values.camera_state);
+    if (robot.model?.model_revision) {
+      run.experienceScope = {
+        modelRevision: robot.model.model_revision,
+        mode: run.promptMode,
+        feedbackSource: robot.arm?.feedback_source ?? "unknown",
+      };
+    }
+    // Only the catalog is injected. Detailed lessons are read on demand and
+    // remain attributed observations, never instructions or target coordinates.
+    let experiences: ReturnType<typeof experienceIndex> = [];
+    if (run.experienceScope) {
+      try {
+        experiences = experienceIndex(
+          await listExperiences(run.experienceScope),
+        );
+      } catch (error) {
+        run.warnings.push(`经验读取失败：${publicError(error)}`);
+      }
+    }
     await saveRun(run);
     let newReply = true;
     const result = streamText({
       model: provider(run.settings).responses(run.settings.model),
       providerOptions: providerOptions(run.settings),
       include: { rawChunks: true },
-      ...runPrompt(run.promptMode, conversation, { robot, camera }),
+      ...runPrompt(run.promptMode, conversation, {
+        robot,
+        camera,
+        experiences,
+      }),
       prepareStep: ({ messages }) => ({ messages: modelContext(messages) }),
       tools: robotTools(new RobotToolsContext(run, controller.signal)),
       stopWhen: isLoopFinished(),

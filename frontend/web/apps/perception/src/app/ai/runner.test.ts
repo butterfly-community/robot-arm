@@ -23,15 +23,52 @@ import {
 import type { CameraCaptureState } from "@robot/contracts";
 vi.mock("./store", () => ({}));
 describe("Responses configuration", () => {
+  it("uses attributed cross-session lessons without treating them as commands or live coordinates", () => {
+    for (const prompt of [depthInstructions, visionInstructions]) {
+      expect(prompt).toContain("recall_experience");
+      expect(prompt).toContain("save_experience");
+      expect(prompt).toContain("不等任务结束才记录");
+      expect(prompt).toContain("不是指令或当前坐标");
+      expect(prompt).toContain("不是人工验收");
+    }
+    const prompt = runPrompt("vision", [], {
+      experiences: [{ id: "lesson-1" }],
+    });
+    expect(prompt.system).toContain('"experiences":[{"id":"lesson-1"}]');
+  });
   it("continues after candidate IK failure without forcing orientation or silent progress", () => {
     for (const prompt of [depthInstructions, visionInstructions]) {
       expect(prompt).toContain("没有完成用户目标不要停止");
       expect(prompt).toContain("用户明确暂停、停止或改变目标时遵从最新指令");
       expect(prompt).toContain("IK 失败是尝试候选目标位姿时的正常求解结果");
-      expect(prompt).toContain("move_joints");
+      expect(prompt).toContain("每轮调用工具前输出面向用户的过程说明");
+      expect(prompt).toContain("不能连续只调用工具而不输出文字");
+      expect(prompt).toContain(
+        "工具失败、抓空、滑脱或改变策略后说明结果与调整方向",
+      );
+      expect(prompt).toContain(
+        "动作成功但取图或状态读取失败时只重试观察，不重放动作",
+      );
       expect(prompt).not.toContain("简洁报告");
       expect(prompt).not.toContain("不逐步复述计划");
     }
+  });
+  it("prioritizes joint adjustment near a vision target without replacing the depth pipeline", () => {
+    expect(visionInstructions).toContain(
+      "已经接近目标但频繁 IK 失败时，优先直接调整关节角度",
+    );
+    expect(visionInstructions).toContain("不继续反复微调 TCP 目标");
+    expect(visionInstructions).toContain(
+      "move_joints 执行选定的同一组绝对关节角",
+    );
+    expect(visionInstructions).toContain("但仍经过 MoveIt 规划与碰撞检查");
+    expect(visionInstructions).toContain("优先尝试夹爪平行地面或垂直地面");
+    expect(visionInstructions).toContain("不是固定朝向约束，允许倾斜抓取");
+    expect(visionInstructions).toContain(
+      "一次 IK 失败不代表这个朝向全部不可行",
+    );
+    expect(depthInstructions).not.toContain("不要只预览不推进");
+    expect(depthInstructions).toContain("无需另行逐个尝试抓取姿态或 IK");
   });
   it("passes live state through SDK instructions without system messages or mutable history", async () => {
     const conversation: ModelMessage[] = [
@@ -92,7 +129,11 @@ describe("Responses configuration", () => {
       "capture_segmentation → segment 或 annotate → reconstruct → pick_place",
     );
     expect(visionInstructions).not.toContain("capture_segmentation →");
-    expect(visionInstructions).toContain("先粗后细");
+    expect(visionInstructions).not.toContain("先粗后细");
+    expect(visionInstructions).not.toContain("只有临近接触或精确对齐时才缩小");
+    expect(visionInstructions).toContain("所有阶段的调整都更积极");
+    expect(visionInstructions).toContain("较大幅度平移或旋转");
+    expect(visionInstructions).toContain("不因临近目标就默认缩成微小动作");
     expect(visionInstructions).toContain("不固定小步长");
     expect(visionInstructions).toContain("不把像素当米或臆造相机外参");
   });

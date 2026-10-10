@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
 import { perceptionSnapshot, cameraImage, readRobot } from "./robot";
+import { recordFailure } from "./experience";
+vi.mock("./experience", () => ({
+  recordFailure: vi.fn(async () => undefined),
+  experienceIndex: vi.fn(),
+  listExperiences: vi.fn(),
+  readExperience: vi.fn(),
+  saveExperience: vi.fn(),
+}));
 vi.mock("./store", () => ({
   saveRun: vi.fn(async () => {}),
   getImage: vi.fn(async (id) => ({
@@ -71,6 +79,18 @@ function setup() {
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
   beforeEach(() => vi.clearAllMocks());
+  it("does not hide or replay a failed motion when experience persistence fails", async () => {
+    const { command, tools } = setup();
+    command.mockRejectedValueOnce(Error("IK failed"));
+    vi.mocked(recordFailure).mockRejectedValueOnce(Error("Redis unavailable"));
+    const result = await tools.move_joints.execute!(
+      { joints: [{ joint_key: "j1", position_rad: 0 }] },
+      { toolCallId: "memory-failure", messages: [], context: undefined },
+    );
+    expect(result).toMatchObject({ error: "IK failed", tool: "move_joints" });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+  });
   it("previews joint angles without changing mode or submitting an execution", async () => {
     const { command, tools } = setup();
     const pose = {

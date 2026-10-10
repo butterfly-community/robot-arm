@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Image from "next/image";
+import { AIExperiencePanel } from "./ai-experience-panel";
 import {
   Button,
   Disclosure,
@@ -417,6 +418,17 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
           {error}
         </p>
       )}
+      <AIExperiencePanel
+        revision={runs.reduce(
+          (count, run) =>
+            count +
+            run.calls.filter(
+              (call) =>
+                call.endedAt && (call.error || call.name === "save_experience"),
+            ).length,
+          0,
+        )}
+      />
       <div
         className="ai-conversation"
         aria-label="AI 会话记录"
