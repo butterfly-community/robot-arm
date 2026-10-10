@@ -10,6 +10,7 @@ import {
 import { randomUUID } from "node:crypto";
 import type { AIRun } from "./types";
 import { saveRun } from "./store";
+import { postureSummary } from "./posture";
 
 const base = () =>
   process.env.GATEWAY_INTERNAL_URL?.replace(/\/$/, "") ??
@@ -101,6 +102,7 @@ export async function readRobot() {
       tool_actuators: model.tool_actuators,
       named_targets: model.named_targets,
     },
+    posture: postureSummary(model, motion.arm_state, motion.motion_state),
     arm: motion.arm_state,
     motion: motion.motion_state,
     connected: transport?.connected,

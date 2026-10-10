@@ -1,6 +1,10 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { CameraCaptureState, PerceptionState } from "@robot/contracts";
+import type {
+  CameraCaptureState,
+  PerceptionState,
+  MotionPreview,
+} from "@robot/contracts";
 import { startPickPlace } from "../start-pick-place";
 import {
   compactScene,
@@ -19,6 +23,10 @@ import {
 } from "./robot";
 import { getImage, putImage, saveRun } from "./store";
 import { errorText } from "./types";
+import { jointReadings, readablePose } from "./posture";
+
+const graspOrientationHint =
+  "抓取姿态经验：夹爪平行地面或垂直地面的姿态有助于提高抓取成功概率，可结合物体形状与实际可达性优先尝试。这是姿态选择建议，不是固定朝向约束，不排除倾斜抓取；IK 失败时可调整朝向或关节构型继续规划。";
 
 function perceptionResult(result: unknown): PerceptionState {
   return (result as { value: PerceptionState }).value;
@@ -40,6 +48,13 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ]);
     return { image_id: image.id, ...image, ...captured.metadata, robot };
   }
+  async function motionFeedback() {
+    try {
+      return { robot: await readRobot() };
+    } catch (error) {
+      return { feedback_error: errorText(error) };
+    }
+  }
   function define<T>(
     name: string,
     description: string,
@@ -53,6 +68,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
       ) => Promise<unknown>,
     ) => Promise<unknown>,
     image = false,
+    afterMotion = false,
   ) {
     return tool({
       description,
@@ -91,9 +107,16 @@ export function robotTools(context: RobotToolsContext): ToolSet {
               output = {
                 result,
                 observation_error: errorText(error),
+                ...(afterMotion ? await motionFeedback() : {}),
                 note: "动作已完成，不重放；如需图像只重试观察。",
               };
             }
+          } else if (afterMotion) {
+            output = {
+              result,
+              ...(await motionFeedback()),
+              note: "动作已完成；实际姿态以反馈为准。若状态读取失败，只重查状态，不重放动作。",
+            };
           }
           call.result = output;
           return output;
@@ -102,6 +125,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           return {
             error: call.error,
             tool: name,
+            ...(afterMotion ? await motionFeedback() : {}),
             request_ids: context.run.requests
               .filter((r) => r.id.includes(toolCallId))
               .map((r) => r.id),
@@ -142,9 +166,70 @@ export function robotTools(context: RobotToolsContext): ToolSet {
   return {
     read_robot: define(
       "read_robot",
-      "读取实际关节、TCP、模型关节键/范围、夹爪及力度反馈。只读，不运动。",
+      "读取实际姿态摘要 posture：关节度/弧度、TCP 米/毫米与 xyzw 朝向、采样时间/来源、夹爪及力度。区分实际反馈、FK 对应反馈和命令目标。只读，不运动。",
       empty,
       readRobot,
+    ),
+    preview_motion: define(
+      "preview_motion",
+      "只读姿态预览，不执行、不切换模式。joints 填绝对关节目标（弧度），未填关节保持实际反馈角；tcp_target 填绝对或增量 TCP，两者只能选一种。joints=[] 且 tcp_target=null 返回当前 FK 和工具坐标轴。复用 MoveIt FK/现有坐标转换，返回当前与目标 TCP、位移、旋转和工具 X/Y/Z 在底座系中的方向。没有 IK、碰撞或路径检查，不能据此宣称可达；不是相机图或实际运动后的观测。",
+      z.object({
+        joints: z.array(
+          z.object({
+            joint_key: z.string(),
+            position_rad: z.number().describe("绝对关节角，单位弧度，不是增量"),
+          }),
+        ),
+        tcp_target: z
+          .object({
+            relative: z.boolean(),
+            pose: z.object({
+              frame: z
+                .string()
+                .describe(
+                  "read_robot 的 base_frame 或 tcp_frame；绝对目标只用 base_frame",
+                ),
+              position_m: z.tuple([z.number(), z.number(), z.number()]),
+              orientation_xyzw: z.tuple([
+                z.number(),
+                z.number(),
+                z.number(),
+                z.number(),
+              ]),
+            }),
+          })
+          .nullable(),
+      }),
+      async (input, post) => {
+        const model = await robotModel();
+        const result = (await post(
+          "/api/motion/preview",
+          {
+            action: "snapshot",
+            model_revision: model.model_revision,
+            joints: input.joints,
+            tcp_target: input.tcp_target,
+            actuators: [],
+            options: {},
+          },
+          "只读姿态预览（不执行）",
+        )) as { request_id: string; value: MotionPreview };
+        const preview = result.value;
+        return {
+          request_id: result.request_id,
+          ...preview,
+          current_tcp: readablePose(preview.current_tcp),
+          target_tcp: readablePose(preview.target_tcp),
+          current_joints: jointReadings(model, preview.feedback.joints_rad),
+          target_joints: preview.target_joints_rad
+            ? jointReadings(model, preview.target_joints_rad)
+            : null,
+          translation_delta_mm: preview.translation_delta_m.map(
+            (value) => value * 1000,
+          ),
+          note: "只读计算结果，不是已执行动作；TCP 目标没有求 IK，因此 target_joints 为 null。",
+        };
+      },
     ),
     read_scene: define(
       "read_scene",
@@ -377,10 +462,12 @@ export function robotTools(context: RobotToolsContext): ToolSet {
         return post("/api/motion/request", target, "回工作位");
       },
       true,
+      true,
     ),
     move_joints: define(
       "move_joints",
-      "通过已有 MoveIt 规划执行关节目标；joint_key 来自 read_robot，position_rad 为弧度。未指定的关节保持，不附带夹爪动作。",
+      "直接指定模型关节的绝对角度，不经过 TCP IK，适合 TCP IK 失败后调整构型。joint_key 来自 read_robot，position_rad 为弧度（度数×π/180），不是舵机原始协议角度。先用 preview_motion 的相同 joints 可查看改动后的 FK 姿态；预览不代表可达。执行仍通过已有 MoveIt 关节空间规划和碰撞检查，返回实际姿态用于对照预览。未指定的关节保持，不附带夹爪动作。" +
+        graspOrientationHint,
       z.object({
         observe_role: observeRole,
         joints: z.array(
@@ -399,10 +486,12 @@ export function robotTools(context: RobotToolsContext): ToolSet {
         });
       },
       true,
+      true,
     ),
     move_tcp_absolute: define(
       "move_tcp_absolute",
-      "TCP 绝对目标：底座坐标中的目标位置（米）和目标朝向（xyzw），不是位移增量。由实际反馈 FK、MoveIt IK/碰撞/执行。",
+      "TCP 绝对目标：底座坐标中的目标位置（米）和目标朝向（xyzw），不是位移增量。由实际反馈 FK、MoveIt IK/碰撞/执行。" +
+        graspOrientationHint,
       z.object({
         observe_role: observeRole,
         frame: z.string(),
@@ -429,10 +518,12 @@ export function robotTools(context: RobotToolsContext): ToolSet {
         );
       },
       true,
+      true,
     ),
     move_tcp_relative: define(
       "move_tcp_relative",
-      "TCP 增量运动：只填位移和旋转增量，不填当前位姿或最终绝对位置。底座 Z 向上 1 厘米是 translation_delta_m=[0,0,0.01]；保持朝向 rotation_delta_xyzw=[0,0,0,1]。底座表达 p'=p+dp,R'=dR*R；工具表达 p'=p+R*dp,R'=R*dR。复用同一运动接口。",
+      "TCP 增量运动：只填位移和旋转增量，不填当前位姿或最终绝对位置。底座 Z 向上 1 厘米是 translation_delta_m=[0,0,0.01]；保持朝向 rotation_delta_xyzw=[0,0,0,1]。底座表达 p'=p+dp,R'=dR*R；工具表达 p'=p+R*dp,R'=R*dR。复用同一运动接口。" +
+        graspOrientationHint,
       z.object({
         observe_role: observeRole,
         frame: z.string().describe("read_robot 返回的 base_frame 或 tcp_frame"),
@@ -458,6 +549,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
         );
       },
       true,
+      true,
     ),
     gripper: define(
       "gripper",
@@ -473,6 +565,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           position_rad: input.position_rad,
           model_revision: (await robotModel()).model_revision,
         }),
+      true,
       true,
     ),
     set_grip_force: define(

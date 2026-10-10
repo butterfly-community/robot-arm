@@ -119,6 +119,21 @@ export interface TcpMotionTarget {
   relative: boolean;
 }
 
+export interface MotionPreview {
+  model_revision: string;
+  feedback: ArmState;
+  current_tcp: ToolPose;
+  target_tcp: ToolPose;
+  target_joints_rad: number[] | null;
+  translation_delta_m: [number, number, number];
+  rotation_delta_xyzw: [number, number, number, number];
+  current_tool_axes_in_base: Array<[number, number, number]>;
+  target_tool_axes_in_base: Array<[number, number, number]>;
+  motion_executed: boolean;
+  ik_checked: boolean;
+  collision_checked: boolean;
+}
+
 export interface RequestRecord {
   schema_version: number;
   request_id: string;

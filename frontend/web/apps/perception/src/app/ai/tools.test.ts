@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
-import { perceptionSnapshot, cameraImage } from "./robot";
+import { perceptionSnapshot, cameraImage, readRobot } from "./robot";
 vi.mock("./store", () => ({
   saveRun: vi.fn(async () => {}),
   getImage: vi.fn(async (id) => ({
@@ -40,6 +40,7 @@ vi.mock("./robot", async (original) => ({
   })),
   robotModel: vi.fn(async () => ({
     model_revision: "test-model",
+    joints: [{ key: "j1", label: "J1", minimum: -Math.PI, maximum: Math.PI }],
     named_targets: [
       {
         key: "work",
@@ -70,6 +71,80 @@ function setup() {
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
   beforeEach(() => vi.clearAllMocks());
+  it("previews joint angles without changing mode or submitting an execution", async () => {
+    const { command, tools } = setup();
+    const pose = {
+      frame: "base",
+      position_m: [0.1, 0.2, 0.3],
+      orientation_xyzw: [0, 0, 0, 1],
+    };
+    command.mockResolvedValueOnce({
+      request_id: "preview",
+      value: {
+        model_revision: "test-model",
+        feedback: { joints_rad: [0] },
+        current_tcp: pose,
+        target_tcp: { ...pose, position_m: [0.2, 0.2, 0.3] },
+        target_joints_rad: [Math.PI / 2],
+        translation_delta_m: [0.1, 0, 0],
+        motion_executed: false,
+        ik_checked: false,
+        collision_checked: false,
+      },
+    });
+    const joints = [{ joint_key: "j1", position_rad: Math.PI / 2 }];
+    const result = await tools.preview_motion.execute!(
+      { joints, tcp_target: null },
+      { toolCallId: "preview", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c[2])).toEqual([
+      "/api/motion/preview",
+    ]);
+    expect(command.mock.calls[0][3]).toMatchObject({
+      action: "snapshot",
+      joints,
+      actuators: [],
+      options: {},
+    });
+    expect(result).toMatchObject({
+      motion_executed: false,
+      ik_checked: false,
+      collision_checked: false,
+      target_joints: [{ position_deg: 90 }],
+      translation_delta_mm: [100, 0, 0],
+    });
+    expect(cameraImage).not.toHaveBeenCalled();
+  });
+  it("executes direct joint targets without a TCP target and returns actual feedback", async () => {
+    const { command, tools } = setup();
+    const joints = [{ joint_key: "j1", position_rad: 0.1 }];
+    const result = await tools.move_joints.execute!(
+      { joints },
+      { toolCallId: "joints", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c[2])).toEqual([
+      "/api/motion/mode",
+      "/api/motion/request",
+    ]);
+    expect(command.mock.calls[1][3]).toMatchObject({ joints, actuators: [] });
+    expect(command.mock.calls[1][3]).not.toHaveProperty("tcp_target");
+    expect(result).toHaveProperty("robot.connected", true);
+    expect(cameraImage).not.toHaveBeenCalled();
+  });
+  it("does not repeat a successful motion if the post-motion state read fails", async () => {
+    const { command, tools } = setup();
+    vi.mocked(readRobot).mockRejectedValueOnce(Error("state unavailable"));
+    const result = await tools.gripper.execute!(
+      { actuator_key: "gripper", position_rad: 0 },
+      { toolCallId: "feedback-failure", messages: [], context: {} },
+    );
+    expect(result).toMatchObject({
+      feedback_error: "state unavailable",
+      result: { value: { last_segmentation_sequence: 43 } },
+    });
+    expect(result).not.toHaveProperty("error");
+    expect(command).toHaveBeenCalledTimes(1);
+  });
   it("recalls the original without capturing new pixels or moving", async () => {
     const { command, tools } = setup();
     const result = await tools.recall_image.execute!(
@@ -141,6 +216,7 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
     expect(result).toMatchObject({
       result: { value: { last_segmentation_sequence: 43 } },
       observation_error: "camera disconnected",
+      robot: { connected: true },
     });
     expect(result).not.toHaveProperty("error");
   });
@@ -151,7 +227,10 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
       { joints: [], observe_role: "external" },
       { toolCallId: "failed", messages: [], context: {} },
     );
-    expect(result).toMatchObject({ error: "IK failed" });
+    expect(result).toMatchObject({
+      error: "IK failed",
+      robot: { connected: true },
+    });
     expect(command).toHaveBeenCalledTimes(1);
     expect(cameraImage).not.toHaveBeenCalled();
   });

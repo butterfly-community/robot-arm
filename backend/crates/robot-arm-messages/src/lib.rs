@@ -1765,6 +1765,26 @@ pub struct ToolPoseFeedback {
     pub arm_state: ArmState,
 }
 
+/// Read-only FK / coordinate preview. It never plans or executes a trajectory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MotionPreview {
+    pub model_revision: String,
+    pub feedback: ArmState,
+    pub current_tcp: ToolPose,
+    pub target_tcp: ToolPose,
+    /// None for a TCP target: no inverse kinematics has been run.
+    pub target_joints_rad: Option<Vec<f64>>,
+    pub translation_delta_m: [f64; 3],
+    /// Rotation taking the current orientation to the target, in the base frame.
+    pub rotation_delta_xyzw: [f64; 4],
+    /// Tool X, Y, Z unit vectors expressed in the base frame, in that order.
+    pub current_tool_axes_in_base: [[f64; 3]; 3],
+    pub target_tool_axes_in_base: [[f64; 3]; 3],
+    pub motion_executed: bool,
+    pub ik_checked: bool,
+    pub collision_checked: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticValue {
     pub key: String,

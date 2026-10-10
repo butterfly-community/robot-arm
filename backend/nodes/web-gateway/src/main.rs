@@ -298,6 +298,7 @@ async fn serve(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/api/motion/cancel", post(request_motion))
         .route("/api/motion/actuator", post(request_actuator))
         .route("/api/motion/snapshot", post(request_motion_snapshot))
+        .route("/api/motion/preview", post(request_motion_preview))
         .route("/api/motion/assets/{*path}", get(model_asset))
         .route("/api/arm-execution/state", get(snapshot_execution))
         .route("/api/arm-execution/connect", post(request_execution))
@@ -464,6 +465,19 @@ async fn request_motion(State(state): State<AppState>, Json(body): Json<Value>) 
     if let Err(response) = validation {
         return response.into_response();
     }
+    forward(state, "motion_request", body).await
+}
+
+async fn request_motion_preview(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = validate_request::<robot_arm_messages::MotionRequest>(&body) {
+        return response.into_response();
+    }
+    // Force the read-only operation even if a caller supplies action=apply.
+    let mut body = body;
+    body["action"] = json!("snapshot");
     forward(state, "motion_request", body).await
 }
 

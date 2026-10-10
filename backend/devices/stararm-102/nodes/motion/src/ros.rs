@@ -15,7 +15,7 @@ use r2r::stararm_102_mtc::action::PickPlace;
 use r2r::{
     ActionClientUntyped, ClientUntyped, Context as RosContext, Node, PublisherUntyped, QosProfile,
 };
-use robot_arm_messages::ArmState;
+use robot_arm_messages::{ArmState, MotionPreview, MotionRequest, ToolPose};
 use serde_json::{Value, json};
 use stararm_102_model::{BASE_FRAME, GRIPPER_JOINT, JOINTS, TCP_FRAME};
 
@@ -41,6 +41,10 @@ pub enum RosEvent {
     ControllerCommand(Value),
     ServoStatus(Value),
     CurrentPose(ArmState, Result<Pose, String>),
+    PreviewFinished {
+        request_id: String,
+        result: Result<MotionPreview, String>,
+    },
     PoseMode(Result<(), String>),
     SyncFinished(Result<(), String>),
     MotionExecuting {
@@ -318,6 +322,81 @@ impl RosInterface {
                 .and_then(parse_fk)
                 .map_err(|error| error.to_string());
             let _ = sender.send(RosEvent::CurrentPose(feedback, result));
+        });
+    }
+
+    /// This worker only calls compute_fk. It neither pauses Servo nor writes
+    /// controller state, changes the scene, requests IK or executes motion.
+    pub fn preview_motion(&self, request: MotionRequest, feedback: ArmState) {
+        let client = self.forward_kinematics.clone();
+        let sender = self.event_sender.clone();
+        thread::spawn(move || {
+            let result = block_on(async {
+                eyre::ensure!(
+                    request.actuators.is_empty() && request.options.is_empty(),
+                    "姿态预览不接受夹爪动作或运动参数"
+                );
+                eyre::ensure!(
+                    request.tcp_target.is_none() || request.joints.is_empty(),
+                    "一次预览只能指定关节目标或 TCP 目标"
+                );
+                eyre::ensure!(
+                    feedback.joints_rad.len() == JOINTS.len()
+                        && feedback.joints_rad.iter().all(|value| value.is_finite()),
+                    "姿态预览缺少完整实际关节反馈"
+                );
+                let mut target_feedback = feedback.clone();
+                let mut seen = BTreeSet::new();
+                for joint in &request.joints {
+                    let index = JOINTS
+                        .iter()
+                        .position(|name| *name == joint.joint_key)
+                        .ok_or_else(|| eyre!("未知关节 {}", joint.joint_key))?;
+                    eyre::ensure!(
+                        joint.position_rad.is_finite() && seen.insert(&joint.joint_key),
+                        "关节预览包含无效或重复目标 {}",
+                        joint.joint_key
+                    );
+                    target_feedback.joints_rad[index] = joint.position_rad;
+                }
+                let current = parse_fk(call(&client, current_pose_request(&feedback)).await?)?;
+                let (target, target_joints_rad) = if let Some(tcp) = &request.tcp_target {
+                    (crate::core::resolve_tcp_target(current, tcp)?, None)
+                } else {
+                    let target = if request.joints.is_empty() {
+                        current
+                    } else {
+                        parse_fk(call(&client, current_pose_request(&target_feedback)).await?)?
+                    };
+                    (target, Some(target_feedback.joints_rad))
+                };
+                let pose = |value: Pose| ToolPose {
+                    frame: BASE_FRAME.into(),
+                    position_m: value.position_m,
+                    orientation_xyzw: value.orientation_xyzw,
+                };
+                Ok::<_, eyre::Report>(MotionPreview {
+                    model_revision: feedback.model_revision.clone(),
+                    feedback,
+                    current_tcp: pose(current),
+                    target_tcp: pose(target),
+                    target_joints_rad,
+                    translation_delta_m: std::array::from_fn(|i| {
+                        target.position_m[i] - current.position_m[i]
+                    }),
+                    rotation_delta_xyzw: crate::core::rotation_delta_in_base(current, target),
+                    current_tool_axes_in_base: crate::core::tool_axes_in_base(current),
+                    target_tool_axes_in_base: crate::core::tool_axes_in_base(target),
+                    motion_executed: false,
+                    ik_checked: false,
+                    collision_checked: false,
+                })
+            })
+            .map_err(|error| error.to_string());
+            let _ = sender.send(RosEvent::PreviewFinished {
+                request_id: request.request_id,
+                result,
+            });
         });
     }
 

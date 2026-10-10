@@ -23,6 +23,16 @@ import {
 import type { CameraCaptureState } from "@robot/contracts";
 vi.mock("./store", () => ({}));
 describe("Responses configuration", () => {
+  it("continues after candidate IK failure without forcing orientation or silent progress", () => {
+    for (const prompt of [depthInstructions, visionInstructions]) {
+      expect(prompt).toContain("没有完成用户目标不要停止");
+      expect(prompt).toContain("用户明确暂停、停止或改变目标时遵从最新指令");
+      expect(prompt).toContain("IK 失败是尝试候选目标位姿时的正常求解结果");
+      expect(prompt).toContain("move_joints");
+      expect(prompt).not.toContain("简洁报告");
+      expect(prompt).not.toContain("不逐步复述计划");
+    }
+  });
   it("passes live state through SDK instructions without system messages or mutable history", async () => {
     const conversation: ModelMessage[] = [
       { role: "user", content: "inspect only" },

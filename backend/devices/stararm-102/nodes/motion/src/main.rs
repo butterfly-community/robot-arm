@@ -378,6 +378,28 @@ impl MotionNode {
     }
 
     fn handle_motion_request(&mut self, node: &mut DoraNode, request: MotionRequest) -> Result<()> {
+        if request.action == RequestAction::Snapshot {
+            // A preview must not enter the motion queue, alter the current
+            // request status or require switching the robot to manual mode.
+            if let Some(feedback) = self.latest_arm_state.as_ref()
+                && request.model_revision == MODEL_REVISION
+                && feedback.model_revision == request.model_revision
+            {
+                self.ros.preview_motion(request, feedback.clone());
+                return Ok(());
+            }
+            return send(
+                node,
+                "motion_request_result",
+                &RequestResult::<robot_arm_messages::MotionPreview> {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    acknowledged_action: RequestAction::Snapshot,
+                    value: None,
+                    original_error: Some("姿态预览缺少匹配型号的实际反馈".into()),
+                },
+            );
+        }
         if self.config.control_mode != ControlMode::Manual {
             return self.fail_motion(
                 node,
@@ -764,6 +786,23 @@ impl MotionNode {
                         Err(error) => self.last_error = Some(error),
                     }
                     self.publish_state(node)?;
+                }
+                RosEvent::PreviewFinished { request_id, result } => {
+                    let (value, original_error) = match result {
+                        Ok(preview) => (Some(preview), None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    send(
+                        node,
+                        "motion_request_result",
+                        &RequestResult {
+                            schema_version: SCHEMA_VERSION,
+                            request_id,
+                            acknowledged_action: RequestAction::Snapshot,
+                            value,
+                            original_error,
+                        },
+                    )?;
                 }
                 RosEvent::PoseMode(result) => {
                     match result {

@@ -176,9 +176,52 @@ fn xyzw(value: UnitQuaternion<f64>) -> [f64; 4] {
     [value.i, value.j, value.k, value.w]
 }
 
+pub fn tool_axes_in_base(pose: Pose) -> [[f64; 3]; 3] {
+    let rotation = quaternion(pose.orientation_xyzw);
+    [Vector3::x(), Vector3::y(), Vector3::z()].map(|axis| (rotation * axis).into())
+}
+
+pub fn rotation_delta_in_base(current: Pose, target: Pose) -> [f64; 4] {
+    xyzw(quaternion(target.orientation_xyzw) * quaternion(current.orientation_xyzw).inverse())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_axes_are_tool_axes_expressed_in_base() {
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let pose = Pose {
+            position_m: [0.0; 3],
+            orientation_xyzw: [0.0, 0.0, s, s],
+        };
+        let expected = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        for (axis, expected) in tool_axes_in_base(pose).iter().zip(expected) {
+            for (value, expected) in axis.iter().zip(expected) {
+                assert_abs_diff_eq!(*value, expected, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn preview_rotation_delta_reconstructs_target_in_base() {
+        let current = Pose {
+            position_m: [0.0; 3],
+            orientation_xyzw: xyzw(UnitQuaternion::from_euler_angles(0.3, -0.5, 0.2)),
+        };
+        let target = Pose {
+            position_m: [0.0; 3],
+            orientation_xyzw: xyzw(UnitQuaternion::from_euler_angles(-0.7, 0.4, 0.9)),
+        };
+        let reconstructed = quaternion(rotation_delta_in_base(current, target))
+            * quaternion(current.orientation_xyzw);
+        assert_abs_diff_eq!(
+            reconstructed.angle_to(&quaternion(target.orientation_xyzw)),
+            0.0,
+            epsilon = 1e-12
+        );
+    }
 
     #[test]
     fn tcp_delta_uses_declared_axes_not_a_timed_velocity() {
