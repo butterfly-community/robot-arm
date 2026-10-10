@@ -10,6 +10,21 @@ import {
 import { settingsSchema, startSchema } from "./types";
 vi.mock("./store", () => ({}));
 describe("Responses configuration", () => {
+  it("directs visual approach from coarse motion to contact refinement without fixed steps or invented coordinates", () => {
+    expect(instructions).toContain("应先大幅接近目标位置");
+    expect(instructions).toContain("即将接触时才转为小幅精调");
+    expect(instructions).toContain("不预设固定步长或接近姿态");
+    expect(instructions).toContain("不把像素直接当米，不臆造相机外参");
+    expect(instructions).toContain("每段运动完成后观察结果");
+    expect(instructions).toContain("仍由现有规划与执行工具完成运动");
+  });
+  it("preserves approach progress across turns and avoids redundant camera switching", () => {
+    expect(instructions).toContain("不因对话续轮而重新回工作位");
+    expect(instructions).toContain("不机械地在每次移动前后切换两台相机");
+    expect(instructions).toContain("所需相机已经正常采集时直接观察");
+    expect(instructions).toContain("不重复从头探测");
+    expect(instructions).toContain("力/速度");
+  });
   it("authorizes task-scoped tools and visual annotation without repeated permission, while respecting read-only requests", () => {
     expect(instructions).toContain(
       "用户提交任务即授权你使用已提供工具完成该任务",

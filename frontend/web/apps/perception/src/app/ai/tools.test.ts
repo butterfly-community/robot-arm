@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
-import { perceptionSnapshot } from "./robot";
+import { perceptionSnapshot, cameraImage } from "./robot";
 vi.mock("./store", () => ({
   saveRun: vi.fn(async () => {}),
   putImage: vi.fn(async () => ({
@@ -14,6 +14,18 @@ vi.mock("./store", () => ({
 vi.mock("./robot", async (original) => ({
   ...(await original<typeof import("./robot")>()),
   imageBytes: vi.fn(async () => Buffer.from("fixture")),
+  cameraImage: vi.fn(async (role) => ({
+    bytes: Buffer.from("fixture"),
+    metadata: {
+      role,
+      source_id: "simulation:test",
+      sequence: 17,
+      received_time_ns: 123,
+      width: 1920,
+      height: 1080,
+      pixel_format: "rgb8",
+    },
+  })),
   perceptionSnapshot: vi.fn(async () => ({
     values: {
       perception_state: {
@@ -35,6 +47,47 @@ function setup() {
   return { command, tools: robotTools(context) };
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
+  it("switches capture through the same camera request without rebinding or moving", async () => {
+    const { command, tools } = setup();
+    const bindings = [{ role: "external", enabled: false }];
+    command.mockResolvedValue({
+      request_id: "camera-switch",
+      value: { bindings, available_sources: [{ profiles: ["large catalog"] }] },
+    });
+    const result = await tools.set_camera_capture.execute!(
+      { role: "external", enabled: false },
+      { toolCallId: "close-camera", messages: [], context: {} },
+    );
+    await tools.set_camera_capture.execute!(
+      { role: "wrist", enabled: true },
+      { toolCallId: "open-camera", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c.slice(2, 4))).toEqual([
+      ["/api/perception/camera", { role: "external", action: "disconnect" }],
+      ["/api/perception/camera", { role: "wrist", action: "connect" }],
+    ]);
+    expect(result).toEqual({ request_id: "camera-switch", bindings });
+  });
+  it("observes the requested role without segmentation, depth or robot commands", async () => {
+    const { command, tools } = setup();
+    for (const role of ["external", "wrist", "depth"]) {
+      const result = await tools.observe_camera.execute!(
+        { role },
+        { toolCallId: `observe-${role}`, messages: [], context: {} },
+      );
+      expect(result).toMatchObject({
+        role,
+        sequence: 17,
+        image_id: "fixture-image",
+        source_id: "simulation:test",
+      });
+      expect(cameraImage).toHaveBeenLastCalledWith(
+        role,
+        expect.any(AbortSignal),
+      );
+    }
+    expect(command).not.toHaveBeenCalled();
+  });
   it("exposes every tool for direct execution without approval gates", () => {
     const { tools } = setup();
     for (const definition of Object.values(tools)) {

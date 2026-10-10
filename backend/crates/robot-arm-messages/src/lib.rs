@@ -782,11 +782,39 @@ pub struct CameraRequest {
     pub output_frames_per_second: Option<f64>,
     #[serde(default)]
     pub driver_parameters: Option<Vec<CameraDriverParameterValue>>,
+    #[serde(default)]
+    pub role: CameraRole,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraRole {
+    #[default]
+    Depth,
+    External,
+    Wrist,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraBindingState {
+    pub role: CameraRole,
+    pub source_id: String,
+    pub color_profile_key: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub streaming: bool,
+    pub has_signal: bool,
+    pub last_sequence: Option<u64>,
+    pub last_frame_time_ns: Option<i64>,
+    pub frame: Option<ImageFrameInfo>,
+    pub original_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CameraCaptureState {
     pub schema_version: u32,
+    #[serde(default)]
+    pub bindings: Vec<CameraBindingState>,
     pub available_sources: Vec<CameraSourceInfo>,
     pub selected_source_id: Option<String>,
     pub selected_color_profile_key: Option<String>,

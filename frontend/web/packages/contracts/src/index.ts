@@ -320,6 +320,7 @@ export interface CameraSourceInfo {
 
 export interface CameraCaptureState {
   schema_version: number;
+  bindings?: CameraBindingState[];
   available_sources: CameraSourceInfo[];
   selected_source_id?: string | null;
   selected_color_profile_key?: string | null;
@@ -336,6 +337,20 @@ export interface CameraCaptureState {
   skipped_output_frame_count: number;
   original_error?: string | null;
   service: ServiceState;
+}
+
+export type CameraRole = "depth" | "external" | "wrist";
+export interface CameraBindingState {
+  role: CameraRole;
+  source_id: string;
+  color_profile_key: string;
+  enabled?: boolean;
+  streaming: boolean;
+  has_signal: boolean;
+  last_sequence?: number | null;
+  last_frame_time_ns?: number | null;
+  frame?: ImageFrameInfo | null;
+  original_error?: string | null;
 }
 
 export interface ImageFrameInfo {

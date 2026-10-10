@@ -5,6 +5,7 @@ import {
   type RobotModelInfo,
   type RequestRecord,
   type CameraCaptureState,
+  type CameraRole,
 } from "@robot/contracts";
 import { randomUUID } from "node:crypto";
 import type { AIRun } from "./types";
@@ -35,6 +36,30 @@ export async function imageBytes(key: "color.png" | "segmentation-color.png") {
   });
   if (!response.ok) throw Error(`相机图像读取失败：HTTP ${response.status}`);
   return Buffer.from(await response.arrayBuffer());
+}
+
+export async function cameraImage(role: CameraRole, signal?: AbortSignal) {
+  const cameraBase =
+    process.env.CAMERA_INTERNAL_URL?.replace(/\/$/, "") ?? "http://camera:8081";
+  const response = await fetch(`${cameraBase}/snapshot?role=${role}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) throw Error(`相机 ${role}：${await response.text()}`);
+  const metadata = JSON.parse(
+    response.headers.get("x-camera-frame") ?? "null",
+  ) as {
+    role: CameraRole;
+    source_id: string;
+    sequence: number;
+    received_time_ns: number;
+    width: number;
+    height: number;
+    pixel_format: string;
+  } | null;
+  if (!metadata || metadata.role !== role)
+    throw Error("相机图像缺少匹配的来源元数据");
+  return { bytes: Buffer.from(await response.arrayBuffer()), metadata };
 }
 export async function perceptionSnapshot(): Promise<{
   values: {

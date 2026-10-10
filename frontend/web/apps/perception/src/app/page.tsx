@@ -35,6 +35,7 @@ import {
 import { useState } from "react";
 
 import { FloatingCameraVideo } from "./camera-video";
+import { CameraBindings } from "./camera-bindings";
 import { SegmentationEditor } from "./segmentation-editor";
 import { startPickPlace } from "./start-pick-place";
 import {
@@ -744,6 +745,12 @@ export default function Page() {
         </p>
       ) : null}
       <div className="dashboard-grid">
+        {camera && !camera.selected_source_id && (
+          <p className="span-12 status" role="status">
+            当前未选择深度相机，AI
+            使用已绑定的外部／腕部摄像头观察并调用运动工具，不使用深度抓放流程。下方能力与配置仍可查看和操作，需要深度数据的操作会报告缺少的输入。
+          </p>
+        )}
         <div className="span-12 metric-grid">
           <Metric
             label="感知状态"
@@ -818,16 +825,20 @@ export default function Page() {
                 }}
               >
                 <option value="">不选择深度相机</option>
-                {camera?.available_sources.map((source) => (
-                  <option
-                    disabled={!source.available}
-                    key={source.source_id}
-                    value={source.source_id}
-                  >
-                    {source.display_name}
-                    {source.available ? "" : " · 当前不可用（配置已保留）"}
-                  </option>
-                ))}
+                {camera?.available_sources
+                  .filter((source) =>
+                    source.profiles.some((p) => p.stream === "depth"),
+                  )
+                  .map((source) => (
+                    <option
+                      disabled={!source.available}
+                      key={source.source_id}
+                      value={source.source_id}
+                    >
+                      {source.display_name}
+                      {source.available ? "" : " · 当前不可用（配置已保留）"}
+                    </option>
+                  ))}
               </select>
             </Field>
             <KeyValue
@@ -1106,6 +1117,16 @@ export default function Page() {
             <KeyValue
               label="当前运行来源"
               value={camera?.selected_source_id ?? "未选择"}
+            />
+            <CameraBindings
+              camera={camera}
+              onRequest={(body) =>
+                send("/api/perception/camera", {
+                  schema_version: schemaVersion,
+                  request_id: requestId(),
+                  ...body,
+                })
+              }
             />
             <KeyValue
               label="活动彩色 / 深度流"
@@ -1829,15 +1850,39 @@ export default function Page() {
           <JsonView value={{ perception, scene, calibration, manipulation }} />
         </Card>
       </div>
-      <FloatingCameraVideo
-        streaming={camera?.streaming ?? false}
-        profile={
-          activeColorProfile
-            ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
-            : "等待彩色流配置"
-        }
-        rates={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
-      />
+      {camera?.selected_source_id && (
+        <FloatingCameraVideo
+          key={camera.selected_source_id}
+          hasSignal={Boolean(camera.streaming && camera.last_frame_time_ns)}
+          streaming={camera?.streaming ?? false}
+          profile={
+            activeColorProfile
+              ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
+              : "等待彩色流配置"
+          }
+          rates={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
+        />
+      )}
+      {camera?.bindings?.map((binding) => (
+        <FloatingCameraVideo
+          key={`${binding.role}:${binding.source_id}`}
+          role={binding.role}
+          streaming={binding.streaming}
+          hasSignal={binding.has_signal}
+          profile={
+            binding.frame
+              ? `${binding.frame.width} × ${binding.frame.height} · ${binding.frame.encoding}`
+              : "等待图像"
+          }
+          rates={
+            binding.original_error ??
+            (camera.available_sources
+              .find((s) => s.source_id === binding.source_id)
+              ?.profiles.find((p) => p.key === binding.color_profile_key)
+              ?.frames_per_second ?? "—") + " FPS"
+          }
+        />
+      ))}
     </Shell>
   );
 }

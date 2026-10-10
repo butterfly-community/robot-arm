@@ -19,11 +19,12 @@ if (
     "stop",
     "new",
     "history",
+    "model",
   ].includes(mode) ||
   !directory
 )
   throw Error(
-    "Usage: general-ai.mjs inspect|camera|settings|reply-layout|config|send|stop|new|history OUTPUT [TEXT or SESSION_ID] [IMAGE] [EFFORT]",
+    "Usage: general-ai.mjs inspect|camera|settings|reply-layout|config|send|stop|new|history|model OUTPUT [TEXT or SESSION_ID or MODEL] [IMAGE] [EFFORT]",
   );
 const output = resolve(directory);
 process.env.TMPDIR = join(output, "browser-temp");
@@ -75,13 +76,20 @@ try {
     timeout: 60000,
   });
   await expect.poll(() => Boolean(latest), { timeout: 60000 }).toBe(true);
-  const canvas = page.getByLabel("相机原始彩色视频", { exact: true });
+  const depthPreview = page.getByLabel("深度相机彩色画面浮动窗口", {
+    exact: true,
+  });
+  const previews = page.locator(".floating-camera-monitor");
   if (["inspect", "camera", "send"].includes(mode)) {
-    const expand = page.getByRole("button", { name: "展开", exact: true });
-    if (await expand.isVisible()) await expand.click();
+    for (const preview of await previews.all()) {
+      const expand = preview.getByRole("button", { name: "展开", exact: true });
+      if (await expand.isVisible()) await expand.click();
+    }
   }
   async function screenshot(name) {
-    if (await canvas.isVisible()) {
+    for (const preview of await previews.all()) {
+      const canvas = preview.getByLabel("相机原始彩色视频", { exact: true });
+      if (!(await canvas.isVisible())) continue;
       if (latest?.perception_state?.source_id) {
         await expect
           .poll(
@@ -91,11 +99,38 @@ try {
           .toBeGreaterThan(10000);
       }
       await canvas.screenshot({
-        path: join(output, name + ".jpg"),
+        path: join(
+          output,
+          name + "-" + (await preview.getAttribute("aria-label")) + ".jpg",
+        ),
         type: "jpeg",
         quality: 75,
       });
     }
+  }
+  if (mode === "model") {
+    if (!text) throw Error("model ID required");
+    const toggle = page.getByRole("button", { name: /^模型与思考配置/ });
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const model = page.getByLabel("通用 AI 模型", { exact: true });
+    await model.fill(text);
+    await model.press("Escape");
+    const saved = page.waitForResponse(
+      (r) =>
+        r.request().method() === "POST" &&
+        new URL(r.url()).pathname === "/perception/api/ai/",
+    );
+    await page
+      .getByRole("button", { name: "保存 AI 配置", exact: true })
+      .click();
+    const result = await (await saved).json();
+    expect(result.model).toBe(text);
+    await page.reload();
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    await expect(model).toHaveValue(text);
+    console.log("MODEL_SAVED", text);
   }
   if (mode === "camera") {
     const advanced = page.getByRole("button", { name: /^高级设置/ });

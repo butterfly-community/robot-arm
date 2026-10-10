@@ -9,6 +9,16 @@ use tokio::sync::mpsc as async_mpsc;
 use crate::drivers::{CameraPoll, Drivers};
 
 pub(crate) enum Command {
+    CloseColor {
+        request_id: String,
+        action: RequestAction,
+    },
+    OpenColor {
+        request_id: String,
+        action: RequestAction,
+        source_id: String,
+        color: CameraStreamProfile,
+    },
     Discover {
         request_id: String,
         action: RequestAction,
@@ -35,6 +45,10 @@ pub(crate) enum Command {
 }
 
 pub(crate) enum Completion {
+    Closed {
+        request_id: String,
+        action: RequestAction,
+    },
     Discovered {
         request_id: String,
         action: RequestAction,
@@ -92,6 +106,42 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
             }
             while let Ok(command) = command_receiver.try_recv() {
                 match command {
+                    Command::CloseColor { request_id, action } => {
+                        // Acknowledge only after STREAMOFF/close releases USB bandwidth.
+                        drop(stream.take());
+                        output_rate = None;
+                        output_sender.send_replace(None);
+                        video_sender.send_replace(None);
+                        let _ = completion_sender
+                            .blocking_send(Completion::Closed { request_id, action });
+                    }
+                    Command::OpenColor {
+                        request_id,
+                        action,
+                        source_id,
+                        color,
+                    } => {
+                        drop(stream.take());
+                        output_sender.send_replace(None);
+                        video_sender.send_replace(None);
+                        let result = drivers.as_mut().map_err(|e| e.clone()).and_then(|d| {
+                            d.open_color(&source_id, &color)
+                                .map_err(|e| format!("{e:#}"))
+                        });
+                        output_rate = None;
+                        let result = result.map(|opened| {
+                            stream = Some(opened);
+                            // Color-only bindings publish live video, not RGB-D.
+                            output_rate = Some((0.0, f64::from(color.frames_per_second)));
+                            last_output_at = None;
+                        });
+                        let _ = completion_sender.blocking_send(Completion::Opened {
+                            request_id,
+                            action,
+                            source_id,
+                            result,
+                        });
+                    }
                     Command::Discover { request_id, action } => {
                         let (sources, errors) = match drivers.as_mut() {
                             Ok(drivers) => drivers.discover(),
@@ -210,11 +260,12 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
             };
             let (output_frames_per_second, capture_frames_per_second) =
                 output_rate.expect("active stream has output rate");
-            let materialize = super::output_due(
-                last_output_at.map(|last: std::time::Instant| last.elapsed()),
-                output_frames_per_second,
-                capture_frames_per_second,
-            );
+            let materialize = output_frames_per_second > 0.0
+                && super::output_due(
+                    last_output_at.map(|last: std::time::Instant| last.elapsed()),
+                    output_frames_per_second,
+                    capture_frames_per_second,
+                );
             match active_stream
                 .poll_frame(materialize)
                 .and_then(CameraPoll::into_rgb)
@@ -261,6 +312,31 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_color_acknowledges_after_clearing_video() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut channels = spawn(&runtime);
+        channels
+            .commands
+            .try_send(Command::CloseColor {
+                request_id: "close-wrist".into(),
+                action: RequestAction::Disconnect,
+            })
+            .unwrap();
+        let completion = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), channels.completions.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        assert!(
+            matches!(completion, Completion::Closed { request_id, action: RequestAction::Disconnect } if request_id == "close-wrist")
+        );
+        assert!(channels.video.borrow().is_none());
+        drop(channels);
+        runtime.shutdown_background();
+    }
 
     #[test]
     fn worker_exits_when_its_owner_drops_the_command_channel() {

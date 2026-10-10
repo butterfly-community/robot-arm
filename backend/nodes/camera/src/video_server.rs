@@ -1,20 +1,29 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
-    extract::{State, WebSocketUpgrade, ws::Message},
-    http::StatusCode,
+    extract::{Query, State, WebSocketUpgrade, ws::Message},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
 use eyre::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use robot_arm_messages::CameraRawVideoFrame;
+use robot_arm_messages::{CameraRawVideoFrame, CameraRole};
+use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Clone)]
 struct VideoState {
-    frames: tokio::sync::watch::Receiver<Option<Arc<CameraRawVideoFrame>>>,
+    frames: VideoStreams,
+}
+
+pub(crate) type VideoStreams =
+    BTreeMap<CameraRole, tokio::sync::watch::Receiver<Option<Arc<CameraRawVideoFrame>>>>;
+#[derive(Default, Deserialize)]
+struct View {
+    #[serde(default)]
+    role: CameraRole,
 }
 
 pub(crate) async fn bind() -> Result<tokio::net::TcpListener> {
@@ -29,12 +38,13 @@ pub(crate) async fn bind() -> Result<tokio::net::TcpListener> {
 
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
-    frames: tokio::sync::watch::Receiver<Option<Arc<CameraRawVideoFrame>>>,
+    frames: VideoStreams,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/ws", get(video_upgrade))
+        .route("/snapshot", get(snapshot))
         .with_state(VideoState { frames });
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -44,9 +54,61 @@ pub(crate) async fn serve(
     Ok(())
 }
 
-async fn video_upgrade(ws: WebSocketUpgrade, State(state): State<VideoState>) -> Response {
-    ws.on_upgrade(move |socket| video_socket(socket, state.frames))
+async fn video_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<VideoState>,
+    Query(view): Query<View>,
+) -> Response {
+    let Some(frames) = state.frames.get(&view.role).cloned() else {
+        return (StatusCode::NOT_FOUND, "相机角色未配置").into_response();
+    };
+    ws.on_upgrade(move |socket| video_socket(socket, frames))
         .into_response()
+}
+
+async fn snapshot(State(state): State<VideoState>, Query(view): Query<View>) -> Response {
+    let Some(mut frames) = state.frames.get(&view.role).cloned() else {
+        return (StatusCode::NOT_FOUND, "相机角色未配置").into_response();
+    };
+    if frames.borrow_and_update().is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "相机未绑定或没有图像信号").into_response();
+    }
+    // A new frame after this request, not a stale preview or perception cache.
+    if frames.changed().await.is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "相机已停止").into_response();
+    }
+    let Some(frame) = frames.borrow_and_update().clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "相机信号中断").into_response();
+    };
+    let metadata = serde_json::json!({"role": view.role, "source_id":frame.source_id,"sequence":frame.sequence,"received_time_ns":frame.received_time_ns,"width":frame.color.width,"height":frame.color.height,"pixel_format":frame.color.pixel_format});
+    let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let rgb = image::RgbImage::from_raw(
+            frame.color.width,
+            frame.color.height,
+            frame.color.packed_rgb()?,
+        )
+        .ok_or_else(|| eyre::eyre!("无效 RGB 图像"))?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        rgb.write_to(&mut out, image::ImageFormat::Png)?;
+        Ok(out.into_inner())
+    })
+    .await;
+    match encoded {
+        Ok(Ok(bytes)) => (
+            [
+                (header::CONTENT_TYPE.as_str(), "image/png"),
+                (header::CACHE_CONTROL.as_str(), "no-store"),
+                ("x-camera-frame", &metadata.to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        error => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("相机图像编码失败：{error:?}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn video_socket(
@@ -80,6 +142,16 @@ async fn video_socket(
                 {
                     return;
                 }
+            } else if sender
+                .send(Message::Text(
+                    json!({"signal":false,"message":"相机信号中断或未绑定"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .is_err()
+            {
+                return;
             }
             if frames.changed().await.is_err() {
                 return;
@@ -109,6 +181,77 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
     #[tokio::test]
+    async fn role_snapshot_waits_for_a_new_frame_and_keeps_pixels_with_metadata() {
+        let frame = |sequence, source: &str, color| {
+            Arc::new(CameraRawVideoFrame {
+                schema_version: SCHEMA_VERSION,
+                sequence,
+                source_id: source.into(),
+                received_time_ns: sequence as i64,
+                color: CameraImagePlane {
+                    width: 1,
+                    height: 1,
+                    stride_bytes: 3,
+                    pixel_format: "rgb8".into(),
+                    frame_id: "optical".into(),
+                    data: color,
+                },
+            })
+        };
+        let (external, e) =
+            tokio::sync::watch::channel(Some(frame(1, "external-source", vec![255, 0, 0])));
+        let (_wrist, w) =
+            tokio::sync::watch::channel(Some(frame(7, "wrist-source", vec![0, 0, 255])));
+        let state = VideoState {
+            frames: BTreeMap::from([(CameraRole::External, e), (CameraRole::Wrist, w)]),
+        };
+        let pending = snapshot(
+            State(state.clone()),
+            Query(View {
+                role: CameraRole::External,
+            }),
+        );
+        tokio::pin!(pending);
+        // Starting the read cannot return the frame from before the request.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        external
+            .send(Some(frame(2, "external-source", vec![0, 255, 0])))
+            .unwrap();
+        let response = pending.await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let metadata: serde_json::Value =
+            serde_json::from_str(response.headers()["x-camera-frame"].to_str().unwrap()).unwrap();
+        assert_eq!(metadata["sequence"], 2);
+        assert_eq!(metadata["source_id"], "external-source");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .unwrap()
+                .into_rgb8()
+                .into_raw(),
+            vec![0, 255, 0]
+        );
+        external.send(None).unwrap();
+        assert_eq!(
+            snapshot(
+                State(state),
+                Query(View {
+                    role: CameraRole::External
+                })
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
     async fn ping_and_close_work_with_and_without_video_frames() {
         for streaming in [false, true] {
             let frame = streaming.then(|| {
@@ -131,7 +274,11 @@ mod tests {
             let (shutdown, stopped) = tokio::sync::watch::channel(false);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(serve(listener, frames, stopped));
+            let server = tokio::spawn(serve(
+                listener,
+                BTreeMap::from([(CameraRole::Depth, frames)]),
+                stopped,
+            ));
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 let (mut client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
                 if streaming {
@@ -143,6 +290,9 @@ mod tests {
                         client.next().await.unwrap().unwrap(),
                         ClientMessage::Binary(vec![255, 0, 0].into())
                     );
+                } else {
+                    let status = client.next().await.unwrap().unwrap();
+                    assert!(status.to_text().unwrap().contains("signal"));
                 }
                 let ping = b"preview".to_vec();
                 client

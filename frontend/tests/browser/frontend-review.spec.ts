@@ -257,17 +257,20 @@ test("video orderly disconnect reports reconnection instead of silently showing 
 }) => {
   const snapshot = await (await request.get("/api/perception/state")).json();
   snapshot.values.camera_state.streaming = true;
+  snapshot.values.camera_state.selected_source_id =
+    "simulation:pick-place-scene";
+  snapshot.values.camera_state.last_frame_time_ns = 1;
   await page.route("**/api/perception/state", (route) =>
     route.fulfill({ json: snapshot }),
   );
   await page.routeWebSocket("**/ws/perception", (route) =>
     route.send(JSON.stringify(snapshot)),
   );
-  await page.routeWebSocket("**/ws/camera-video", (route) =>
+  await page.routeWebSocket("**/ws/camera-video*", (route) =>
     route.close({ code: 1000 }),
   );
   await page.goto("/perception/");
-  const monitor = page.getByLabel("彩色视频浮动窗口");
+  const monitor = page.getByLabel("深度相机彩色画面浮动窗口");
   await expect(
     monitor.getByText("相机视频连接中断，正在重连", { exact: true }),
   ).toBeVisible();

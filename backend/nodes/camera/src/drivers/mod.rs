@@ -106,6 +106,41 @@ pub(crate) struct Drivers {
 }
 
 impl Drivers {
+    pub(crate) fn open_color(
+        &mut self,
+        source_id: &str,
+        color: &CameraStreamProfile,
+    ) -> Result<Box<dyn CameraStream>> {
+        if source_id.starts_with("v4l2:") {
+            return Ok(Box::new(ColorStream(uvc_camera::Stream::open(
+                source_id, color,
+            )?)));
+        }
+        // RGB-D drivers can supply their existing color plane too. They remain
+        // the only owner of native capture; no fabricated depth or intrinsics.
+        let (sources, _) = self.discover();
+        let source = sources
+            .iter()
+            .find(|s| s.source_id == source_id)
+            .ok_or_else(|| eyre::eyre!("相机未连接"))?;
+        let depth = source
+            .profiles
+            .iter()
+            .find(|p| {
+                p.stream == robot_arm_messages::CameraStreamKind::Depth
+                    && p.available
+                    && p.width == color.width
+                    && p.height == color.height
+                    && p.frames_per_second == color.frames_per_second
+            })
+            .or_else(|| {
+                source.profiles.iter().find(|p| {
+                    p.stream == robot_arm_messages::CameraStreamKind::Depth && p.available
+                })
+            })
+            .ok_or_else(|| eyre::eyre!("驱动没有可用采集配置"))?;
+        self.open(source_id, color, depth, &[])
+    }
     pub(crate) fn new() -> Result<Self> {
         Ok(Self {
             simulation: SimulationDriver::new()?,
@@ -117,6 +152,9 @@ impl Drivers {
     pub(crate) fn discover(&mut self) -> (Vec<CameraSourceInfo>, Vec<String>) {
         let mut sources = Vec::new();
         let mut errors = Vec::new();
+        let (ordinary, ordinary_errors) = uvc_camera::discover();
+        sources.extend(ordinary);
+        errors.extend(ordinary_errors);
         collect_discovery(
             &mut sources,
             &mut errors,
@@ -172,6 +210,21 @@ impl Drivers {
 
     pub(crate) fn set_calibration_active(&mut self, active: bool) {
         self.simulation.set_calibration_active(active);
+    }
+}
+
+struct ColorStream(uvc_camera::Stream);
+impl CameraStream for ColorStream {
+    fn poll_frame(&mut self, _materialize: bool) -> Result<CameraPoll> {
+        let Some(frame) = self.0.next_frame()? else {
+            return Ok(CameraPoll::Pending);
+        };
+        Ok(CameraPoll::Captured {
+            sequence: frame.sequence,
+            received_time_ns: frame.received_time_ns,
+            video_frame: Box::new(frame),
+            frame: None,
+        })
     }
 }
 

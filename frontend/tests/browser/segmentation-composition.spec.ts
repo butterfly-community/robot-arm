@@ -49,7 +49,7 @@ for (const width of [1440, 390])
       publish = () => socket.send(JSON.stringify(snapshot));
       publish();
     });
-    await page.routeWebSocket("**/ws/camera-video", () => {});
+    await page.routeWebSocket("**/ws/camera-video*", () => {});
     const png = await page.evaluate(() => {
       const c = document.createElement("canvas");
       c.width = 1920;

@@ -1,7 +1,8 @@
 # 架构与调用链
 
-单一业务链路：相机 → 场景/模型 → 绑定观测的抓放请求 → MoveIt/MTC → 执行器。
-手动与 AI 共用这条链路；模拟只替换输入适配器，不替换运动学或执行契约。
+深度抓放：相机 → 场景/模型 → 绑定观测的抓放请求 → MoveIt/MTC → 执行器。
+纯 RGB 观察由同一相机节点提供给 AI，AI 组合现有关节/TCP/夹爪工具；仍使用同一运动与执行链路。
+手动与 AI 共用底层能力；模拟只替换输入适配器，不替换运动学或执行契约。
 部署见[Docker](DOCKER.md)，硬件/角度与精度边界见[型号说明](STARARM-102.md)。
 
 ## 离散控制与请求结果
@@ -79,10 +80,18 @@ SDK pipeline/Align 由采集 worker 拥有。采集频率与上送频率独立�
 | `refresh` / `select` | 发现/用户选择 → 来源和 profile；不按设备枚举索引存配置 |
 | `start` / `stop_capture` / `reset` | 明确请求 → 同一 worker 的采集状态 |
 | `tick` / `finish_capture_command` | worker 结果 → 状态、RGB-D 原子 bundle |
+| `bindings::apply` / `tick` | 外部/腕部角色绑定 → 独立采集 worker、持久配置与信号状态 |
+| `video_server::snapshot` | 指定角色 → 请求之后的新 RGB 帧及同帧来源、序号、时间、尺寸 |
 | `start_automatic_calibration` / `advance_automatic_calibration` | 型号姿态与实际反馈 → 采样、求解、回工作位 |
 | `poll_calibration_work` / `apply_solved_calibration` | 当前会话结果 → 待确认状态 / 已落盘外参 |
 
-来源启动时发现但不自动选择。profile 与已应用外参持久化，设备离线不丢配置。
+深度来源启动时发现但不自动选择。外部/腕部绑定按保存的采集开关恢复，设备离线不丢配置。
+普通相机 `connect` 开启已保存绑定，`disconnect` 关闭采集并等待释放 USB 设备但保留配置，
+`unselect` 才解除绑定。网页与 AI 的 `set_camera_capture` 共用这些请求；带宽不足时轮流开启取新图。
+普通 USB 摄像头由 `uvc-camera` 使用 V4L2 枚举并采集，OpenCV 在驱动边界统一为 RGB；
+绑定优先保存 by-id，没有序列号时使用物理端口标识，不保存 `/dev/videoN`。
+分辨率、帧率来自设备枚举，不预设固定值。同一来源不能同时占用两个角色。
+绑定仅声明用途，不产生内参、外参或深度。profile 与已应用外参持久化。
 采集、SDK Align、标定使用 Tokio 阻塞任务，Dora 循环收取结果。
 标定流程为工作位 → 九姿态采图/新电机反馈 FK → 求解 → 回工作位 → 确认应用；
 取消或失败不覆盖已有外参。标定、图像、相机参数均由本节点管理。
@@ -260,7 +269,10 @@ HTTP 接收成功不是动作完成；网页按同一 request ID 跟踪准备、
 全链路使用 RGB；Z16 深度不做颜色转换。设备边界按真实格式/stride 解码，SDK 负责彩深对齐。
 OpenCV 灰度计算使用 RGB2GRAY；仅在需要 BGR 的编码/解码边界转换，检测原图不预模糊。
 浏览器使用 @thi.ng/pixel 将 RGB888 转 Canvas RGBA。实时彩色视频与低频上送 RGB-D 独立节流，
-同一 camera 节点发布，不增加视频节点；网关转发，浏览器浮窗可拖动和收起。
+同一 camera 节点发布，不增加视频节点；网页入口转发，浏览器按 depth/external/wrist 分别订阅。
+每个浮窗收到首帧后才出现，可独立拖动/收起；断流清除旧画面并提示，解除绑定隐藏浮窗。
+`/api/camera/snapshot?role=external|wrist|depth` 返回 PNG，`x-camera-frame` 携带同帧元数据。
+快照等待请求后的下一帧，不读取感知缓存；不同角色独立采集，不承诺同步双目。
 
 ## 网页与配置归属
 
@@ -271,7 +283,12 @@ AI 栏目包含自动/提示词/手动分割和可折叠抓放场景。分割冻
 输入绑定归 controller-input，相机与标定归 camera，模型提示归 scene，串口/反馈/夹持归 execution。
 
 通用 AI 在 Next.js 服务端，使用 AI SDK 的 OpenAI Responses provider。模型可看图、回答或组合
-已有工具，不固定为抓放流程；抓放仍复用手动按钮的 startPickPlace，不复制感知/运动实现。
+已有工具，不固定为抓放流程。深度抓放复用手动按钮的 startPickPlace；未选择深度来源时，
+AI 通过 `observe_camera(role)` 读取外部/腕部图像，组合已有关节/TCP、夹爪与力度工具，
+不调用深度重建或 GraspGenX，不复制运动实现，也不将像素坐标伪装成三维坐标。
+纯视觉提示词采用先粗后细：远距离先大幅接近，临近接触再精调，运动幅度根据图像和实际反馈调整；
+不固定步长或朝向，不在每次移动后强制切换相机，续轮核对状态后沿用已有接近进度。
+网页保留原有栏目和操作，只在顶部提示当前未选择深度相机。RGB 观察工具可用不等于纯视觉抓放已验收。
 地址、模型、reasoning effort 在 AI 配置中保存到 Redis；.env 提供初始默认值和仅服务端可见的密钥。
 本地分割、候选、规划和执行不依赖外部 AI 服务。
 

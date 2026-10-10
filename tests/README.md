@@ -1,5 +1,25 @@
 # 回归测试
 
+`cd frontend && pnpm exec playwright test camera-bindings.spec.ts` 从真实采集页面绑定两个模拟来源，
+核对独立视频、拖动/收起、刷新持久化、窄屏布局与解除绑定，不拦截请求，不操作机械臂。
+`CAMERA_BINDINGS_KEEP=1 CAMERA_AI_TEST=1` 额外通过网页向当前模型服务发送两路模拟图像，
+验证 AI 的角色取图工具；运行前须已授权图像发送。仅设置 KEEP 可保留绑定用于整套重启复验。
+该测试不证明实体 UVC 采集或腕部纯视觉抓放，实体设备需另从同一页面完成绑定与预览验收。
+相机节点单测覆盖绑定持久化、离线配置保留、快照等待新帧、元数据/像素一致和 RGB 解码。
+
+实体相机使用 `node tests/integration/camera-bindings.mjs discover temp/camera-check`
+从网页刷新并列出设备与支持的流配置。使用 `bind OUTPUT external|wrist SOURCE PROFILE`
+从同一页面选择、保存并检查出图，保存页面截图与原始画布像素；`unbind OUTPUT ROLE`
+从页面解除绑定。`off OUTPUT ROLE` 关闭采集但保留绑定，`on OUTPUT ROLE` 按保存配置重新开启。
+共享 USB 带宽不足时先 off 一路再 on 另一路，验收须核对两路分别收到开启之后的新图，
+不能把一次快照成功当成同时采集成功。设备与配置参数必须来自实际枚举，不使用固定 video 编号。
+`cycle OUTPUT` 对已保存的两路绑定从网页连续切换两轮，检查新帧时间、唯一活动采集、配置保留
+与刷新后的关闭状态；此模式会切换真实采集，但不改变分辨率、不操作机械臂。
+`node tests/integration/connect-execution.mjs ENDPOINT temp/execution-check` 通过执行页面连接
+所选真实串口并核对硬件反馈，不发送运动命令。
+`node tests/integration/general-ai.mjs model temp/ai-model MODEL` 通过页面保存模型名称，
+刷新后核对持久化；`send` 模式记录所有已出图的相机角色，不将 AI 回复成功当作抓放成功。
+
 生产逻辑在各服务/crate 中，纯函数回归随模块维护；本目录只放跨服务测试和输入夹具。
 临时输出统一根目录 `temp/`。软件反馈测试不证明真机夹持、力度或实际定位精度。
 服务停止后 `temp/` 可以随时清空；测试自行创建结果目录，正式夹具不在其中。

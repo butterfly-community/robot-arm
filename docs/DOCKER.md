@@ -75,7 +75,7 @@ StarArm-102 基础不是全局后端基础。运动和执行镜像读取同一�
 | 服务 | Dockerfile | 服务独占的环境 |
 | --- | --- | --- |
 | controller-input | `backend/nodes/controller-input/Dockerfile` | SDL/HID 所需 USB 构建与运行库 |
-| camera | `backend/nodes/camera/Dockerfile` | OpenCV 5、librealsense SDK/运行库和相机 USB 权限 |
+| camera | `backend/nodes/camera/Dockerfile` | OpenCV 5、librealsense、V4L2 普通摄像头与相机设备权限 |
 | perception | `backend/nodes/scene/Dockerfile` | OpenCV 5；不含相机驱动、ROS 或 AI 权重 |
 | perception-compute | `backend/services/perception-compute/Dockerfile` | Python 计算运行环境、YOLOE、GraspGenX、模型和夹爪资产 |
 | stararm-102-motion | `backend/devices/stararm-102/nodes/motion/Dockerfile` | ROS 2 Lyrical、MoveIt/Servo/MTC、RViz/noVNC、设备 ROS 模型 |
@@ -161,7 +161,11 @@ inotify/轮询发现 evdev 与 HIDAPI 设备。Docker 网络命名空间不能�
 保留 udev 数据挂载用于设备属性读取，不禁用 HIDAPI、传感器或震动，也不增加自定义设备扫描路径。
 依据：[SDL Linux 手柄发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/joystick/linux/SDL_sysjoystick.c)、
 [SDL HIDAPI 发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/hidapi/SDL_hidapi.c)。
-相机默认未选择，不会在容器启动时占用设备。RealSense 真机由 camera 服务直接打开，原始 RGB-D
+深度相机默认未选择；外部/腕部摄像头按保存的采集开关恢复，未绑定或已关闭则不占用设备。
+三路预览共用 camera 服务的视频端口，配置保存在正式 runtime 目录，不依赖 temp。
+外部/腕部绑定提供独立采集开关；关闭等待驱动释放设备，保留绑定与分辨率，重启保持关闭状态。
+共享 USB 带宽不足时可先关闭一路再开启另一路轮流取图，AI 使用相同相机请求，不另建采集节点。
+RealSense 真机由 camera 服务直接打开，原始 RGB-D
 不经过 ROS。
 
 Docker 数据根目录属于主机配置，不由仓库脚本修改。清理历史镜像前先检查 Compose 引用和共享

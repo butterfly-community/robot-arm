@@ -5,6 +5,7 @@ members = [
   "crates/json-config-store",
   "crates/scene-core",
   "crates/realsense-camera",
+  "crates/uvc-camera",
   "crates/robot-arm-messages",
   "crates/spatial-core",
   "devices/stararm-102/crates/model",

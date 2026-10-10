@@ -1,3 +1,4 @@
+mod bindings;
 mod capture_worker;
 mod drivers;
 mod video_server;
@@ -53,6 +54,8 @@ struct CameraConfigStore {
     config_version: u64,
     profiles: BTreeMap<String, SavedProfiles>,
     #[serde(default)]
+    bindings: BTreeMap<robot_arm_messages::CameraRole, bindings::SavedBinding>,
+    #[serde(default)]
     cameras: BTreeMap<String, SavedCalibration>,
     #[serde(skip, default = "default_calibration_session")]
     calibration_session: CalibrationSessionState,
@@ -69,6 +72,7 @@ impl Default for CameraConfigStore {
             schema_version: CONFIG_SCHEMA_VERSION,
             config_version: 0,
             profiles: BTreeMap::new(),
+            bindings: BTreeMap::new(),
             cameras: BTreeMap::new(),
             calibration_session: default_calibration_session(),
         }
@@ -76,6 +80,7 @@ impl Default for CameraConfigStore {
 }
 
 struct CameraNode {
+    bindings: bindings::Bindings,
     runtime: tokio::runtime::Handle,
     calibration_work: Option<tokio::task::JoinHandle<Result<CalibrationWork>>>,
     config_path: PathBuf,
@@ -170,16 +175,20 @@ fn run() -> Result<()> {
     let capture = capture_worker::spawn(&runtime);
     let (video_shutdown, video_shutdown_receiver) = tokio::sync::watch::channel(false);
     let video_listener = runtime.block_on(video_server::bind())?;
-    let _video_server = runtime.spawn(video_server::serve(
-        video_listener,
-        capture.video,
-        video_shutdown_receiver,
-    ));
     let config_path = std::env::var_os("CAMERA_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/config/camera.json"));
     let config = load_config(&config_path)?;
+    let bindings = bindings::Bindings::new(&runtime, &config.bindings);
+    let mut videos = bindings.videos();
+    videos.insert(robot_arm_messages::CameraRole::Depth, capture.video);
+    let _video_server = runtime.spawn(video_server::serve(
+        video_listener,
+        videos,
+        video_shutdown_receiver,
+    ));
     let mut camera = CameraNode {
+        bindings,
         runtime: runtime.handle().clone(),
         calibration_work: None,
         config_path,
@@ -301,6 +310,26 @@ fn run() -> Result<()> {
 
 impl CameraNode {
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
+        for (request_id, action, mut error) in self.bindings.tick() {
+            if error.is_none() {
+                self.config.bindings = self.bindings.saved();
+                self.config.config_version += 1;
+                if let Err(e) = save(&self.config_path, &self.config) {
+                    error = Some(format!("保存相机绑定失败：{e:#}"));
+                }
+            }
+            send(
+                node,
+                "request_result",
+                &RequestResult {
+                    schema_version: SCHEMA_VERSION,
+                    request_id,
+                    acknowledged_action: action,
+                    value: Some(self.state()),
+                    original_error: error,
+                },
+            )?;
+        }
         while let Ok(completion) = self.capture_completions.try_recv() {
             self.finish_capture_command(node, completion)?;
         }
@@ -386,6 +415,7 @@ impl CameraNode {
         completion: CaptureCompletion,
     ) -> Result<()> {
         let (request_id, action, result) = match completion {
+            CaptureCompletion::Closed { request_id, action } => (request_id, action, Ok(())),
             CaptureCompletion::Discovered {
                 request_id,
                 action,
@@ -470,6 +500,37 @@ impl CameraNode {
     }
 
     fn apply_request(&mut self, node: &mut DoraNode, request: CameraRequest) -> Result<()> {
+        if request.role != robot_arm_messages::CameraRole::Depth
+            && !matches!(
+                request.action,
+                RequestAction::Refresh | RequestAction::Discover
+            )
+        {
+            let result =
+                self.bindings
+                    .apply(&request, &self.sources, self.selected_source_id.as_deref());
+            if matches!(result, Ok(true)) {
+                return self.publish_state(node);
+            }
+            let result = result.and_then(|_| {
+                self.config.bindings = self.bindings.saved();
+                self.config.config_version += 1;
+                save(&self.config_path, &self.config)?;
+                Ok(())
+            });
+            send(
+                node,
+                "request_result",
+                &RequestResult {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    acknowledged_action: request.action,
+                    value: Some(self.state()),
+                    original_error: result.err().map(|e| format!("{e:#}")),
+                },
+            )?;
+            return self.publish_state(node);
+        }
         let action = request.action;
         self.original_error = None;
         let asynchronous = match action {
@@ -558,6 +619,12 @@ impl CameraNode {
             .source_id
             .as_deref()
             .ok_or_else(|| eyre!("请选择相机来源"))?;
+        if self
+            .bindings
+            .owns_source(source_id, robot_arm_messages::CameraRole::Depth)
+        {
+            bail!("该相机已绑定普通摄像头角色，请先解除原绑定");
+        }
         let source = self
             .sources
             .iter()
@@ -1353,6 +1420,7 @@ impl CameraNode {
     fn state(&self) -> CameraCaptureState {
         CameraCaptureState {
             schema_version: SCHEMA_VERSION,
+            bindings: self.bindings.states(),
             available_sources: self.sources.clone(),
             selected_source_id: self.selected_source_id.clone(),
             selected_color_profile_key: self.selected_color_profile_key.clone(),
@@ -1513,6 +1581,20 @@ fn selected_profile<'a>(
 }
 
 fn merge_saved_sources(sources: &mut Vec<CameraSourceInfo>, config: &CameraConfigStore) {
+    for binding in config.bindings.values() {
+        if !sources
+            .iter()
+            .any(|s| s.source_id == binding.source.source_id)
+        {
+            let mut source = binding.source.clone();
+            source.available = false;
+            for profile in &mut source.profiles {
+                profile.available = false;
+                profile.unavailable_reason = Some("设备当前未连接".into());
+            }
+            sources.push(source);
+        }
+    }
     for (source_id, saved) in &config.profiles {
         let Some(snapshot) = &saved.source_snapshot else {
             continue;
@@ -1638,6 +1720,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn role_bindings_survive_serialization_and_missing_devices_stay_visible() {
+        use robot_arm_messages::CameraRole;
+        let mut config = CameraConfigStore::default();
+        config.bindings.insert(
+            CameraRole::Wrist,
+            bindings::SavedBinding {
+                source: CameraSourceInfo {
+                    source_id: "v4l2:stable-serial".into(),
+                    display_name: "Wrist camera".into(),
+                    available: true,
+                    ..Default::default()
+                },
+                color_profile_key: "MJPG:1280:720:1:30".into(),
+                enabled: false,
+            },
+        );
+        let restored: CameraConfigStore =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(!restored.bindings[&CameraRole::Wrist].enabled);
+        let mut legacy = serde_json::to_value(&restored.bindings[&CameraRole::Wrist]).unwrap();
+        legacy.as_object_mut().unwrap().remove("enabled");
+        assert!(
+            serde_json::from_value::<bindings::SavedBinding>(legacy)
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            restored.bindings[&CameraRole::Wrist].source.source_id,
+            "v4l2:stable-serial"
+        );
+        let mut sources = vec![];
+        merge_saved_sources(&mut sources, &restored);
+        assert_eq!(sources.len(), 1);
+        assert!(!sources[0].available);
+        assert_eq!(sources[0].display_name, "Wrist camera");
+    }
+
+    #[test]
     fn disconnected_execution_reports_the_original_fault_instead_of_waiting_for_feedback() {
         let transport = ExecutionTransportState {
             selected_endpoint: Some("/dev/ttyUSB0".into()),
@@ -1707,6 +1827,7 @@ mod tests {
     fn default_state_does_not_select_or_start_a_camera() {
         let state = CameraCaptureState {
             schema_version: SCHEMA_VERSION,
+            bindings: vec![],
             available_sources: vec![],
             selected_source_id: None,
             selected_color_profile_key: None,
@@ -1884,6 +2005,7 @@ mod tests {
         let config = CameraConfigStore {
             schema_version: CONFIG_SCHEMA_VERSION,
             config_version: 1,
+            bindings: BTreeMap::new(),
             profiles: BTreeMap::from([(
                 snapshot.source_id.clone(),
                 SavedProfiles {

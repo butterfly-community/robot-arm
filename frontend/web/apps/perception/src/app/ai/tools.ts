@@ -1,10 +1,11 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { PerceptionState } from "@robot/contracts";
+import type { CameraCaptureState, PerceptionState } from "@robot/contracts";
 import { startPickPlace } from "../start-pick-place";
 import {
   compactScene,
   compactCamera,
+  cameraImage,
   gateway,
   imageBytes,
   perceptionSnapshot,
@@ -153,25 +154,36 @@ export function robotTools(context: RobotToolsContext): ToolSet {
         };
       },
     ),
+    set_camera_capture: define(
+      "set_camera_capture",
+      "开启或关闭已绑定的外部/腕部摄像头采集，与网页开关相同。关闭会等待释放 USB 设备但保留绑定与分辨率；开启使用已保存配置。共享 USB 带宽不足时，先关闭另一台，等待完成后开启要观察的一台，再 observe_camera 获取新图。不开启或关闭深度相机，不运动。",
+      z.object({ role: z.enum(["external", "wrist"]), enabled: z.boolean() }),
+      async ({ role, enabled }, post) => {
+        const result = (await post("/api/perception/camera", {
+          role,
+          action: enabled ? "connect" : "disconnect",
+        })) as { request_id: string; value: CameraCaptureState };
+        // The acknowledged camera state includes every device capability and
+        // saved calibration. Switching only needs binding/signal state; keep
+        // the full result in the request record, not in each model turn.
+        return {
+          request_id: result.request_id,
+          bindings: result.value.bindings,
+        };
+      },
+    ),
     observe_camera: define(
       "observe_camera",
-      "采集当前相机新的真实 RGB 图片并识图，不运行分割、不运动。执行后确认物体时必须重新观察。",
-      empty,
-      async (_, post) => {
-        const result = await post(
-          "/api/perception/request",
-          { action: "snapshot", classes: null, placement_labels: null },
-          "刷新相机图像",
-        );
-        const state = perceptionResult(result);
-        const image = await putImage(await imageBytes("color.png"));
+      "按角色读取请求之后的新 RGB 图像：depth=深度相机彩色图，external=外部摄像头，wrist=腕部摄像头。先 read_scene 查询绑定；每路独立采集，不宣称同步双目。无需深度、内参、标定或分割，不运动。",
+      z.object({ role: z.enum(["depth", "external", "wrist"]) }),
+      async ({ role }) => {
+        const captured = await cameraImage(role, context.signal);
+        const image = await putImage(captured.bytes);
         return {
           image_id: image.id,
           ...image,
-          source_id: state.source_id,
-          captured_at_ns: state.last_frame_time_ns,
-          frame: state.color_frame,
-          note: "相机原始 RGB，不是机械臂基座视角；像素位置不是空间坐标",
+          ...captured.metadata,
+          note: "角色绑定不是几何标定；相机原始 RGB，像素位置不是空间坐标。动作后重新观察并读取机器人反馈。",
         };
       },
       true,

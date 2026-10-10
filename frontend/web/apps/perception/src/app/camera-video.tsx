@@ -1,6 +1,8 @@
 "use client";
 
 import { RGB888 } from "@thi.ng/pixel";
+import type { CameraRole } from "@robot/contracts";
+import { cameraTitles } from "./camera-bindings";
 import { Button } from "@robot/ui";
 import {
   type CSSProperties,
@@ -69,7 +71,13 @@ function frameMetadata(value: string): FrameMetadata {
   return metadata as FrameMetadata;
 }
 
-export function CameraVideo({ streaming }: { streaming: boolean }) {
+export function CameraVideo({
+  streaming,
+  role = "depth",
+}: {
+  streaming: boolean;
+  role?: CameraRole;
+}) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string>();
 
@@ -82,11 +90,21 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
     const connect = () => {
       metadata = undefined;
       const scheme = location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${scheme}://${location.host}/ws/camera-video`);
+      socket = new WebSocket(
+        `${scheme}://${location.host}/ws/camera-video?role=${role}`,
+      );
       socket.binaryType = "arraybuffer";
       socket.onmessage = (event) => {
         try {
           if (typeof event.data === "string") {
+            if (JSON.parse(event.data).signal === false) {
+              canvas.current
+                ?.getContext("2d")
+                ?.clearRect(0, 0, canvas.current.width, canvas.current.height);
+              metadata = undefined;
+              setError("相机信号中断或未绑定");
+              return;
+            }
             metadata = frameMetadata(event.data);
             return;
           }
@@ -119,6 +137,9 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
       };
       socket.onclose = () => {
         if (!stopped) {
+          canvas.current
+            ?.getContext("2d")
+            ?.clearRect(0, 0, canvas.current.width, canvas.current.height);
           setError("相机视频连接中断，正在重连");
           retry = setTimeout(connect, 1000);
         }
@@ -131,7 +152,7 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
       if (retry) clearTimeout(retry);
       socket?.close();
     };
-  }, [streaming]);
+  }, [streaming, role]);
 
   if (!streaming) return <div className="visual-empty">等待相机开始采集</div>;
   return (
@@ -143,6 +164,8 @@ export function CameraVideo({ streaming }: { streaming: boolean }) {
 }
 
 type FloatingCameraVideoProps = {
+  role?: CameraRole;
+  hasSignal?: boolean;
   streaming: boolean;
   profile: string;
   rates: string;
@@ -159,11 +182,11 @@ const subscribeBrowser = () => () => undefined;
 const browserSnapshot = () => true;
 const serverSnapshot = () => false;
 
-function storedPosition(): WindowPosition | undefined {
+function storedPosition(key: string): WindowPosition | undefined {
   if (typeof window === "undefined") return undefined;
   try {
     const value = JSON.parse(
-      localStorage.getItem(POSITION_STORAGE_KEY) ?? "null",
+      localStorage.getItem(key) ?? "null",
     ) as Partial<WindowPosition> | null;
     if (
       Number.isFinite(value?.left) &&
@@ -181,13 +204,15 @@ function storedPosition(): WindowPosition | undefined {
   return undefined;
 }
 
-function storedCollapsed(): boolean {
+function storedCollapsed(key: string): boolean {
   if (typeof window === "undefined") return false;
-  return localStorage.getItem(COLLAPSED_STORAGE_KEY) === "true";
+  return localStorage.getItem(key) === "true";
 }
 
 export function FloatingCameraVideo({
+  role = "depth",
   streaming,
+  hasSignal = streaming,
   profile,
   rates,
 }: FloatingCameraVideoProps) {
@@ -196,9 +221,13 @@ export function FloatingCameraVideo({
     browserSnapshot,
     serverSnapshot,
   );
-  if (!browserReady) return null;
+  const [seen, setSeen] = useState(false);
+  if (hasSignal && !seen) setSeen(true);
+  if (!browserReady || (!hasSignal && !seen)) return null;
   return (
     <FloatingCameraVideoWindow
+      role={role}
+      hasSignal={hasSignal}
       streaming={streaming}
       profile={profile}
       rates={rates}
@@ -207,17 +236,23 @@ export function FloatingCameraVideo({
 }
 
 function FloatingCameraVideoWindow({
+  role = "depth",
   streaming,
+  hasSignal = streaming,
   profile,
   rates,
 }: FloatingCameraVideoProps) {
+  const positionKey = `${POSITION_STORAGE_KEY}:${role}`;
+  const collapsedKey = `${COLLAPSED_STORAGE_KEY}:${role}`;
   const panel = useRef<HTMLElement>(null);
   const dragOffset = useRef<WindowPosition | undefined>(undefined);
-  const [position, setPosition] = useState<WindowPosition | undefined>(
-    storedPosition,
+  const [position, setPosition] = useState<WindowPosition | undefined>(() =>
+    storedPosition(positionKey),
   );
   const positionRef = useRef<WindowPosition | undefined>(position);
-  const [collapsed, setCollapsed] = useState(storedCollapsed);
+  const [collapsed, setCollapsed] = useState(() =>
+    storedCollapsed(collapsedKey),
+  );
 
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || !panel.current) return;
@@ -252,10 +287,7 @@ function FloatingCameraVideoWindow({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     if (positionRef.current) {
-      localStorage.setItem(
-        POSITION_STORAGE_KEY,
-        JSON.stringify(positionRef.current),
-      );
+      localStorage.setItem(positionKey, JSON.stringify(positionRef.current));
     }
   };
 
@@ -266,14 +298,17 @@ function FloatingCameraVideoWindow({
         right: "auto",
         bottom: "auto",
       } satisfies CSSProperties)
-    : undefined;
+    : ({
+        top: 80 + ["depth", "external", "wrist"].indexOf(role) * 64,
+        bottom: "auto",
+      } satisfies CSSProperties);
 
   return (
     <aside
       ref={panel}
       className={`floating-camera-monitor${collapsed ? " is-collapsed" : ""}`}
       style={style}
-      aria-label="彩色视频浮动窗口"
+      aria-label={`${cameraTitles[role]}浮动窗口`}
     >
       <header
         className="floating-camera-header"
@@ -283,9 +318,9 @@ function FloatingCameraVideoWindow({
         onPointerCancel={stopDrag}
       >
         <div>
-          <strong>彩色视频</strong>
+          <strong>{cameraTitles[role]}</strong>
           <span>
-            {collapsed ? "预览已收起" : streaming ? "采集中" : "等待视频"}
+            {!hasSignal ? "信号中断" : collapsed ? "预览已收起" : "采集中"}
           </span>
         </div>
         <Button
@@ -302,7 +337,7 @@ function FloatingCameraVideoWindow({
           onClick={() => {
             const next = !collapsed;
             setCollapsed(next);
-            localStorage.setItem(COLLAPSED_STORAGE_KEY, String(next));
+            localStorage.setItem(collapsedKey, String(next));
           }}
         >
           {collapsed ? "展开" : "收起"}
@@ -310,7 +345,7 @@ function FloatingCameraVideoWindow({
       </header>
       {!collapsed && (
         <div className="floating-camera-content">
-          <CameraVideo streaming={streaming} />
+          <CameraVideo streaming={streaming && hasSignal} role={role} />
           <div className="floating-camera-metadata">
             <span title={profile}>{profile}</span>
             <span title={rates}>{rates}</span>

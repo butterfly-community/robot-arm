@@ -1229,6 +1229,28 @@ input[type="range"] {
   backdrop-filter: blur(12px);
   pointer-events: none;
 }
+
+.camera-bindings {
+  display: grid;
+  gap: 24px;
+  margin-block: 24px;
+}
+.camera-binding {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  border: 1px solid var(--border, #28313a);
+  border-radius: 10px;
+  padding: 20px;
+}
+.camera-binding h3 {
+  margin: 0;
+}
+.camera-binding .card-actions {
+  margin: 0;
+  flex-wrap: wrap;
+  gap: 12px;
+}
 .floating-camera-monitor.is-collapsed {
   width: 240px;
 }

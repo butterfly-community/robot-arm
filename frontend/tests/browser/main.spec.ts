@@ -707,12 +707,12 @@ test("color video floats, drags, collapses, and restores browser state", async (
 }) => {
   await page.goto("/perception/");
   await page.evaluate(() => {
-    localStorage.removeItem("robot-arm:perception:color-video-position");
-    localStorage.removeItem("robot-arm:perception:color-video-collapsed");
+    localStorage.removeItem("robot-arm:perception:color-video-position:depth");
+    localStorage.removeItem("robot-arm:perception:color-video-collapsed:depth");
   });
   await page.reload();
 
-  const monitor = page.getByLabel("彩色视频浮动窗口");
+  const monitor = page.getByLabel("深度相机彩色画面浮动窗口");
   await expect(monitor).toBeVisible();
   const before = await monitor.boundingBox();
   const header = monitor.locator(".floating-camera-header");
@@ -729,20 +729,22 @@ test("color video floats, drags, collapses, and restores browser state", async (
   expect(moved!.y).toBeLessThan(before!.y - 20);
 
   await page.reload();
-  const restored = await page.getByLabel("彩色视频浮动窗口").boundingBox();
+  const restored = await page
+    .getByLabel("深度相机彩色画面浮动窗口")
+    .boundingBox();
   expect(restored).not.toBeNull();
   expect(Math.abs(restored!.x - moved!.x)).toBeLessThan(2);
   expect(Math.abs(restored!.y - moved!.y)).toBeLessThan(2);
 
-  await page.getByRole("button", { name: "收起" }).click();
+  await monitor.getByRole("button", { name: "收起" }).click();
   await expect(
     monitor.getByRole("button", { name: "展开", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".floating-camera-content")).toHaveCount(0);
+  await expect(monitor.locator(".floating-camera-content")).toHaveCount(0);
   await page.reload();
   await expect(
     page
-      .getByLabel("彩色视频浮动窗口")
+      .getByLabel("深度相机彩色画面浮动窗口")
       .getByRole("button", { name: "展开", exact: true }),
   ).toBeVisible();
 });
@@ -770,14 +772,14 @@ test("video preview collapse closes the connection and expand reconnects", async
   }
   const connections: { closed: boolean; frames: number }[] = [];
   page.on("websocket", (socket) => {
-    if (!socket.url().endsWith("/ws/camera-video")) return;
+    if (!socket.url().includes("/ws/camera-video?role=depth")) return;
     const connection = { closed: false, frames: 0 };
     connections.push(connection);
     socket.on("framereceived", () => connection.frames++);
     socket.on("close", () => (connection.closed = true));
   });
   await page.goto("/perception/");
-  const monitor = page.getByLabel("彩色视频浮动窗口");
+  const monitor = page.getByLabel("深度相机彩色画面浮动窗口");
   for (let round = 0; round < 3; round++) {
     await expect.poll(() => connections.length).toBe(round + 1);
     await expect.poll(() => connections[round].frames).toBeGreaterThan(1);
