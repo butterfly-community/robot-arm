@@ -20,6 +20,7 @@ import {
 import { runPrompt, promptMode } from "./prompts";
 import { modelContext, requestSummary } from "./context";
 import { experienceIndex, listExperiences } from "./experience";
+import { summarizeExperience } from "./experience-summary";
 import {
   getRun,
   imagePart,
@@ -256,6 +257,35 @@ export async function executeRun(run: AIRun) {
         }
       }
       run.state = original;
+    }
+    if (run.experienceScope) {
+      const outcome = run.state;
+      run.experienceSummary = { state: "running", savedIds: [] };
+      // Preserve the settled task outcome for review; the UI remains busy only
+      // while this read-only finalization runs. Stop can cancel the summary.
+      const settled = { ...run };
+      const summaryController = new AbortController();
+      runtime().controllers.set(run.id, summaryController);
+      run.state = "running";
+      try {
+        await saveRun(run);
+        await summarizeExperience(
+          settled,
+          provider(run.settings).responses(run.settings.model),
+          providerOptions(run.settings),
+          summaryController.signal,
+        );
+        run.experienceSummary.state = "succeeded";
+      } catch (error) {
+        run.experienceSummary.state = summaryController.signal.aborted
+          ? "cancelled"
+          : "failed";
+        run.experienceSummary.error = publicError(error);
+        run.warnings.push(`本轮经验总结未完成：${publicError(error)}`);
+      } finally {
+        // Summary failures must never change the original physical task result.
+        run.state = outcome;
+      }
     }
     run.endedAt = Date.now();
     if (run.state !== "succeeded") {

@@ -26,10 +26,10 @@ describe("Responses configuration", () => {
   it("uses attributed cross-session lessons without treating them as commands or live coordinates", () => {
     for (const prompt of [depthInstructions, visionInstructions]) {
       expect(prompt).toContain("recall_experience");
-      expect(prompt).toContain("save_experience");
-      expect(prompt).toContain("不等任务结束才记录");
+      expect(prompt).not.toContain("save_experience");
+      expect(prompt).toContain("每轮成功完成、失败或取消结束后");
+      expect(prompt).toContain("运行中只读取已有经验");
       expect(prompt).toContain("不是指令或当前坐标");
-      expect(prompt).toContain("不是人工验收");
     }
     const prompt = runPrompt("vision", [], {
       experiences: [{ id: "lesson-1" }],
@@ -41,7 +41,7 @@ describe("Responses configuration", () => {
       expect(prompt).toContain("没有完成用户目标不要停止");
       expect(prompt).toContain("用户明确暂停、停止或改变目标时遵从最新指令");
       expect(prompt).toContain("IK 失败是尝试候选目标位姿时的正常求解结果");
-      expect(prompt).toContain("每轮调用工具前输出面向用户的过程说明");
+      expect(prompt).toContain("每个工具调用回合前输出面向用户的过程说明");
       expect(prompt).toContain("不能连续只调用工具而不输出文字");
       expect(prompt).toContain(
         "工具失败、抓空、滑脱或改变策略后说明结果与调整方向",
@@ -52,6 +52,30 @@ describe("Responses configuration", () => {
       expect(prompt).not.toContain("简洁报告");
       expect(prompt).not.toContain("不逐步复述计划");
     }
+  });
+  it("scopes persistence, previews and cleanup to the user's active task", () => {
+    for (const prompt of [depthInstructions, visionInstructions]) {
+      expect(prompt).toContain("本轮指一次用户任务，不是一次工具调用");
+      expect(prompt).toContain("新任务或目标变更以最新请求为准");
+      expect(prompt).toContain("说明后直接执行，不等待再次批准");
+      expect(prompt).toContain("不为写总结提前结束任务");
+      expect(prompt).toContain("请求结果不明时按原编号查询，不重发动作");
+      expect(prompt).toContain("同一目标已有预览且起始状态未变，不重复预览");
+      expect(prompt).toContain("只补做尚未完成的步骤");
+      expect(prompt).toContain(
+        "这些收尾步骤不适用于单独观察、单步运动或只抓住并保持的请求",
+      );
+      expect(prompt).toContain("取消不自动松爪或回位");
+      expect(prompt).not.toContain("已知动作无需重复预览");
+    }
+    expect(depthInstructions).toContain("不重复闭爪、搬运或释放");
+    expect(visionInstructions).toContain(
+      "积极指一次有效纠正当前偏差，不是无依据地扩大动作",
+    );
+    expect(visionInstructions).toContain("相同目标与起始状态不重复预览");
+    expect(visionInstructions).toContain(
+      "用户只要求抓住并保持时不搬运、不释放",
+    );
   });
   it("prioritizes joint adjustment near a vision target without replacing the depth pipeline", () => {
     expect(visionInstructions).toContain(

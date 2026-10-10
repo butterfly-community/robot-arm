@@ -103,6 +103,11 @@ export interface AIRun {
   warnings: string[];
   promptMode?: "depth" | "vision";
   experienceScope?: ExperienceScope;
+  experienceSummary?: {
+    state: "running" | "succeeded" | "failed" | "cancelled";
+    savedIds: string[];
+    error?: string;
+  };
   steps?: {
     responseId?: string;
     responseMs: number;

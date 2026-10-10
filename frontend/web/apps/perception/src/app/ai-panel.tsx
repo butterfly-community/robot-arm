@@ -419,15 +419,7 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
         </p>
       )}
       <AIExperiencePanel
-        revision={runs.reduce(
-          (count, run) =>
-            count +
-            run.calls.filter(
-              (call) =>
-                call.endedAt && (call.error || call.name === "save_experience"),
-            ).length,
-          0,
-        )}
+        revision={runs.reduce((count, run) => count + (run.endedAt ?? 0), 0)}
       />
       <div
         className="ai-conversation"
@@ -479,13 +471,30 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
               <KeyValue
                 label="当前步骤"
                 value={
-                  run.calls.findLast((call) => !call.endedAt)?.name ??
-                  (run.calls.length
-                    ? `${run.calls.at(-1)!.name} 已结束，等待模型继续`
-                    : "等待模型响应")
+                  run.experienceSummary?.state === "running"
+                    ? "动作流程已结束，正在总结本轮经验"
+                    : (run.calls.findLast((call) => !call.endedAt)?.name ??
+                      (run.calls.length
+                        ? `${run.calls.at(-1)!.name} 已结束，等待模型继续`
+                        : "等待模型响应"))
                 }
               />
             )}
+            {run.experienceSummary &&
+              run.experienceSummary.state !== "running" && (
+                <KeyValue
+                  label="本轮经验"
+                  value={
+                    run.experienceSummary.state === "succeeded"
+                      ? run.experienceSummary.savedIds.length
+                        ? `已总结并保存 ${run.experienceSummary.savedIds.length} 条经验`
+                        : "已总结，无新增经验"
+                      : run.experienceSummary.state === "cancelled"
+                        ? "总结已取消"
+                        : "总结失败，原任务结果不变"
+                  }
+                />
+              )}
             {run.requests
               .filter((request) =>
                 ["accepted", "planning", "executing"].includes(request.state),

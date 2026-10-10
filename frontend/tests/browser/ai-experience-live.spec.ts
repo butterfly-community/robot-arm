@@ -48,11 +48,10 @@ test("experience survives a new conversation and refresh, and can be deleted in 
     expect(run.state, run.error).toBe("succeeded");
     expect(run.requests).toHaveLength(0);
     expect(
-      run.calls.every((call) =>
-        ["recall_experience", "save_experience"].includes(call.name),
-      ),
+      run.calls.every((call) => ["recall_experience"].includes(call.name)),
     ).toBe(true);
     expect(run.calls.every((call) => !call.error)).toBe(true);
+    expect(run.experienceSummary?.state).toBe("succeeded");
     await expect(
       page.locator(`[data-run-id="${run.id}"] .ai-response`),
     ).toHaveText(run.text);
@@ -61,15 +60,21 @@ test("experience survives a new conversation and refresh, and can be deleted in 
 
   const first = await send(
     page,
-    `只做经验库功能验收，不运动、不取图、不调用其他工具或继续历史任务。用 save_experience 新增标题为“${title}”的测试经验，条件注明“仅验收数据，不用于机械臂控制”，结论“测试假设尚未验证”，下一步“核对跨会话读取后删除”，assessment=hypothesis，evidenceCallIds=[]。保存后报告编号并结束。`,
+    `只做经验库功能验收，不运动、不取图、不调用其他工具或继续历史任务。这是我的纠正：“${title}”这条经验仅为验收数据，不用于机械臂控制，测试假设尚未验证。请确认收到并结束本轮；结束总结时用此标题保存待验证结论，下一步是核对跨会话读取后删除。`,
   );
-  const saved = first.calls.find((call) => call.name === "save_experience");
+  const entries = await (
+    await page.request.get("/perception/api/ai/experiences/")
+  ).json();
+  const saved = entries.find(
+    (entry: { title: string }) => entry.title === title,
+  );
   expect(saved).toBeTruthy();
-  const id = (saved!.result as { id: string }).id;
+  const id = saved.id;
   expect(id).toBeTruthy();
+  expect(first.experienceSummary?.savedIds).toContain(id);
   const second = await send(
     page,
-    `只做经验读取验收，不运动、不取图、不修改经验、不调用其他工具或继续历史任务。请从当前经验目录中找到标题“${title}”，用 recall_experience 读取详情，说明它是未验证的测试假设，报告来源任务编号后结束。`,
+    `只做经验读取验收，不运动、不取图、不修改经验、不调用其他工具或继续历史任务。请从当前经验目录中找到标题“${title}”，用 recall_experience 读取详情，说明它是未验证的测试假设，报告来源任务编号后结束。本轮没有新增经验，结束总结不要重复保存。`,
   );
   expect(second.sessionId).not.toBe(first.sessionId);
   expect(

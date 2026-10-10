@@ -4,12 +4,11 @@ import { db } from "./store";
 import {
   experienceInputSchema,
   type AIExperience,
-  type AICall,
   type AIRun,
   type ExperienceScope,
 } from "./types";
 
-// Same persistent Redis as conversations; no TTL, files, or extra model calls.
+// Same persistent Redis as conversations; no TTL or separate storage service.
 const key = "robot-arm:ai:experiences";
 // Compare-and-set protects a human deletion/correction from an in-flight AI
 // update. Do not recreate a value read before the user removed it.
@@ -70,12 +69,16 @@ export async function listExperiences(scope?: ExperienceScope, query = "") {
 }
 
 export function experienceIndex(values: AIExperience[]) {
-  return values.map(({ id, title, conditions, reflection }) => ({
-    id,
-    title,
-    conditions,
-    assessment: reflection?.assessment ?? "failure_fact",
-  }));
+  // Keep old intermediate records manageable in the UI, but do not inject
+  // unsummarized failures into subsequent tasks.
+  return values
+    .filter((value) => value.reflection)
+    .map(({ id, title, conditions, reflection }) => ({
+      id,
+      title,
+      conditions,
+      assessment: reflection!.assessment,
+    }));
 }
 
 export async function readExperience(id: string, scope: ExperienceScope) {
@@ -111,50 +114,6 @@ function sources(
       callIds: [...new Set([...(current?.callIds ?? []), ...callIds])],
     },
   ];
-}
-
-export async function recordFailure(run: AIRun, call: AICall) {
-  // Never turn cancellation or a memory-tool error into a robot lesson.
-  if (
-    !run.experienceScope ||
-    !call.error ||
-    !run.requests.some(
-      (request) =>
-        request.id.startsWith(`${run.id}:${call.id}:`) &&
-        request.state === "failed",
-    )
-  )
-    return undefined;
-  const scope = run.experienceScope;
-  const id = identity(scope, `failure:${call.name}:${call.error}`);
-  const redis = await db();
-  const raw = await redis.hGet(key, id);
-  const previous: AIExperience | undefined = raw ? JSON.parse(raw) : undefined;
-  const now = Date.now();
-  const value: AIExperience = {
-    id,
-    scope,
-    title: previous?.title ?? `${call.name}：${call.error}`,
-    conditions:
-      previous?.conditions ??
-      "仅证明所记录参数的这次请求失败，不代表该方向或整个任务不可行。",
-    failure: {
-      tool: call.name,
-      input: call.input,
-      error: call.error,
-      runId: run.id,
-      callId: call.id,
-    },
-    reflection: previous?.reflection,
-    sources: sources(previous, run, [call.id]),
-    createdAt: previous?.createdAt ?? now,
-    updatedAt: now,
-  };
-  await persist(id, raw, value);
-  return {
-    experience_id: id,
-    note: "失败事实已保存；原因及改进效果尚需结合观测判断，可用 save_experience 补充。",
-  };
 }
 
 export async function saveExperience(

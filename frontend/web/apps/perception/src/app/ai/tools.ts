@@ -22,14 +22,8 @@ import {
   RobotToolsContext,
 } from "./robot";
 import { getImage, putImage, saveRun } from "./store";
-import { errorText, experienceInputSchema } from "./types";
-import {
-  experienceIndex,
-  listExperiences,
-  readExperience,
-  recordFailure,
-  saveExperience,
-} from "./experience";
+import { errorText } from "./types";
+import { experienceIndex, listExperiences, readExperience } from "./experience";
 import { jointReadings, readablePose } from "./posture";
 
 function perceptionResult(result: unknown): PerceptionState {
@@ -126,20 +120,9 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           return output;
         } catch (error) {
           call.error = errorText(error);
-          let experience;
-          if (!context.signal.aborted) {
-            try {
-              experience = await recordFailure(context.run, call);
-            } catch (memoryError) {
-              (context.run.warnings ??= []).push(
-                `失败经验保存失败：${errorText(memoryError)}`,
-              );
-            }
-          }
           return {
             error: call.error,
             tool: name,
-            ...experience,
             ...(afterMotion ? await motionFeedback() : {}),
             request_ids: context.run.requests
               .filter((r) => r.id.includes(toolCallId))
@@ -191,12 +174,6 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           ? readExperience(id, scope)
           : experienceIndex(await listExperiences(scope, query));
       },
-    ),
-    save_experience: define(
-      "save_experience",
-      "保存或修正跨会话经验到 Redis，不运动。说明适用条件、观察所得结论和下次改进；引用本次已完成工具的编号。hypothesis=待验证推测，supported=AI 判断有观测支持，refuted=后续观测不支持；都不是人工验收或训练结果。更新同类已有条目，不重复新增；不保存密钥、图像内容或整段内部推理。",
-      experienceInputSchema,
-      async (input) => saveExperience(context.run, input),
     ),
     read_robot: define(
       "read_robot",
@@ -488,7 +465,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     work_pose: define(
       "work_pose",
-      "使用系统已定义的工作位，等待实际运动完成。与网页工作位按钮相同。",
+      "使用系统已定义的工作位，等待实际运动完成。与网页工作位按钮相同；同时应用该命名姿态的关节与夹爪目标，不是仅移动机械臂。需要保持夹爪状态而只改整臂构型时用 move_joints。",
       z.object({ observe_role: observeRole }),
       async (_, post) => {
         const target = namedTargetRequest(await robotModel(), "work");

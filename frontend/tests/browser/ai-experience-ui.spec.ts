@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
-import type { AIExperience } from "../../web/apps/perception/src/app/ai/types";
+import type {
+  AIExperience,
+  AIRun,
+} from "../../web/apps/perception/src/app/ai/types";
 
 // Supplemental UI regression only: all APIs/WebSockets are intercepted. This
 // does not replace the opt-in unmocked ai-experience-live acceptance test.
@@ -13,6 +16,28 @@ for (const width of [1600, 390]) {
     await page.routeWebSocket("**/ws/**", (socket) => socket.close());
     let failDelete = true;
     let failRead = false;
+    const run: AIRun = {
+      id: "summary-run",
+      sessionId: "fixture-session",
+      owner: "fixture",
+      settings: {
+        baseURL: "https://example.com/v1",
+        model: "fixture",
+        effort: "",
+      },
+      state: "running",
+      input: "任务结束总结",
+      images: [],
+      text: "动作流程已结束。",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      calls: [],
+      requests: [],
+      responseModels: [],
+      responseIds: [],
+      warnings: [],
+      experienceSummary: { state: "running", savedIds: [] },
+    };
     let items: AIExperience[] = [
       {
         id: "fixture-lesson",
@@ -71,7 +96,7 @@ for (const width of [1600, 390]) {
       if (url.pathname.includes("/api/ai/events/"))
         return route.fulfill({
           contentType: "text/event-stream",
-          body: "data: []\n\n",
+          body: `data: ${JSON.stringify([run])}\n\n`,
         });
       if (url.pathname === "/perception/api/ai/")
         return route.fulfill({
@@ -84,13 +109,16 @@ for (const width of [1600, 390]) {
             keyConfigured: false,
             checks: [],
             sessions: [],
-            runs: [],
+            runs: [run],
           },
         });
       if (route.request().method() !== "GET") return route.abort();
       return route.fulfill({ json: { values: {} } });
     });
     await page.goto("/perception/");
+    await expect(
+      page.getByText("动作流程已结束，正在总结本轮经验", { exact: true }),
+    ).toBeVisible();
     const toggle = page.getByRole("button", { name: /^任务经验/ });
     await expect(toggle).toBeVisible();
     await toggle.click();
@@ -155,6 +183,35 @@ for (const width of [1600, 390]) {
     await expect(remove).toHaveCount(0);
     await page.reload();
     await expect(page.getByText("0 / 0 条经验", { exact: true })).toBeVisible();
+    run.state = "succeeded";
+    run.endedAt = Date.now();
+    run.experienceSummary = { state: "succeeded", savedIds: [] };
+    await page.reload();
+    await expect(
+      page.getByText("已总结，无新增经验", { exact: true }),
+    ).toBeVisible();
+    run.experienceSummary = {
+      state: "succeeded",
+      savedIds: ["fixture-lesson"],
+    };
+    await page.reload();
+    await expect(
+      page.getByText("已总结并保存 1 条经验", { exact: true }),
+    ).toBeVisible();
+    run.experienceSummary = {
+      state: "failed",
+      savedIds: [],
+      error: "总结失败测试",
+    };
+    run.warnings = ["本轮经验总结未完成：总结失败测试"];
+    await page.reload();
+    await expect(
+      page.getByText("总结失败，原任务结果不变", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator('[data-run-id="summary-run"]')).toHaveAttribute(
+      "data-run-state",
+      "succeeded",
+    );
     expect(errors).toEqual([]);
   });
 }

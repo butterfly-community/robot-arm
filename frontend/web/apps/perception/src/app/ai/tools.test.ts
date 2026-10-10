@@ -2,13 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
 import { perceptionSnapshot, cameraImage, readRobot } from "./robot";
-import { recordFailure } from "./experience";
 vi.mock("./experience", () => ({
-  recordFailure: vi.fn(async () => undefined),
   experienceIndex: vi.fn(),
   listExperiences: vi.fn(),
   readExperience: vi.fn(),
-  saveExperience: vi.fn(),
 }));
 vi.mock("./store", () => ({
   saveRun: vi.fn(async () => {}),
@@ -79,17 +76,34 @@ function setup() {
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
   beforeEach(() => vi.clearAllMocks());
-  it("does not hide or replay a failed motion when experience persistence fails", async () => {
+  it("describes the gripper target included in work_pose without promising to preserve the grasp", async () => {
+    const { command, tools } = setup();
+    expect(tools.work_pose.description).toContain(
+      "同时应用该命名姿态的关节与夹爪目标",
+    );
+    expect(tools.work_pose.description).toContain(
+      "需要保持夹爪状态而只改整臂构型时用 move_joints",
+    );
+    await tools.work_pose.execute!(
+      {},
+      { toolCallId: "work", messages: [], context: undefined },
+    );
+    expect(command.mock.calls[1][3]).toMatchObject({
+      joints: [{ joint_key: "j1", position_rad: 0 }],
+      actuators: [{ actuator_key: "gripper", position_rad: 0 }],
+    });
+  });
+  it("keeps failed attempts in the run without an experience write tool or replay", async () => {
     const { command, tools } = setup();
     command.mockRejectedValueOnce(Error("IK failed"));
-    vi.mocked(recordFailure).mockRejectedValueOnce(Error("Redis unavailable"));
     const result = await tools.move_joints.execute!(
       { joints: [{ joint_key: "j1", position_rad: 0 }] },
       { toolCallId: "memory-failure", messages: [], context: undefined },
     );
     expect(result).toMatchObject({ error: "IK failed", tool: "move_joints" });
     expect(command).toHaveBeenCalledTimes(1);
-    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(tools).not.toHaveProperty("save_experience");
+    expect(result).not.toHaveProperty("experience_id");
   });
   it("previews joint angles without changing mode or submitting an execution", async () => {
     const { command, tools } = setup();

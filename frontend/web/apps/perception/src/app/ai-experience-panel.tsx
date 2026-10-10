@@ -80,6 +80,7 @@ export function AIExperiencePanel({ revision }: { revision: number }) {
       <div className="card-stack">
         <p className="muted">
           新任务会读取相同机械臂、深度／纯视觉模式及反馈来源的经验目录。
+          每轮结束后统一总结；中间尝试不入库，没有新结论就不新增。
           可删除错误经验；删除不抹除历史会话，也不能撤回当前任务已经读到的内容。
         </p>
         <Field label="查找经验">
@@ -109,7 +110,7 @@ export function AIExperiencePanel({ revision }: { revision: number }) {
           </p>
         )}
         {!loading && !error && !shown.length && (
-          <p>暂无匹配经验；失败事实和 AI 总结会在任务执行过程中保存。</p>
+          <p>暂无匹配经验；AI 会在每轮结束后总结并保存可复用结论。</p>
         )}
         {shown.map((item) => (
           <article className="ai-run" key={item.id}>

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type AICall, type AIRun, experienceInputSchema } from "./types";
+import { type AIRun, experienceInputSchema } from "./types";
 
 const values = vi.hoisted(() => new Map<string, string>());
 const beforeWrite = vi.hoisted(() => vi.fn());
@@ -24,7 +24,6 @@ import {
   experienceIndex,
   listExperiences,
   readExperience,
-  recordFailure,
   saveExperience,
 } from "./experience";
 
@@ -66,42 +65,16 @@ describe("persistent experience facts and attributed lessons", () => {
     values.clear();
     beforeWrite.mockReset();
   });
-  it("records a failed robot request once per error and retains cross-session sources", async () => {
+  it("excludes old intermediate failure facts from the model catalog without deleting them", async () => {
     const run = fixture();
-    const call: AICall = {
-      ...run.calls[0],
-      error: "IK -31",
-      input: { position_m: [0.2, 0, 0.18] },
-    };
-    const first = await recordFailure(run, call);
-    expect(first?.experience_id).toBeTruthy();
-    const next = fixture("run-2");
-    await recordFailure(next, {
-      ...call,
-      input: { position_m: [0.21, 0, 0.18] },
-    });
-    const items = await listExperiences(run.experienceScope);
-    expect(items).toHaveLength(1);
-    expect(items[0].sources.map((source) => source.runId)).toEqual([
-      "run-1",
-      "run-2",
-    ]);
-    expect(items[0].reflection).toBeUndefined();
-    expect(items[0].failure?.input).toEqual({ position_m: [0.21, 0, 0.18] });
-    expect(experienceIndex(items)[0].assessment).toBe("failure_fact");
-  });
-  it("does not turn a successful or unknown request into a failure lesson", async () => {
-    const run = fixture();
-    for (const state of ["succeeded", "unknown", "cancelled"]) {
-      run.requests[0].state = state;
-      expect(
-        await recordFailure(run, {
-          ...run.calls[0],
-          error: "observation failed",
-        }),
-      ).toBeUndefined();
-    }
-    expect(await listExperiences()).toEqual([]);
+    const saved = await saveExperience(run, note());
+    values.set(
+      "legacy-fact",
+      JSON.stringify({ ...saved, id: "legacy-fact", reflection: undefined }),
+    );
+    const items = await listExperiences();
+    expect(items).toHaveLength(2);
+    expect(experienceIndex(items).map((item) => item.id)).toEqual([saved.id]);
   });
   it("deduplicates lessons and allows later evidence to refute an earlier assessment", async () => {
     const run = fixture();
