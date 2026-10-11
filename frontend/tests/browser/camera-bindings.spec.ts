@@ -26,8 +26,8 @@ test("saved bindings recover after a whole-stack restart", async ({ page }) => {
   }
 });
 
-// Actual page -> gateway -> camera workers -> RGB WebSockets. No interception.
-// Simulation sources exercise the formal RGB contract, not physical UVC capture.
+// Actual page -> gateway -> camera workers -> H.264 WebSockets. No interception.
+// Simulation sources exercise the formal video contract, not physical UVC capture.
 test("bind two camera roles, preview independently, reload and unbind via the page", async ({
   page,
 }) => {
@@ -77,13 +77,19 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
     if (await expand.isVisible()) await expand.click();
     await expect
       .poll(() =>
-        monitor.locator("canvas").evaluate((c: HTMLCanvasElement) => c.width),
+        monitor
+          .locator("video")
+          .evaluate((c: HTMLVideoElement) => c.videoWidth),
       )
       .toBe(1280);
     images.push(
-      await monitor
-        .locator("canvas")
-        .evaluate((c: HTMLCanvasElement) => c.toDataURL()),
+      await monitor.locator("video").evaluate((v: HTMLVideoElement) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = v.videoWidth;
+        canvas.height = v.videoHeight;
+        canvas.getContext("2d")!.drawImage(v, 0, 0);
+        return canvas.toDataURL();
+      }),
     );
     await monitor.getByRole("button", { name: "收起", exact: true }).click();
   }
@@ -131,7 +137,9 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
     await monitor.getByRole("button", { name: "展开", exact: true }).click();
     await expect
       .poll(() =>
-        monitor.locator("canvas").evaluate((c: HTMLCanvasElement) => c.width),
+        monitor
+          .locator("video")
+          .evaluate((c: HTMLVideoElement) => c.videoWidth),
       )
       .toBe(1280);
   }
@@ -180,12 +188,12 @@ test("depth preview still starts and stops through the page", async ({
   await expect(monitor).toBeVisible();
   await expect
     .poll(() =>
-      monitor.locator("canvas").evaluate((c: HTMLCanvasElement) => c.width),
+      monitor.locator("video").evaluate((c: HTMLVideoElement) => c.videoWidth),
     )
     .toBe(1280);
   await page.getByRole("button", { name: "停用相机", exact: true }).click();
   await expect(monitor.getByText("信号中断", { exact: true })).toBeVisible();
-  await expect(monitor.locator("canvas")).toHaveCount(0);
+  await expect(monitor.locator("video")).toHaveCount(0);
   await source.selectOption("");
   await expect(monitor).toHaveCount(0);
 });

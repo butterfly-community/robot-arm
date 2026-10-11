@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+camera-media.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
 image.workspace = true

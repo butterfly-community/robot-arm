@@ -116,17 +116,18 @@ try {
   }
   async function screenshot(name) {
     for (const preview of await previews.all()) {
-      const canvas = preview.getByLabel("相机原始彩色视频", { exact: true });
-      if (!(await canvas.isVisible())) continue;
+      const video = preview.getByLabel("相机彩色视频", { exact: true });
+      if (!(await video.isVisible())) continue;
       if (latest?.perception_state?.source_id) {
         await expect
           .poll(
-            () => canvas.evaluate((el) => el.toDataURL("image/jpeg").length),
+            () =>
+              video.evaluate((el) => el.readyState >= 2 && el.videoWidth > 0),
             { timeout: 15000 },
           )
-          .toBeGreaterThan(10000);
+          .toBe(true);
       }
-      await canvas.screenshot({
+      await video.screenshot({
         path: join(
           output,
           name + "-" + (await preview.getAttribute("aria-label")) + ".jpg",

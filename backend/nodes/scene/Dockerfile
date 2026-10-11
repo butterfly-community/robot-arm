@@ -1,4 +1,4 @@
-FROM robot-arm-services-backend-base:2026.09.05-r9 AS build
+FROM robot-arm-services-backend-base:2026.09.05-r9 AS build-deps
 
 # OpenCV is owned by scene-node for instance geometry.
 RUN apt-get update \
@@ -20,6 +20,10 @@ RUN git clone --depth=1 --branch 5.0.0 https://github.com/opencv/opencv.git /ope
     && cmake --build /opencv-build \
     && cmake --install /opencv-build
 
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+
+FROM build-deps AS build
 WORKDIR /src
 COPY backend .
 RUN cargo build --release --locked -p scene-node
@@ -27,7 +31,7 @@ RUN cargo build --release --locked -p scene-node
 FROM robot-arm-services-backend-runtime:2026.09.05-r3
 RUN apt-get update \
     && apt-get install --yes \
-       libstdc++6
+       libstdc++6 libavcodec62 libavformat62 libavutil60 libswscale9
 COPY --from=build /opt/opencv5 /opt/opencv5
 ENV LD_LIBRARY_PATH=/opt/opencv5/lib
 COPY --from=build /src/target/release/scene-node \

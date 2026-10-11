@@ -28,7 +28,9 @@ pub struct Solution {
 }
 
 pub fn detect(
-    image_png: &[u8],
+    image_rgb: &[u8],
+    width: u32,
+    height: u32,
     camera_matrix_values: &[f64; 9],
     distortion_values: &[f64],
     distortion_model: &str,
@@ -47,14 +49,18 @@ pub fn detect(
             "ChArUco/PnP 不支持当前 {distortion_model} 投影；需要驱动提供校正后的彩色图与对应内参"
         );
     }
-    // The public boundary is a standard PNG (RGB), not a raw BGR buffer.
-    // ChArUco treats three-channel Mats as BGR, and imencode expects BGR too.
-    // Let OpenCV's codecs own both boundary conversions; never swap manually.
-    let mut image =
-        imgcodecs::imdecode(&Vector::from_slice(image_png), imgcodecs::IMREAD_COLOR_BGR)?;
-    if image.empty() {
-        bail!("cannot decode calibration image");
+    // The caller already decoded H.264. Do not encode PNG only to decode it
+    // immediately in OpenCV. BGR conversion belongs exactly at this boundary.
+    if width == 0
+        || height == 0
+        || image_rgb.len() as u64 != u64::from(width) * u64::from(height) * 3
+    {
+        bail!("invalid calibration RGB dimensions");
     }
+    let pixels = Mat::from_slice(image_rgb)?;
+    let rgb = pixels.reshape(3, height as i32)?;
+    let mut image = Mat::default();
+    imgproc::cvt_color_def(&rgb, &mut image, imgproc::COLOR_RGB2BGR)?;
     let dictionary =
         objdetect::get_predefined_dictionary_i32(dictionary_id(&board_config.dictionary)?)?;
     let board = objdetect::CharucoBoard::new_def(
@@ -388,12 +394,12 @@ pub fn self_test() -> Result<()> {
         objdetect::CharucoBoard::new_def(Size::new(5, 5), 0.015, 0.011, &dictionary)?;
     let mut board_image = Mat::default();
     calibration_board.generate_image(Size::new(600, 600), &mut board_image, 40, 1)?;
-    let mut encoded = Vector::<u8>::new();
-    if !imgcodecs::imencode_def(".png", &board_image, &mut encoded)? {
-        bail!("synthetic ChArUco board was not encoded");
-    }
+    let mut rgb = Mat::default();
+    imgproc::cvt_color_def(&board_image, &mut rgb, imgproc::COLOR_GRAY2RGB)?;
     let detection = detect(
-        encoded.as_slice(),
+        rgb.data_bytes()?,
+        600,
+        600,
         &[800.0, 0.0, 300.0, 0.0, 800.0, 300.0, 0.0, 0.0, 1.0],
         &[0.0; 5],
         "plumb_bob",
@@ -439,6 +445,8 @@ mod tests {
         ] {
             let error = super::detect(
                 &[],
+                0,
+                0,
                 &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 &[k1, 0.0, 0.0, 0.0],
                 model,

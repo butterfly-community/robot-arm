@@ -202,18 +202,6 @@ impl CameraImagePlane {
         Ok(())
     }
 
-    /// Published colour is RGB8. Remove row padding without changing channels.
-    pub fn packed_rgb(&self) -> Result<Vec<u8>, ArrowCodecError> {
-        self.validate_layout("color")?;
-        self.validate_format("color", &[("rgb8", 3)])?;
-        let packed = self.width as usize * 3;
-        Ok(self
-            .data
-            .chunks_exact(self.stride_bytes as usize)
-            .flat_map(|row| row[..packed].iter().copied())
-            .collect())
-    }
-
     fn validate_format(
         &self,
         label: &str,
@@ -252,7 +240,8 @@ pub struct CameraFrameBundle {
     pub device_time_ns: i64,
     pub device_time_domain: String,
     pub received_time_ns: i64,
-    /// RGB8 at the service boundary; native driver formats stay in the adapter.
+    /// Independently decodable H.264 Annex B access unit (SPS/PPS + IDR).
+    /// stride_bytes is zero for compressed data. Native formats stay in capture.
     pub color: CameraImagePlane,
     /// Depth registered to the color image plane by the camera driver adapter.
     pub aligned_depth: CameraImagePlane,
@@ -263,14 +252,16 @@ pub struct CameraFrameBundle {
     pub calibration: Option<DepthCameraCalibration>,
 }
 
-/// Latest color frame for live Web display, independent of RGB-D output throttling.
+/// A color frame inside the capture adapter / media codec. Not a raw Web transport.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CameraRawVideoFrame {
     pub schema_version: u32,
     pub sequence: u64,
     pub source_id: String,
+    /// Capture clock within this stream; media timing, not wall-clock freshness.
+    pub device_time_ns: i64,
     pub received_time_ns: i64,
-    /// RGB8, with optional row padding declared by stride_bytes.
+    /// Driver-native color before FFmpeg, H.264 after encoding (stride zero).
     pub color: CameraImagePlane,
 }
 
@@ -422,8 +413,16 @@ pub fn camera_frame_from_arrow(array: &dyn Array) -> Result<CameraFrameBundle, A
 }
 
 fn validate_camera_frame(bundle: &CameraFrameBundle) -> Result<(), ArrowCodecError> {
-    bundle.color.validate_layout("color")?;
-    bundle.color.validate_format("color", &[("rgb8", 3)])?;
+    if bundle.color.width == 0
+        || bundle.color.height == 0
+        || bundle.color.pixel_format != "h264"
+        || bundle.color.stride_bytes != 0
+        || bundle.color.data.is_empty()
+    {
+        return Err(ArrowCodecError::InvalidCameraFrame(
+            "color must be a nonempty H.264 access unit with dimensions and zero stride".into(),
+        ));
+    }
     bundle.aligned_depth.validate_layout("aligned_depth")?;
     bundle
         .aligned_depth
@@ -2335,8 +2334,8 @@ mod tests {
             color: CameraImagePlane {
                 width: 2,
                 height: 2,
-                stride_bytes: 6,
-                pixel_format: "rgb8".into(),
+                stride_bytes: 0,
+                pixel_format: "h264".into(),
                 frame_id: "camera_color_optical_frame".into(),
                 data: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             },
@@ -2435,25 +2434,18 @@ mod tests {
     #[test]
     fn camera_frame_preserves_row_padding() {
         let mut frame = camera_frame_fixture();
-        frame.color.stride_bytes = 8;
-        frame.color.data = (0..16).collect();
         frame.aligned_depth.stride_bytes = 6;
         frame.aligned_depth.data = (0..12).collect();
         let encoded = camera_frame_to_arrow(&frame).unwrap();
         assert_eq!(camera_frame_from_arrow(encoded.as_ref()).unwrap(), frame);
-        assert_eq!(
-            frame.color.packed_rgb().unwrap(),
-            [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13]
-        );
     }
 
     #[test]
-    fn camera_colour_contract_is_rgb_not_native_driver_formats() {
-        for format in ["bgr8", "rgba8", "bgra8", "y8"] {
+    fn camera_colour_transport_is_h264_not_native_driver_formats() {
+        for format in ["rgb8", "bgr8", "rgba8", "bgra8", "y8"] {
             let mut frame = camera_frame_fixture();
             frame.color.pixel_format = format.into();
             assert!(camera_frame_to_arrow(&frame).is_err());
-            assert!(frame.color.packed_rgb().is_err());
         }
     }
 
@@ -2463,8 +2455,9 @@ mod tests {
             let mut frame = camera_frame_fixture();
             frame.color.width = width;
             frame.color.height = height;
-            frame.color.stride_bytes = width * 3;
-            frame.color.data = vec![17; (frame.color.stride_bytes * frame.color.height) as usize];
+            frame.color.stride_bytes = 0;
+            // Transport validates the envelope, FFmpeg validates the bitstream.
+            frame.color.data = vec![0, 0, 0, 1, 0x65];
             frame.aligned_depth.width = width;
             frame.aligned_depth.height = height;
             frame.aligned_depth.stride_bytes = width * 2;

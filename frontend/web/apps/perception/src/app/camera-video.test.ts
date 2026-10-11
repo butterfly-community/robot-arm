@@ -1,62 +1,46 @@
 import { describe, expect, it } from "vitest";
+import { frameMetadata, videoChunk } from "./camera-video";
 
-import { rawFrameToRgba } from "./camera-video";
-
-describe("rawFrameToRgba", () => {
+const frame = {
+  codec: "h264",
+  stream_id: 1,
+  sequence: 10,
+  keyframe: true,
+  duration_ms: 1000 / 60,
+  width: 1920,
+  height: 1080,
+};
+describe("H.264 video contract", () => {
+  it("batches ordered encoded frames without losing bytes or capture duration", () => {
+    const packets = [16, 20, 16, 20, 16].map((duration, i) => ({
+      video: new Uint8Array([0, 0, 0, 1, i]),
+      duration,
+      isLastVideoFrameComplete: true,
+    }));
+    const chunk = videoChunk(packets);
+    expect([...chunk.video]).toEqual(packets.flatMap((p) => [...p.video]));
+    expect(chunk.duration).toBe(88);
+    expect(chunk.isLastVideoFrameComplete).toBe(true);
+    expect(packets).toHaveLength(5);
+  });
   it.each([
     [1280, 720],
     [1920, 1080],
-  ])("uses the reported %d×%d frame size", (width, height) => {
-    const rgba = rawFrameToRgba({
-      width,
-      height,
-      stride: width * 3,
-      format: "rgb8",
-      bytes: new Uint8Array(width * height * 3),
-    });
-    expect(rgba).toHaveLength(width * height * 4);
+  ])("retains %dx%d and fractional frame timing", (width, height) => {
+    const value = { ...frame, width, height };
+    expect(frameMetadata(JSON.stringify(value))).toEqual(value);
   });
-
-  it("reads padded RGB rows without swapping channels", () => {
-    expect(
-      Array.from(
-        rawFrameToRgba({
-          width: 1,
-          height: 2,
-          stride: 4,
-          format: "rgb8",
-          bytes: new Uint8Array([1, 2, 3, 99, 10, 20, 30, 88]),
-        }),
-      ),
-    ).toEqual([1, 2, 3, 255, 10, 20, 30, 255]);
+  it.each([
+    { codec: "rgb8" },
+    { duration_ms: 0 },
+    { width: 0 },
+    { height: -1 },
+    { stream_id: null },
+    { sequence: 1.5 },
+    { keyframe: null },
+  ])("rejects invalid metadata %j", (invalid) => {
+    expect(() =>
+      frameMetadata(JSON.stringify({ ...frame, ...invalid })),
+    ).toThrow("相机视频元数据无效");
   });
-
-  it("preserves red, green and blue primaries", () => {
-    expect(
-      Array.from(
-        rawFrameToRgba({
-          width: 3,
-          height: 1,
-          stride: 9,
-          format: "rgb8",
-          bytes: new Uint8Array([255, 0, 0, 0, 255, 0, 0, 0, 255]),
-        }),
-      ),
-    ).toEqual([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
-  });
-
-  it.each(["bgr8", "rgba8", "bgra8", "y8", "yuyv"])(
-    "rejects native %s outside the published RGB contract",
-    (format) => {
-      expect(() =>
-        rawFrameToRgba({
-          width: 1,
-          height: 1,
-          stride: 2,
-          format,
-          bytes: new Uint8Array(2),
-        }),
-      ).toThrow(`不支持的彩色视频格式 ${format}`);
-    },
-  );
 });

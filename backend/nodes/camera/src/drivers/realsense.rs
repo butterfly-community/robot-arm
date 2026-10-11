@@ -30,19 +30,18 @@ impl CameraDriver for RealSenseDriver {
 
 impl CameraStream for RealSenseStream {
     fn poll_frame(&mut self, materialize: bool) -> Result<CameraPoll> {
-        RealSenseStream::poll_frame(self, materialize).map(|poll| match poll {
-            realsense_camera::FramePoll::Pending => CameraPoll::Pending,
-            realsense_camera::FramePoll::Captured {
-                sequence,
-                received_time_ns,
-                video_frame,
-                frame,
-            } => CameraPoll::Captured {
-                sequence,
-                received_time_ns,
-                video_frame,
-                frame,
-            },
+        RealSenseStream::poll_frame(self, materialize).and_then(|poll| {
+            Ok(match poll {
+                realsense_camera::FramePoll::Pending => CameraPoll::Pending,
+                realsense_camera::FramePoll::Captured {
+                    video_frame, frame, ..
+                } => CameraPoll::Captured {
+                    video_frame: Box::new(
+                        camera_media::NativeDecoder::default().decode(*video_frame)?,
+                    ),
+                    frame,
+                },
+            })
         })
     }
 }

@@ -1,6 +1,5 @@
 //! V4L2 camera adapter. Native formats and device indices never leave this crate.
 use eyre::{Context, Result, bail, eyre};
-use opencv::{core, imgcodecs, imgproc, prelude::*};
 use robot_arm_messages::{
     CameraImagePlane, CameraRawVideoFrame, CameraSourceInfo, CameraStreamKind, CameraStreamProfile,
     SCHEMA_VERSION,
@@ -143,6 +142,7 @@ pub struct Stream {
     source_id: String,
     last_valid_frame: Instant,
     timeout: Duration,
+    decoder: camera_media::NativeDecoder,
 }
 
 impl Stream {
@@ -195,46 +195,42 @@ impl Stream {
             source_id: source_id.into(),
             last_valid_frame: Instant::now(),
             timeout,
+            decoder: camera_media::NativeDecoder::default(),
         })
     }
 
-    pub fn next_frame(&mut self) -> Result<Option<CameraRawVideoFrame>> {
+    pub fn next_frame(&mut self) -> Result<Option<camera_media::DecodedFrame>> {
         let (bytes, metadata) = self.stream.next().wrap_err("相机采集失败或信号中断")?;
+        let received_time_ns = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as i64;
         let sequence = u64::from(metadata.sequence);
         let decoded = bytes
             .get(..metadata.bytesused as usize)
             .ok_or_else(|| eyre!("相机帧长度超过采集缓冲区"))
-            .and_then(|bytes| decode(&self.format, bytes));
-        let color = match decoded {
-            Ok(color) => color,
+            .and_then(|bytes| {
+                self.decoder.decode(CameraRawVideoFrame {
+                    schema_version: SCHEMA_VERSION,
+                    sequence,
+                    source_id: self.source_id.clone(),
+                    device_time_ns: Duration::from(metadata.timestamp).as_nanos() as i64,
+                    received_time_ns,
+                    color: CameraImagePlane {
+                        width: self.format.width,
+                        height: self.format.height,
+                        stride_bytes: self.format.stride,
+                        pixel_format: self.format.fourcc.to_string(),
+                        frame_id: "color_optical_frame".into(),
+                        data: bytes.to_vec(),
+                    },
+                })
+            });
+        let frame = match decoded {
+            Ok(frame) => frame,
             Err(error) => {
                 return pending_frame(self.last_valid_frame.elapsed(), self.timeout, error);
             }
         };
-        // Some UVC firmware emits a previous-mode JPEG immediately after
-        // STREAMON. Never publish it as the new resolution or stop on that
-        // single transition frame. Sustained mismatch uses the same I/O deadline.
-        if color.width != self.format.width || color.height != self.format.height {
-            return pending_frame(
-                self.last_valid_frame.elapsed(),
-                self.timeout,
-                eyre!(
-                    "相机持续输出 {}×{}，所选配置为 {}×{}",
-                    color.width,
-                    color.height,
-                    self.format.width,
-                    self.format.height
-                ),
-            );
-        }
         self.last_valid_frame = Instant::now();
-        Ok(Some(CameraRawVideoFrame {
-            schema_version: SCHEMA_VERSION,
-            sequence,
-            source_id: self.source_id.clone(),
-            received_time_ns: SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as i64,
-            color,
-        }))
+        Ok(Some(frame))
     }
 }
 
@@ -253,63 +249,22 @@ fn pending_frame<T>(
     }
 }
 
+#[cfg(test)]
 fn decode(format: &Format, bytes: &[u8]) -> Result<CameraImagePlane> {
-    let name = format.fourcc.to_string();
-    let mut rgb = core::Mat::default();
-    if matches!(name.as_str(), "MJPG" | "JPEG") {
-        rgb = imgcodecs::imdecode(
-            &core::Vector::from_slice(bytes),
-            imgcodecs::IMREAD_COLOR_RGB,
-        )?;
-    } else {
-        let (channels, code) = match name.as_str() {
-            "RGB3" => (3, None),
-            "BGR3" => (3, Some(imgproc::COLOR_BGR2RGB)),
-            "YUYV" => (2, Some(imgproc::COLOR_YUV2RGB_YUY2)),
-            "UYVY" => (2, Some(imgproc::COLOR_YUV2RGB_UYVY)),
-            "GREY" => (1, Some(imgproc::COLOR_GRAY2RGB)),
-            "NV12" => (1, Some(imgproc::COLOR_YUV2RGB_NV12)),
-            _ => bail!("不支持像素格式 {name}"),
-        };
-        let rows = if name == "NV12" {
-            format.height * 3 / 2
-        } else {
-            format.height
-        };
-        let row_bytes = format.width as usize * channels as usize;
-        let stride = (format.stride as usize).max(row_bytes);
-        if bytes.len() < stride * rows as usize {
-            bail!("相机图像载荷不足");
-        }
-        let packed: Vec<u8> = bytes
-            .chunks(stride)
-            .take(rows as usize)
-            .flat_map(|r| r[..row_bytes].iter().copied())
-            .collect();
-        let mat = core::Mat::from_slice(&packed)?;
-        let mat = mat.reshape(channels, rows as i32)?;
-        if let Some(code) = code {
-            imgproc::cvt_color_def(&mat, &mut rgb, code)?;
-        } else {
-            rgb = mat.try_clone()?;
-        }
-    }
-    if rgb.empty() {
-        bail!("解码图像为空");
-    }
-    Ok(CameraImagePlane {
-        width: rgb.cols() as u32,
-        height: rgb.rows() as u32,
-        stride_bytes: rgb.cols() as u32 * 3,
-        pixel_format: "rgb8".into(),
-        frame_id: "color_optical_frame".into(),
-        data: rgb.data_bytes()?.to_vec(),
-    })
+    camera_media::native_rgb(
+        format.width,
+        format.height,
+        format.stride,
+        &format.fourcc.to_string(),
+        bytes,
+    )
+    .wrap_err("FFmpeg 原生相机图像解码失败")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencv::{core, imgcodecs, prelude::*};
     #[test]
     fn bad_frame_is_pending_but_sustained_failure_preserves_the_cause() {
         let timeout = Duration::from_secs(1);
@@ -325,7 +280,7 @@ mod tests {
             error(),
         )
         .unwrap_err();
-        assert!(format!("{failure:#}").contains("解码图像为空"));
+        assert!(format!("{failure:#}").contains("FFmpeg 原生相机图像解码失败"));
     }
 
     #[test]
@@ -343,6 +298,9 @@ mod tests {
             (decoded.width, decoded.height, decoded.stride_bytes),
             (2, 1, 6)
         );
+        for (actual, expected) in decoded.data.iter().zip([40_u8, 30, 20, 70, 60, 50]) {
+            assert!(actual.abs_diff(expected) < 5, "JPEG BGR-to-RGB boundary");
+        }
     }
     #[test]
     fn bgr_and_rgb_decode_to_the_same_rgb_without_padding() {

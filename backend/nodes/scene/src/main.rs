@@ -24,7 +24,9 @@ use scene_core::{InstancePointCloud, world_scene_and_instance_clouds_from_aligne
 use serde::{Deserialize, Serialize};
 
 mod segmentation;
-use segmentation::{SegmentationLayer, edit_segmented, empty_segmented, rebuild_segmented};
+use segmentation::{
+    SegmentationLayer, edit_segmented, empty_segmented, ensure_segmented_color, rebuild_segmented,
+};
 
 #[cfg(test)]
 mod stage_tests;
@@ -578,7 +580,17 @@ impl SceneNode {
                                 .await
                                 .context("冻结标注图失败")?
                             } else {
-                                segment_frame(http, config, frame, None, sequence).await
+                                segment_frame(
+                                    http,
+                                    config,
+                                    empty_segmented(
+                                        frame,
+                                        sequence,
+                                        active_model,
+                                        available_models,
+                                    ),
+                                )
+                                .await
                             }
                         });
                         let segmented = tokio::select! {
@@ -1012,9 +1024,7 @@ fn validate_stage_input(
 async fn segment_frame(
     http: reqwest::Client,
     config: SceneConfig,
-    frame: CameraFrameBundle,
-    tool: Option<ToolPoseFeedback>,
-    sequence: u64,
+    mut input: SegmentedFrame,
 ) -> Result<SegmentedFrame> {
     let catalog = model_catalog(&http, &config.compute_service_url).await?;
     let model = config.model.as_deref().unwrap_or(&catalog.model).to_owned();
@@ -1024,7 +1034,12 @@ async fn segment_frame(
         .find(|item| item.id == model)
         .ok_or_else(|| eyre!("未知分割模型 {model}"))?
         .prompt_free;
-    let color = frame.color.clone();
+    input = tokio::task::spawn_blocking(move || {
+        ensure_segmented_color(&mut input)?;
+        Ok::<_, eyre::Report>(input)
+    })
+    .await
+    .context("冻结彩色图编码任务异常结束")??;
     let instances = segment(
         &http,
         &config.compute_service_url,
@@ -1035,7 +1050,7 @@ async fn segment_frame(
         } else {
             &config.prompt
         },
-        &color,
+        &input.assets["color.png"].1,
     )
     .await?;
     // An automatic model names the instances itself. Any observed instance can
@@ -1056,14 +1071,15 @@ async fn segment_frame(
                 instance
             })
             .collect();
-        let mut output = empty_segmented(frame, sequence, model.clone(), catalog.models);
-        output.tool = tool;
-        output.layers.push(SegmentationLayer {
+        input.model = model.clone();
+        input.models = catalog.models;
+        input.layers.retain(|layer| layer.source != model);
+        input.layers.push(SegmentationLayer {
             source: model,
             instances,
             placement_labels,
         });
-        rebuild_segmented(output)
+        rebuild_segmented(input)
     })
     .await
     .context("分割图像编码任务异常结束")?
@@ -1105,13 +1121,8 @@ async fn segment(
     model: &str,
     classes: &[String],
     prompt: &SegmentationPrompt,
-    color: &CameraImagePlane,
+    color_png: &[u8],
 ) -> Result<Vec<DetectedInstance2D>> {
-    let color = color.clone();
-    let image_base64 =
-        tokio::task::spawn_blocking(move || color_png(&color).map(|png| BASE64.encode(png)))
-            .await
-            .context("彩色图编码任务异常结束")??;
     let response = http
         .post(format!(
             "{}/v1/segment",
@@ -1119,7 +1130,7 @@ async fn segment(
         ))
         .json(&SegmentRequest {
             model,
-            image_base64,
+            image_base64: BASE64.encode(color_png),
             classes,
             prompt,
         })
@@ -1255,10 +1266,12 @@ fn decode_depth(frame: &CameraFrameBundle) -> Result<AlignedDepthFrame> {
 }
 
 fn color_rgb(message: &CameraImagePlane) -> Result<RgbImage> {
-    Ok(
-        RgbImage::from_raw(message.width, message.height, message.packed_rgb()?)
-            .expect("validated packed RGB dimensions"),
+    Ok(RgbImage::from_raw(
+        message.width,
+        message.height,
+        camera_media::decode_image(message)?,
     )
+    .expect("validated packed RGB dimensions"))
 }
 
 fn color_png(message: &CameraImagePlane) -> Result<Vec<u8>> {

@@ -26,6 +26,8 @@ node --test tests/tools/*.test.mjs
 链接检查覆盖主仓库与 tools 的本地路径；构建上下文检查需要 Docker，只用合成输入。
 前端单测覆盖业务提交、请求终态、Responses 上下文、图片持久化与 RGB 像素一致性。
 消息/场景/运动回归确认抓放使用绑定同次快照的单条请求，不靠独立点云订阅拼接。
+H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../frontend/tests/media/README.md)，
+不访问运行中的相机或机械臂，也不能替代部署后的真实页面验收。
 
 ## 浏览器回归
 
@@ -104,6 +106,36 @@ docker compose exec -T -w /workspace/web/apps/perception web-perception \
 ```
 
 ## 软件链路与原生模块
+
+H.264 部署验收：`node tests/integration/camera-bindings.mjs measure temp/camera-rate external`
+（或 `wrist`）从实际页面连续观测 30 秒，输出设备帧序号、接收/浏览器处理/实际呈现 FPS、丢帧、
+平均/P95/最大帧大小及浏览器实际接收字节。浏览器处理计数包含丢帧，不能当作成功播放帧率；
+播放以 `presented_fps` 为准。WebSocket 事件里的状态 JSON 已解压，实际传输量以 Chrome NetLog 的
+socket 字节计数为准；临时 NetLog 在汇总后删除。`bind/on/off/cycle` 用于真实页面绑定与切换。
+`CAMERA_VERIFY_CONTINUITY=1` 额外检查序号连续、无重排、浏览器不丢帧，以及实际呈现与源帧率一致。
+播放瓶颈诊断：`node tests/integration/browser-video-diagnostics.mjs temp/browser-video`
+记录解码器/图形后端，比较空白页、视频页与临时去除浮窗背景模糊后的刷新率。
+`camera-bindings measure` 的 `CAMERA_DIAGNOSTIC_FREEZE_STATE=1` 仅用于隔离状态刷新负担，
+禁止与连续性验收同时使用。两项诊断不替代未修改页面的验收。
+
+`node tests/integration/camera-h264-flow.mjs temp/h264-flow` 从网页切到软件反馈，使用正式 1080p
+模拟 RGB-D 完成标定、提示词分割、定位和抓放；不会执行真机运动。结束恢复深度选择、提示词和执行连接。
+模拟相机的新版标定保留在其来源下，不覆盖真机标定。它验证软件闭环，不证明实物夹持。
+`H264_REUSE_CALIBRATION=1` 从网页复用已保存的模拟标定，仍检查九个样本及 1 mm 精度。
+测试在分割编辑器临时使用 `red cube, dark rectangle`，后者按测试托盘的外观匹配，不评估类别名称。
+`node tests/integration/segmentation-prompts.mjs 'gray tray' 'dark rectangle'` 可在已载入的冻结帧上
+通过同一网页比较提示词，遇到匹配即停止；不保存模型配置、不移动机械臂。
+
+`uvc-camera/tests/device_controls.rs` 使用正式驱动的 V4L2 库：
+`report_device_controls_without_starting_capture` 只读查询格式、帧率和曝光参数；
+`fixed_rate_trial` 暂停动态曝光帧率 90 秒并恢复原值，用于区分曝光降帧与处理吞吐。
+两项均默认忽略，须在相机依赖镜像中指定 `UVC_DIAGNOSTIC_DEVICE`，通过精确测试名和
+`-- --ignored --nocapture` 单独运行。对照期间应保持光照和系统负载一致；画面变暗不能单独证明
+曝光设置有问题。关闭动态降帧可能限制暗光曝光时间，实际亮度取决于相机的曝光与增益策略。
+`capture_stage_benchmark` 须先从网页关闭对应角色采集，独占测量原生 MJPEG、解码和编码三个阶段，
+分别报告设备帧率、处理帧率、载荷字节数和耗时；结束后从网页恢复原采集状态。
+该诊断串行测量原生解码与编码，不插入 RGB 转换；正式采集采用双线程流水处理，吞吐以网页实测为准。
+这些底层测试仅用于定位瓶颈，最终播放帧率和网络带宽仍以同一网页的 `measure` 为准。
 
 | 入口 | 范围与副作用 |
 | --- | --- |

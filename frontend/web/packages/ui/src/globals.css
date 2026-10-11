@@ -1200,11 +1200,20 @@ input[type="range"] {
   border-radius: var(--radius-control);
   background: #070a0e;
 }
-.camera-video canvas {
+.camera-video video {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+.camera-video-rate {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 6px;
+  background: #070a0ed9;
+  color: var(--muted);
+  font-size: var(--text-caption);
 }
 .camera-video-error {
   position: absolute;
@@ -1224,9 +1233,10 @@ input[type="range"] {
   overflow: hidden;
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  /* Opaque video surface: backdrop blur forces extra offscreen compositing
+     on every frame and measurably drops 1080p playback frames. */
+  background: var(--surface);
   box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
-  backdrop-filter: blur(12px);
   pointer-events: none;
 }
 

@@ -22,6 +22,7 @@ required-features = ["realsense-runtime"]
 [dependencies]
 axum.workspace = true
 camera-calibration = { workspace = true, optional = true }
+camera-media.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
 futures.workspace = true

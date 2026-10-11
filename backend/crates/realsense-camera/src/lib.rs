@@ -77,6 +77,7 @@ impl RealSenseDriver {
             source_id: source_id.into(),
             pipeline,
             align: Align::new(Rs2StreamKind::Color, 1).context("创建 RealSense 深度对齐器")?,
+            last_color_sequence: None,
         })
     }
 }
@@ -85,13 +86,12 @@ pub struct RealSenseStream {
     source_id: String,
     pipeline: ActivePipeline,
     align: Align,
+    last_color_sequence: Option<u64>,
 }
 
 pub enum FramePoll {
     Pending,
     Captured {
-        sequence: u64,
-        received_time_ns: i64,
         video_frame: Box<CameraRawVideoFrame>,
         frame: Option<Box<CameraFrameBundle>>,
     },
@@ -113,17 +113,21 @@ impl RealSenseStream {
             .frames_of_type::<ColorFrame>()
             .pop()
             .ok_or_else(|| eyre::eyre!("frameset 缺少彩色帧"))?;
+        // The SDK may reuse the slower stream's frame in successive framesets.
+        // Encode each color exposure once, before creating H.264 references.
+        if !take_new_color(&mut self.last_color_sequence, color.frame_number()) {
+            return Ok(FramePoll::Pending);
+        }
         let video_frame = Box::new(CameraRawVideoFrame {
             schema_version: SCHEMA_VERSION,
-            sequence,
+            sequence: color.frame_number(),
             source_id: self.source_id.clone(),
+            device_time_ns: (color.timestamp() * 1_000_000.0).round() as i64,
             received_time_ns,
             color: image_plane(&color, "color_optical_frame")?,
         });
         if !materialize {
             return Ok(FramePoll::Captured {
-                sequence,
-                received_time_ns,
                 video_frame,
                 frame: None,
             });
@@ -148,8 +152,6 @@ impl RealSenseStream {
         let color_profile = color.stream_profile();
         let camera_intrinsics = intrinsics(color_profile)?;
         Ok(FramePoll::Captured {
-            sequence,
-            received_time_ns,
             video_frame,
             frame: Some(Box::new(CameraFrameBundle {
                 schema_version: SCHEMA_VERSION,
@@ -170,6 +172,10 @@ impl RealSenseStream {
             })),
         })
     }
+}
+
+fn take_new_color(previous: &mut Option<u64>, sequence: u64) -> bool {
+    previous.replace(sequence) != Some(sequence)
 }
 
 fn source_info(device: &Device) -> Option<CameraSourceInfo> {
@@ -457,6 +463,18 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_slow_color_frames_are_not_encoded_twice() {
+        let mut previous = None;
+        let exposures: Vec<_> = [100, 100, 101, 101, 102]
+            .into_iter()
+            .filter(|sequence| take_new_color(&mut previous, *sequence))
+            .collect();
+        assert_eq!(exposures, [100, 101, 102]);
+        // A new/restarted capture is not confused with the previous counter.
+        assert!(take_new_color(&mut previous, 0));
+    }
 
     #[test]
     fn pixel_formats_have_an_unambiguous_round_trip() {

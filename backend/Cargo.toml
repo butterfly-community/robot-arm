@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/camera-media",
   "crates/camera-calibration",
   "crates/json-config-store",
   "crates/scene-core",
@@ -33,6 +34,7 @@ arrow = { version = "59.2.0", default-features = false }
 axum = { version = "0.8.7", features = ["ws"] }
 base64 = "0.23.1"
 camera-calibration = { path = "crates/camera-calibration" }
+camera-media = { path = "crates/camera-media" }
 dora-node-api = { version = "1.0.0-rc.5", default-features = false, features = ["arrow-v59"] }
 eyre = "0.6.12"
 futures = "0.3.32"

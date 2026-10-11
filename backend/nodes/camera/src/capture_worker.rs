@@ -1,12 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use robot_arm_messages::{
-    CameraDriverParameterValue, CameraFrameBundle, CameraRawVideoFrame, CameraSourceInfo,
-    CameraStreamProfile, RequestAction, ToolPose,
+    CameraDriverParameterValue, CameraFrameBundle, CameraSourceInfo, CameraStreamProfile,
+    RequestAction, ToolPose,
 };
 use tokio::sync::mpsc as async_mpsc;
 
-use crate::drivers::{CameraPoll, Drivers};
+use crate::{
+    drivers::{CameraPoll, Drivers},
+    encoding_worker::{EncodingWorker, Job},
+};
 
 pub(crate) enum Command {
     CloseColor {
@@ -85,7 +88,7 @@ pub(crate) struct Channels {
     pub(crate) commands: async_mpsc::Sender<Command>,
     pub(crate) completions: async_mpsc::Receiver<Completion>,
     pub(crate) outputs: tokio::sync::watch::Receiver<Option<Output>>,
-    pub(crate) video: tokio::sync::watch::Receiver<Option<Arc<CameraRawVideoFrame>>>,
+    pub(crate) video: tokio::sync::watch::Receiver<Option<Arc<camera_media::VideoFrame>>>,
 }
 
 pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
@@ -96,6 +99,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
     runtime.spawn_blocking(move || {
         let mut drivers = Drivers::new().map_err(|error| format!("{error:#}"));
         let mut stream = None;
+        let mut encoder: Option<EncodingWorker> = None;
         let mut output_rate = None;
         let mut last_output_at = None;
         let mut captured_count = 0;
@@ -107,6 +111,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
             while let Ok(command) = command_receiver.try_recv() {
                 match command {
                     Command::CloseColor { request_id, action } => {
+                        encoder = None;
                         // Acknowledge only after STREAMOFF/close releases USB bandwidth.
                         drop(stream.take());
                         output_rate = None;
@@ -121,6 +126,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         source_id,
                         color,
                     } => {
+                        encoder = None;
                         drop(stream.take());
                         output_sender.send_replace(None);
                         video_sender.send_replace(None);
@@ -164,6 +170,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         output_frames_per_second,
                         capture_frames_per_second,
                     } => {
+                        encoder = None;
                         drop(stream.take());
                         output_sender.send_replace(None);
                         video_sender.send_replace(None);
@@ -205,6 +212,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         }
                     }
                     Command::Stop => {
+                        encoder = None;
                         output_sender.send_replace(None);
                         video_sender.send_replace(None);
                         stream = None;
@@ -218,6 +226,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                         action,
                         source_id,
                     } => {
+                        encoder = None;
                         output_sender.send_replace(None);
                         video_sender.send_replace(None);
                         stream = None;
@@ -266,33 +275,39 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                     output_frames_per_second,
                     capture_frames_per_second,
                 );
-            match active_stream
-                .poll_frame(materialize)
-                .and_then(CameraPoll::into_rgb)
-            {
-                Ok(CameraPoll::Pending) => std::thread::sleep(Duration::from_millis(1)),
-                Ok(CameraPoll::Captured {
-                    sequence,
-                    received_time_ns,
-                    video_frame,
-                    frame,
-                }) => {
-                    captured_count += 1;
-                    let _ = video_sender.send(Some(Arc::from(video_frame)));
-                    if let Some(frame) = frame {
-                        last_output_at = Some(std::time::Instant::now());
-                        let _ = output_sender.send(Some(Output::Capture {
-                            sequence,
-                            received_time_ns,
-                            frame,
-                            captured_count,
-                            skipped_count,
-                        }));
-                    } else {
-                        skipped_count += 1;
-                    }
+            match active_stream.poll_frame(materialize).and_then(|poll| {
+                let CameraPoll::Captured {
+                    video_frame, frame, ..
+                } = poll
+                else {
+                    return Ok(None);
+                };
+                if encoder.is_none() {
+                    encoder = Some(EncodingWorker::spawn(
+                        video_sender.clone(),
+                        output_sender.clone(),
+                    )?);
                 }
+                captured_count += 1;
+                if frame.is_some() {
+                    // Sampling belongs to acquisition, not encode completion.
+                    last_output_at = Some(std::time::Instant::now());
+                } else {
+                    skipped_count += 1;
+                }
+                encoder.as_ref().unwrap().submit(Job {
+                    video: *video_frame,
+                    sample: frame,
+                    fps: capture_frames_per_second,
+                    captured_count,
+                    skipped_count,
+                })?;
+                Ok(Some(()))
+            }) {
+                Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+                Ok(Some(())) => {}
                 Err(error) => {
+                    encoder = None;
                     video_sender.send_replace(None);
                     stream = None;
                     output_rate = None;

@@ -1,4 +1,4 @@
-//! Role bindings share the capture worker and RGB contract with depth preview.
+//! Role bindings share the capture worker and H.264 contract with depth preview.
 use crate::{
     capture_worker::{self, Command, Completion, Output},
     video_server::VideoStreams,
@@ -233,16 +233,15 @@ impl Bindings {
                     result,
                     ..
                 } = completion
+                    && slot.pending.as_ref().is_some_and(|p| p.0 == request_id)
                 {
-                    if slot.pending.as_ref().is_some_and(|p| p.0 == request_id) {
-                        let (_, binding) = slot.pending.take().unwrap();
-                        slot.streaming = result.is_ok();
-                        if result.is_ok() {
-                            slot.binding = binding;
-                        }
-                        slot.error = result.err();
-                        results.push((request_id, action, slot.error.clone()));
+                    let (_, binding) = slot.pending.take().unwrap();
+                    slot.streaming = result.is_ok();
+                    if result.is_ok() {
+                        slot.binding = binding;
                     }
+                    slot.error = result.err();
+                    results.push((request_id, action, slot.error.clone()));
                 }
             }
             if slot.channels.outputs.has_changed().unwrap_or(false)
@@ -266,6 +265,7 @@ impl Bindings {
                     .video
                     .borrow()
                     .clone()
+                    .map(|f| f.latest.clone())
                     .filter(|f| slot.streaming && f.source_id == binding.source.source_id);
                 Some(CameraBindingState {
                     role: *role,

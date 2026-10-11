@@ -1,4 +1,4 @@
-FROM robot-arm-services-backend-base:2026.09.05-r9 AS build
+FROM robot-arm-services-backend-base:2026.09.05-r9 AS build-deps
 
 # OpenCV is owned by camera-node for calibration.
 RUN apt-get update \
@@ -33,6 +33,10 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install --yes librealsense2-dev librealsense2-utils
 
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+
+FROM build-deps AS build
 WORKDIR /src
 COPY backend .
 RUN cargo build --release --locked -p camera-node \
@@ -44,7 +48,8 @@ COPY --from=build /etc/apt/keyrings/librealsenseai.gpg \
 COPY --from=build /etc/apt/sources.list.d/librealsense.list \
      /etc/apt/sources.list.d/librealsense.list
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends librealsense2
+    && apt-get install --yes --no-install-recommends librealsense2 \
+       libavcodec62 libavformat62 libavutil60 libswscale9
 COPY --from=build /opt/opencv5 /opt/opencv5
 ENV LD_LIBRARY_PATH=/opt/opencv5/lib
 COPY --from=build /src/target/release/camera-node \

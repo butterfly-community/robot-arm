@@ -3,11 +3,9 @@ mod simulation;
 #[cfg(feature = "realsense-runtime")]
 mod realsense;
 
-use eyre::{Result, bail};
-use opencv::{core, imgproc, prelude::*};
+use eyre::Result;
 use robot_arm_messages::{
-    CameraDriverParameterValue, CameraFrameBundle, CameraImagePlane, CameraRawVideoFrame,
-    CameraSourceInfo, CameraStreamProfile, ToolPose,
+    CameraDriverParameterValue, CameraFrameBundle, CameraSourceInfo, CameraStreamProfile, ToolPose,
 };
 
 pub(crate) use simulation::SimulationDriver;
@@ -19,68 +17,12 @@ pub(crate) trait CameraStream {
     fn poll_frame(&mut self, materialize: bool) -> Result<CameraPoll>;
 }
 
-#[derive(Clone)]
 pub(crate) enum CameraPoll {
     Pending,
     Captured {
-        sequence: u64,
-        received_time_ns: i64,
-        video_frame: Box<CameraRawVideoFrame>,
+        video_frame: Box<camera_media::DecodedFrame>,
         frame: Option<Box<CameraFrameBundle>>,
     },
-}
-
-impl CameraPoll {
-    /// Normalize once at the acquisition boundary, before either publication.
-    pub(crate) fn into_rgb(mut self) -> Result<Self> {
-        if let Self::Captured {
-            video_frame, frame, ..
-        } = &mut self
-        {
-            normalize_rgb(&mut video_frame.color)?;
-            if let Some(frame) = frame {
-                normalize_rgb(&mut frame.color)?;
-            }
-        }
-        Ok(self)
-    }
-}
-
-fn normalize_rgb(image: &mut CameraImagePlane) -> Result<()> {
-    image.validate_layout("driver color")?;
-    let (channels, conversion) = match image.pixel_format.as_str() {
-        "rgb8" => (3, None),
-        "bgr8" => (3, Some(imgproc::COLOR_BGR2RGB)),
-        "rgba8" => (4, Some(imgproc::COLOR_RGBA2RGB)),
-        "bgra8" => (4, Some(imgproc::COLOR_BGRA2RGB)),
-        "y8" => (1, Some(imgproc::COLOR_GRAY2RGB)),
-        format => bail!("不支持的驱动彩色格式 {format}"),
-    };
-    let packed = image.width as usize * channels as usize;
-    if (image.stride_bytes as usize) < packed {
-        bail!("驱动彩色图 stride 小于像素行宽");
-    }
-    let Some(conversion) = conversion else {
-        return Ok(());
-    };
-    // The byte-row ROI retains arbitrary native row padding. Reshape changes
-    // only channel/column interpretation; cvtColor owns the channel conversion.
-    let data = {
-        let bytes = core::Mat::from_slice(&image.data)?;
-        let rows = bytes.reshape(1, i32::try_from(image.height)?)?;
-        let pixels = core::Mat::roi(
-            &rows,
-            core::Rect::new(0, 0, i32::try_from(packed)?, i32::try_from(image.height)?),
-        )?;
-        let native = pixels.reshape(channels, 0)?;
-        let mut rgb = core::Mat::default();
-        imgproc::cvt_color_def(&native, &mut rgb, conversion)?;
-        rgb.data_bytes()?.to_vec()
-    };
-    image.data = data;
-    image.stride_bytes = image.width * 3;
-    image.pixel_format = "rgb8".into();
-    Ok(())
 }
 
 pub(crate) trait CameraDriver {
@@ -220,8 +162,6 @@ impl CameraStream for ColorStream {
             return Ok(CameraPoll::Pending);
         };
         Ok(CameraPoll::Captured {
-            sequence: frame.sequence,
-            received_time_ns: frame.received_time_ns,
             video_frame: Box::new(frame),
             frame: None,
         })
@@ -242,8 +182,6 @@ fn collect_discovery(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn native_colour_normalizes_once_and_opencv_codecs_preserve_rgb() {
         let colours = [
@@ -275,32 +213,18 @@ mod tests {
                 }
                 data.extend([91; 5]); // padding need not be divisible by channels
             }
-            let mut frame = CameraImagePlane {
-                width: 3,
-                height: 2,
-                stride_bytes: (3 * channels + 5) as u32,
-                pixel_format: format.into(),
-                frame_id: "optical".into(),
-                data,
-            };
-            normalize_rgb(&mut frame).unwrap();
+            let frame =
+                camera_media::native_rgb(3, 2, (3 * channels + 5) as u32, format, &data).unwrap();
             assert_eq!(frame.pixel_format, "rgb8");
-            assert_eq!(frame.frame_id, "optical");
-            assert_eq!(frame.packed_rgb().unwrap(), expected, "{format}");
-            let once = frame.clone();
-            normalize_rgb(&mut frame).unwrap();
-            assert_eq!(frame, once, "normalizing RGB must not swap it again");
+            assert_eq!(frame.stride_bytes, frame.width * 3);
+            assert_eq!(frame.data, expected, "{format}");
 
             #[cfg(feature = "opencv-runtime")]
             {
-                use opencv::imgcodecs;
+                use opencv::{core, imgcodecs, prelude::*};
                 // Exercise the codec boundary independently of snapshot helpers.
-                let image = image::RgbImage::from_raw(
-                    frame.width,
-                    frame.height,
-                    frame.packed_rgb().unwrap(),
-                )
-                .unwrap();
+                let image =
+                    image::RgbImage::from_raw(frame.width, frame.height, frame.data).unwrap();
                 let mut png = std::io::Cursor::new(Vec::new());
                 image.write_to(&mut png, image::ImageFormat::Png).unwrap();
                 let encoded = core::Vector::from_slice(png.get_ref());

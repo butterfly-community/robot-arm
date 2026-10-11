@@ -721,6 +721,16 @@ impl StarArmExecution {
             return self.poll_information_scan();
         }
         let Some(bus) = self.bus.as_mut() else {
+            // Stationary software feedback must be sampled like real feedback.
+            // Never synthesize samples for a disconnected hardware endpoint.
+            if self.transport.selected_endpoint.is_none() && feedback_due {
+                self.last_feedback_poll = Some(now);
+                self.state.sequence = self.next_sequence;
+                self.next_sequence += 1;
+                self.state.sample_time_ns = now_ns();
+                self.state.feedback_source = FeedbackSource::Software;
+                return true;
+            }
             return false;
         };
         if !bus.bus.monitor_read_pending() {
@@ -1122,6 +1132,22 @@ mod tests {
         execution.apply_command(command(joints.clone(), 0.2));
         assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
         assert_eq!(execution.state.joints_rad, joints);
+    }
+
+    #[test]
+    fn stationary_software_feedback_is_fresh_but_disconnected_hardware_is_not_fabricated() {
+        let mut execution = StarArmExecution::new();
+        let joints = execution.state.joints_rad.clone();
+        let sequence = execution.state.sequence;
+        execution.last_feedback_poll = None;
+        assert!(execution.poll_hardware());
+        assert!(execution.state.sequence > sequence);
+        assert_eq!(execution.state.joints_rad, joints);
+        assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
+        assert!(!execution.poll_hardware());
+        execution.transport.selected_endpoint = Some("disconnected-hardware".into());
+        execution.last_feedback_poll = None;
+        assert!(!execution.poll_hardware());
     }
 
     #[test]

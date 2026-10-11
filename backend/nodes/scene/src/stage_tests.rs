@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 
 fn frame() -> CameraFrameBundle {
-    CameraFrameBundle {
+    let mut frame = CameraFrameBundle {
         schema_version: SCHEMA_VERSION,
         sequence: 7,
         source_id: "fixture".into(),
@@ -42,7 +42,27 @@ fn frame() -> CameraFrameBundle {
         },
         depth_scale_m: 0.001,
         calibration: None,
-    }
+    };
+    encode_color(&mut frame);
+    frame
+}
+
+fn encode_color(frame: &mut CameraFrameBundle) {
+    let input = robot_arm_messages::CameraRawVideoFrame {
+        schema_version: SCHEMA_VERSION,
+        sequence: frame.sequence,
+        source_id: frame.source_id.clone(),
+        device_time_ns: frame.device_time_ns,
+        received_time_ns: frame.received_time_ns,
+        color: frame.color.clone(),
+    };
+    frame.color = camera_media::Encoder::new(input.color.width, input.color.height, 30.0)
+        .unwrap()
+        .encode(input, true)
+        .unwrap()
+        .latest
+        .color
+        .clone();
 }
 
 async fn compute_fixture() -> (
@@ -108,16 +128,23 @@ async fn segmentation_only_needs_rgb_and_does_not_call_grasps() {
             classes: vec!["frame".into()],
             ..Default::default()
         };
-        let output = segment_frame(reqwest::Client::new(), config, frame(), None, 10)
-            .await
-            .unwrap();
+        let output = segment_frame(
+            reqwest::Client::new(),
+            config,
+            empty_segmented(frame(), 10, String::new(), vec![]),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.instances.len(), 1);
         assert!(output.assets.contains_key("mask-0.png"));
         assert!(!output.assets.contains_key("overlay.png"));
         let rgb = image::load_from_memory(&output.assets["segmentation-color.png"].1)
             .unwrap()
             .into_rgb8();
-        assert_eq!(rgb.as_raw(), &output.frame.color.packed_rgb().unwrap());
+        assert_eq!(
+            rgb.as_raw(),
+            &camera_media::decode_image(&output.frame.color).unwrap()
+        );
         assert!(!output.assets.contains_key("depth.png"));
         assert!(output.frame.calibration.is_none());
         assert!(reconstruct_frame(&output, 11).is_err());
@@ -137,9 +164,13 @@ async fn reconstruction_has_no_grasps_and_generation_targets_only_one_instance()
         compute_service_url: url.clone(),
         ..Default::default()
     };
-    let mut input = segment_frame(reqwest::Client::new(), config.clone(), frame(), None, 10)
-        .await
-        .unwrap();
+    let mut input = segment_frame(
+        reqwest::Client::new(),
+        config.clone(),
+        empty_segmented(frame(), 10, String::new(), vec![]),
+    )
+    .await
+    .unwrap();
     input.frame.aligned_depth = CameraImagePlane {
         width: 16,
         height: 16,
@@ -204,9 +235,13 @@ async fn stages_reject_stale_or_unselected_inputs_without_recomputing_upstream()
         compute_service_url: url,
         ..Default::default()
     };
-    let input = segment_frame(reqwest::Client::new(), config, frame(), None, 10)
-        .await
-        .unwrap();
+    let input = segment_frame(
+        reqwest::Client::new(),
+        config,
+        empty_segmented(frame(), 10, String::new(), vec![]),
+    )
+    .await
+    .unwrap();
     let mut request: PerceptionRequest = serde_json::from_value(json!({
         "schema_version": SCHEMA_VERSION, "request_id": "test", "action": "reconstruct",
         "input_sequence": 9 }))
@@ -373,13 +408,33 @@ async fn manual_and_both_models_compose_on_one_frame_without_duplicate_layers() 
 }
 
 #[test]
+fn frozen_frame_edits_reuse_png_without_decoding_video_again() {
+    let mut input = rebuild_segmented(empty_segmented(frame(), 1, String::new(), vec![])).unwrap();
+    let png = input.assets["color.png"].clone();
+    // Deliberately remove the encoded input after freezing. Edits must consume
+    // the existing image, not decode/re-encode it behind the viewer's back.
+    input.frame.color.data.clear();
+    input.manual_regions.push(ManualRegion {
+        id: "region".into(),
+        label: "target".into(),
+        bounding_box_xyxy: [1., 1., 4., 4.],
+    });
+    let result = rebuild_segmented(input).unwrap();
+    assert_eq!(result.assets["color.png"], png);
+    assert_eq!(result.assets["segmentation-color.png"], png);
+    assert_eq!(result.instances.len(), 1);
+}
+
+#[test]
 fn manual_region_validation_is_transactional_and_resolution_independent() {
     for [width, height] in [[1280, 720], [1920, 1080]] {
         let mut source = frame();
         source.color.width = width;
         source.color.height = height;
         source.color.stride_bytes = width * 3;
+        source.color.pixel_format = "rgb8".into();
         source.color.data = vec![0; (width * height * 3) as usize];
+        encode_color(&mut source);
         let mut input = empty_segmented(source, 1, String::new(), vec![]);
         input.manual_regions = vec![ManualRegion {
             id: "edge".into(),

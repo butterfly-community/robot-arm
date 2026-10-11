@@ -72,7 +72,20 @@ fn manual_instance(region: &ManualRegion, width: u32, height: u32) -> Result<Det
     })
 }
 
+pub(super) fn ensure_segmented_color(input: &mut SegmentedFrame) -> Result<()> {
+    // A frozen capture is immutable across model/manual edits. Decode/encode
+    // once; inference and both viewers consume the exact same PNG bytes.
+    if !input.assets.contains_key("color.png") {
+        input.assets.insert(
+            "color.png".into(),
+            ("image/png".into(), color_png(&input.frame.color)?),
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn rebuild_segmented(mut input: SegmentedFrame) -> Result<SegmentedFrame> {
+    ensure_segmented_color(&mut input)?;
     input.instances = input
         .layers
         .iter()
@@ -93,11 +106,11 @@ pub(super) fn rebuild_segmented(mut input: SegmentedFrame) -> Result<SegmentedFr
     input.placement_labels.sort();
     input.placement_labels.dedup();
     let color = &input.frame.color;
-    let rgb = color_png(color)?;
-    input.assets = BTreeMap::from([
-        ("color.png".into(), ("image/png".into(), rgb.clone())),
-        ("segmentation-color.png".into(), ("image/png".into(), rgb)),
-    ]);
+    input.assets.retain(|key, _| !key.starts_with("mask-"));
+    input.assets.insert(
+        "segmentation-color.png".into(),
+        input.assets["color.png"].clone(),
+    );
     for (index, instance) in input.instances.iter().enumerate() {
         // Retain mask validation without rendering an unused tinted copy.
         let mask = image::load_from_memory_with_format(&instance.mask_png, ImageFormat::Png)?;
@@ -123,19 +136,8 @@ pub(super) async fn edit_segmented(
     match edit {
         SegmentationEdit::Model => {
             // Never fetch another camera frame: RGB, depth, calibration and feedback stay paired.
-            let result = segment_frame(
-                http,
-                config,
-                input.frame.clone(),
-                input.tool.clone(),
-                sequence,
-            )
-            .await?;
-            input.models = result.models;
-            for layer in result.layers {
-                input.layers.retain(|old| old.source != layer.source);
-                input.layers.push(layer);
-            }
+            input.sequence = sequence;
+            return segment_frame(http, config, input).await;
         }
         SegmentationEdit::Manual { regions } => input.manual_regions = regions,
         SegmentationEdit::Remove { instance_ids } => {

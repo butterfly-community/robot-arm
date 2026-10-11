@@ -1,6 +1,7 @@
 mod bindings;
 mod capture_worker;
 mod drivers;
+mod encoding_worker;
 mod video_server;
 
 use std::{
@@ -12,8 +13,6 @@ use std::{
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result, bail, eyre};
 use futures::FutureExt;
-#[cfg(feature = "opencv-runtime")]
-use image::{DynamicImage, ImageFormat, RgbImage};
 use json_config_store::{load_or_default, save};
 #[cfg(feature = "opencv-runtime")]
 use robot_arm_messages::Pose3;
@@ -27,8 +26,6 @@ use robot_arm_messages::{
     SetControlModeRequest, ToolPose, ToolPoseFeedback, camera_frame_to_arrow, from_arrow, to_arrow,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "opencv-runtime")]
-use std::io::Cursor;
 
 use crate::capture_worker::Command as CaptureCommand;
 use crate::capture_worker::{Completion as CaptureCompletion, Output as CaptureOutput};
@@ -310,7 +307,17 @@ fn run() -> Result<()> {
 
 impl CameraNode {
     fn tick(&mut self, node: &mut DoraNode) -> Result<()> {
+        // Polling captures at 1 ms must not broadcast the complete capability
+        // catalog at 1 kHz. Telemetry follows the existing FPS window; command
+        // completion and calibration progress still publish immediately.
+        let previous_progress = (
+            self.config.calibration_session.phase,
+            self.config.calibration_session.stage_message.clone(),
+            self.config.calibration_session.observations.len(),
+        );
+        let mut state_changed = false;
         for (request_id, action, mut error) in self.bindings.tick() {
+            state_changed = true;
             if error.is_none() {
                 self.config.bindings = self.bindings.saved();
                 self.config.config_version += 1;
@@ -332,6 +339,7 @@ impl CameraNode {
         }
         while let Ok(completion) = self.capture_completions.try_recv() {
             self.finish_capture_command(node, completion)?;
+            state_changed = true;
         }
         if let Err(error) = self.advance_automatic_calibration(node) {
             self.fail_automatic_calibration(error.to_string());
@@ -392,6 +400,7 @@ impl CameraNode {
                         self.desired_streaming = false;
                         self.streaming = false;
                         self.latest_frame = None;
+                        state_changed = true;
                     }
                 }
             }
@@ -404,8 +413,16 @@ impl CameraNode {
             self.frame_window_started = Instant::now();
             self.frame_window_count = 0;
             self.output_window_count = 0;
+            state_changed = true;
         }
-        self.publish_state(node)?;
+        let current_progress = (
+            self.config.calibration_session.phase,
+            self.config.calibration_session.stage_message.clone(),
+            self.config.calibration_session.observations.len(),
+        );
+        if state_changed || current_progress != previous_progress {
+            self.publish_state(node)?;
+        }
         Ok(())
     }
 
@@ -700,6 +717,7 @@ impl CameraNode {
                 .frames_per_second
                 .min(depth_profile.frames_per_second),
         );
+        let color_capture_fps = f64::from(color_profile.frames_per_second);
         let output_frames_per_second = request
             .output_frames_per_second
             .or_else(|| saved.and_then(|value| value.output_frames_per_second))
@@ -741,7 +759,7 @@ impl CameraNode {
         self.selected_source_id = Some(source_id);
         self.selected_color_profile_key = Some(color_key);
         self.selected_depth_profile_key = Some(depth_key);
-        self.selected_capture_frames_per_second = Some(maximum_output_fps);
+        self.selected_capture_frames_per_second = Some(color_capture_fps);
         self.output_frames_per_second = Some(output_frames_per_second);
         self.selected_driver_parameters = driver_parameters;
         self.reset_stream_statistics();
@@ -1311,7 +1329,9 @@ impl CameraNode {
             .as_ref()
             .ok_or_else(|| eyre!("标定板配置缺失"))?;
         let detection = camera_calibration::detect(
-            &color_png(&frame.color)?,
+            &camera_media::decode_image(&frame.color)?,
+            frame.color.width,
+            frame.color.height,
             &intrinsics_matrix(&frame.intrinsics),
             &frame.intrinsics.distortion,
             &frame.intrinsics.distortion_model,
@@ -1511,15 +1531,6 @@ fn intrinsics_matrix(value: &robot_arm_messages::CameraIntrinsics) -> [f64; 9] {
         0.0,
         1.0,
     ]
-}
-
-#[cfg(feature = "opencv-runtime")]
-fn color_png(message: &robot_arm_messages::CameraImagePlane) -> Result<Vec<u8>> {
-    let rgb = RgbImage::from_raw(message.width, message.height, message.packed_rgb()?)
-        .expect("validated packed RGB dimensions");
-    let mut output = Cursor::new(Vec::new());
-    DynamicImage::ImageRgb8(rgb).write_to(&mut output, ImageFormat::Png)?;
-    Ok(output.into_inner())
 }
 
 // Called only for the matching motion request's success, never on HTTP acceptance.

@@ -1,6 +1,6 @@
 "use client";
 
-import { RGB888 } from "@thi.ng/pixel";
+import type JMuxer from "jmuxer";
 import type { CameraRole } from "@robot/contracts";
 import { cameraTitles } from "./camera-bindings";
 import { Button } from "@robot/ui";
@@ -13,58 +13,48 @@ import {
   useSyncExternalStore,
 } from "react";
 
-type RawFrame = {
-  width: number;
-  height: number;
-  stride: number;
-  format: string;
-  bytes: Uint8Array;
-};
-
-export function rawFrameToRgba(
-  frame: RawFrame,
-): Uint8ClampedArray<ArrayBuffer> {
-  if (frame.format !== "rgb8")
-    throw new Error(`不支持的彩色视频格式 ${frame.format}，相机应发布 rgb8`);
-  const bytesPerPixel = 3;
-  if (
-    frame.width <= 0 ||
-    frame.height <= 0 ||
-    frame.stride < frame.width * bytesPerPixel ||
-    frame.bytes.length !== frame.stride * frame.height
-  ) {
-    throw new Error("彩色视频帧尺寸、步长或载荷长度无效");
-  }
-  const pixels = new Uint32Array(frame.width * frame.height);
-  for (let y = 0; y < frame.height; y += 1) {
-    for (let x = 0; x < frame.width; x += 1) {
-      const source = y * frame.stride + x * bytesPerPixel;
-      let packed = 0;
-      for (let channel = 0; channel < bytesPerPixel; channel += 1) {
-        packed = (packed << 8) | frame.bytes[source + channel];
-      }
-      pixels[y * frame.width + x] = RGB888.toABGR(packed);
-    }
-  }
-  // @thi.ng/pixel 的统一中间格式就是 Canvas 原生 ABGR32；在浏览器的
-  // Uint8ClampedArray 视图中对应 RGBA 字节，不再自行维护通道转换分支。
-  return new Uint8ClampedArray(pixels.buffer);
-}
-
 type FrameMetadata = {
   width: number;
   height: number;
-  stride_bytes: number;
-  pixel_format: string;
+  codec: "h264";
+  stream_id: number;
+  sequence: number;
+  keyframe: boolean;
+  duration_ms: number;
 };
 
-function frameMetadata(value: string): FrameMetadata {
+type VideoPacket = Parameters<JMuxer["feed"]>[0];
+
+export function videoChunk(packets: readonly VideoPacket[]): VideoPacket {
+  const video = new Uint8Array(
+    packets.reduce((n, p) => n + p.video.byteLength, 0),
+  );
+  let offset = 0;
+  let duration = 0;
+  for (const packet of packets) {
+    video.set(packet.video, offset);
+    offset += packet.video.byteLength;
+    duration += packet.duration;
+  }
+  // JMuxer parses the access units and apportions the chunk's duration across
+  // its frames. Preserve every byte and total capture time; don't hand-write
+  // a cadence estimator, duplicate frames or resample camera pixels.
+  return { video, duration, isLastVideoFrameComplete: true };
+}
+
+export function frameMetadata(value: string): FrameMetadata {
   const metadata = JSON.parse(value) as Partial<FrameMetadata>;
   if (
     !Number.isSafeInteger(metadata.width) ||
     !Number.isSafeInteger(metadata.height) ||
-    !Number.isSafeInteger(metadata.stride_bytes) ||
-    !metadata.pixel_format
+    metadata.width! <= 0 ||
+    metadata.height! <= 0 ||
+    metadata.codec !== "h264" ||
+    !Number.isSafeInteger(metadata.stream_id) ||
+    !Number.isSafeInteger(metadata.sequence) ||
+    typeof metadata.keyframe !== "boolean" ||
+    !Number.isFinite(metadata.duration_ms) ||
+    metadata.duration_ms! <= 0
   ) {
     throw new Error("相机视频元数据无效");
   }
@@ -78,8 +68,9 @@ export function CameraVideo({
   streaming: boolean;
   role?: CameraRole;
 }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
+  const video = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string>();
+  const [fps, setFps] = useState<number>();
 
   useEffect(() => {
     if (!streaming) return;
@@ -87,7 +78,55 @@ export function CameraVideo({
     let socket: WebSocket | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let metadata: FrameMetadata | undefined;
-    const connect = () => {
+    let muxer: JMuxer | undefined;
+    let muxerReady = false;
+    let pending: VideoPacket[] = [];
+    let streamId: number | undefined;
+    let durationRemainder = 0;
+    let callback: number | undefined;
+    const target = video.current;
+    if (!target) return;
+    let lastPaint: { time: number; frames: number } | undefined;
+    const painted = (now: number, frame: VideoFrameCallbackMetadata) => {
+      if (stopped) return;
+      if (!lastPaint) lastPaint = { time: now, frames: frame.presentedFrames };
+      if (now - lastPaint.time >= 1000) {
+        setFps(
+          ((frame.presentedFrames - lastPaint.frames) * 1000) /
+            (now - lastPaint.time),
+        );
+        lastPaint = { time: now, frames: frame.presentedFrames };
+      }
+      callback = target.requestVideoFrameCallback(painted);
+    };
+    if (target.requestVideoFrameCallback)
+      callback = target.requestVideoFrameCallback(painted);
+    const clear = () => {
+      muxer?.destroy();
+      muxer = undefined;
+      muxerReady = false;
+      pending = [];
+      streamId = undefined;
+      metadata = undefined;
+      durationRemainder = 0;
+      lastPaint = undefined;
+      setFps(undefined);
+      target.removeAttribute("src");
+      target.load();
+    };
+    const flush = () => {
+      if (!muxerReady || !muxer || !pending.length) return;
+      try {
+        const chunk = videoChunk(pending);
+        pending = [];
+        muxer.feed(chunk);
+      } catch (reason) {
+        clear();
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    };
+    const feedTimer = setInterval(flush, 200);
+    const connect = (Muxer: typeof JMuxer) => {
       metadata = undefined;
       const scheme = location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(
@@ -98,10 +137,7 @@ export function CameraVideo({
         try {
           if (typeof event.data === "string") {
             if (JSON.parse(event.data).signal === false) {
-              canvas.current
-                ?.getContext("2d")
-                ?.clearRect(0, 0, canvas.current.width, canvas.current.height);
-              metadata = undefined;
+              clear();
               setError("相机信号中断或未绑定");
               return;
             }
@@ -111,53 +147,103 @@ export function CameraVideo({
           if (!metadata || !(event.data instanceof ArrayBuffer)) {
             throw new Error("相机视频帧与元数据未配对");
           }
-          const frame = {
-            width: metadata.width,
-            height: metadata.height,
-            stride: metadata.stride_bytes,
-            format: metadata.pixel_format,
-            bytes: new Uint8Array(event.data),
-          };
+          const frame = metadata;
           metadata = undefined;
-          const target = canvas.current;
-          if (!target) return;
-          target.width = frame.width;
-          target.height = frame.height;
-          const context = target.getContext("2d");
-          if (!context) throw new Error("浏览器不支持 Canvas 2D");
-          context.putImageData(
-            new ImageData(rawFrameToRgba(frame), frame.width, frame.height),
-            0,
-            0,
-          );
-          setError(undefined);
+          if (streamId !== frame.stream_id) {
+            clear();
+            if (!frame.keyframe) throw Error("H.264 视频缺少起始关键帧");
+            streamId = frame.stream_id;
+            const created = new Muxer({
+              node: target,
+              mode: "video",
+              videoCodec: "H264",
+              // Feed complete short chunks, then append them immediately.
+              // The user permits 1–2 s buffering; avoid the library's default
+              // 500 ms live-edge seek discarding otherwise valid frames.
+              flushingTime: 0,
+              maxDelay: 2000,
+              clearBuffer: true,
+              live: true,
+              onReady: () => {
+                if (stopped || muxer !== created) return;
+                muxerReady = true;
+                flush();
+              },
+              onUnsupportedCodec: () => {
+                if (!stopped) setError("当前浏览器不支持此 H.264 视频解码");
+              },
+              onError: (reason: unknown) => {
+                if (!stopped) setError(`H.264 播放失败：${String(reason)}`);
+              },
+            });
+            muxer = created;
+            void target.play().catch((reason: unknown) => {
+              if (
+                !stopped &&
+                reason instanceof Error &&
+                reason.name !== "AbortError"
+              )
+                setError(reason.message);
+            });
+          }
+          const duration = frame.duration_ms + durationRemainder;
+          const rounded = Math.round(duration);
+          durationRemainder = duration - rounded;
+          const packet = {
+            video: new Uint8Array(event.data),
+            duration: rounded,
+            isLastVideoFrameComplete: true,
+          };
+          // MSE sourceopen is asynchronous. Feeding before onReady discards
+          // JMuxer's initialization segment and leaves the video unplayable.
+          pending.push(packet);
         } catch (reason) {
+          clear();
           setError(reason instanceof Error ? reason.message : String(reason));
         }
       };
       socket.onclose = () => {
         if (!stopped) {
-          canvas.current
-            ?.getContext("2d")
-            ?.clearRect(0, 0, canvas.current.width, canvas.current.height);
+          clear();
           setError("相机视频连接中断，正在重连");
-          retry = setTimeout(connect, 1000);
+          retry = setTimeout(() => connect(Muxer), 1000);
         }
       };
-      socket.onerror = () => setError("相机视频连接中断，正在重连");
+      socket.onerror = () => {
+        if (!stopped) setError("相机视频连接中断，正在重连");
+      };
     };
-    connect();
+    void import("jmuxer")
+      .then(({ default: Muxer }) => {
+        if (!stopped) connect(Muxer);
+      })
+      .catch((reason: unknown) => {
+        if (!stopped) setError(`H.264 播放器加载失败：${String(reason)}`);
+      });
     return () => {
       stopped = true;
+      clearInterval(feedTimer);
       if (retry) clearTimeout(retry);
       socket?.close();
+      if (callback !== undefined) target.cancelVideoFrameCallback(callback);
+      clear();
     };
   }, [streaming, role]);
 
   if (!streaming) return <div className="visual-empty">等待相机开始采集</div>;
   return (
     <div className="camera-video">
-      <canvas ref={canvas} aria-label="相机原始彩色视频" />
+      <video
+        ref={video}
+        aria-label="相机彩色视频"
+        autoPlay
+        muted
+        playsInline
+        onPlaying={() => setError(undefined)}
+      />
+      <span className="camera-video-rate">
+        H.264 · {fps === undefined ? "等待播放" : `${fps.toFixed(1)} FPS 实测`}
+      </span>
       {error && <span className="camera-video-error">{error}</span>}
     </div>
   );

@@ -24,6 +24,8 @@ export function CameraBindings({
       <p className="status">
         共享 USB
         带宽不足时，可先关闭一路采集、再开启另一路，轮流采集以缓解带宽占用。关闭采集会释放设备，保留绑定和分辨率；再次开启后使用新图像，不复用关闭前的画面。
+        降低感知上送频率不会降低 USB
+        带宽；需要选择设备支持的低帧率流配置，或关闭一路采集。
       </p>
       {(["external", "wrist"] as const).map((role) => (
         <Binding key={role} role={role} camera={camera} onRequest={onRequest} />

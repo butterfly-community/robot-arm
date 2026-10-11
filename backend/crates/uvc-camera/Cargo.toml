@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 eyre.workspace = true
-opencv.workspace = true
+camera-media.workspace = true
 robot-arm-messages.workspace = true
 v4l = "0.14.0"
+
+[dev-dependencies]
+opencv.workspace = true

@@ -9,6 +9,8 @@ license.workspace = true
 axum.workspace = true
 dora-node-api.workspace = true
 eyre.workspace = true
+futures.workspace = true
+yawc = { version = "0.4.2", default-features = false, features = ["axum"] }
 redis = { version = "1.7.0", features = ["tokio-comp", "connection-manager"] }
 robot-arm-messages.workspace = true
 serde.workspace = true

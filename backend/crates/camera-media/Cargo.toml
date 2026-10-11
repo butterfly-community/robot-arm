@@ -1,0 +1,11 @@
+[package]
+name = "camera-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+eyre.workspace = true
+ffmpeg-next = { version = "8.1", default-features = false, features = ["format", "software-scaling"] }
+robot-arm-messages.workspace = true

@@ -87,11 +87,11 @@ try {
   await page.getByLabel("放置区域", { exact: true }).selectOption(regionId);
   recording = (async () => {
     let index = 0;
-    const canvas = page.getByLabel("相机原始彩色视频", { exact: true });
+    const video = page.getByLabel("相机彩色视频", { exact: true });
     while (!stop) {
-      if (await canvas.isVisible()) {
+      if (await video.isVisible()) {
         try {
-          await canvas.screenshot({
+          await video.screenshot({
             path: join(output, `frame-${String(index++).padStart(3, "0")}.jpg`),
             type: "jpeg",
             quality: 70,

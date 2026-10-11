@@ -259,21 +259,18 @@ impl CameraStream for SimulationStream {
             schema_version: SCHEMA_VERSION,
             sequence: self.sequence,
             source_id: self.config.source_id.clone(),
+            device_time_ns: now_ns,
             received_time_ns: now_ns,
             color: color.clone(),
         });
         if !materialize {
             return Ok(CameraPoll::Captured {
-                sequence: self.sequence,
-                received_time_ns: now_ns,
-                video_frame,
+                video_frame: Box::new(camera_media::NativeDecoder::default().decode(*video_frame)?),
                 frame: None,
             });
         }
         Ok(CameraPoll::Captured {
-            sequence: self.sequence,
-            received_time_ns: now_ns,
-            video_frame,
+            video_frame: Box::new(camera_media::NativeDecoder::default().decode(*video_frame)?),
             frame: Some(Box::new(CameraFrameBundle {
                 schema_version: SCHEMA_VERSION,
                 sequence: self.sequence,
@@ -992,7 +989,7 @@ mod tests {
 
     #[cfg(feature = "opencv-runtime")]
     #[test]
-    fn charuco_render_detection_and_hand_eye_solution_match_oracle() {
+    fn charuco_h264_detection_and_hand_eye_solution_match_oracle() {
         use std::{fs, io::Cursor, path::PathBuf};
 
         use image::{DynamicImage, ImageFormat};
@@ -1113,6 +1110,9 @@ mod tests {
         let mut detection_sheet = RgbImage::new(426 * 3, 240 * 3);
         let mut round_reports = Vec::new();
         let mut checks_passed = true;
+        let mut encoder =
+            camera_media::Encoder::new(config.calibration.width, config.calibration.height, 30.0)
+                .unwrap();
         for (round, (center_offset, angle_offset)) in round_offsets.into_iter().enumerate() {
             if recorded_boards.is_some() && round != 0 {
                 break;
@@ -1141,15 +1141,33 @@ mod tests {
                 let mut color = background.clone();
                 let mut depth = background_depth.clone();
                 render_charuco(config, &tool, &mut color, &mut depth).unwrap();
-                let image =
-                    RgbImage::from_raw(config.calibration.width, config.calibration.height, color)
-                        .unwrap();
-                let mut png = Cursor::new(Vec::new());
-                DynamicImage::ImageRgb8(image)
-                    .write_to(&mut png, ImageFormat::Png)
+                // Exercise the production color codec before OpenCV detection,
+                // not a lossless test-only bypass of the camera transport.
+                let encoded = encoder
+                    .encode(
+                        robot_arm_messages::CameraRawVideoFrame {
+                            schema_version: SCHEMA_VERSION,
+                            sequence: (round * samples.len() + sample) as u64,
+                            source_id: "calibration-fixture".into(),
+                            device_time_ns: (round * samples.len() + sample) as i64 * 100_000_000,
+                            received_time_ns: 0,
+                            color: CameraImagePlane {
+                                width: config.calibration.width,
+                                height: config.calibration.height,
+                                stride_bytes: config.calibration.width * 3,
+                                pixel_format: "rgb8".into(),
+                                frame_id: "color_optical_frame".into(),
+                                data: color,
+                            },
+                        },
+                        true,
+                    )
                     .unwrap();
+                let color = camera_media::decode_image(&encoded.latest.color).unwrap();
                 let detection = camera_calibration::detect(
-                    png.get_ref(),
+                    &color,
+                    config.calibration.width,
+                    config.calibration.height,
                     &config.calibration.camera_matrix,
                     &config.calibration.distortion,
                     &config.calibration.distortion_model,
@@ -1157,6 +1175,16 @@ mod tests {
                 )
                 .unwrap();
                 if let Some(root) = &artifact_root {
+                    let image = RgbImage::from_raw(
+                        config.calibration.width,
+                        config.calibration.height,
+                        color,
+                    )
+                    .unwrap();
+                    let mut png = Cursor::new(Vec::new());
+                    DynamicImage::ImageRgb8(image)
+                        .write_to(&mut png, ImageFormat::Png)
+                        .unwrap();
                     let pose_dir = root.join(format!("round-{}-pose-{}", round + 1, sample + 1));
                     fs::create_dir_all(&pose_dir).unwrap();
                     fs::write(pose_dir.join("input.png"), png.get_ref()).unwrap();

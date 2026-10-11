@@ -793,7 +793,7 @@ test("video preview collapse closes the connection and expand reconnects", async
     await expect(
       monitor.getByText("预览已收起", { exact: true }),
     ).toBeVisible();
-    await expect(monitor.locator("canvas")).toHaveCount(0);
+    await expect(monitor.locator("video")).toHaveCount(0);
     const current = await (await request.get("/api/perception/state")).json();
     expect(current.values.camera_state.streaming).toBe(true);
     if (round < 2) {

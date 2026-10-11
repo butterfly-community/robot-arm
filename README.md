@@ -167,7 +167,7 @@ Depth processing retains the actual resolution, camera intrinsics and depth unit
 3. **Depth to point clouds:** Z16 values are converted to meters using the device-reported scale. Intrinsics and distortion handling recover spatial points, and extrinsics transform them into the robot-base frame. Invalid depth is excluded from object localization.
 4. **Object/environment separation:** segmentation masks and depth-connected regions extract target points. Remaining valid points form the environment observation, supporting grasp inference and collision planning.
 
-The image pipeline uses RGB, with conversion only at OpenCV boundaries that require BGR. Point clouds use binary transport rather than large browser-side JSON arrays. Live video and lower-frequency perception sampling are throttled independently; model inference is not triggered automatically for every video frame.
+FFmpeg encodes camera color streams as H.264 for browser playback. Calibration and perception decode frames into RGB on demand, converting to BGR only at OpenCV boundaries that require it. Depth remains raw Z16, and point clouds use binary transport. Live video and lower-frequency perception sampling are throttled independently; model inference is not triggered automatically for every video frame.
 
 Camera acquisition, SDK alignment and calibration run in Tokio worker tasks, while the node event loop handles commands and state. Vision models remain loaded in the compute service instead of being reinitialized for each request.
 

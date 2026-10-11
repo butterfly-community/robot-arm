@@ -943,7 +943,7 @@ export default function Page() {
             </Field>
             <Field
               label="上送频率 · FPS"
-              hint="设备仍按所选 profile 的采集频率持续读取完整 RGB-D 帧束；采集节点只按这里的频率把最新帧束送给上层，避免慢消费者反压设备。识别与抓取模型仍只在手动点击时运行。"
+              hint="仅控制发给感知的 RGB-D 帧束频率，不降低 USB 带宽或实时视频帧率。USB 采集频率由彩色流、深度流配置决定；模型推理仍需手动启动。"
             >
               <Input
                 aria-label="上送频率"
@@ -1860,7 +1860,7 @@ export default function Page() {
               ? `${activeColorProfile.width} × ${activeColorProfile.height} · ${activeColorProfile.pixel_format}`
               : "等待彩色流配置"
           }
-          rates={`${activeColorProfile?.frames_per_second ?? "—"} / ${camera?.output_frames_per_second ?? "—"} FPS`}
+          rates={`采集配置 ${activeColorProfile?.frames_per_second ?? "—"} / 上送 ${camera?.output_frames_per_second ?? "—"} FPS`}
         />
       )}
       {camera?.bindings?.map((binding) => (
@@ -1876,10 +1876,12 @@ export default function Page() {
           }
           rates={
             binding.original_error ??
-            (camera.available_sources
-              .find((s) => s.source_id === binding.source_id)
-              ?.profiles.find((p) => p.key === binding.color_profile_key)
-              ?.frames_per_second ?? "—") + " FPS"
+            "采集配置 " +
+              (camera.available_sources
+                .find((s) => s.source_id === binding.source_id)
+                ?.profiles.find((p) => p.key === binding.color_profile_key)
+                ?.frames_per_second ?? "—") +
+              " FPS"
           }
         />
       ))}

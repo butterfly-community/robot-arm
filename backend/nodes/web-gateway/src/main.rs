@@ -13,20 +13,19 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{
-        DefaultBodyLimit, Path, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
-    },
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result};
+use futures::{SinkExt, StreamExt};
 use robot_arm_messages::{ExecutionRequest, SCHEMA_VERSION, from_arrow, to_arrow};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
+use yawc::{CompressionLevel, Frame, IncomingUpgrade, OpCode, Options, WebSocket};
 
 const DEFAULT_PORT: u16 = 8080;
 
@@ -673,8 +672,20 @@ async fn forward_value(
 
 macro_rules! ws_handler {
     ($name:ident, $namespace:literal) => {
-        async fn $name(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-            ws.on_upgrade(move |socket| websocket(socket, state, $namespace))
+        async fn $name(ws: IncomingUpgrade, State(state): State<AppState>) -> Response {
+            // RFC 7692: browsers transparently decompress the unchanged JSON
+            // contract. Video stays on its existing H.264 binary connection.
+            match ws.upgrade(Options::default().with_compression_level(CompressionLevel::fast())) {
+                Ok((response, upgrade)) => {
+                    tokio::spawn(async move {
+                        if let Ok(socket) = upgrade.await {
+                            websocket(socket, state, $namespace).await;
+                        }
+                    });
+                    response.into_response()
+                }
+                Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+            }
         }
     };
 }
@@ -684,13 +695,16 @@ ws_handler!(ws_perception, "perception");
 ws_handler!(ws_motion, "motion");
 ws_handler!(ws_execution, "arm-execution");
 
-async fn websocket(mut socket: WebSocket, state: AppState, namespace: &'static str) {
+async fn websocket<S>(mut socket: WebSocket<S>, state: AppState, namespace: &'static str)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let Some(channel) = state.channels.get(namespace) else {
         return;
     };
     let mut receiver = channel.subscribe();
     if socket
-        .send(Message::Text(state.snapshot(namespace).to_string().into()))
+        .send(Frame::text(state.snapshot(namespace).to_string()))
         .await
         .is_err()
     {
@@ -702,12 +716,13 @@ async fn websocket(mut socket: WebSocket, state: AppState, namespace: &'static s
             changed = receiver.changed(), if ready => {
                 if changed.is_err() { break; }
                 let update = receiver.borrow_and_update().clone();
-                if socket.send(Message::Text(update.into())).await.is_err() { break; }
+                if socket.send(Frame::text(update)).await.is_err() { break; }
                 ready = false;
             },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(Message::Text(message))) if message.as_str() == "next" => ready = true,
+            incoming = socket.next() => match incoming {
+                None => break,
+                Some(frame) if frame.opcode() == OpCode::Close => break,
+                Some(frame) if frame.opcode() == OpCode::Text && frame.as_str() == "next" => ready = true,
                 _ => {}
             },
         }
@@ -717,6 +732,39 @@ async fn websocket(mut socket: WebSocket, state: AppState, namespace: &'static s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn compressed_websocket_preserves_snapshot_and_next_flow_control() {
+        let (sender, _requests) = mpsc::channel();
+        let state = AppState::new(sender);
+        state.update(
+            "perception",
+            "camera_state",
+            json!({"profiles": ["x".repeat(10000)]}),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/ws", get(ws_perception))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut socket = WebSocket::connect(format!("ws://{address}/ws").parse().unwrap())
+            .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
+            .await
+            .unwrap();
+        let initial: Value = serde_json::from_str(socket.next().await.unwrap().as_str()).unwrap();
+        assert_eq!(
+            initial["values"]["camera_state"]["profiles"][0]
+                .as_str()
+                .unwrap()
+                .len(),
+            10000
+        );
+        state.update("perception", "camera_state", json!({"sequence": 2}));
+        socket.send(Frame::text("next")).await.unwrap();
+        let next: Value = serde_json::from_str(socket.next().await.unwrap().as_str()).unwrap();
+        assert_eq!(next["values"]["camera_state"]["sequence"], 2);
+        server.abort();
+    }
     #[tokio::test]
     async fn malformed_request_is_not_forwarded_to_a_node() {
         let (sender, receiver) = mpsc::channel();
