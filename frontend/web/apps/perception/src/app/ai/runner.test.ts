@@ -100,28 +100,47 @@ describe("Responses configuration", () => {
     expect(depthInstructions).not.toContain("不要只预览不推进");
     expect(depthInstructions).toContain("无需另行逐个尝试抓取姿态或 IK");
   });
-  it("opens for the final vision approach without replaying gripper actions or changing depth planning", () => {
+  it("establishes closed-gripper contact then withdraws before opening and reapproaching", () => {
     const steps = [
       "### 1. 观察目标",
-      "### 2. 接近与调整姿态",
-      "### 3. 张开与空间对齐",
-      "### 4. 闭合与搬运",
-      "### 5. 放置与收尾",
+      "### 2. 闭爪接近与建立接触",
+      "### 3. 撤回与优化姿态",
+      "### 4. 张开与再次接近",
+      "### 5. 闭合与搬运",
+      "### 6. 放置与收尾",
     ];
     const prompt = runPrompt("vision", [], {}).system;
     const positions = steps.map((step) => prompt.indexOf(step));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(prompt).toContain(
-      "大幅度接近目标并完成主要姿态调整，不提前张开夹爪",
-    );
-    expect(prompt).toContain("到达抓取前位置后按物品所需开口张开");
-    expect(visionInstructions).toContain("不设固定距离");
-    expect(visionInstructions).toContain("不要等指尖接触物体才张开");
-    expect(visionInstructions).toContain("不为重演顺序额外闭合再张开");
-    expect(visionInstructions).toContain("失败恢复所需的松开不受此顺序影响");
+    const contact = prompt.slice(positions[1], positions[2]);
+    const retreat = prompt.slice(positions[2], positions[3]);
+    const open = prompt.slice(positions[3], positions[4]);
+    expect(contact).toContain("保持夹爪闭合，大幅度接近目标");
+    expect(contact).toContain("在建立有效接触前不要打开夹爪");
+    expect(contact).toContain("撤回后依据接触位置优化夹持姿态");
+    expect(retreat).toContain("先撤回离开物体、留出张开和调姿空间");
+    expect(retreat).toContain("不要贴着物体张开、旋转或横移");
+    expect(retreat).toContain("不固定为朝向底座，也不设固定距离");
+    expect(open).toContain("撤回完成后按物品所需开口张开");
+    expect(open).toContain("再依据已建立的接触位置重新接近");
+    expect(open).toContain("不边贴近物体边张开");
+    expect(prompt).not.toContain("不要等指尖接触物体才张开");
+    expect(prompt).not.toContain("到达抓取前位置后按物品所需开口张开");
     expect(runPrompt("depth", [], {}).system).not.toContain(steps[2]);
     expect(depthInstructions).toContain("pick_place 包含抓取与放置");
+  });
+  it("requires contact evidence and reuses it without mistaking it for a completed grasp", () => {
+    const prompt = runPrompt("vision", [], {}).system;
+    expect(prompt).toContain("有效接触是实际碰到目标并据此确定相对位置");
+    expect(prompt).toContain("也不等于已经抓住");
+    expect(prompt).toContain("不能单凭闭爪力度或画面重叠宣称接触");
+    expect(prompt).toContain("已有本轮有效接触记录且目标未移动时复用");
+    expect(prompt).toContain("目标移动后更新接触位置");
+    expect(prompt).toContain("已经完成撤回和张开时直接继续，不重新闭爪触碰");
+    expect(prompt).toContain("姿态选择以充分夹取深度和稳定夹持为目标");
+    expect(prompt).toContain("优先夹住物体中部");
+    expect(prompt).toContain("避免仅用指尖或边缘浅夹、只夹角点而滑脱");
   });
   it("withdraws after a missed grasp before changing posture in either mode", () => {
     for (const mode of ["depth", "vision"] as const) {
@@ -178,7 +197,7 @@ describe("Responses configuration", () => {
     expect(prompt).toContain("不把图像重叠当作空间到位");
     expect(prompt).not.toContain("应向底座方向收回");
     expect(prompt.indexOf("视觉判断容易前伸过度")).toBeLessThan(
-      prompt.indexOf("### 4. 闭合与搬运"),
+      prompt.indexOf("### 5. 闭合与搬运"),
     );
     expect(runPrompt("depth", [], {}).system).not.toContain(alignment);
   });
@@ -237,17 +256,27 @@ describe("Responses configuration", () => {
     ).toBe("depth");
     expect(taskInstructions("depth")).toBe(depthInstructions);
     expect(taskInstructions("vision")).toBe(visionInstructions);
-    const qualityPriority = "抓取质量优先于速度和减少动作次数";
+    const qualityPriority = "抓取决策最高优先级是夹取姿态与夹取质量";
     expect(visionInstructions).toContain(qualityPriority);
     expect(visionInstructions.indexOf(qualityPriority)).toBeLessThan(
-      visionInstructions.indexOf("### 1. 观察目标"),
+      visionInstructions.indexOf("执行顺序是"),
     );
+    expect(visionInstructions).toContain(
+      "不为速度、减少动作次数或沿用当前姿态而牺牲夹持质量",
+    );
+    expect(visionInstructions).toContain(
+      "先接触是确定相对位置的步骤，不是降低夹持质量要求",
+    );
+    expect(visionInstructions).toContain(
+      "发现浅夹或边缘夹持时，继续调整后再闭合",
+    );
+    expect(visionInstructions).not.toContain("不要先花多轮追求最佳姿态");
     expect(visionInstructions).toContain("夹持区域对齐、夹取深度到位后闭合");
     expect(depthInstructions).toContain("### 1. 采图与分割");
     expect(depthInstructions).toContain("### 2. 三维定位");
     expect(visionInstructions).not.toContain("capture_segmentation");
     expect(visionInstructions.indexOf("大幅度接近目标")).toBeLessThan(
-      visionInstructions.indexOf("到达附近后小幅度微调夹爪姿态与位置"),
+      visionInstructions.indexOf("依据接触位置小幅度微调夹爪姿态与位置"),
     );
     expect(visionInstructions).toContain(
       "闭合后两侧夹持面充分贴合、增大有效接触面积",
