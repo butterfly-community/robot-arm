@@ -80,19 +80,19 @@ describe("Responses configuration", () => {
       "先 preview_motion，再用 move_joints 执行预览的同一组绝对关节角",
     );
     expect(visionInstructions).toContain(
-      "夹爪接近方向默认平行或垂直地面，不选择倾斜抓取",
+      "可以平行地面、垂直地面或在这两种姿态附近稍微倾斜",
     );
     expect(visionInstructions).toContain(
-      "只有物体形状或摆放特别适合倾斜、能明显改善接触和夹取深度时才采用",
+      "大幅倾斜只在物体形状或摆放特别适合、能明显改善夹持时采用",
     );
+    expect(visionInstructions).toContain("不要求精确水平或竖直");
+    expect(visionInstructions).toContain("不为消除小幅倾斜反复调姿");
+    expect(visionInstructions).not.toContain("既不水平也不竖直");
+    expect(visionInstructions).not.toContain("不选择倾斜抓取");
     expect(visionInstructions).toContain(
-      "倾斜是接近方向相对地面既不水平也不竖直",
-    );
-    expect(visionInstructions).toContain(
-      "保持水平或竖直接近时，为对齐物体而旋转夹持方向不属于倾斜，不限制这种旋转",
+      "保持接近方向、为对齐物体而旋转夹持方向不属于倾斜，不限制这种旋转",
     );
     expect(visionInstructions).toContain("不以图像中的斜向外观判断");
-    expect(visionInstructions).not.toContain("允许倾斜抓取");
     expect(visionInstructions).toContain(
       "桌面物品优先选择短边、中部容易夹持的位置",
     );
