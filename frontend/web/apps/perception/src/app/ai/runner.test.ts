@@ -42,7 +42,6 @@ describe("Responses configuration", () => {
       expect(prompt).toContain("用户明确暂停、停止或改变目标时遵从最新指令");
       expect(prompt).toContain("IK 失败是尝试候选目标位姿时的正常求解结果");
       expect(prompt).toContain("每个工具调用回合前输出面向用户的过程说明");
-      expect(prompt).toContain("不能连续只调用工具而不输出文字");
       expect(prompt).toContain(
         "工具失败、抓空、滑脱或改变策略后说明结果与调整方向",
       );
@@ -68,7 +67,7 @@ describe("Responses configuration", () => {
       expect(prompt).toContain("取消不自动松爪或回位");
       expect(prompt).not.toContain("已知动作无需重复预览");
     }
-    expect(depthInstructions).toContain("不重复闭爪、搬运或释放");
+    expect(depthInstructions).toContain("补做尚未完成的收尾");
     expect(visionInstructions).toContain(
       "用户只要求抓住并保持时不搬运、不释放",
     );
@@ -77,14 +76,23 @@ describe("Responses configuration", () => {
     expect(visionInstructions).toContain(
       "已经接近目标但频繁 IK 失败时，优先直接调整关节角度",
     );
-    expect(visionInstructions).toContain("不继续反复微调 TCP 目标");
     expect(visionInstructions).toContain(
-      "move_joints 执行选定的同一组绝对关节角",
+      "先 preview_motion，再用 move_joints 执行预览的同一组绝对关节角",
     );
-    expect(visionInstructions).toContain("但仍经过 MoveIt 规划与碰撞检查");
-    expect(visionInstructions).toContain("优先尝试夹爪平行地面或垂直地面");
-    expect(visionInstructions).toContain("不是固定约束");
-    expect(visionInstructions).toContain("允许倾斜抓取");
+    expect(visionInstructions).toContain(
+      "夹爪接近方向默认平行或垂直地面，不选择倾斜抓取",
+    );
+    expect(visionInstructions).toContain(
+      "只有物体形状或摆放特别适合倾斜、能明显改善接触和夹取深度时才采用",
+    );
+    expect(visionInstructions).toContain(
+      "倾斜是接近方向相对地面既不水平也不竖直",
+    );
+    expect(visionInstructions).toContain(
+      "保持水平或竖直接近时，为对齐物体而旋转夹持方向不属于倾斜，不限制这种旋转",
+    );
+    expect(visionInstructions).toContain("不以图像中的斜向外观判断");
+    expect(visionInstructions).not.toContain("允许倾斜抓取");
     expect(visionInstructions).toContain(
       "桌面物品优先选择短边、中部容易夹持的位置",
     );
@@ -104,12 +112,14 @@ describe("Responses configuration", () => {
     const positions = steps.map((step) => prompt.indexOf(step));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(prompt).toContain("先接近目标并完成主要姿态调整，不提前张开夹爪");
+    expect(prompt).toContain(
+      "大幅度接近目标并完成主要姿态调整，不提前张开夹爪",
+    );
     expect(prompt).toContain("到达抓取前位置后按物品所需开口张开");
     expect(visionInstructions).toContain("不设固定距离");
     expect(visionInstructions).toContain("不要等指尖接触物体才张开");
     expect(visionInstructions).toContain("不为重演顺序额外闭合再张开");
-    expect(visionInstructions).toContain("必要的松开与撤离不受接近顺序影响");
+    expect(visionInstructions).toContain("失败恢复所需的松开不受此顺序影响");
     expect(runPrompt("depth", [], {}).system).not.toContain(steps[2]);
     expect(depthInstructions).toContain("pick_place 包含抓取与放置");
   });
@@ -125,7 +135,8 @@ describe("Responses configuration", () => {
       );
       expect(prompt).not.toContain("抓空或滑脱时修正位置、深度或朝向再抓");
     }
-    expect(visionInstructions).toContain("抓空或滑脱后先撤离，再做这些调整");
+    expect(visionInstructions).toContain("抓空或滑脱进入异常处理");
+    expect(visionInstructions.match(/先撤离目标/g)).toHaveLength(1);
   });
   it("keeps numbered depth steps in order without adding observation or confirmation rounds", () => {
     const steps = [
@@ -226,26 +237,29 @@ describe("Responses configuration", () => {
     ).toBe("depth");
     expect(taskInstructions("depth")).toBe(depthInstructions);
     expect(taskInstructions("vision")).toBe(visionInstructions);
-    const qualityPriority =
-      "抓取质量优先：最适合物体的夹爪姿态、两侧充分接触、充分夹取深度，优先于接近速度、减少动作次数和常用姿态偏好";
+    const qualityPriority = "抓取质量优先于速度和减少动作次数";
     expect(visionInstructions).toContain(qualityPriority);
     expect(visionInstructions.indexOf(qualityPriority)).toBeLessThan(
       visionInstructions.indexOf("### 1. 观察目标"),
     );
-    expect(visionInstructions).toContain(
-      "不要为了沿用当前姿态或尽快闭爪而接受浅夹",
-    );
+    expect(visionInstructions).toContain("夹持区域对齐、夹取深度到位后闭合");
     expect(depthInstructions).toContain("### 1. 采图与分割");
     expect(depthInstructions).toContain("### 2. 三维定位");
     expect(visionInstructions).not.toContain("capture_segmentation");
-    expect(visionInstructions).toContain(
-      "大幅度接近目标，到达附近后小幅度微调夹爪姿态与位置",
+    expect(visionInstructions.indexOf("大幅度接近目标")).toBeLessThan(
+      visionInstructions.indexOf("到达附近后小幅度微调夹爪姿态与位置"),
     );
     expect(visionInstructions).toContain(
-      "两侧夹持面充分贴合物体、尽量增大有效接触面积和夹持深度",
+      "闭合后两侧夹持面充分贴合、增大有效接触面积",
     );
+    expect(visionInstructions).toContain(
+      "充分夹取深度指物体进入两指之间的有效夹持区域",
+    );
+    expect(visionInstructions).toContain("不是让夹爪尽量靠近地面");
     expect(visionInstructions).toContain("避免仅用指尖或边缘浅夹");
-    expect(visionInstructions).toContain("不固定朝向、角度或步长");
+    expect(visionInstructions).not.toContain("不固定朝向、角度或步长");
+    expect(visionInstructions).not.toContain("## 纯视觉调整策略");
+    expect(visionInstructions.match(/增大有效接触面积/g)).toHaveLength(1);
     expect(visionInstructions).not.toContain(
       "所有阶段都采用能明显纠正偏差的较大幅度调整",
     );
