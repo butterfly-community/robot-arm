@@ -94,6 +94,18 @@ describe("Responses configuration", () => {
     expect(depthInstructions).not.toContain("不要只预览不推进");
     expect(depthInstructions).toContain("无需另行逐个尝试抓取姿态或 IK");
   });
+  it("opens for the final vision approach without replaying gripper actions or changing depth planning", () => {
+    const sequence =
+      "先接近目标并完成主要姿态调整 → 到达抓取前位置 → 按物体所需开口张开夹爪 → 完成最后一段接近 → 闭合";
+    expect(visionInstructions).toContain(sequence);
+    expect(visionInstructions).toContain("不设固定距离");
+    expect(visionInstructions).toContain("不要等指尖接触物体才张开");
+    expect(visionInstructions).toContain("不为重演顺序额外闭合再张开");
+    expect(visionInstructions).toContain("必要的松开与撤离不受此接近顺序影响");
+    expect(runPrompt("vision", [], {}).system).toContain(sequence);
+    expect(runPrompt("depth", [], {}).system).not.toContain(sequence);
+    expect(depthInstructions).toContain("pick_place 包含抓取与放置");
+  });
   it("passes live state through SDK instructions without system messages or mutable history", async () => {
     const conversation: ModelMessage[] = [
       { role: "user", content: "inspect only" },
