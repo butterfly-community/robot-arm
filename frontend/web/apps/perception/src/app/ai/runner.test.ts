@@ -226,6 +226,15 @@ describe("Responses configuration", () => {
     ).toBe("depth");
     expect(taskInstructions("depth")).toBe(depthInstructions);
     expect(taskInstructions("vision")).toBe(visionInstructions);
+    const qualityPriority =
+      "抓取质量优先：最适合物体的夹爪姿态、两侧充分接触、充分夹取深度，优先于接近速度、减少动作次数和常用姿态偏好";
+    expect(visionInstructions).toContain(qualityPriority);
+    expect(visionInstructions.indexOf(qualityPriority)).toBeLessThan(
+      visionInstructions.indexOf("### 1. 观察目标"),
+    );
+    expect(visionInstructions).toContain(
+      "不要为了沿用当前姿态或尽快闭爪而接受浅夹",
+    );
     expect(depthInstructions).toContain("### 1. 采图与分割");
     expect(depthInstructions).toContain("### 2. 三维定位");
     expect(visionInstructions).not.toContain("capture_segmentation");
