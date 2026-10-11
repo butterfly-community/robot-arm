@@ -70,9 +70,6 @@ describe("Responses configuration", () => {
     }
     expect(depthInstructions).toContain("不重复闭爪、搬运或释放");
     expect(visionInstructions).toContain(
-      "积极指一次有效纠正当前偏差，不是无依据地扩大动作",
-    );
-    expect(visionInstructions).toContain(
       "用户只要求抓住并保持时不搬运、不释放",
     );
   });
@@ -232,12 +229,19 @@ describe("Responses configuration", () => {
     expect(depthInstructions).toContain("### 1. 采图与分割");
     expect(depthInstructions).toContain("### 2. 三维定位");
     expect(visionInstructions).not.toContain("capture_segmentation");
-    expect(visionInstructions).not.toContain("先粗后细");
-    expect(visionInstructions).not.toContain("只有临近接触或精确对齐时才缩小");
     expect(visionInstructions).toContain(
+      "大幅度接近目标，到达附近后小幅度微调夹爪姿态与位置",
+    );
+    expect(visionInstructions).toContain(
+      "两侧夹持面充分贴合物体、尽量增大有效接触面积和夹持深度",
+    );
+    expect(visionInstructions).toContain("避免仅用指尖或边缘浅夹");
+    expect(visionInstructions).toContain("不固定朝向、角度或步长");
+    expect(visionInstructions).not.toContain(
       "所有阶段都采用能明显纠正偏差的较大幅度调整",
     );
-    expect(visionInstructions).toContain("不因靠近目标就默认微调");
+    expect(visionInstructions).not.toContain("不因靠近目标就默认微调");
+    expect(visionInstructions).not.toContain("方向正确但幅度不足就增大调整");
     expect(visionInstructions).toContain("幅度依据图像与实际 TCP");
     expect(visionInstructions).toContain("不把像素当米或臆造相机外参");
   });
