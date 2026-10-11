@@ -116,6 +116,20 @@ describe("Responses configuration", () => {
     expect(runPrompt("depth", [], {}).system).not.toContain(steps[2]);
     expect(depthInstructions).toContain("pick_place 包含抓取与放置");
   });
+  it("withdraws after a missed grasp before changing posture in either mode", () => {
+    for (const mode of ["depth", "vision"] as const) {
+      const prompt = runPrompt(mode, [], {}).system;
+      expect(prompt).toContain(
+        "确认抓空或滑脱后，先撤离目标、留出调整空间，再调整位置、深度或朝向并重新接近",
+      );
+      expect(prompt).toContain("不要贴着物体旋转或横移");
+      expect(prompt).toContain(
+        "撤离方向和幅度依据当前图像与实际姿态，不设固定距离",
+      );
+      expect(prompt).not.toContain("抓空或滑脱时修正位置、深度或朝向再抓");
+    }
+    expect(visionInstructions).toContain("抓空或滑脱后先撤离，再做这些调整");
+  });
   it("keeps numbered depth steps in order without adding observation or confirmation rounds", () => {
     const steps = [
       "### 1. 采图与分割",
