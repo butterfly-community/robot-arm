@@ -14,8 +14,16 @@ import {
   sessions,
   settings,
   writeJSON,
+  addRunUpdate,
+  getRun,
+  getImage,
 } from "../../ai/store";
-import { idSchema, settingsSchema, startSchema } from "../../ai/types";
+import {
+  idSchema,
+  settingsSchema,
+  startSchema,
+  updateSchema,
+} from "../../ai/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -40,6 +48,17 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     switch (body.action) {
+      case "append": {
+        const input = updateSchema.parse(body);
+        await Promise.all(input.images.map(getImage));
+        await addRunUpdate(input.runId, input.sessionId, {
+          id: input.messageId,
+          text: input.text,
+          images: input.images,
+          receivedAt: Date.now(),
+        });
+        return NextResponse.json(await getRun(input.runId), { status: 202 });
+      }
       case "start": {
         const { run, created } = await createRun(startSchema.parse(body));
         if (created) after(() => executeRun(run));

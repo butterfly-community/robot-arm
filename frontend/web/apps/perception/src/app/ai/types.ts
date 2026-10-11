@@ -13,6 +13,14 @@ export const startSchema = z.object({
   text: z.string().trim().min(1),
   images: z.array(z.string().regex(/^[a-f0-9]{64}$/)).default([]),
 });
+export const updateSchema = startSchema.extend({ messageId: idSchema });
+export interface AIUpdate {
+  id: string;
+  text: string;
+  images: string[];
+  receivedAt: number;
+  includedAt?: number;
+}
 export type AIState =
   "running" | "stopping" | "succeeded" | "failed" | "cancelled" | "interrupted";
 export interface AIImage {
@@ -101,6 +109,9 @@ export interface AIRun {
   reportedEfforts?: string[];
   usage?: unknown;
   warnings: string[];
+  acceptingInput?: boolean;
+  updates?: AIUpdate[];
+  networkRetry?: { attempt: number; nextAt: number; error: string };
   promptMode?: "depth" | "vision";
   experienceScope?: ExperienceScope;
   experienceSummary?: {
@@ -139,5 +150,32 @@ export interface AISnapshot {
 }
 export const activeRun = (run: AIRun) =>
   run.state === "running" || run.state === "stopping";
+// GET/POST responses can arrive after a newer SSE event. Keep the latest
+// version per run, including inbox changes which have their own timestamps.
+export function mergeRuns(
+  previous: AIRun[],
+  incoming: AIRun[],
+  session: string,
+) {
+  const revision = (run: AIRun) =>
+    Math.max(
+      run.updatedAt,
+      ...(run.updates ?? []).flatMap((item) => [
+        item.receivedAt,
+        item.includedAt ?? 0,
+      ]),
+    );
+  const records = new Map(
+    previous
+      .filter((run) => run.sessionId === session)
+      .map((run) => [run.id, run]),
+  );
+  for (const run of incoming) {
+    if (run.sessionId !== session) continue;
+    const known = records.get(run.id);
+    if (!known || revision(run) >= revision(known)) records.set(run.id, run);
+  }
+  return [...records.values()].sort((a, b) => a.startedAt - b.startedAt);
+}
 export const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);

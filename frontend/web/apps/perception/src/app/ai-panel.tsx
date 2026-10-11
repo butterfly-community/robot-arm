@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { AIExperiencePanel } from "./ai-experience-panel";
 import {
@@ -15,6 +15,7 @@ import {
 import { requestId } from "@robot/gateway-client";
 import {
   activeRun,
+  mergeRuns,
   errorText,
   type AIImage,
   type AIRun,
@@ -44,7 +45,10 @@ async function request(body?: unknown) {
   );
   const result = await response.json();
   if (!response.ok)
-    throw Error(result.original_error ?? `HTTP ${response.status}`);
+    throw Object.assign(
+      Error(result.original_error ?? `HTTP ${response.status}`),
+      { rejected: true },
+    );
   return result;
 }
 export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
@@ -64,6 +68,10 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
   const [now, setNow] = useState(() => Date.now());
   const [connected, setConnected] = useState(false);
   const current = runs.findLast(activeRun);
+  const submission = useRef<{
+    key: string;
+    body: Record<string, unknown>;
+  } | null>(null);
   const config = draft ?? snapshot?.settings;
   const models =
     catalog?.baseURL === config?.baseURL ? (catalog?.items ?? []) : [];
@@ -103,25 +111,35 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
   useEffect(() => {
     if (!session) return;
     let disposed = false;
-    void fetch(`${endpoint}?session=${encodeURIComponent(session)}`, {
-      cache: "no-store",
-    })
-      .then(async (response) => {
-        const value = await response.json();
-        if (!response.ok) throw Error(value.original_error);
-        if (!disposed) {
-          setSnapshot(value);
-          setRuns(value.runs);
-        }
+    const refresh = () =>
+      fetch(`${endpoint}?session=${encodeURIComponent(session)}`, {
+        cache: "no-store",
       })
-      .catch((e) => {
-        if (!disposed) setError(errorText(e));
-      });
+        .then(async (response) => {
+          const value = await response.json();
+          if (!response.ok) throw Error(value.original_error);
+          if (!disposed) {
+            setSnapshot(value);
+            setRuns((previous) => mergeRuns(previous, value.runs, session));
+          }
+        })
+        .catch((e) => {
+          if (!disposed) setError(errorText(e));
+        });
+    void refresh();
     const events = new EventSource(
       `${endpoint}events/?session=${encodeURIComponent(session)}`,
     );
-    events.onopen = () => setConnected(true);
-    events.onmessage = (event) => setRuns(JSON.parse(event.data));
+    events.onopen = () => {
+      setConnected(true);
+      void refresh();
+    };
+    events.onmessage = (event) => {
+      if (!disposed)
+        setRuns((previous) =>
+          mergeRuns(previous, JSON.parse(event.data), session),
+        );
+    };
     events.onerror = () => setConnected(false);
     return () => {
       disposed = true;
@@ -151,16 +169,56 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
   }
   async function send() {
     await operation("start", async () => {
-      const run = await request({
-        action: "start",
-        runId: requestId(),
-        sessionId: session,
+      const key = JSON.stringify({
+        session,
         text,
         images: images.map((v) => v.id),
       });
-      setRuns((previous) =>
-        previous.some((r) => r.id === run.id) ? previous : [...previous, run],
-      );
+      if (submission.current?.key !== key)
+        submission.current = {
+          key,
+          body: {
+            action: current ? "append" : "start",
+            runId: current?.id ?? requestId(),
+            ...(current ? { messageId: requestId() } : {}),
+            sessionId: session,
+            text,
+            images: images.map((v) => v.id),
+          },
+        };
+      let run: AIRun;
+      try {
+        run = await request(submission.current.body);
+      } catch (error) {
+        // Refresh terminal state even if the SSE connection was interrupted.
+        const latest = await fetch(
+          `${endpoint}?session=${encodeURIComponent(session)}`,
+          { cache: "no-store" },
+        )
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (latest) {
+          setRuns((previous) => mergeRuns(previous, latest.runs, session));
+        }
+        const accepted = (latest?.runs as AIRun[] | undefined)?.find(
+          (r) =>
+            r.id === submission.current?.body.runId &&
+            (submission.current.body.action === "start" ||
+              r.updates?.some(
+                (u) => u.id === submission.current?.body.messageId,
+              )),
+        );
+        if (accepted) run = accepted;
+        else {
+          // An ambiguous transport error must reuse the same request ID. Only
+          // an explicit rejection permits a fresh submission after refresh.
+          if (error && typeof error === "object" && "rejected" in error)
+            submission.current = null;
+          throw error;
+        }
+      }
+      setRuns((previous) => mergeRuns(previous, [run], session));
+      submission.current = null;
       setText("");
       setImages([]);
     });
@@ -294,7 +352,11 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
       </Disclosure>
       <Field
         label="AI 任务"
-        hint="例如：看看相机里有什么；回到工作位；把紫色海绵放到另一张纸上。只观察不会主动抓放。"
+        hint={
+          current
+            ? "可补充提醒；消息在下一次模型决策时接入，不打断已下发的动作。停止请使用停止按钮。"
+            : "例如：看看相机里有什么；回到工作位；把紫色海绵放到另一张纸上。只观察不会主动抓放。"
+        }
       >
         <textarea
           aria-label="AI 任务"
@@ -333,11 +395,20 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
         </label>
         <Button
           disabled={
-            Boolean(pending) || !text.trim() || Boolean(current) || !session
+            Boolean(pending) ||
+            !text.trim() ||
+            !session ||
+            current?.state === "stopping" ||
+            current?.acceptingInput === false ||
+            current?.experienceSummary?.state === "running"
           }
           onClick={send}
         >
-          {pending === "start" ? "正在提交…" : "发送 AI 任务"}
+          {pending === "start"
+            ? "正在提交…"
+            : current
+              ? "发送补充"
+              : "发送 AI 任务"}
         </Button>
         <Button
           disabled={Boolean(pending) || !current}
@@ -458,6 +529,32 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
               {run.text ||
                 (activeRun(run) ? "等待模型响应或工具结果…" : "暂无文本回复")}
             </div>
+            {run.updates?.map((update) => (
+              <div
+                key={update.id}
+                className="ai-response"
+                data-update-id={update.id}
+              >
+                <p className="ai-user-text">补充：{update.text}</p>
+                <p>
+                  {update.includedAt
+                    ? "已加入模型上下文"
+                    : activeRun(run)
+                      ? "已接收，等待下一次模型决策"
+                      : "本轮已结束，此补充尚未加入模型上下文"}
+                </p>
+                {update.images.map((id) => (
+                  <a
+                    key={id}
+                    href={`${endpoint}images/${id}/`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    补充图片
+                  </a>
+                ))}
+              </div>
+            ))}
             <p className="ai-run-status" aria-label="AI 状态">
               {labels[run.state]} ·{" "}
               {Math.round(
@@ -471,12 +568,14 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
               <KeyValue
                 label="当前步骤"
                 value={
-                  run.experienceSummary?.state === "running"
-                    ? "动作流程已结束，正在总结本轮经验"
-                    : (run.calls.findLast((call) => !call.endedAt)?.name ??
-                      (run.calls.length
-                        ? `${run.calls.at(-1)!.name} 已结束，等待模型继续`
-                        : "等待模型响应"))
+                  run.networkRetry
+                    ? `网络中断，重试 ${run.networkRetry.attempt}/15 · ${run.networkRetry.nextAt > now ? `${Math.ceil((run.networkRetry.nextAt - now) / 1000)} 秒后重试` : "正在重新请求"}`
+                    : run.experienceSummary?.state === "running"
+                      ? "动作流程已结束，正在总结本轮经验"
+                      : (run.calls.findLast((call) => !call.endedAt)?.name ??
+                        (run.calls.length
+                          ? `${run.calls.at(-1)!.name} 已结束，等待模型继续`
+                          : "等待模型响应"))
                 }
               />
             )}

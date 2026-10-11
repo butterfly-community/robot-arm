@@ -80,6 +80,17 @@ describe("one end-of-run summary, never intermediate failure writes", () => {
       expect(instructions).toContain("本次没有提供原图，不能声称重新看图验证");
       expect(instructions).toContain("有依据但原因或效果尚未验证");
       expect(instructions).toContain("没有新结论返回空 lessons");
+      const sections = [
+        "## 1. 核对依据",
+        "## 2. 提炼结论",
+        "## 3. 合并去重",
+        "## 4. 输出经验",
+      ];
+      const positions = sections.map((section) =>
+        instructions.indexOf(section),
+      );
+      expect(positions.every((position) => position >= 0)).toBe(true);
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
       expect(instructions).not.toContain("没有完成用户目标不要停止");
       const message = model.doStreamCalls[0].prompt.find(
         (message) => message.role === "user",

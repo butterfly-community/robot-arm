@@ -8,6 +8,11 @@ const mocks = vi.hoisted(() => ({
   summary: vi.fn(),
   release: vi.fn(),
   command: vi.fn(),
+  updates: vi.fn(async () => [] as import("./types").AIUpdate[]),
+  included: vi.fn(),
+  closeInput: vi.fn(async () => true),
+  append: vi.fn(),
+  save: vi.fn(),
 }));
 vi.mock("ai", async (original) => ({
   ...(await original<typeof import("ai")>()),
@@ -15,13 +20,17 @@ vi.mock("ai", async (original) => ({
 }));
 vi.mock("./store", () => ({
   runtime: () => ({ controllers: mocks.controllers }),
-  appendMessages: vi.fn(),
+  appendMessages: mocks.append,
   messages: async () => [],
   imagePart: vi.fn(),
   saveRun: async (run: AIRun) => {
+    await mocks.save(run);
     mocks.saved.push(structuredClone(run));
   },
   release: mocks.release,
+  runUpdates: mocks.updates,
+  markUpdatesIncluded: mocks.included,
+  closeRunInput: mocks.closeInput,
 }));
 vi.mock("./experience", () => ({
   listExperiences: async () => [],
@@ -50,6 +59,9 @@ describe("task finalization owns experience summary", () => {
     mocks.saved.length = 0;
     mocks.controllers.set("run", new AbortController());
     mocks.summary.mockResolvedValue(undefined);
+    mocks.save.mockResolvedValue(undefined);
+    mocks.updates.mockResolvedValue([]);
+    mocks.closeInput.mockResolvedValue(true);
   });
   it.each(
     (["succeeded", "failed", "cancelled"] as const).flatMap((outcome) =>
@@ -119,4 +131,92 @@ describe("task finalization owns experience summary", () => {
       expect(mocks.release).toHaveBeenCalledExactlyOnceWith(run);
     },
   );
+  function fixture() {
+    return {
+      id: "run",
+      sessionId: "session",
+      input: "test",
+      images: [],
+      state: "running",
+      text: "",
+      calls: [],
+      requests: [],
+      warnings: [],
+      settings: {
+        baseURL: "https://example.com/v1",
+        model: "test",
+        effort: "",
+      },
+    } as unknown as AIRun;
+  }
+  it("continues the same run for an update received during the final answer", async () => {
+    const run = fixture();
+    const update = {
+      id: "update",
+      text: "new direction",
+      images: [],
+      receivedAt: 1,
+    };
+    mocks.updates.mockResolvedValue([update]);
+    mocks.closeInput.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mocks.stream.mockImplementation((options) => ({
+      fullStream: (async function* () {
+        const next = await options.prepareStep({
+          messages: [{ role: "user", content: "original" }],
+        });
+        expect(JSON.stringify(next.messages)).toContain("new direction");
+        yield { type: "finish" };
+      })(),
+      totalUsage: Promise.resolve({}),
+      finishReason: Promise.resolve("stop"),
+    }));
+    await executeRun(run);
+    expect(mocks.stream).toHaveBeenCalledTimes(2);
+    expect(mocks.included).toHaveBeenCalledWith("run", ["update"]);
+    expect(run.state).toBe("succeeded");
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+  it("does not start another model retry budget for summary after network failure", async () => {
+    const run = fixture();
+    mocks.stream.mockImplementation(() => ({
+      fullStream: (async function* () {
+        throw new TypeError("fetch failed");
+        yield;
+      })(),
+    }));
+    await executeRun(run);
+    expect(run.state).toBe("failed");
+    expect(mocks.summary).not.toHaveBeenCalled();
+    expect(run.experienceSummary?.error).toContain("连接未恢复");
+    expect(mocks.release).toHaveBeenCalledOnce();
+    expect(mocks.controllers.has("run")).toBe(false);
+  });
+  it("releases the task owner even when finalization persistence fails", async () => {
+    const run = fixture();
+    mocks.save.mockRejectedValue(Error("storage unavailable"));
+    await expect(executeRun(run)).rejects.toThrow("storage unavailable");
+    expect(mocks.controllers.has("run")).toBe(false);
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+  it("cancels a network wait without starting summary when SDK closes without throwing", async () => {
+    const run = fixture();
+    mocks.stream.mockImplementation(() => ({
+      fullStream: (async function* () {
+        run.networkRetry = {
+          attempt: 1,
+          nextAt: Date.now() + 10000,
+          error: "network",
+        };
+        mocks.controllers.get("run")!.abort();
+        yield { type: "abort" };
+      })(),
+      totalUsage: Promise.resolve({}),
+      finishReason: Promise.resolve("stop"),
+    }));
+    await executeRun(run);
+    expect(run.state).toBe("cancelled");
+    expect(run.experienceSummary?.state).toBe("cancelled");
+    expect(mocks.summary).not.toHaveBeenCalled();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
 });

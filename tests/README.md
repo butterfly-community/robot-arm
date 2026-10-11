@@ -25,6 +25,8 @@ node --test tests/tools/*.test.mjs
 
 链接检查覆盖主仓库与 tools 的本地路径；构建上下文检查需要 Docker，只用合成输入。
 前端单测覆盖业务提交、请求终态、Responses 上下文、图片持久化与 RGB 像素一致性。
+`node tests/integration/ai-inbox.mjs` 使用已部署 Redis 执行生产 Lua 的隔离键测试，检查补充消息去重、
+收尾竞态及空数组保真，结束删除测试键；不能替代真实页面验收。
 消息/场景/运动回归确认抓放使用绑定同次快照的单条请求，不靠独立点云订阅拼接。
 H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../frontend/tests/media/README.md)，
 不访问运行中的相机或机械臂，也不能替代部署后的真实页面验收。
@@ -57,6 +59,8 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 
 | 入口与参数 | 用途与副作用 |
 | --- | --- |
+| `ai-conversation OUTPUT` | 真实模型、真实页面的运行中补充、刷新恢复、同会话追问、停止及停止后再发送；仅发送文字和姿态数据，不拍照、不运动，开始前确认无其他 AI 任务 |
+| `ai-conversation OUTPUT network` | 通过页面临时配置不可达的容器本地地址，核对实际 15 次/10 秒重试、失败解锁；随后恢复原地址并验证真实模型继续回复。不证明上游中途断流，断流与工具不重放由 SDK 单测覆盖 |
 | `camera-bindings discover OUTPUT` | 页面刷新并列出设备/profile |
 | `camera-bindings bind OUTPUT ROLE SOURCE PROFILE` | 选择、保存并核对新图；ROLE 为 external 或 wrist |
 | `camera-bindings on\|off\|unbind OUTPUT ROLE` | 开关采集或解除绑定；关闭保留配置 |

@@ -9,6 +9,7 @@ import {
   activeRun,
   type AIImage,
   type AIRun,
+  type AIUpdate,
   type AISettings,
   type CapabilityCheck,
 } from "./types";
@@ -66,13 +67,104 @@ export async function saveRun(run: AIRun) {
 }
 export async function getRun(id: string) {
   const run = await readJSON<AIRun>(`run:${id}`);
-  if (run && activeRun(run) && run.owner !== runtime().owner) {
+  if (
+    run &&
+    activeRun(run) &&
+    (run.owner !== runtime().owner || !runtime().controllers.has(run.id))
+  ) {
     run.state = "interrupted";
     run.error =
-      "AI 服务已重启；未确认的机器人动作需查询原请求，不自动续跑或重放。";
+      "AI 任务执行进程已结束；未确认的机器人动作需查询原请求，不自动续跑或重放。";
+    run.acceptingInput = false;
+    delete run.networkRetry;
+    run.endedAt = Date.now();
     await saveRun(run);
   }
+  if (run) run.updates = await runUpdates(run.id);
   return run;
+}
+export async function runUpdates(id: string): Promise<AIUpdate[]> {
+  const redis = await db();
+  const [items, included] = await Promise.all([
+    redis.lRange(prefix + `run:${id}:updates`, 0, -1),
+    redis.hGetAll(prefix + `run:${id}:included`),
+  ]);
+  return items.map((raw) => {
+    const item = JSON.parse(raw) as AIUpdate;
+    if (included[item.id]) item.includedAt = Number(included[item.id]);
+    return item;
+  });
+}
+
+export async function addRunUpdate(
+  runId: string,
+  sessionId: string,
+  update: AIUpdate,
+) {
+  const result = await (
+    await db()
+  ).eval(
+    `
+    local updates = redis.call('LRANGE', KEYS[2], 0, -1)
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return 0 end
+    local run = cjson.decode(raw)
+    if run.sessionId ~= ARGV[3] then return 0 end
+    for _, rawItem in ipairs(updates) do if cjson.decode(rawItem).id == ARGV[2] then return 1 end end
+    if run.state ~= 'running' or run.acceptingInput == false or redis.call('EXISTS', KEYS[3]) == 1
+      or (run.experienceSummary and run.experienceSummary.state == 'running') then return 0 end
+    redis.call('RPUSH', KEYS[2], ARGV[1])
+    return 1
+  `,
+    {
+      keys: [
+        prefix + `run:${runId}`,
+        prefix + `run:${runId}:updates`,
+        prefix + `run:${runId}:input-closed`,
+      ],
+      arguments: [JSON.stringify(update), update.id, sessionId],
+    },
+  );
+  if (result !== 1)
+    throw Error("任务已结束或正在收尾，请保留消息并在结束后发送");
+}
+
+export async function markUpdatesIncluded(runId: string, ids: string[]) {
+  if (ids.length)
+    await (
+      await db()
+    ).hSet(
+      prefix + `run:${runId}:included`,
+      Object.fromEntries(ids.map((id) => [id, String(Date.now())])),
+    );
+}
+
+// Atomically close the inbox only if every accepted update reached a step.
+export async function closeRunInput(runId: string): Promise<boolean> {
+  return (
+    (await (
+      await db()
+    ).eval(
+      `
+    local updates = redis.call('LRANGE', KEYS[2], 0, -1)
+    for _, rawItem in ipairs(updates) do
+      if redis.call('HEXISTS', KEYS[4], cjson.decode(rawItem).id) == 0 then return 0 end
+    end
+    -- Do not re-encode the run: Lua cjson changes empty arrays into objects.
+    redis.call('SET', KEYS[3], '1')
+    return 1
+  `,
+      {
+        keys: [
+          prefix + `run:${runId}`,
+          prefix + `run:${runId}:updates`,
+          prefix + `run:${runId}:input-closed`,
+          prefix + `run:${runId}:included`,
+        ],
+        arguments: [],
+      },
+    )) === 1
+  );
 }
 export async function runs(sessionId: string) {
   const ids = await (
@@ -108,7 +200,11 @@ export async function register(run: AIRun): Promise<boolean> {
     local active = redis.call('GET', KEYS[2])
     if active then
       local a = cjson.decode(active)
-      if a.owner == ARGV[2] then return -1 end
+      local raw = redis.call('GET', ARGV[6] .. a.id)
+      if a.owner == ARGV[2] and raw then
+        local previous = cjson.decode(raw)
+        if previous.state == 'running' or previous.state == 'stopping' then return -1 end
+      end
     end
     redis.call('SET', KEYS[1], ARGV[1])
     redis.call('SET', KEYS[2], cjson.encode({owner=ARGV[2], id=ARGV[3]}))
@@ -129,6 +225,7 @@ export async function register(run: AIRun): Promise<boolean> {
         run.id,
         String(run.startedAt),
         run.sessionId,
+        prefix + "run:",
       ],
     },
   );

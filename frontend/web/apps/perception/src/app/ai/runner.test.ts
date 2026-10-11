@@ -72,7 +72,6 @@ describe("Responses configuration", () => {
     expect(visionInstructions).toContain(
       "积极指一次有效纠正当前偏差，不是无依据地扩大动作",
     );
-    expect(visionInstructions).toContain("相同目标与起始状态不重复预览");
     expect(visionInstructions).toContain(
       "用户只要求抓住并保持时不搬运、不释放",
     );
@@ -87,24 +86,79 @@ describe("Responses configuration", () => {
     );
     expect(visionInstructions).toContain("但仍经过 MoveIt 规划与碰撞检查");
     expect(visionInstructions).toContain("优先尝试夹爪平行地面或垂直地面");
-    expect(visionInstructions).toContain("不是固定朝向约束，允许倾斜抓取");
+    expect(visionInstructions).toContain("不是固定约束");
+    expect(visionInstructions).toContain("允许倾斜抓取");
     expect(visionInstructions).toContain(
-      "一次 IK 失败不代表这个朝向全部不可行",
+      "桌面物品优先选择短边、中部容易夹持的位置",
     );
+    expect(visionInstructions).toContain("不代表整个任务或朝向不可行");
     expect(depthInstructions).not.toContain("不要只预览不推进");
     expect(depthInstructions).toContain("无需另行逐个尝试抓取姿态或 IK");
   });
   it("opens for the final vision approach without replaying gripper actions or changing depth planning", () => {
-    const sequence =
-      "先接近目标并完成主要姿态调整 → 到达抓取前位置 → 按物体所需开口张开夹爪 → 完成最后一段接近 → 闭合";
-    expect(visionInstructions).toContain(sequence);
+    const steps = [
+      "### 1. 观察目标",
+      "### 2. 接近与调整姿态",
+      "### 3. 张开与空间对齐",
+      "### 4. 闭合与搬运",
+      "### 5. 放置与收尾",
+    ];
+    const prompt = runPrompt("vision", [], {}).system;
+    const positions = steps.map((step) => prompt.indexOf(step));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(prompt).toContain("先接近目标并完成主要姿态调整，不提前张开夹爪");
+    expect(prompt).toContain("到达抓取前位置后按物品所需开口张开");
     expect(visionInstructions).toContain("不设固定距离");
     expect(visionInstructions).toContain("不要等指尖接触物体才张开");
     expect(visionInstructions).toContain("不为重演顺序额外闭合再张开");
-    expect(visionInstructions).toContain("必要的松开与撤离不受此接近顺序影响");
-    expect(runPrompt("vision", [], {}).system).toContain(sequence);
-    expect(runPrompt("depth", [], {}).system).not.toContain(sequence);
+    expect(visionInstructions).toContain("必要的松开与撤离不受接近顺序影响");
+    expect(runPrompt("depth", [], {}).system).not.toContain(steps[2]);
     expect(depthInstructions).toContain("pick_place 包含抓取与放置");
+  });
+  it("keeps numbered depth steps in order without adding observation or confirmation rounds", () => {
+    const steps = [
+      "### 1. 采图与分割",
+      "### 2. 三维定位",
+      "### 3. 执行抓放",
+      "### 4. 核对与收尾",
+    ];
+    const prompt = runPrompt("depth", [], {}).system;
+    const positions = steps.map((step) => prompt.indexOf(step));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    for (const tool of [
+      "capture_segmentation",
+      "segment",
+      "annotate",
+      "reconstruct",
+      "pick_place",
+    ])
+      expect(prompt).toContain(tool);
+    expect(prompt).toContain("同一固定帧重建");
+    for (const instructions of [depthInstructions, visionInstructions]) {
+      expect(instructions).toContain("不是额外的工具调用或确认轮次");
+      expect(instructions).toContain("已有图像、反馈或已完成步骤直接复用");
+      expect(instructions).toContain("提问或观察请求不运动");
+      expect(instructions).toContain("保持既有力度和速度");
+      expect(instructions).toContain(
+        "目标区释放 → 撤开夹爪 → 回到工作位 → 新图核对结果",
+      );
+    }
+  });
+  it("requires spatial grasp alignment without prescribing a correction direction", () => {
+    const alignment = "两指实际夹持区域对准物品";
+    const prompt = runPrompt("vision", [], {}).system;
+    expect(prompt).toContain(alignment);
+    expect(prompt).toContain("视觉判断容易前伸过度");
+    expect(prompt).toContain("闭合前优先依据已有图像修正这一偏差");
+    expect(prompt).not.toContain("抓空时优先排查");
+    expect(prompt).toContain("不把图像重叠当作空间到位");
+    expect(prompt).not.toContain("应向底座方向收回");
+    expect(prompt.indexOf("视觉判断容易前伸过度")).toBeLessThan(
+      prompt.indexOf("### 4. 闭合与搬运"),
+    );
+    expect(runPrompt("depth", [], {}).system).not.toContain(alignment);
   });
   it("passes live state through SDK instructions without system messages or mutable history", async () => {
     const conversation: ModelMessage[] = [
@@ -161,31 +215,36 @@ describe("Responses configuration", () => {
     ).toBe("depth");
     expect(taskInstructions("depth")).toBe(depthInstructions);
     expect(taskInstructions("vision")).toBe(visionInstructions);
-    expect(depthInstructions).toContain(
-      "capture_segmentation → segment 或 annotate → reconstruct → pick_place",
-    );
-    expect(visionInstructions).not.toContain("capture_segmentation →");
+    expect(depthInstructions).toContain("### 1. 采图与分割");
+    expect(depthInstructions).toContain("### 2. 三维定位");
+    expect(visionInstructions).not.toContain("capture_segmentation");
     expect(visionInstructions).not.toContain("先粗后细");
     expect(visionInstructions).not.toContain("只有临近接触或精确对齐时才缩小");
-    expect(visionInstructions).toContain("所有阶段的调整都更积极");
-    expect(visionInstructions).toContain("较大幅度平移或旋转");
-    expect(visionInstructions).toContain("不因临近目标就默认缩成微小动作");
-    expect(visionInstructions).toContain("不固定小步长");
+    expect(visionInstructions).toContain(
+      "所有阶段都采用能明显纠正偏差的较大幅度调整",
+    );
+    expect(visionInstructions).toContain("不因靠近目标就默认微调");
+    expect(visionInstructions).toContain("幅度依据图像与实际 TCP");
     expect(visionInstructions).toContain("不把像素当米或臆造相机外参");
   });
   it("preserves approach progress across turns and avoids redundant camera switching", () => {
-    expect(visionInstructions).toContain("续轮不是重新开始");
-    expect(visionInstructions).toContain("之后复用，不从头试探");
-    expect(visionInstructions).toContain("不反复切换视角确认");
+    expect(visionInstructions).toContain(
+      "沿用同一会话已确认的方向、动作效果和进度",
+    );
+    expect(visionInstructions).toContain("建立方向关系，之后复用");
+    expect(visionInstructions).toContain("必要时才切换相机");
     expect(visionInstructions).toContain("保持既有力度和速度");
     expect(visionInstructions).toContain("observe_role");
     for (const prompt of [visionInstructions, depthInstructions])
-      expect(prompt).toContain("释放物体、撤开夹爪、回到工作位");
+      expect(prompt).toContain("目标区释放 → 撤开夹爪 → 回到工作位");
   });
   it("authorizes task-scoped tools and visual annotation without repeated permission, while respecting read-only requests", () => {
-    expect(depthInstructions).toContain("任务内无需重复征求授权");
-    expect(depthInstructions).toContain("基于当前图像补框");
-    expect(depthInstructions).toContain("三维坐标由重建计算");
+    expect(depthInstructions).toContain("说明后直接执行，不等待再次批准");
+    expect(depthInstructions).toContain("依据该帧补框");
+    expect(depthInstructions).toContain("同一固定帧重建");
+    expect(depthInstructions).toContain(
+      "真实对象/区域 ID 和三维坐标，不编造坐标",
+    );
     expect(depthInstructions).toContain("提问或观察请求不运动");
   });
   it("separates model turns without breaking streamed words or adding empty tool-only paragraphs", () => {

@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { AIRun } from "./types";
 import { saveRun } from "./store";
 import { postureSummary } from "./posture";
+import { networkRecovery } from "./network";
 
 const base = () =>
   process.env.GATEWAY_INTERNAL_URL?.replace(/\/$/, "") ??
@@ -213,15 +214,22 @@ export async function waitRequest(
   update: (record: RequestRecord) => Promise<void> = async () => {},
 ) {
   for (;;) {
-    const response = await fetch(
-      `${base()}/api/requests/${encodeURIComponent(id)}`,
-      { cache: "no-store" },
-    );
-    const record = (await response.json()) as RequestRecord;
-    if (!response.ok)
-      throw Error(
-        record.original_error ?? `查询机器人任务失败 (${response.status})`,
+    // Retry only reads of the original ID, never the motion submission.
+    const record = await networkRecovery().run(async () => {
+      const response = await fetch(
+        `${base()}/api/requests/${encodeURIComponent(id)}`,
+        { cache: "no-store" },
       );
+      const record = (await response.json()) as RequestRecord;
+      if (!response.ok)
+        throw Object.assign(
+          Error(
+            record.original_error ?? `查询机器人任务失败 (${response.status})`,
+          ),
+          { statusCode: response.status },
+        );
+      return record;
+    });
     await update(record);
     if (record.terminal || record.state === "unknown") return record;
     await new Promise((resolve) => setTimeout(resolve, 500));

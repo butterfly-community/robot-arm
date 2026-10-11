@@ -18,6 +18,11 @@ import {
   readRobot,
 } from "./robot";
 import { runPrompt, promptMode } from "./prompts";
+import {
+  networkRetries,
+  resilientModel,
+  transientNetworkError,
+} from "./network";
 import { modelContext, requestSummary } from "./context";
 import { experienceIndex, listExperiences } from "./experience";
 import { summarizeExperience } from "./experience-summary";
@@ -32,6 +37,9 @@ import {
   appendMessages,
   saveRun,
   settings,
+  runUpdates,
+  markUpdatesIncluded,
+  closeRunInput,
 } from "./store";
 import {
   activeRun,
@@ -119,13 +127,65 @@ export async function createRun(input: z.infer<typeof startSchema>) {
     responseModels: [],
     responseIds: [],
     warnings: [],
+    acceptingInput: true,
   };
-  const created = await register(run);
-  if (created) runtime().controllers.set(run.id, new AbortController());
-  return { run, created };
+  // Another submission with this ID may be registering while settings loaded.
+  // Never replace or remove its AbortController on an idempotent browser retry.
+  if (runtime().controllers.has(run.id))
+    return { run: (await getRun(run.id)) ?? run, created: false };
+  runtime().controllers.set(run.id, new AbortController());
+  try {
+    const created = await register(run);
+    if (!created) runtime().controllers.delete(run.id);
+    return { run, created };
+  } catch (error) {
+    runtime().controllers.delete(run.id);
+    throw error;
+  }
 }
 export async function executeRun(run: AIRun) {
+  try {
+    await executeOwnedRun(run);
+  } catch (error) {
+    // Finalization/storage errors must not leave a live owner with no runner.
+    if (activeRun(run))
+      run.state = runtime().controllers.get(run.id)?.signal.aborted
+        ? "cancelled"
+        : "failed";
+    run.acceptingInput = false;
+    run.error = publicError(error);
+    run.endedAt = Date.now();
+    await saveRun(run);
+  } finally {
+    runtime().controllers.delete(run.id);
+    await release(run);
+  }
+}
+
+async function pendingMessages(run: AIRun): Promise<ModelMessage[]> {
+  const pending = (await runUpdates(run.id)).filter((item) => !item.includedAt);
+  const added: ModelMessage[] = await Promise.all(
+    pending.map(async (item) => ({
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: item.text },
+        ...(await Promise.all(item.images.map(imagePart))),
+      ],
+    })),
+  );
+  if (added.length) {
+    await appendMessages(run.sessionId, added);
+    await markUpdatesIncluded(
+      run.id,
+      pending.map((item) => item.id),
+    );
+  }
+  return added;
+}
+
+async function executeOwnedRun(run: AIRun) {
   const controller = runtime().controllers.get(run.id)!;
+  let networkFailed = false;
   try {
     const input: ModelMessage = {
       role: "user",
@@ -135,7 +195,7 @@ export async function executeRun(run: AIRun) {
       ],
     };
     await appendMessages(run.sessionId, [input]);
-    const conversation = await messages(run.sessionId);
+    let conversation = await messages(run.sessionId);
     if (controller.signal.aborted) throw Error("AI 已停止");
     const [snapshot, robot] = await Promise.all([
       perceptionSnapshot(),
@@ -163,68 +223,102 @@ export async function executeRun(run: AIRun) {
       }
     }
     await saveRun(run);
-    let newReply = true;
-    const result = streamText({
-      model: provider(run.settings).responses(run.settings.model),
-      providerOptions: providerOptions(run.settings),
-      include: { rawChunks: true },
-      ...runPrompt(run.promptMode, conversation, {
-        robot,
-        camera,
-        experiences,
-      }),
-      prepareStep: ({ messages }) => ({ messages: modelContext(messages) }),
-      tools: robotTools(new RobotToolsContext(run, controller.signal)),
-      stopWhen: isLoopFinished(),
-      abortSignal: controller.signal,
-      onChunk: async ({ chunk }) => {
-        if (chunk.type === "text-delta" && chunk.text) {
-          run.firstTokenAt ??= Date.now();
-          run.text = appendReplyText(run.text, chunk.text, newReply);
-          newReply = false;
+    for (;;) {
+      let newReply = true;
+      const model = provider(run.settings).responses(run.settings.model);
+      const result = streamText({
+        model,
+        maxRetries: 0,
+        streamRetries: networkRetries,
+        providerOptions: providerOptions(run.settings),
+        include: { rawChunks: true },
+        ...runPrompt(run.promptMode, conversation, {
+          robot,
+          camera,
+          experiences,
+        }),
+        prepareStep: async ({ messages: stepMessages }) => {
+          const checkpoint = run.text;
+          const extra = await pendingMessages(run);
+          return {
+            messages: modelContext([...stepMessages, ...extra]),
+            model: resilientModel(model, controller.signal, async (status) => {
+              run.networkRetry = {
+                ...status,
+                error: publicError(Error(status.error)),
+              };
+              run.text = checkpoint;
+              newReply = true;
+              await saveRun(run);
+            }),
+          };
+        },
+        tools: robotTools(new RobotToolsContext(run, controller.signal)),
+        stopWhen: isLoopFinished(),
+        abortSignal: controller.signal,
+        onChunk: async ({ chunk }) => {
+          if (chunk.type === "text-delta" && chunk.text) {
+            run.firstTokenAt ??= Date.now();
+            run.text = appendReplyText(run.text, chunk.text, newReply);
+            newReply = false;
+            await saveRun(run);
+          }
+        },
+        onStepEnd: async (step) => {
+          // A completed model turn, not an individual streaming token, is a paragraph boundary.
+          newReply = true;
+          delete run.networkRetry;
+          (run.steps ??= []).push({
+            responseId: step.response.id,
+            responseMs: step.performance.responseTimeMs,
+            stepMs: step.performance.stepTimeMs,
+            inputTokens: step.usage.inputTokens,
+            outputTokens: step.usage.outputTokens,
+          });
+          await appendMessages(run.sessionId, step.response.messages);
+          if (step.response.id) run.responseIds.push(step.response.id);
+          if (step.response.modelId)
+            run.responseModels.push(step.response.modelId);
+          run.warnings.push(
+            ...(step.warnings ?? []).map((warning) => JSON.stringify(warning)),
+          );
           await saveRun(run);
+        },
+      });
+      // SDK consumes and decodes SSE; the browser receives persisted progress.
+      for await (const part of result.fullStream) {
+        if (part.type === "error") throw part.error;
+        if (part.type === "raw") {
+          const effort = responseEffort(part.rawValue);
+          if (effort)
+            run.reportedEfforts = [
+              ...new Set([...(run.reportedEfforts ?? []), effort]),
+            ];
         }
-      },
-      onStepEnd: async (step) => {
-        // A completed model turn, not an individual streaming token, is a paragraph boundary.
-        newReply = true;
-        (run.steps ??= []).push({
-          responseId: step.response.id,
-          responseMs: step.performance.responseTimeMs,
-          stepMs: step.performance.stepTimeMs,
-          inputTokens: step.usage.inputTokens,
-          outputTokens: step.usage.outputTokens,
-        });
-        await appendMessages(run.sessionId, step.response.messages);
-        if (step.response.id) run.responseIds.push(step.response.id);
-        if (step.response.modelId)
-          run.responseModels.push(step.response.modelId);
-        run.warnings.push(
-          ...(step.warnings ?? []).map((warning) => JSON.stringify(warning)),
-        );
-        await saveRun(run);
-      },
-    });
-    // SDK consumes and decodes SSE; the browser receives persisted progress.
-    for await (const part of result.fullStream) {
-      if (part.type === "error") throw part.error;
-      if (part.type === "raw") {
-        const effort = responseEffort(part.rawValue);
-        if (effort)
-          run.reportedEfforts = [
-            ...new Set([...(run.reportedEfforts ?? []), effort]),
-          ];
       }
+      run.usage = await result.totalUsage;
+      const finish = await result.finishReason;
+      if (controller.signal.aborted) run.state = "cancelled";
+      else if (finish !== "stop") throw Error(`模型未正常完成：${finish}`);
+      else if (!(await closeRunInput(run.id))) {
+        // An update arrived while the final response was being generated.
+        // Continue this run, rather than losing it or starting another robot task.
+        conversation = await messages(run.sessionId);
+        continue;
+      } else run.state = "succeeded";
+      break;
     }
-    run.usage = await result.totalUsage;
-    const finish = await result.finishReason;
-    if (controller.signal.aborted) run.state = "cancelled";
-    else if (finish !== "stop") throw Error(`模型未正常完成：${finish}`);
-    else run.state = "succeeded";
   } catch (error) {
+    networkFailed = transientNetworkError(error) || Boolean(run.networkRetry);
     run.state = controller.signal.aborted ? "cancelled" : "failed";
     run.error = publicError(error);
   } finally {
+    run.acceptingInput = false;
+    // SDK cancellation can finish the stream normally instead of throwing.
+    // A stopped retry must not start a new network wait in the summary.
+    networkFailed ||= controller.signal.aborted && Boolean(run.networkRetry);
+    delete run.networkRetry;
+    run.updates = await runUpdates(run.id);
     // Aborting model generation is not proof a previously submitted robot
     // action stopped. Finish tracking its original ID before a terminal AI state.
     const active = run.requests.filter((r) =>
@@ -258,7 +352,15 @@ export async function executeRun(run: AIRun) {
       }
       run.state = original;
     }
-    if (run.experienceScope) {
+    if (run.experienceScope && networkFailed) {
+      run.experienceSummary = {
+        state: controller.signal.aborted ? "cancelled" : "failed",
+        savedIds: [],
+        error: controller.signal.aborted
+          ? "已停止网络恢复，本轮不再发起经验总结"
+          : "模型连接未恢复，本轮不再发起经验总结",
+      };
+    } else if (run.experienceScope) {
       const outcome = run.state;
       run.experienceSummary = { state: "running", savedIds: [] };
       // Preserve the settled task outcome for review; the UI remains busy only
@@ -271,7 +373,17 @@ export async function executeRun(run: AIRun) {
         await saveRun(run);
         await summarizeExperience(
           settled,
-          provider(run.settings).responses(run.settings.model),
+          resilientModel(
+            provider(run.settings).responses(run.settings.model),
+            summaryController.signal,
+            async (status) => {
+              run.networkRetry = {
+                ...status,
+                error: publicError(Error(status.error)),
+              };
+              await saveRun(run);
+            },
+          ),
           providerOptions(run.settings),
           summaryController.signal,
         );
@@ -285,6 +397,7 @@ export async function executeRun(run: AIRun) {
       } finally {
         // Summary failures must never change the original physical task result.
         run.state = outcome;
+        delete run.networkRetry;
       }
     }
     run.endedAt = Date.now();
@@ -297,8 +410,6 @@ export async function executeRun(run: AIRun) {
       ]);
     }
     await saveRun(run);
-    runtime().controllers.delete(run.id);
-    await release(run);
   }
 }
 export async function stopRun(id: string) {

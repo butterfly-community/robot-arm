@@ -10,6 +10,8 @@ vi.mock("redis", () => ({
     on: vi.fn(),
     connect: async () => {},
     get: async (key: string) => data.get(key),
+    lRange: async (key: string) => JSON.parse(data.get(key) ?? "[]"),
+    hGetAll: async (key: string) => JSON.parse(data.get(key) ?? "{}"),
     set: async (key: string, value: string) => {
       data.set(key, value);
     },
@@ -21,11 +23,42 @@ import {
   messages,
   putImage,
   appendMessages,
+  getRun,
+  runtime,
+  runUpdates,
 } from "./store";
 describe("complete local Responses context", () => {
   beforeEach(() => {
     data.clear();
     process.env.AI_DATA_DIR = resolve(process.cwd(), "../temp/ai-unit-images");
+  });
+  it("repairs a same-process orphan instead of leaving the input permanently busy", async () => {
+    data.set(
+      "robot-arm:ai:run:orphan",
+      JSON.stringify({
+        id: "orphan",
+        owner: runtime().owner,
+        state: "running",
+        networkRetry: { attempt: 2 },
+        acceptingInput: true,
+      }),
+    );
+    const run = await getRun("orphan");
+    expect(run?.state).toBe("interrupted");
+    expect(run?.acceptingInput).toBe(false);
+    expect(run?.networkRetry).toBeUndefined();
+    expect(run?.endedAt).toBeDefined();
+  });
+  it("keeps message arrays intact while joining separately persisted consumption status", async () => {
+    const item = { id: "u", text: "reminder", images: [], receivedAt: 1 };
+    data.set(
+      "robot-arm:ai:run:r:updates",
+      JSON.stringify([JSON.stringify(item)]),
+    );
+    expect(await runUpdates("r")).toEqual([item]);
+    data.set("robot-arm:ai:run:r:included", JSON.stringify({ u: "2" }));
+    expect(await runUpdates("r")).toEqual([{ ...item, includedAt: 2 }]);
+    expect((await runUpdates("r"))[0].images).toEqual([]);
   });
   it("preserves RGB pixels, dimensions and content-addressed identity through PNG upload", async () => {
     const rgb = Buffer.from([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0]);

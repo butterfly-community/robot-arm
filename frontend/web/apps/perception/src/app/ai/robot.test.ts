@@ -40,6 +40,26 @@ const response = (state = "succeeded") =>
     }),
   );
 describe("AI uses the same persisted robot requests", () => {
+  it("retries interrupted status reads without submitting the physical command twice", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({}))
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(response());
+    vi.stubGlobal("fetch", fetcher);
+    const result = new RobotToolsContext(
+      run(),
+      new AbortController().signal,
+    ).command("move", 0, "/api/motion/request", {}, "move");
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await result;
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(
+      fetcher.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
+  });
   it("waits for the acknowledged camera version before a following observation", async () => {
     const snapshot = (version: number) =>
       Response.json({
