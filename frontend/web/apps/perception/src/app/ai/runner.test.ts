@@ -80,12 +80,23 @@ describe("Responses configuration", () => {
       "先 preview_motion，再用 move_joints 执行预览的同一组绝对关节角",
     );
     expect(visionInstructions).toContain(
-      "可以平行地面、垂直地面或在这两种姿态附近稍微倾斜",
+      "物品放置在桌面时，优先从顶部向下抓取",
     );
+    expect(visionInstructions).toContain("接近方向大致垂直桌面");
+    expect(visionInstructions).toContain("尽量避免平行桌面的侧向抓取");
+    expect(visionInstructions).toContain("这是桌面场景的偏好");
+    expect(visionInstructions).toContain(
+      "仅圆柱形或特别高、侧面适合稳定夹持的物品才考虑平行桌面的侧向抓取",
+    );
+    expect(visionInstructions).toContain("不因一次顶部 IK 失败就改为侧抓");
+    expect(visionInstructions).not.toContain("顶部不适合时再选择");
     expect(visionInstructions).toContain(
       "大幅倾斜只在物体形状或摆放特别适合、能明显改善夹持时采用",
     );
-    expect(visionInstructions).toContain("不要求精确水平或竖直");
+    expect(visionInstructions).toContain(
+      "顶部抓取允许小幅倾斜，不要求精确竖直",
+    );
+    expect(visionInstructions).not.toContain("可以平行地面、垂直地面");
     expect(visionInstructions).toContain("不为消除小幅倾斜反复调姿");
     expect(visionInstructions).not.toContain("既不水平也不竖直");
     expect(visionInstructions).not.toContain("不选择倾斜抓取");
