@@ -42,7 +42,7 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 | `form-sync`、`request-status`、`pick-place-progress` | 草稿/生效值、失败保留、同请求进度与刷新；拦截写入 |
 | `segmentation-composition`、`segmentation-models`、`grasp-selection` | 三种分割组合、原图框选、来源与实例选择；拦截写入，不运行实体抓放 |
 | `calibration-persistence` | 已保存外参、重新标定/取消、刷新回显；拦截标定请求，不证明真实标定精度 |
-| `calibration-values` | 已保存深度/双目标定参数横向滚动、实时刷新期间的菜单选择；需保存的标定和外部左相机测试绑定，只编辑未保存草稿，不运动 |
+| `calibration-values` | 已保存深度/双目标定参数横向滚动；需保存的标定且未选择深度来源（否则页面仅展示所选来源），只读、不运动 |
 | `input-discovery` | 实际未发现提示与布局；注入故障用例只验证错误显示 |
 | `input-gamepad` | 实体手柄发现、编辑/保存/刷新与采样；恢复原名称，不发运动 |
 | `camera-bindings` | 网页绑定两个模拟来源、出图、拖动/收起、持久化与解除；不拦截，不发运动 |

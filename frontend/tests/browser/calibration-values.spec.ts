@@ -8,6 +8,10 @@ for (const width of [1600, 390]) {
     await page.setViewportSize({ width, height: 1100 });
     await page.goto("/perception/");
     await expect(page.locator(".topbar-state")).toHaveText("实时连接正常");
+    await expect(
+      page.getByLabel("相机来源", { exact: true }),
+      "此只读用例要求未选择深度来源，以同时展示保存的深度相机和双目标定",
+    ).toHaveAttribute("data-value", "");
     const toggle = page.getByText("标定详细数值", { exact: true }).first();
     await expect(toggle).toBeVisible();
     await toggle.click();
