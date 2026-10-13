@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 eyre.workspace = true
 nalgebra.workspace = true
-opencv.workspace = true
+opencv = { workspace = true, features = ["stereo"] }
 robot-arm-messages.workspace = true
+serde.workspace = true

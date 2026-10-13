@@ -15,6 +15,7 @@ import {
 import { settingsSchema, startSchema } from "./types";
 import {
   depthInstructions,
+  stereoInstructions,
   visionInstructions,
   promptMode,
   taskInstructions,
@@ -23,8 +24,54 @@ import {
 import type { CameraCaptureState } from "@robot/contracts";
 vi.mock("./store", () => ({}));
 describe("Responses configuration", () => {
+  it.each([
+    ["external", ["external", "external_right", "wrist"]],
+    ["wrist", ["external", "wrist", "wrist_right"]],
+  ] as const)(
+    "uses stereo localization and AI motion with a single opposite camera: %s",
+    (rig, roles) => {
+      for (const streaming of [false, true]) {
+        const camera = {
+          selected_source_id: `stereo:${rig}`,
+          streaming,
+          bindings: roles.map((role) => ({
+            role,
+            source_id: `replay:${role}`,
+            streaming,
+          })),
+        } as CameraCaptureState;
+        expect(promptMode(camera)).toBe("stereo");
+      }
+      const prompt = runPrompt("stereo", [], {}).system;
+      for (const tool of [
+        "capture_segmentation",
+        "segment",
+        "annotate",
+        "reconstruct",
+        "observe_stereo_depth",
+        "move_tcp_absolute",
+        "move_tcp_relative",
+        "move_joints",
+        "gripper",
+      ]) {
+        expect(prompt).toContain(tool);
+      }
+      expect(prompt).toContain(
+        "不调用 generate_grasps、GraspGenX 或 pick_place",
+      );
+      expect(prompt).toContain("不要求四路齐全");
+      expect(prompt).toContain("不要求先闭爪触碰目标测位置");
+      expect(prompt).toContain("图像时刻的实际机械臂反馈");
+      expect(prompt).not.toContain("pick_place 包含抓取与放置");
+      expect(prompt).not.toContain("在建立有效接触前不要打开夹爪");
+    },
+  );
   it("uses attributed cross-session lessons without treating them as commands or live coordinates", () => {
-    for (const prompt of [depthInstructions, visionInstructions]) {
+    for (const prompt of [
+      depthInstructions,
+      stereoInstructions,
+      visionInstructions,
+    ]) {
       expect(prompt).toContain("recall_experience");
       expect(prompt).not.toContain("save_experience");
       expect(prompt).toContain("每轮成功完成、失败或取消结束后");
@@ -37,7 +84,11 @@ describe("Responses configuration", () => {
     expect(prompt.system).toContain('"experiences":[{"id":"lesson-1"}]');
   });
   it("continues after candidate IK failure without forcing orientation or silent progress", () => {
-    for (const prompt of [depthInstructions, visionInstructions]) {
+    for (const prompt of [
+      depthInstructions,
+      stereoInstructions,
+      visionInstructions,
+    ]) {
       expect(prompt).toContain("没有完成用户目标不要停止");
       expect(prompt).toContain("用户明确暂停、停止或改变目标时遵从最新指令");
       expect(prompt).toContain("IK 失败是尝试候选目标位姿时的正常求解结果");
@@ -154,7 +205,7 @@ describe("Responses configuration", () => {
     expect(prompt).toContain("避免仅用指尖或边缘浅夹、只夹角点而滑脱");
   });
   it("withdraws after a missed grasp before changing posture in either mode", () => {
-    for (const mode of ["depth", "vision"] as const) {
+    for (const mode of ["depth", "stereo", "vision"] as const) {
       const prompt = runPrompt(mode, [], {}).system;
       expect(prompt).toContain(
         "确认抓空或滑脱后，先撤离目标、留出调整空间，再调整位置、深度或朝向并重新接近",
@@ -267,6 +318,7 @@ describe("Responses configuration", () => {
     ).toBe("depth");
     expect(taskInstructions("depth")).toBe(depthInstructions);
     expect(taskInstructions("vision")).toBe(visionInstructions);
+    expect(taskInstructions("stereo")).toBe(stereoInstructions);
     const qualityPriority = "抓取决策最高优先级是夹取姿态与夹取质量";
     expect(visionInstructions).toContain(qualityPriority);
     expect(visionInstructions.indexOf(qualityPriority)).toBeLessThan(

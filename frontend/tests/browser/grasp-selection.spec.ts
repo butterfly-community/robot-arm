@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 
 // UI contract only: all writes are intercepted, never a physical grasp trial.
@@ -57,11 +58,11 @@ test("accepted task selection follows updates without losing a later human edit"
   await page.getByText("抓放场景", { exact: true }).click();
   const target = page.getByLabel("抓取目标", { exact: true });
   const destination = page.getByLabel("放置区域", { exact: true });
-  await expect(target).toHaveValue("old-box");
-  await expect(destination).toHaveValue("old-pad");
+  await expect(target).toHaveAttribute("data-value", "old-box");
+  await expect(destination).toHaveAttribute("data-value", "old-pad");
   // Exercise an actual human draft, not only the page's first-option default.
-  await target.selectOption("old-box");
-  await destination.selectOption("old-pad");
+  await chooseOption(target, "old-box");
+  await chooseOption(destination, "old-pad");
   snapshot.values.world_scene.sequence = 2;
   snapshot.values.world_scene.objects = [object("new-box")];
   snapshot.values.world_scene.placement_regions = [
@@ -71,11 +72,11 @@ test("accepted task selection follows updates without losing a later human edit"
   snapshot.values.manipulation_state.object_id = "new-box";
   snapshot.values.manipulation_state.placement_region_id = "new-pad";
   publish!();
-  await expect(target).toHaveValue("new-box");
-  await expect(destination).toHaveValue("new-pad");
+  await expect(target).toHaveAttribute("data-value", "new-box");
+  await expect(destination).toHaveAttribute("data-value", "new-pad");
   snapshot.values.manipulation_state.state = "succeeded";
   publish!();
-  await destination.selectOption("other-pad");
+  await chooseOption(destination, "other-pad");
   publish!();
-  await expect(destination).toHaveValue("other-pad");
+  await expect(destination).toHaveAttribute("data-value", "other-pad");
 });

@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test, type WebSocketRoute } from "@playwright/test";
 
 test("the initial page state comes only from the WebSocket snapshot", async ({
@@ -179,10 +180,13 @@ test("perception supports empty roles, rejects stale selections and stops after 
       .getByLabel("抓放进度", { exact: true })
       .getByText("Error: 模式切换失败", { exact: true }),
   ).toBeVisible();
-  await page.getByLabel("抓取目标", { exact: true }).selectOption("object-a");
+  await chooseOption(page.getByLabel("抓取目标", { exact: true }), "object-a");
   snapshot.values.world_scene.objects[0].object_id = "object-b";
   socket!.send(JSON.stringify(snapshot));
-  await expect(page.getByLabel("抓取目标", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("抓取目标", { exact: true })).toHaveAttribute(
+    "data-value",
+    "",
+  );
   await expect(
     page.getByRole("button", { name: "启动", exact: true }),
   ).toBeDisabled();
@@ -284,9 +288,11 @@ test("robot asset failure is visible and page reload recovers the preview", asyn
     route.fulfill({ status: 404, body: "asset unavailable (test)" }),
   );
   await page.goto("/motion/");
-  await expect(page.locator(".robot-load-status[role=alert]")).toContainText(
-    "机械臂模型加载失败",
-  );
+  for (const label of ["机械臂三维反馈与目标预览", "TCP 目标坐标轴预览"]) {
+    await expect(
+      page.getByLabel(label).locator(".robot-load-status[role=alert]"),
+    ).toContainText("机械臂模型加载失败");
+  }
   await page.unroute("**/api/motion/assets/**");
   await page.reload();
   await expect(page.getByLabel("机械臂三维反馈与目标预览")).toHaveAttribute(

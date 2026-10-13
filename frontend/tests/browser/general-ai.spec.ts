@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 test("AI editable dropdowns select, accept custom values and retain drafts without requiring an image", async ({
   page,
@@ -306,8 +307,15 @@ test("running robot task survives browser reload and cancellation is not immedia
   await page.reload();
   await expect(conversation.locator(".ai-run")).toHaveCount(2);
   await expect(
-    page.getByRole("button", { name: "发送 AI 任务", exact: true }),
+    page.getByRole("button", { name: "发送补充", exact: true }),
   ).toBeDisabled();
+  await page
+    .getByLabel("AI 任务", { exact: true })
+    .fill("测试补充草稿，不发送");
+  await expect(
+    page.getByRole("button", { name: "发送补充", exact: true }),
+  ).toBeEnabled();
+  await page.getByLabel("AI 任务", { exact: true }).fill("");
   await page
     .getByRole("button", { name: "停止 AI 与当前动作", exact: true })
     .click();
@@ -321,9 +329,10 @@ test("running robot task survives browser reload and cancellation is not immedia
     { timeout: 15000 },
   );
   expect(starts).toBe(0);
-  await page
-    .getByLabel("AI 历史会话", { exact: true })
-    .selectOption(run.sessionId);
+  await chooseOption(
+    page.getByLabel("AI 历史会话", { exact: true }),
+    run.sessionId,
+  );
   await expect(page.locator('[data-run-id="fixture-run"]')).toContainText(
     "已取消",
   );

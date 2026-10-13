@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Authorized real browser acceptance. Does not intercept or fabricate commands/results.
 import {
   chromium,
@@ -163,8 +164,8 @@ try {
         .toBe("executing");
     }
     await expandSegmentation(page, "抓放场景");
-    await page.getByLabel("抓取目标", { exact: true }).selectOption(objectId);
-    await page.getByLabel("放置区域", { exact: true }).selectOption(regionId);
+    await chooseOption(page.getByLabel("抓取目标", { exact: true }), objectId);
+    await chooseOption(page.getByLabel("放置区域", { exact: true }), regionId);
     await page.getByRole("button", { name: "启动", exact: true }).click();
     await expect.poll(() => Boolean(graspId), { timeout: 180000 }).toBe(true);
     if (mode !== "complete") {

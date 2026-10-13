@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { robotTools } from "./tools";
 import type { RobotToolsContext } from "./robot";
 import { perceptionSnapshot, cameraImage, readRobot } from "./robot";
@@ -76,6 +76,51 @@ function setup() {
 }
 describe("AI segmentation uses the same single refresh request as the UI", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.unstubAllGlobals());
+  it("returns stereo coordinates with their rectified image and never commands motion", async () => {
+    const metadata = {
+      source_id: "stereo:wrist",
+      point_in_rectified_camera_m: [0, 0, 0.5],
+      point_in_base_m: [0.2, 0, 0.1],
+      frame: "rectified_left_optical",
+    };
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response("png", {
+          headers: { "x-camera-frame": JSON.stringify(metadata) },
+        }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const { command, tools } = setup();
+    const result = await tools.observe_stereo_depth.execute!(
+      { rig: "wrist", u: 0.4, v: 0.6 },
+      { toolCallId: "stereo", messages: [], context: undefined },
+    );
+    expect(fetch.mock.calls[0][0]).toContain(
+      "/stereo/depth?rig=wrist&image=true&u=0.4&v=0.6",
+    );
+    expect(result).toMatchObject({ ...metadata, image_id: "fixture-image" });
+    expect(command).not.toHaveBeenCalled();
+  });
+  it("reports missing stereo calibration instead of inventing a depth result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () => new Response("请先完成并应用双目标定", { status: 400 }),
+      ),
+    );
+    const { command, tools } = setup();
+    const result = await tools.observe_stereo_depth.execute!(
+      { rig: "external" },
+      { toolCallId: "stereo-missing", messages: [], context: undefined },
+    );
+    expect(result).toMatchObject({
+      error: "请先完成并应用双目标定",
+      tool: "observe_stereo_depth",
+    });
+    expect(result).not.toHaveProperty("point_in_base_m");
+    expect(command).not.toHaveBeenCalled();
+  });
   it("describes the gripper target included in work_pose without promising to preserve the grasp", async () => {
     const { command, tools } = setup();
     expect(tools.work_pose.description).toContain(
@@ -200,8 +245,24 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
       values: {
         camera_state: {
           bindings: [
-            { role: "external", enabled: true, streaming: true },
-            { role: "wrist", enabled: false, streaming: false },
+            {
+              role: "external",
+              source_id: "left",
+              enabled: true,
+              streaming: true,
+            },
+            {
+              role: "external_right",
+              source_id: null,
+              enabled: false,
+              streaming: false,
+            },
+            {
+              role: "wrist",
+              source_id: null,
+              enabled: false,
+              streaming: false,
+            },
           ],
         },
       },
@@ -274,8 +335,18 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
       values: {
         camera_state: {
           bindings: [
-            { role: "external", enabled: true, streaming: true },
-            { role: "wrist", enabled: false, streaming: false },
+            {
+              role: "external",
+              source_id: "external-left",
+              enabled: true,
+              streaming: true,
+            },
+            {
+              role: "wrist",
+              source_id: "wrist-left",
+              enabled: false,
+              streaming: false,
+            },
           ],
         },
       },
@@ -313,9 +384,64 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
     ]);
     expect(result).toEqual({ request_id: "camera-switch", bindings });
   });
+  it("exclusive observation keeps both stereo peers open and only switches the other rig", async () => {
+    const { command, tools } = setup();
+    vi.mocked(perceptionSnapshot).mockResolvedValueOnce({
+      values: {
+        camera_state: {
+          bindings: [
+            {
+              role: "external",
+              source_id: "external-left",
+              enabled: true,
+              streaming: true,
+            },
+            {
+              role: "external_right",
+              source_id: "external-right",
+              enabled: true,
+              streaming: true,
+            },
+            {
+              role: "wrist",
+              source_id: "wrist-left",
+              enabled: false,
+              streaming: false,
+            },
+            {
+              role: "wrist_right",
+              source_id: "wrist-right",
+              enabled: false,
+              streaming: false,
+            },
+          ],
+        },
+      },
+    } as never);
+    await tools.observe_camera.execute!(
+      { role: "wrist_right", exclusive: true },
+      { toolCallId: "stereo-group", messages: [], context: {} },
+    );
+    expect(command.mock.calls.map((c) => c[3])).toEqual([
+      { role: "external", action: "disconnect" },
+      { role: "external_right", action: "disconnect" },
+      { role: "wrist", action: "connect" },
+      { role: "wrist_right", action: "connect" },
+    ]);
+    expect(cameraImage).toHaveBeenCalledWith(
+      "wrist_right",
+      expect.any(AbortSignal),
+    );
+  });
   it("observes the requested role without segmentation, depth or robot commands", async () => {
     const { command, tools } = setup();
-    for (const role of ["external", "wrist", "depth"]) {
+    for (const role of [
+      "external",
+      "external_right",
+      "wrist",
+      "wrist_right",
+      "depth",
+    ]) {
       const result = await tools.observe_camera.execute!(
         { role },
         { toolCallId: `observe-${role}`, messages: [], context: {} },

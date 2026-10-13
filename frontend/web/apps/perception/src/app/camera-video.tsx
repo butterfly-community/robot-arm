@@ -385,7 +385,16 @@ function FloatingCameraVideoWindow({
         bottom: "auto",
       } satisfies CSSProperties)
     : ({
-        top: 80 + ["depth", "external", "wrist"].indexOf(role) * 64,
+        top:
+          80 +
+          [
+            "depth",
+            "external",
+            "external_right",
+            "wrist",
+            "wrist_right",
+          ].indexOf(role) *
+            64,
         bottom: "auto",
       } satisfies CSSProperties);
 
@@ -404,7 +413,7 @@ function FloatingCameraVideoWindow({
         onPointerCancel={stopDrag}
       >
         <div>
-          <strong>{cameraTitles[role]}</strong>
+          <strong title={cameraTitles[role]}>{cameraTitles[role]}</strong>
           <span>
             {!hasSignal ? "信号中断" : collapsed ? "预览已收起" : "采集中"}
           </span>

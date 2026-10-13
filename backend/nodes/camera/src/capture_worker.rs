@@ -42,7 +42,6 @@ pub(crate) enum Command {
         action: RequestAction,
         source_id: String,
     },
-    UpdateToolPose(ToolPose),
     SetCalibrationActive(bool),
     Shutdown,
 }
@@ -86,6 +85,7 @@ pub(crate) enum Output {
 
 pub(crate) struct Channels {
     pub(crate) commands: async_mpsc::Sender<Command>,
+    pub(crate) tool_pose: tokio::sync::watch::Sender<Option<ToolPose>>,
     pub(crate) completions: async_mpsc::Receiver<Completion>,
     pub(crate) outputs: tokio::sync::watch::Receiver<Option<Output>>,
     pub(crate) video: tokio::sync::watch::Receiver<Option<Arc<camera_media::VideoFrame>>>,
@@ -93,6 +93,9 @@ pub(crate) struct Channels {
 
 pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
     let (commands, mut command_receiver) = async_mpsc::channel(8);
+    // Pose is replaceable state, not a command. Slow capture must never queue
+    // old poses ahead of user controls or fill their acknowledgement queue.
+    let (tool_pose, mut pose_receiver) = tokio::sync::watch::channel(None::<ToolPose>);
     let (completion_sender, completions) = async_mpsc::channel(8);
     let (output_sender, outputs) = tokio::sync::watch::channel(None);
     let (video_sender, video_outputs) = tokio::sync::watch::channel(None);
@@ -107,6 +110,12 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
         loop {
             if command_receiver.is_closed() {
                 return;
+            }
+            if pose_receiver.has_changed().unwrap_or(false)
+                && let Some(pose) = pose_receiver.borrow_and_update().clone()
+                && let Ok(drivers) = drivers.as_mut()
+            {
+                drivers.update_tool_pose(pose);
             }
             while let Ok(command) = command_receiver.try_recv() {
                 match command {
@@ -250,11 +259,6 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
                             result,
                         });
                     }
-                    Command::UpdateToolPose(pose) => {
-                        if let Ok(drivers) = drivers.as_mut() {
-                            drivers.update_tool_pose(pose);
-                        }
-                    }
                     Command::SetCalibrationActive(active) => {
                         if let Ok(drivers) = drivers.as_mut() {
                             drivers.set_calibration_active(active);
@@ -318,6 +322,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Runtime) -> Channels {
     });
     Channels {
         commands,
+        tool_pose,
         completions,
         outputs,
         video: video_outputs,
@@ -332,6 +337,22 @@ mod tests {
     fn close_color_acknowledges_after_clearing_video() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut channels = spawn(&runtime);
+        let capacity = channels.commands.capacity();
+        for i in 0..1000 {
+            channels
+                .tool_pose
+                .send(Some(ToolPose {
+                    frame: "base_link".into(),
+                    position_m: [i as f64, 0.0, 0.0],
+                    orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                }))
+                .unwrap();
+        }
+        assert_eq!(channels.commands.capacity(), capacity);
+        assert_eq!(
+            channels.tool_pose.borrow().as_ref().unwrap().position_m[0],
+            999.0
+        );
         channels
             .commands
             .try_send(Command::CloseColor {

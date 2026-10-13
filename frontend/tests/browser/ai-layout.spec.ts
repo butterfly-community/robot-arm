@@ -22,7 +22,7 @@ for (const width of [1600, 390]) {
         .getByText(title, { exact: true })
         .locator("xpath=ancestor::div[contains(@class, 'disclosure')][1]");
     const camera = card("相机来源与配置"),
-      calibration = card("相机外参标定"),
+      calibration = card("深度相机标定"),
       ai = card("AI");
     await expect(page.locator(".perception-section-heading h2")).toHaveText([
       "相机与标定",
@@ -69,9 +69,9 @@ for (const width of [1600, 390]) {
     } else expect(right.y).toBeGreaterThan(left.y + left.height);
     for (const title of ["抓放场景", "相机内参与外参", "分割结果"])
       await page.getByText(title, { exact: true }).click();
-    await expect(fold("抓放场景").locator("select")).toHaveCount(2);
+    await expect(fold("抓放场景").getByRole("combobox")).toHaveCount(2);
     await expect(
-      fold("抓放场景").locator(".disclosure-content button"),
+      fold("抓放场景").locator(".disclosure-content").getByRole("button"),
     ).toHaveCount(3);
     await expect(
       fold("抓放场景").getByRole("button", { name: "启动", exact: true }),

@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import {
   schemaVersion,
@@ -36,6 +37,8 @@ import { useState } from "react";
 
 import { FloatingCameraVideo } from "./camera-video";
 import { CameraBindings } from "./camera-bindings";
+import { StereoCalibrations } from "./stereo-calibration";
+import { CalibrationValues } from "./calibration-values";
 import { SegmentationEditor } from "./segmentation-editor";
 import { startPickPlace } from "./start-pick-place";
 import {
@@ -172,26 +175,28 @@ function CalibrationResultValues({ result }: { result: CalibrationResult }) {
       />
       <details className="calibration-board-parameters">
         <summary>标定详细数值</summary>
-        <KeyValue label="求解器" value={result.solver} />
-        <KeyValue
-          label="标定板在夹具中：位置 · m / 四元数"
-          value={`${numbers(result.board_in_calibration_tool.position_m, 6)} / ${numbers(result.board_in_calibration_tool.orientation_xyzw, 6)}`}
-        />
-        <KeyValue
-          label="各样本平移残差 · mm"
-          value={numbers(
-            residuals.map((value) => value * 1000),
-            2,
-          )}
-        />
-        <KeyValue
-          label="各样本旋转残差 · °"
-          value={degrees(result.rotation_residuals_rad)}
-        />
-        <KeyValue
-          label="标定板格数 / 单格 / Marker · mm"
-          value={`${result.board.squares_x} × ${result.board.squares_y} / ${result.board.square_size_m * 1000} / ${result.board.marker_size_m * 1000}`}
-        />
+        <CalibrationValues label="标定详细数值">
+          <KeyValue label="求解器" value={result.solver} />
+          <KeyValue
+            label="标定板在夹具中：位置 · m / 四元数"
+            value={`${numbers(result.board_in_calibration_tool.position_m, 6)} / ${numbers(result.board_in_calibration_tool.orientation_xyzw, 6)}`}
+          />
+          <KeyValue
+            label="各样本平移残差 · mm"
+            value={numbers(
+              residuals.map((value) => value * 1000),
+              2,
+            )}
+          />
+          <KeyValue
+            label="各样本旋转残差 · °"
+            value={degrees(result.rotation_residuals_rad)}
+          />
+          <KeyValue
+            label="标定板格数 / 单格 / Marker · mm"
+            value={`${result.board.squares_x} × ${result.board.squares_y} / ${result.board.square_size_m * 1000} / ${result.board.marker_size_m * 1000}`}
+          />
+        </CalibrationValues>
       </details>
     </>
   );
@@ -816,12 +821,12 @@ export default function Page() {
               label="相机来源"
               hint="列表来自相机采集节点的主动发现结果；不选择时不会打开设备或发布图像。"
             >
-              <select
+              <Select
                 aria-label="相机来源"
                 disabled={pending}
                 value={selectedSourceId}
-                onChange={(event) => {
-                  void selectCamera(event.currentTarget.value);
+                onValueChange={(nextValue) => {
+                  void selectCamera(nextValue);
                 }}
               >
                 <option value="">不选择深度相机</option>
@@ -839,7 +844,7 @@ export default function Page() {
                       {source.available ? "" : " · 当前不可用（配置已保留）"}
                     </option>
                   ))}
-              </select>
+              </Select>
             </Field>
             <KeyValue
               label="设备型号"
@@ -885,13 +890,11 @@ export default function Page() {
               label="彩色流"
               hint="显示驱动当前报告和后端保留的彩色配置；当前不可用的配置会置灰并保留，不会因刷新丢失。"
             >
-              <select
+              <Select
                 aria-label="彩色流"
                 disabled={pending}
                 value={selectedColorProfileKey}
-                onChange={(event) =>
-                  changeProfile("color", event.currentTarget.value)
-                }
+                onValueChange={(nextValue) => changeProfile("color", nextValue)}
               >
                 <option value="">由驱动能力选择</option>
                 {selectedSource?.profiles
@@ -909,19 +912,17 @@ export default function Page() {
                         : ` · 不可用（${profile.unavailable_reason ?? "未知原因"}）`}
                     </option>
                   ))}
-              </select>
+              </Select>
             </Field>
             <Field
               label="深度流"
               hint="深度比例由活动设备直接报告，不由页面填写。"
             >
-              <select
+              <Select
                 aria-label="深度流"
                 disabled={pending}
                 value={selectedDepthProfileKey}
-                onChange={(event) =>
-                  changeProfile("depth", event.currentTarget.value)
-                }
+                onValueChange={(nextValue) => changeProfile("depth", nextValue)}
               >
                 <option value="">由驱动能力选择</option>
                 {selectedSource?.profiles
@@ -939,7 +940,7 @@ export default function Page() {
                         : ` · 不可用（${profile.unavailable_reason ?? "未知原因"}）`}
                     </option>
                   ))}
-              </select>
+              </Select>
             </Field>
             <Field
               label="上送频率 · FPS"
@@ -975,7 +976,7 @@ export default function Page() {
                       hint={`范围 ${parameter.minimum}–${parameter.maximum}，步长 ${parameter.step || "连续"}，驱动默认 ${parameter.default_value}${parameter.read_only ? "；只读" : ""}`}
                     >
                       {parameter.kind === "boolean" && !parameter.read_only ? (
-                        <select
+                        <Select
                           aria-label={`${parameter.sensor_name} · ${parameter.display_name}`}
                           disabled={pending}
                           value={driverParameterValue(
@@ -983,17 +984,17 @@ export default function Page() {
                             parameter.key,
                             parameter.current_value,
                           )}
-                          onChange={(event) =>
+                          onValueChange={(nextValue) =>
                             changeDriverParameter(
                               extension.namespace,
                               parameter.key,
-                              event.currentTarget.value,
+                              nextValue,
                             )
                           }
                         >
                           <option value="1">启用</option>
                           <option value="0">停用</option>
-                        </select>
+                        </Select>
                       ) : (
                         <Input
                           aria-label={`${parameter.sensor_name} · ${parameter.display_name}`}
@@ -1201,7 +1202,7 @@ export default function Page() {
           <Card
             className="span-6 perception-camera-calibration"
             eyebrow="Camera extrinsic calibration"
-            title="相机外参标定"
+            title="深度相机标定"
             action={
               <StatusBadge
                 tone={visibleSavedCalibrations.length ? "good" : "neutral"}
@@ -1417,6 +1418,7 @@ export default function Page() {
                         Boolean(savedCalibration) ||
                         Boolean(calibration?.active) ||
                         !camera?.selected_source_id ||
+                        camera.selected_source_id.startsWith("stereo:") ||
                         selectedSourceId !== camera.selected_source_id ||
                         !model?.calibration_targets?.length
                       }
@@ -1580,55 +1582,57 @@ export default function Page() {
               title="相机内参与外参"
               englishTitle="当前 RGB-D 帧内参、深度比例与生效外参。"
             >
-              <KeyValue
-                label="彩色 / 深度流"
-                value={`${camera?.selected_color_profile_key ?? "—"} / ${camera?.selected_depth_profile_key ?? "—"}`}
-                hint="来自所选驱动声明，决定读取哪两路图像。图像流必须与相机参数流的分辨率配套，否则像素和三维点会错位。"
-              />
-              <KeyValue
-                label="相机参数流"
-                value={activeSource ? "随原子 RGB-D 帧提供" : "—"}
-                hint="来自所选驱动声明，提供与图像分辨率对应的 K、D、P 标定数据。"
-              />
-              <KeyValue
-                label="内参 K"
-                value={numbers(perception?.camera_calibration?.camera_matrix)}
-                hint="K = [fx, 0, cx; 0, fy, cy; 0, 0, 1]，由相机参数流提供。fx、fy 是像素焦距，cx、cy 是光心；错误会改变点云的横向尺度和位置。"
-              />
-              <KeyValue
-                label="畸变模型 / D"
-                value={
-                  perception?.camera_calibration
-                    ? `${perception.camera_calibration.distortion_model} · ${numbers(perception.camera_calibration.distortion)}`
-                    : "—"
-                }
-                hint="D 由相机参数流提供，元素含义由畸变模型决定；plumb_bob 通常依次为 k1、k2、t1、t2、k3，用于修正径向和切向畸变。"
-              />
-              <KeyValue
-                label="投影矩阵 P"
-                value={numbers(
-                  perception?.camera_calibration?.projection_matrix,
-                )}
-                hint="P = [fx′, 0, cx′, Tx; 0, fy′, cy′, Ty; 0, 0, 1, 0]，由相机参数流提供，决定校正后的三维点投影到哪个像素。"
-              />
-              <KeyValue
-                label="深度比例"
-                value={`${perception?.depth_scale_m ?? "—"} m / unit`}
-                hint="由活动相机驱动随帧报告。原始深度值乘以它得到米，并等比例决定点云、物体距离和尺寸。"
-              />
-              <KeyValue
-                label="外参：平移 / 四元数"
-                value={
-                  perception?.camera_calibration
-                    ? `${numbers(perception.camera_calibration.translation_m)} / ${numbers(perception.camera_calibration.orientation_xyzw)}`
-                    : "—"
-                }
-                hint="由本卡片的标定流程求得。平移 x/y/z 是相机在机械臂底座坐标中的米制位置，四元数 x/y/z/w 是朝向；共同把相机数据转换到底座坐标。"
-              />
+              <CalibrationValues label="相机内参与外参">
+                <KeyValue
+                  label="彩色 / 深度流"
+                  value={`${camera?.selected_color_profile_key ?? "—"} / ${camera?.selected_depth_profile_key ?? "—"}`}
+                  hint="来自所选驱动声明，决定读取哪两路图像。图像流必须与相机参数流的分辨率配套，否则像素和三维点会错位。"
+                />
+                <KeyValue
+                  label="相机参数流"
+                  value={activeSource ? "随原子 RGB-D 帧提供" : "—"}
+                  hint="来自所选驱动声明，提供与图像分辨率对应的 K、D、P 标定数据。"
+                />
+                <KeyValue
+                  label="内参 K"
+                  value={numbers(perception?.camera_calibration?.camera_matrix)}
+                  hint="K = [fx, 0, cx; 0, fy, cy; 0, 0, 1]，由相机参数流提供。fx、fy 是像素焦距，cx、cy 是光心；错误会改变点云的横向尺度和位置。"
+                />
+                <KeyValue
+                  label="畸变模型 / D"
+                  value={
+                    perception?.camera_calibration
+                      ? `${perception.camera_calibration.distortion_model} · ${numbers(perception.camera_calibration.distortion)}`
+                      : "—"
+                  }
+                  hint="D 由相机参数流提供，元素含义由畸变模型决定；plumb_bob 通常依次为 k1、k2、t1、t2、k3，用于修正径向和切向畸变。"
+                />
+                <KeyValue
+                  label="投影矩阵 P"
+                  value={numbers(
+                    perception?.camera_calibration?.projection_matrix,
+                  )}
+                  hint="P = [fx′, 0, cx′, Tx; 0, fy′, cy′, Ty; 0, 0, 1, 0]，由相机参数流提供，决定校正后的三维点投影到哪个像素。"
+                />
+                <KeyValue
+                  label="深度比例"
+                  value={`${perception?.depth_scale_m ?? "—"} m / unit`}
+                  hint="由活动相机驱动随帧报告。原始深度值乘以它得到米，并等比例决定点云、物体距离和尺寸。"
+                />
+                <KeyValue
+                  label="外参：平移 / 四元数"
+                  value={
+                    perception?.camera_calibration
+                      ? `${numbers(perception.camera_calibration.translation_m)} / ${numbers(perception.camera_calibration.orientation_xyzw)}`
+                      : "—"
+                  }
+                  hint="由本卡片的标定流程求得。平移 x/y/z 是相机在机械臂底座坐标中的米制位置，四元数 x/y/z/w 是朝向；共同把相机数据转换到底座坐标。"
+                />
+              </CalibrationValues>
             </Disclosure>
           </Card>
+          <StereoCalibrations />
         </section>
-
         <section className="perception-section">
           <PerceptionSectionHeading
             index="02"
@@ -1649,13 +1653,11 @@ export default function Page() {
                 >
                   <div className="perception-task-grid">
                     <Field label="抓取目标">
-                      <select
+                      <Select
                         aria-label="抓取目标"
                         disabled={pending}
                         value={selectedObject}
-                        onChange={(event) =>
-                          setObjectId(event.currentTarget.value)
-                        }
+                        onValueChange={(nextValue) => setObjectId(nextValue)}
                       >
                         <option value="">选择已三维定位的实例</option>
                         {scene?.objects.map((item) => (
@@ -1663,16 +1665,14 @@ export default function Page() {
                             {item.label} · {item.object_id}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </Field>
                     <Field label="放置区域">
-                      <select
+                      <Select
                         aria-label="放置区域"
                         disabled={pending}
                         value={selectedRegion}
-                        onChange={(event) =>
-                          setRegionId(event.currentTarget.value)
-                        }
+                        onValueChange={(nextValue) => setRegionId(nextValue)}
                       >
                         <option value="">选择放置区域</option>
                         {scene?.placement_regions.map((item) => (
@@ -1680,7 +1680,7 @@ export default function Page() {
                             {item.label} · {item.region_id}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </Field>
                   </div>
                   <div className="card-actions perception-task-actions">
@@ -1749,12 +1749,12 @@ export default function Page() {
                       label="AI 默认分割模型"
                       hint="仅指定 AI 自然语言任务默认使用的模型。三种分割始终独立可用，不受此选择限制。"
                     >
-                      <select
+                      <Select
                         aria-label="AI 默认分割模型"
                         value={selectedModelId}
                         disabled={pending}
-                        onChange={(event) =>
-                          setSegmentationModel(event.currentTarget.value)
+                        onValueChange={(nextValue) =>
+                          setSegmentationModel(nextValue)
                         }
                       >
                         {!perception?.available_models?.length && (
@@ -1766,7 +1766,7 @@ export default function Page() {
                             {item.label}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </Field>
                     <Field
                       label="抓取点云邻近距离 · mm"

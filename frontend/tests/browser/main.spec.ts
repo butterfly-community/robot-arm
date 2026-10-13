@@ -1,3 +1,7 @@
+import {
+  chooseOption,
+  readOptions,
+} from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -332,7 +336,7 @@ test("tracking page applies and displays a controller binding", async ({
   await expect(
     verticalBinding.getByText("TCP 沿竖直方向直线平移"),
   ).toBeVisible();
-  await verticalBinding.getByLabel("垂直平移输入方式").selectOption("buttons");
+  await chooseOption(verticalBinding.getByLabel("垂直平移输入方式"), "buttons");
   await expect(verticalBinding.getByLabel("垂直平移下移")).toBeVisible();
   await expect(verticalBinding.getByLabel("垂直平移上移")).toBeVisible();
   const summaryBox = await verticalBinding.locator("summary").boundingBox();
@@ -382,18 +386,15 @@ test("tracking page applies and displays a controller binding", async ({
     });
     await field.locator("summary").click();
     const sourceSelect = field.getByLabel("接管控制输入设备");
-    await sourceSelect.selectOption(selectedRuntimeSource.source_id);
-    await expect(sourceSelect).toHaveValue(selectedRuntimeSource.source_id);
+    await chooseOption(sourceSelect, selectedRuntimeSource.source_id);
+    await expect(sourceSelect).toHaveAttribute(
+      "data-value",
+      selectedRuntimeSource.source_id,
+    );
     const componentSelect = field.getByLabel("接管控制设备输入");
-    await expect
-      .poll(() => componentSelect.locator("option").count())
-      .toBeGreaterThan(1);
-    const componentPath = await componentSelect
-      .locator("option")
-      .nth(1)
-      .getAttribute("value");
+    const componentPath = (await readOptions(componentSelect))[1]?.value;
     expect(componentPath).toBeTruthy();
-    await componentSelect.selectOption(componentPath!);
+    await chooseOption(componentSelect, componentPath!);
     await page.getByRole("button", { name: "应用绑定" }).click();
     await expect(
       page.getByRole("button", { name: "绑定已应用" }),
@@ -529,20 +530,22 @@ test("perception page uses the simulation camera through the canonical path", as
     await manualSettings.locator(".disclosure-toggle").click();
     const camera = page.getByLabel("相机来源");
     await page.getByRole("button", { name: "刷新相机列表" }).click();
-    await expect(
-      camera.locator('option[value="simulation:depth-grid"]'),
-    ).toHaveCount(1);
-    await camera.selectOption("simulation:depth-grid");
+    expect(
+      (await readOptions(camera)).some(
+        (option) =>
+          option.value === "simulation:depth-grid" && !option.disabled,
+      ),
+    ).toBe(true);
+    await chooseOption(camera, "simulation:depth-grid");
     await expect(page.getByText(/驱动支持的流配置 · \d+ 项/)).toBeVisible();
     // Saved profiles remain visible even when a driver no longer reports them.
     // Select current capabilities explicitly, as a user would after an update.
     for (const label of ["彩色流", "深度流"]) {
       const stream = page.getByRole("combobox", { name: label, exact: true });
-      const supported = await stream
-        .locator('option:not([disabled]):not([value=""])')
-        .first()
-        .getAttribute("value");
-      await stream.selectOption(supported!);
+      const supported = (await readOptions(stream)).find(
+        (option) => !option.disabled && option.value,
+      )?.value;
+      await chooseOption(stream, supported!);
     }
     await page.getByRole("spinbutton", { name: "上送频率" }).fill("1");
     await page.getByRole("button", { name: "保存并启用" }).click();
@@ -621,7 +624,7 @@ test("perception page uses the simulation camera through the canonical path", as
         pointCount: 0,
         objectCount: 0,
       });
-    await camera.selectOption("simulation:pick-place-scene");
+    await chooseOption(camera, "simulation:pick-place-scene");
     await page.getByRole("button", { name: "保存并启用" }).click();
     await runPerceptionOnce();
     await expect(
@@ -629,8 +632,8 @@ test("perception page uses the simulation camera through the canonical path", as
     ).toBeVisible();
     await expect(page.getByText("red cube", { exact: true })).toBeVisible();
     // Generic AI is covered by its own Responses and browser tests.
-    await camera.selectOption("");
-    await expect(camera).toHaveValue("");
+    await chooseOption(camera, "");
+    await expect(camera).toHaveAttribute("data-value", "");
     await expect
       .poll(async () => {
         const state = await (await request.get("/api/perception/state")).json();
@@ -642,12 +645,12 @@ test("perception page uses the simulation camera through the canonical path", as
       .toEqual({ sourceId: null, objectCount: 0 });
     await expect(page.getByText("未启用", { exact: true })).toBeVisible();
     await page.reload();
-    await expect(camera).toHaveValue("");
-    await camera.selectOption("simulation:depth-grid");
+    await expect(camera).toHaveAttribute("data-value", "");
+    await chooseOption(camera, "simulation:depth-grid");
     await expect(
       page.getByRole("spinbutton", { name: "上送频率" }),
     ).toHaveValue("1");
-    await camera.selectOption("");
+    await chooseOption(camera, "");
   } finally {
     await request.post("/api/perception/camera", {
       data: {
@@ -807,12 +810,12 @@ test("card status precedes the collapse button and collapse state persists", asy
 }) => {
   await page.goto("/perception/");
   await page.evaluate(() =>
-    localStorage.removeItem("robot-arm:card:/perception/:相机外参标定"),
+    localStorage.removeItem("robot-arm:card:/perception/:深度相机标定"),
   );
   await page.reload();
 
   const card = page.locator("section.card").filter({
-    has: page.getByText("相机外参标定", { exact: true }),
+    has: page.getByText("深度相机标定", { exact: true }),
   });
   const status = card.locator(":scope > .card-heading > .card-action");
   const collapse = card.locator(
@@ -902,7 +905,10 @@ test("virtual feedback is selectable, draggable, and visible across pages", asyn
       has: page.getByText("夹爪力度反馈", { exact: true }),
     });
     await field.locator("summary").click();
-    await field.getByLabel("夹爪力度反馈设备").selectOption("virtual-feedback");
+    await chooseOption(
+      field.getByLabel("夹爪力度反馈设备"),
+      "virtual-feedback",
+    );
     const applied = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/tracking/bindings") &&

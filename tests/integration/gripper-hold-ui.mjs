@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Real browser test: existing grasp pipeline plus the existing force settings.
 // Requires authorization, an inspected scene and the robot at its work pose.
 import {
@@ -83,8 +84,8 @@ try {
   await expect(page.locator(".topbar-state")).toHaveText("实时连接正常");
   await expandSegmentation(page);
   await expandSegmentation(page, "抓放场景");
-  await page.getByLabel("抓取目标", { exact: true }).selectOption(objectId);
-  await page.getByLabel("放置区域", { exact: true }).selectOption(regionId);
+  await chooseOption(page.getByLabel("抓取目标", { exact: true }), objectId);
+  await chooseOption(page.getByLabel("放置区域", { exact: true }), regionId);
   recording = (async () => {
     let index = 0;
     const video = page.getByLabel("相机彩色视频", { exact: true });

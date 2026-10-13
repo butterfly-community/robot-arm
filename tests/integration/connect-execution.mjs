@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Explicitly connect the user's selected real serial endpoint through the UI.
 // Does not command joints or the gripper.
 import {
@@ -32,7 +33,10 @@ try {
   if ((await toggle.getAttribute("aria-expanded")) === "false")
     await toggle.click();
   if (!transport.connected) {
-    await page.getByLabel("执行模式", { exact: true }).selectOption("hardware");
+    await chooseOption(
+      page.getByLabel("执行模式", { exact: true }),
+      "hardware",
+    );
     await page
       .getByLabel("串口路径（可手动输入）", { exact: true })
       .fill(endpoint);

@@ -42,6 +42,7 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 | `form-sync`、`request-status`、`pick-place-progress` | 草稿/生效值、失败保留、同请求进度与刷新；拦截写入 |
 | `segmentation-composition`、`segmentation-models`、`grasp-selection` | 三种分割组合、原图框选、来源与实例选择；拦截写入，不运行实体抓放 |
 | `calibration-persistence` | 已保存外参、重新标定/取消、刷新回显；拦截标定请求，不证明真实标定精度 |
+| `calibration-values` | 已保存深度/双目标定参数横向滚动、实时刷新期间的菜单选择；需保存的标定和外部左相机测试绑定，只编辑未保存草稿，不运动 |
 | `input-discovery` | 实际未发现提示与布局；注入故障用例只验证错误显示 |
 | `input-gamepad` | 实体手柄发现、编辑/保存/刷新与采样；恢复原名称，不发运动 |
 | `camera-bindings` | 网页绑定两个模拟来源、出图、拖动/收起、持久化与解除；不拦截，不发运动 |
@@ -51,6 +52,11 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 启用 USB 解绑/重绑测试（会短暂断开该手柄），脚本核对设备类型并恢复；未提供时明确跳过。
 相机绑定测试加 `CAMERA_AI_TEST=1` 可通过已配置模型验证角色取图，须已授权发送图片；
 `CAMERA_BINDINGS_KEEP=1` 保留测试绑定。模拟来源不证明实体 UVC 采集或真机抓放。
+
+`select-pointer` 从真实页面验证下拉菜单：鼠标悬停、逐项点击、实时刷新、缩放及滚动后命中，
+并覆盖模拟相机的选择、保存、出图、刷新回显和恢复。不运行机械臂或模型任务。
+`calibration-values` 验证标定详细数值横向滚动。通用下拉测试辅助方法位于
+`tests/integration/select-controls.mjs`，只操作可见菜单，不注入选中状态或假设菜单行高。
 
 ## 真实页面操作
 
@@ -62,7 +68,7 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 | `ai-conversation OUTPUT` | 真实模型、真实页面的运行中补充、刷新恢复、同会话追问、停止及停止后再发送；仅发送文字和姿态数据，不拍照、不运动，开始前确认无其他 AI 任务 |
 | `ai-conversation OUTPUT network` | 通过页面临时配置不可达的容器本地地址，核对实际 15 次/10 秒重试、失败解锁；随后恢复原地址并验证真实模型继续回复。不证明上游中途断流，断流与工具不重放由 SDK 单测覆盖 |
 | `camera-bindings discover OUTPUT` | 页面刷新并列出设备/profile |
-| `camera-bindings bind OUTPUT ROLE SOURCE PROFILE` | 选择、保存并核对新图；ROLE 为 external 或 wrist |
+| `camera-bindings bind OUTPUT ROLE SOURCE PROFILE` | 选择、保存并核对新图；ROLE 为 external、external_right、wrist 或 wrist_right |
 | `camera-bindings on\|off\|unbind OUTPUT ROLE` | 开关采集或解除绑定；关闭保留配置 |
 | `camera-bindings cycle OUTPUT` | 已绑定两路轮流切换并核对新帧、刷新持久化；不改分辨率、不运动 |
 | `connect-execution ENDPOINT OUTPUT` | 页面连接真实串口并核对反馈，不发运动 |
@@ -111,8 +117,28 @@ docker compose exec -T -w /workspace/web/apps/perception web-perception \
 
 ## 软件链路与原生模块
 
+`node tests/integration/stereo-camera.mjs temp/stereo-ui` 从网页选择软件执行反馈，绑定四路文件测试画面，
+完成外部 720p、腕部 1080p 的双目和手眼采样、求解、保存、深度检查，再选择双目作为正式 RGB-D 来源，
+核对场景深度与外参、预览和刷新持久化。不调用外部 AI、不操作真机；结束保留软件模式和测试绑定。
+测试中的关节角从资产真实参数读取，仍由网页滑块、执行按钮、MoveIt 和执行反馈完成运动；
+不会把真实参数写入标定结果。整套重启后运行
+`node tests/integration/stereo-camera.mjs temp/stereo-restart-ui --verify-only`，核对服务自行恢复四路绑定和
+标定，再从网页检查深度、框选测试区域并完成三维定位；恢复检查之前不重新写入绑定或标定。
+随后核对尺寸不匹配、关闭右相机的错误提示和恢复，补采外参样本并取消本轮，确认已保存结果不变。
+这部分只移动软件机械臂，最终回工作位并恢复四路场景画面。
+完成上述准备后，在 `frontend` 下执行
+`STEREO_ACCEPTANCE_TEST=1 pnpm exec playwright test tests/browser/stereo-depth-status.spec.ts tests/browser/stereo-layout.spec.ts`，
+复查深度失败时清除旧统计、恢复后的结果，以及四路浮窗的单行标题、完整标题提示与页面间距；
+显式等待浮窗挂载，避免空列表跳过断言。仅使用测试绑定，不连接真实设备。
+配套 Rust `stereo_assets` 测试覆盖两组各自的 720p / 1080p 图像、光学标定、深度和手眼误差。
+`node tests/integration/stereo-ai.mjs temp/stereo-ai` 从通用 AI 页面要求观察两组双目中心点，跟踪原任务到
+终态并检查工具坐标、双目提示词模式以及未调用 GraspGenX/自动抓放；只在四路测试输入、软件反馈已启用时运行。
+从网页选择并启用腕部双目来源，验收后停用，四路绑定保留。会向当前配置的模型服务发送生成的测试图，
+不运动、不发送真实相机画面。
+浏览器中断后可追加原 `SESSION_ID RUN_ID` 重新打开历史会话并跟踪原请求，不再次提交任务。
+
 H.264 部署验收：`node tests/integration/camera-bindings.mjs measure temp/camera-rate external`
-（或 `wrist`）从实际页面连续观测 30 秒，输出设备帧序号、接收/浏览器处理/实际呈现 FPS、丢帧、
+（角色支持 `external`、`external_right`、`wrist`、`wrist_right`）从实际页面连续观测 30 秒，输出设备帧序号、接收/浏览器处理/实际呈现 FPS、丢帧、
 平均/P95/最大帧大小及浏览器实际接收字节。浏览器处理计数包含丢帧，不能当作成功播放帧率；
 播放以 `presented_fps` 为准。WebSocket 事件里的状态 JSON 已解压，实际传输量以 Chrome NetLog 的
 socket 字节计数为准；临时 NetLog 在汇总后删除。`bind/on/off/cycle` 用于真实页面绑定与切换。

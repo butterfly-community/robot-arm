@@ -2,6 +2,8 @@ mod bindings;
 mod capture_worker;
 mod drivers;
 mod encoding_worker;
+#[cfg(feature = "opencv-runtime")]
+mod stereo;
 mod video_server;
 
 use std::{
@@ -11,7 +13,7 @@ use std::{
 };
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
-use eyre::{Context, Result, bail, eyre};
+use eyre::{Context, Result, bail, ensure, eyre};
 use futures::FutureExt;
 use json_config_store::{load_or_default, save};
 #[cfg(feature = "opencv-runtime")]
@@ -90,6 +92,7 @@ struct CameraNode {
     output_frames_per_second: Option<f64>,
     selected_driver_parameters: Vec<CameraDriverParameterValue>,
     capture_commands: tokio::sync::mpsc::Sender<CaptureCommand>,
+    capture_tool_pose: tokio::sync::watch::Sender<Option<ToolPose>>,
     capture_completions: tokio::sync::mpsc::Receiver<CaptureCompletion>,
     capture_outputs: tokio::sync::watch::Receiver<Option<CaptureOutput>>,
     desired_streaming: bool,
@@ -179,10 +182,20 @@ fn run() -> Result<()> {
     let bindings = bindings::Bindings::new(&runtime, &config.bindings);
     let mut videos = bindings.videos();
     videos.insert(robot_arm_messages::CameraRole::Depth, capture.video);
+    #[cfg(feature = "opencv-runtime")]
+    stereo::initialize(
+        videos.clone(),
+        config_path.with_file_name("stereo-calibrations.json"),
+    )?;
+    #[cfg(feature = "opencv-runtime")]
+    let camera_routes = stereo::router();
+    #[cfg(not(feature = "opencv-runtime"))]
+    let camera_routes = axum::Router::new();
     let _video_server = runtime.spawn(video_server::serve(
         video_listener,
         videos,
         video_shutdown_receiver,
+        camera_routes,
     ));
     let mut camera = CameraNode {
         bindings,
@@ -198,6 +211,7 @@ fn run() -> Result<()> {
         output_frames_per_second: None,
         selected_driver_parameters: vec![],
         capture_commands: capture.commands,
+        capture_tool_pose: capture.tool_pose,
         capture_completions: capture.completions,
         capture_outputs: capture.outputs,
         desired_streaming: false,
@@ -257,6 +271,8 @@ fn run() -> Result<()> {
                 "motion_state" => {
                     let state: MotionState = from_arrow(data.as_array())?;
                     if let Some(pose) = state.current_tool_pose.clone() {
+                        #[cfg(feature = "opencv-runtime")]
+                        stereo::update_feedback(pose.clone());
                         camera.update_tool_pose(pose.pose)?;
                     }
                     camera.latest_motion_state = Some(state);
@@ -827,15 +843,9 @@ impl CameraNode {
     }
 
     fn update_tool_pose(&self, pose: ToolPose) -> Result<()> {
-        match self
-            .capture_commands
-            .try_send(CaptureCommand::UpdateToolPose(pose))
-        {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(eyre!("相机采集任务已经停止"))
-            }
-        }
+        self.capture_tool_pose
+            .send(Some(pose))
+            .map_err(|_| eyre!("相机采集任务已经停止"))
     }
 
     fn reset_stream_statistics(&mut self) {
@@ -900,6 +910,11 @@ impl CameraNode {
         &self,
         frame: &CameraFrameBundle,
     ) -> Result<Option<DepthCameraCalibration>> {
+        // Stereo rectification changes the optical frame; wrist extrinsics also
+        // depend on this frame's actual TCP. Never replace them with a static pose.
+        if frame.source_id.starts_with("stereo:") {
+            return Ok(frame.calibration.clone());
+        }
         let saved = self
             .config
             .cameras
@@ -996,6 +1011,10 @@ impl CameraNode {
             .clone()
             .or_else(|| self.selected_source_id.clone())
             .ok_or_else(|| eyre!("开始标定需要相机来源"))?;
+        ensure!(
+            !camera_source_id.starts_with("stereo:"),
+            "双目来源请使用外部双目标定或腕部双目标定，不能应用固定深度相机的标定流程"
+        );
         if self.selected_source_id.as_deref() != Some(camera_source_id.as_str()) || !self.streaming
         {
             bail!("标定相机必须是当前正在采集的相机来源");

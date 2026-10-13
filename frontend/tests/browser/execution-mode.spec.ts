@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 import type { ArmState } from "@robot/contracts";
 
@@ -44,7 +45,7 @@ test("stopped hardware can explicitly switch to persistent simulator mode", asyn
   await expand();
   const initial = JSON.parse(JSON.stringify({ transport, arm }));
   if (transport!.selected_endpoint != null) {
-    await mode.selectOption("software");
+    await chooseOption(mode, "software");
     // Selecting a draft alone must not modify the active endpoint.
     expect(transport!.selected_endpoint).toBe(
       initial.transport.selected_endpoint,
@@ -60,7 +61,7 @@ test("stopped hardware can explicitly switch to persistent simulator mode", asyn
   ).toBeDisabled();
 
   // Reproduce failed/stopped hardware through the real connection form.
-  await mode.selectOption("hardware");
+  await chooseOption(mode, "hardware");
   const discovery = page.waitForResponse(
     (response) =>
       response.url().endsWith("/api/arm-execution/endpoints") &&
@@ -81,13 +82,13 @@ test("stopped hardware can explicitly switch to persistent simulator mode", asyn
   expect(transport!.connected).toBe(false);
   await page.reload();
   await expand();
-  await expect(mode).toHaveValue("hardware");
+  await expect(mode).toHaveAttribute("data-value", "hardware");
   await expect(
     page.getByLabel("串口路径（可手动输入）", { exact: true }),
   ).toHaveValue(missingPort);
 
   const observedPose = [...arm!.joints_rad];
-  await mode.selectOption("software");
+  await chooseOption(mode, "software");
   await page.getByRole("button", { name: "应用执行模式", exact: true }).click();
   await expect.poll(() => transport?.selected_endpoint).toBeNull();
   await expect.poll(() => arm?.feedback_source).toBe("software");
@@ -95,7 +96,7 @@ test("stopped hardware can explicitly switch to persistent simulator mode", asyn
   await expect(page.getByLabel("机械臂连接异常")).toHaveCount(0);
   await page.reload();
   await expand();
-  await expect(mode).toHaveValue("software");
+  await expect(mode).toHaveAttribute("data-value", "software");
   await expect(
     page.getByRole("button", { name: "模拟器已启用" }),
   ).toBeDisabled();
@@ -195,8 +196,8 @@ test("failed simulator activation retains the hardware mode and permits retry", 
   });
   await page.goto("/arm-execution/");
   const mode = page.getByLabel("执行模式", { exact: true });
-  await expect(mode).toHaveValue("hardware");
-  await mode.selectOption("software");
+  await expect(mode).toHaveAttribute("data-value", "hardware");
+  await chooseOption(mode, "software");
   await page.getByRole("button", { name: "应用执行模式", exact: true }).click();
   await expect(page.getByRole("button", { name: "正在切换…" })).toBeDisabled();
   await expect(mode).toBeDisabled();
@@ -205,7 +206,7 @@ test("failed simulator activation retains the hardware mode and permits retry", 
   await expect(page.locator('p.error[role="alert"]')).toContainText(
     "配置保存失败",
   );
-  await expect(mode).toHaveValue("software");
+  await expect(mode).toHaveAttribute("data-value", "software");
   await expect(
     page.getByRole("button", { name: "应用执行模式", exact: true }),
   ).toBeEnabled();

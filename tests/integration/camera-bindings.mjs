@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Real page controls only; use discover before choosing device keys and profiles.
 import {
   chromium,
@@ -6,6 +7,12 @@ import {
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { resolve, join } from "node:path";
 const [mode, directory, role, source, profile] = process.argv.slice(2);
+const titles = {
+  external: "外部摄像头 1（左）",
+  external_right: "外部摄像头 2（右）",
+  wrist: "腕部摄像头 1（左）",
+  wrist_right: "腕部摄像头 2（右）",
+};
 if (
   !["discover", "bind", "unbind", "on", "off", "cycle", "measure"].includes(
     mode,
@@ -13,7 +20,7 @@ if (
   !directory
 )
   throw Error(
-    "Usage: camera-bindings.mjs discover|bind|unbind|on|off|cycle|measure OUTPUT [external|wrist SOURCE PROFILE]",
+    "Usage: camera-bindings.mjs discover|bind|unbind|on|off|cycle|measure OUTPUT [external|external_right|wrist|wrist_right SOURCE PROFILE]",
   );
 const output = resolve(directory);
 process.env.TMPDIR = join(output, "browser-temp");
@@ -82,7 +89,7 @@ try {
   await expect(
     page.getByRole("button", { name: "刷新相机列表", exact: true }),
   ).toBeEnabled();
-  const label = role === "wrist" ? "腕部摄像头" : "外部摄像头";
+  const label = titles[role] ?? titles.external;
   const section = page.getByRole("region", {
     name: `${label}绑定`,
     exact: true,
@@ -291,10 +298,11 @@ try {
             .camera_state.bindings,
       );
     const saved = await state();
-    const titles = { external: "外部摄像头", wrist: "腕部摄像头" };
     await expect(page.getByText(/共享 USB 带宽不足时/)).toBeVisible();
     for (let round = 0; round < 2; round++) {
-      for (const target of ["wrist", "external"]) {
+      for (const target of saved
+        .map((binding) => binding.role)
+        .filter((role) => titles[role])) {
         for (const binding of await state()) {
           if (!binding.streaming) continue;
           const name = titles[binding.role];
@@ -360,7 +368,7 @@ try {
     await page.reload();
     await expect(
       page
-        .getByRole("region", { name: "腕部摄像头绑定", exact: true })
+        .getByRole("region", { name: "腕部摄像头 1（左）绑定", exact: true })
         .getByText("采集已关闭，绑定与分辨率保留", { exact: true }),
     ).toBeVisible();
     console.log("RELOAD_PRESERVED_CAPTURE_SWITCH");
@@ -385,17 +393,19 @@ try {
       .click();
     await expect(
       section.getByLabel(`${label}来源`, { exact: true }),
-    ).toHaveValue("");
+    ).toHaveAttribute("data-value", "");
   }
   if (mode === "bind") {
-    if (!["external", "wrist"].includes(role) || !source || !profile)
+    if (!titles[role] || !source || !profile)
       throw Error("missing binding arguments");
-    await section
-      .getByLabel(`${label}来源`, { exact: true })
-      .selectOption(source);
-    await section
-      .getByLabel(`${label}流配置`, { exact: true })
-      .selectOption(profile);
+    await chooseOption(
+      section.getByLabel(`${label}来源`, { exact: true }),
+      source,
+    );
+    await chooseOption(
+      section.getByLabel(`${label}流配置`, { exact: true }),
+      profile,
+    );
     await section
       .getByRole("button", { name: `保存${label}绑定`, exact: true })
       .click();

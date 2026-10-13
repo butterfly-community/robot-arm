@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 
 test("saved bindings recover after a whole-stack restart", async ({ page }) => {
@@ -7,12 +8,12 @@ test("saved bindings recover after a whole-stack restart", async ({ page }) => {
   );
   await page.goto("/perception/");
   for (const [name, source] of [
-    ["外部摄像头", "simulation:pick-place-scene"],
-    ["腕部摄像头", "simulation:depth-grid"],
+    ["外部摄像头 1（左）", "simulation:pick-place-scene"],
+    ["腕部摄像头 1（左）", "simulation:depth-grid"],
   ]) {
-    await expect(page.getByLabel(`${name}来源`, { exact: true })).toHaveValue(
-      source,
-    );
+    await expect(
+      page.getByLabel(`${name}来源`, { exact: true }),
+    ).toHaveAttribute("data-value", source);
     const section = page.getByRole("region", {
       name: `${name}绑定`,
       exact: true,
@@ -38,12 +39,12 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
   });
   const depth = page.getByLabel("相机来源", { exact: true });
   await expect(depth).toBeVisible();
-  await depth.selectOption("");
+  await chooseOption(depth, "");
   await page.getByRole("button", { name: "刷新相机列表", exact: true }).click();
   await expect(
     page.getByRole("status").filter({ hasText: "当前未选择深度相机" }),
   ).toBeVisible();
-  const roles = ["外部摄像头", "腕部摄像头"];
+  const roles = ["外部摄像头 1（左）", "腕部摄像头 1（左）"];
   const sources = ["simulation:pick-place-scene", "simulation:depth-grid"];
   const images: string[] = [];
   for (let i = 0; i < 2; i++) {
@@ -59,12 +60,14 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
     await expect(
       page.getByLabel(`${roles[i]}浮动窗口`, { exact: true }),
     ).toHaveCount(0);
-    await section
-      .getByLabel(`${roles[i]}来源`, { exact: true })
-      .selectOption(sources[i]);
-    await section
-      .getByLabel(`${roles[i]}流配置`, { exact: true })
-      .selectOption("color:1280x720:rgb8:10");
+    await chooseOption(
+      section.getByLabel(`${roles[i]}来源`, { exact: true }),
+      sources[i],
+    );
+    await chooseOption(
+      section.getByLabel(`${roles[i]}流配置`, { exact: true }),
+      "color:1280x720:rgb8:10",
+    );
     await section
       .getByRole("button", { name: `保存${roles[i]}绑定`, exact: true })
       .click();
@@ -100,7 +103,7 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
   for (let i = 0; i < 2; i++) {
     await expect(
       page.getByLabel(`${roles[i]}来源`, { exact: true }),
-    ).toHaveValue(sources[i]);
+    ).toHaveAttribute("data-value", sources[i]);
     await expect(
       page
         .getByLabel(`${roles[i]}浮动窗口`, { exact: true })
@@ -160,9 +163,9 @@ test("bind two camera roles, preview independently, reload and unbind via the pa
     }
     await page.reload();
     for (const name of roles)
-      await expect(page.getByLabel(`${name}来源`, { exact: true })).toHaveValue(
-        "",
-      );
+      await expect(
+        page.getByLabel(`${name}来源`, { exact: true }),
+      ).toHaveAttribute("data-value", "");
   }
 });
 
@@ -175,13 +178,15 @@ test("depth preview still starts and stops through the page", async ({
   );
   await page.goto("/perception/");
   const source = page.getByLabel("相机来源", { exact: true });
-  await source.selectOption("simulation:pick-place-scene");
-  await page
-    .getByRole("combobox", { name: "彩色流", exact: true })
-    .selectOption("color:1280x720:rgb8:10");
-  await page
-    .getByRole("combobox", { name: "深度流", exact: true })
-    .selectOption("depth:1280x720:z16le:10");
+  await chooseOption(source, "simulation:pick-place-scene");
+  await chooseOption(
+    page.getByRole("combobox", { name: "彩色流", exact: true }),
+    "color:1280x720:rgb8:10",
+  );
+  await chooseOption(
+    page.getByRole("combobox", { name: "深度流", exact: true }),
+    "depth:1280x720:z16le:10",
+  );
   await page.getByRole("spinbutton", { name: "上送频率" }).fill("1");
   await page.getByRole("button", { name: "保存并启用", exact: true }).click();
   const monitor = page.getByLabel("深度相机彩色画面浮动窗口", { exact: true });
@@ -194,7 +199,7 @@ test("depth preview still starts and stops through the page", async ({
   await page.getByRole("button", { name: "停用相机", exact: true }).click();
   await expect(monitor.getByText("信号中断", { exact: true })).toBeVisible();
   await expect(monitor.locator("video")).toHaveCount(0);
-  await source.selectOption("");
+  await chooseOption(source, "");
   await expect(monitor).toHaveCount(0);
 });
 

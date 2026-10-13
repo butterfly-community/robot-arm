@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import { useState } from "react";
 import { Button, Disclosure, Field, StatusBadge } from "@robot/ui";
@@ -81,18 +82,18 @@ export function VisualPromptEditor({
       {reference && (
         <>
           <Field label="示例类别">
-            <select
+            <Select
               aria-label="示例类别"
               value={classId}
               disabled={busy}
-              onChange={(event) => setClassId(Number(event.target.value))}
+              onValueChange={(nextValue) => setClassId(Number(nextValue))}
             >
               {classes.map((label, index) => (
                 <option key={index} value={index}>
                   {label}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <ImageBoxCanvas
             key={reference.url}

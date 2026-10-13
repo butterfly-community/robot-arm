@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import { useState } from "react";
 import type {
@@ -170,12 +171,12 @@ function FrozenEditor({
     const model = automatic ? autoModel : textModel;
     return (
       <Field label={automatic ? "自动分割模型" : "提示词分割模型"}>
-        <select
+        <Select
           aria-label={automatic ? "自动分割模型" : "提示词分割模型"}
           value={model}
           disabled={busy || !models.length}
-          onChange={(e) =>
-            (automatic ? setAutoModel : setTextModel)(e.target.value)
+          onValueChange={(nextValue) =>
+            (automatic ? setAutoModel : setTextModel)(nextValue)
           }
         >
           {!models.length && <option value="">没有可用模型</option>}
@@ -184,7 +185,7 @@ function FrozenEditor({
               {m.label}
             </option>
           ))}
-        </select>
+        </Select>
         <div className="card-actions" style={{ marginTop: "0.75rem" }}>
           <Button
             variant="outline"
@@ -243,18 +244,18 @@ function FrozenEditor({
             />
           </Field>
           <Field label="提示方式">
-            <select
+            <Select
               aria-label="提示方式"
               value={promptKind}
               disabled={busy}
-              onChange={(e) => setPromptKind(e.target.value)}
+              onValueChange={(nextValue) => setPromptKind(nextValue)}
             >
               <option value="text">文字提示词</option>
               <option value="visual">视觉示例</option>
               {state.visual_prompt_active && (
                 <option value="saved">已保存的视觉示例</option>
               )}
-            </select>
+            </Select>
           </Field>
           {promptKind === "visual" && (
             <VisualPromptEditor

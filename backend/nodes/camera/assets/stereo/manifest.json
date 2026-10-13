@@ -1,0 +1,776 @@
+{
+  "sources": [
+    {
+      "source_id": "replay:external-left",
+      "display_name": "测试画面 · 外部 左",
+      "width": 1920,
+      "height": 1080,
+      "frames": [
+        {
+          "key": "scene",
+          "file": "external-left-scene.png",
+          "label": "桌面深度测试"
+        },
+        {
+          "key": "board-01",
+          "file": "external-left-board-01.png",
+          "label": "ChArUco 姿态 1"
+        },
+        {
+          "key": "board-02",
+          "file": "external-left-board-02.png",
+          "label": "ChArUco 姿态 2"
+        },
+        {
+          "key": "board-03",
+          "file": "external-left-board-03.png",
+          "label": "ChArUco 姿态 3"
+        },
+        {
+          "key": "board-04",
+          "file": "external-left-board-04.png",
+          "label": "ChArUco 姿态 4"
+        },
+        {
+          "key": "board-05",
+          "file": "external-left-board-05.png",
+          "label": "ChArUco 姿态 5"
+        },
+        {
+          "key": "board-06",
+          "file": "external-left-board-06.png",
+          "label": "ChArUco 姿态 6"
+        },
+        {
+          "key": "board-07",
+          "file": "external-left-board-07.png",
+          "label": "ChArUco 姿态 7"
+        },
+        {
+          "key": "board-08",
+          "file": "external-left-board-08.png",
+          "label": "ChArUco 姿态 8"
+        },
+        {
+          "key": "board-09",
+          "file": "external-left-board-09.png",
+          "label": "ChArUco 姿态 9"
+        },
+        {
+          "key": "board-10",
+          "file": "external-left-board-10.png",
+          "label": "ChArUco 姿态 10"
+        },
+        {
+          "key": "board-11",
+          "file": "external-left-board-11.png",
+          "label": "ChArUco 姿态 11"
+        },
+        {
+          "key": "board-12",
+          "file": "external-left-board-12.png",
+          "label": "ChArUco 姿态 12"
+        },
+        {
+          "key": "board-13",
+          "file": "external-left-board-13.png",
+          "label": "ChArUco 姿态 13"
+        },
+        {
+          "key": "board-14",
+          "file": "external-left-board-14.png",
+          "label": "ChArUco 姿态 14"
+        },
+        {
+          "key": "board-15",
+          "file": "external-left-board-15.png",
+          "label": "ChArUco 姿态 15"
+        },
+        {
+          "key": "board-16",
+          "file": "external-left-board-16.png",
+          "label": "ChArUco 姿态 16"
+        },
+        {
+          "key": "board-17",
+          "file": "external-left-board-17.png",
+          "label": "ChArUco 姿态 17"
+        },
+        {
+          "key": "board-18",
+          "file": "external-left-board-18.png",
+          "label": "ChArUco 姿态 18"
+        },
+        {
+          "key": "board-19",
+          "file": "external-left-board-19.png",
+          "label": "ChArUco 姿态 19"
+        },
+        {
+          "key": "board-20",
+          "file": "external-left-board-20.png",
+          "label": "ChArUco 姿态 20"
+        },
+        {
+          "key": "board-21",
+          "file": "external-left-board-21.png",
+          "label": "ChArUco 姿态 21"
+        },
+        {
+          "key": "board-22",
+          "file": "external-left-board-22.png",
+          "label": "ChArUco 姿态 22"
+        },
+        {
+          "key": "board-23",
+          "file": "external-left-board-23.png",
+          "label": "ChArUco 姿态 23"
+        },
+        {
+          "key": "board-24",
+          "file": "external-left-board-24.png",
+          "label": "ChArUco 姿态 24"
+        },
+        {
+          "key": "handeye-01",
+          "file": "external-left-handeye-01.png",
+          "label": "机械臂外参姿态 1"
+        },
+        {
+          "key": "handeye-02",
+          "file": "external-left-handeye-02.png",
+          "label": "机械臂外参姿态 2"
+        },
+        {
+          "key": "handeye-03",
+          "file": "external-left-handeye-03.png",
+          "label": "机械臂外参姿态 3"
+        },
+        {
+          "key": "handeye-04",
+          "file": "external-left-handeye-04.png",
+          "label": "机械臂外参姿态 4"
+        },
+        {
+          "key": "handeye-05",
+          "file": "external-left-handeye-05.png",
+          "label": "机械臂外参姿态 5"
+        },
+        {
+          "key": "handeye-06",
+          "file": "external-left-handeye-06.png",
+          "label": "机械臂外参姿态 6"
+        },
+        {
+          "key": "handeye-07",
+          "file": "external-left-handeye-07.png",
+          "label": "机械臂外参姿态 7"
+        },
+        {
+          "key": "handeye-08",
+          "file": "external-left-handeye-08.png",
+          "label": "机械臂外参姿态 8"
+        },
+        {
+          "key": "handeye-09",
+          "file": "external-left-handeye-09.png",
+          "label": "机械臂外参姿态 9"
+        },
+        {
+          "key": "handeye-10",
+          "file": "external-left-handeye-10.png",
+          "label": "机械臂外参姿态 10"
+        },
+        {
+          "key": "handeye-11",
+          "file": "external-left-handeye-11.png",
+          "label": "机械臂外参姿态 11"
+        },
+        {
+          "key": "handeye-12",
+          "file": "external-left-handeye-12.png",
+          "label": "机械臂外参姿态 12"
+        }
+      ]
+    },
+    {
+      "source_id": "replay:external-right",
+      "display_name": "测试画面 · 外部 右",
+      "width": 1920,
+      "height": 1080,
+      "frames": [
+        {
+          "key": "scene",
+          "file": "external-right-scene.png",
+          "label": "桌面深度测试"
+        },
+        {
+          "key": "board-01",
+          "file": "external-right-board-01.png",
+          "label": "ChArUco 姿态 1"
+        },
+        {
+          "key": "board-02",
+          "file": "external-right-board-02.png",
+          "label": "ChArUco 姿态 2"
+        },
+        {
+          "key": "board-03",
+          "file": "external-right-board-03.png",
+          "label": "ChArUco 姿态 3"
+        },
+        {
+          "key": "board-04",
+          "file": "external-right-board-04.png",
+          "label": "ChArUco 姿态 4"
+        },
+        {
+          "key": "board-05",
+          "file": "external-right-board-05.png",
+          "label": "ChArUco 姿态 5"
+        },
+        {
+          "key": "board-06",
+          "file": "external-right-board-06.png",
+          "label": "ChArUco 姿态 6"
+        },
+        {
+          "key": "board-07",
+          "file": "external-right-board-07.png",
+          "label": "ChArUco 姿态 7"
+        },
+        {
+          "key": "board-08",
+          "file": "external-right-board-08.png",
+          "label": "ChArUco 姿态 8"
+        },
+        {
+          "key": "board-09",
+          "file": "external-right-board-09.png",
+          "label": "ChArUco 姿态 9"
+        },
+        {
+          "key": "board-10",
+          "file": "external-right-board-10.png",
+          "label": "ChArUco 姿态 10"
+        },
+        {
+          "key": "board-11",
+          "file": "external-right-board-11.png",
+          "label": "ChArUco 姿态 11"
+        },
+        {
+          "key": "board-12",
+          "file": "external-right-board-12.png",
+          "label": "ChArUco 姿态 12"
+        },
+        {
+          "key": "board-13",
+          "file": "external-right-board-13.png",
+          "label": "ChArUco 姿态 13"
+        },
+        {
+          "key": "board-14",
+          "file": "external-right-board-14.png",
+          "label": "ChArUco 姿态 14"
+        },
+        {
+          "key": "board-15",
+          "file": "external-right-board-15.png",
+          "label": "ChArUco 姿态 15"
+        },
+        {
+          "key": "board-16",
+          "file": "external-right-board-16.png",
+          "label": "ChArUco 姿态 16"
+        },
+        {
+          "key": "board-17",
+          "file": "external-right-board-17.png",
+          "label": "ChArUco 姿态 17"
+        },
+        {
+          "key": "board-18",
+          "file": "external-right-board-18.png",
+          "label": "ChArUco 姿态 18"
+        },
+        {
+          "key": "board-19",
+          "file": "external-right-board-19.png",
+          "label": "ChArUco 姿态 19"
+        },
+        {
+          "key": "board-20",
+          "file": "external-right-board-20.png",
+          "label": "ChArUco 姿态 20"
+        },
+        {
+          "key": "board-21",
+          "file": "external-right-board-21.png",
+          "label": "ChArUco 姿态 21"
+        },
+        {
+          "key": "board-22",
+          "file": "external-right-board-22.png",
+          "label": "ChArUco 姿态 22"
+        },
+        {
+          "key": "board-23",
+          "file": "external-right-board-23.png",
+          "label": "ChArUco 姿态 23"
+        },
+        {
+          "key": "board-24",
+          "file": "external-right-board-24.png",
+          "label": "ChArUco 姿态 24"
+        },
+        {
+          "key": "handeye-01",
+          "file": "external-right-handeye-01.png",
+          "label": "机械臂外参姿态 1"
+        },
+        {
+          "key": "handeye-02",
+          "file": "external-right-handeye-02.png",
+          "label": "机械臂外参姿态 2"
+        },
+        {
+          "key": "handeye-03",
+          "file": "external-right-handeye-03.png",
+          "label": "机械臂外参姿态 3"
+        },
+        {
+          "key": "handeye-04",
+          "file": "external-right-handeye-04.png",
+          "label": "机械臂外参姿态 4"
+        },
+        {
+          "key": "handeye-05",
+          "file": "external-right-handeye-05.png",
+          "label": "机械臂外参姿态 5"
+        },
+        {
+          "key": "handeye-06",
+          "file": "external-right-handeye-06.png",
+          "label": "机械臂外参姿态 6"
+        },
+        {
+          "key": "handeye-07",
+          "file": "external-right-handeye-07.png",
+          "label": "机械臂外参姿态 7"
+        },
+        {
+          "key": "handeye-08",
+          "file": "external-right-handeye-08.png",
+          "label": "机械臂外参姿态 8"
+        },
+        {
+          "key": "handeye-09",
+          "file": "external-right-handeye-09.png",
+          "label": "机械臂外参姿态 9"
+        },
+        {
+          "key": "handeye-10",
+          "file": "external-right-handeye-10.png",
+          "label": "机械臂外参姿态 10"
+        },
+        {
+          "key": "handeye-11",
+          "file": "external-right-handeye-11.png",
+          "label": "机械臂外参姿态 11"
+        },
+        {
+          "key": "handeye-12",
+          "file": "external-right-handeye-12.png",
+          "label": "机械臂外参姿态 12"
+        }
+      ]
+    },
+    {
+      "source_id": "replay:wrist-left",
+      "display_name": "测试画面 · 腕部 左",
+      "width": 1920,
+      "height": 1080,
+      "frames": [
+        {
+          "key": "scene",
+          "file": "wrist-left-scene.png",
+          "label": "桌面深度测试"
+        },
+        {
+          "key": "board-01",
+          "file": "wrist-left-board-01.png",
+          "label": "ChArUco 姿态 1"
+        },
+        {
+          "key": "board-02",
+          "file": "wrist-left-board-02.png",
+          "label": "ChArUco 姿态 2"
+        },
+        {
+          "key": "board-03",
+          "file": "wrist-left-board-03.png",
+          "label": "ChArUco 姿态 3"
+        },
+        {
+          "key": "board-04",
+          "file": "wrist-left-board-04.png",
+          "label": "ChArUco 姿态 4"
+        },
+        {
+          "key": "board-05",
+          "file": "wrist-left-board-05.png",
+          "label": "ChArUco 姿态 5"
+        },
+        {
+          "key": "board-06",
+          "file": "wrist-left-board-06.png",
+          "label": "ChArUco 姿态 6"
+        },
+        {
+          "key": "board-07",
+          "file": "wrist-left-board-07.png",
+          "label": "ChArUco 姿态 7"
+        },
+        {
+          "key": "board-08",
+          "file": "wrist-left-board-08.png",
+          "label": "ChArUco 姿态 8"
+        },
+        {
+          "key": "board-09",
+          "file": "wrist-left-board-09.png",
+          "label": "ChArUco 姿态 9"
+        },
+        {
+          "key": "board-10",
+          "file": "wrist-left-board-10.png",
+          "label": "ChArUco 姿态 10"
+        },
+        {
+          "key": "board-11",
+          "file": "wrist-left-board-11.png",
+          "label": "ChArUco 姿态 11"
+        },
+        {
+          "key": "board-12",
+          "file": "wrist-left-board-12.png",
+          "label": "ChArUco 姿态 12"
+        },
+        {
+          "key": "board-13",
+          "file": "wrist-left-board-13.png",
+          "label": "ChArUco 姿态 13"
+        },
+        {
+          "key": "board-14",
+          "file": "wrist-left-board-14.png",
+          "label": "ChArUco 姿态 14"
+        },
+        {
+          "key": "board-15",
+          "file": "wrist-left-board-15.png",
+          "label": "ChArUco 姿态 15"
+        },
+        {
+          "key": "board-16",
+          "file": "wrist-left-board-16.png",
+          "label": "ChArUco 姿态 16"
+        },
+        {
+          "key": "board-17",
+          "file": "wrist-left-board-17.png",
+          "label": "ChArUco 姿态 17"
+        },
+        {
+          "key": "board-18",
+          "file": "wrist-left-board-18.png",
+          "label": "ChArUco 姿态 18"
+        },
+        {
+          "key": "board-19",
+          "file": "wrist-left-board-19.png",
+          "label": "ChArUco 姿态 19"
+        },
+        {
+          "key": "board-20",
+          "file": "wrist-left-board-20.png",
+          "label": "ChArUco 姿态 20"
+        },
+        {
+          "key": "board-21",
+          "file": "wrist-left-board-21.png",
+          "label": "ChArUco 姿态 21"
+        },
+        {
+          "key": "board-22",
+          "file": "wrist-left-board-22.png",
+          "label": "ChArUco 姿态 22"
+        },
+        {
+          "key": "board-23",
+          "file": "wrist-left-board-23.png",
+          "label": "ChArUco 姿态 23"
+        },
+        {
+          "key": "board-24",
+          "file": "wrist-left-board-24.png",
+          "label": "ChArUco 姿态 24"
+        },
+        {
+          "key": "handeye-01",
+          "file": "wrist-left-handeye-01.png",
+          "label": "机械臂外参姿态 1"
+        },
+        {
+          "key": "handeye-02",
+          "file": "wrist-left-handeye-02.png",
+          "label": "机械臂外参姿态 2"
+        },
+        {
+          "key": "handeye-03",
+          "file": "wrist-left-handeye-03.png",
+          "label": "机械臂外参姿态 3"
+        },
+        {
+          "key": "handeye-04",
+          "file": "wrist-left-handeye-04.png",
+          "label": "机械臂外参姿态 4"
+        },
+        {
+          "key": "handeye-05",
+          "file": "wrist-left-handeye-05.png",
+          "label": "机械臂外参姿态 5"
+        },
+        {
+          "key": "handeye-06",
+          "file": "wrist-left-handeye-06.png",
+          "label": "机械臂外参姿态 6"
+        },
+        {
+          "key": "handeye-07",
+          "file": "wrist-left-handeye-07.png",
+          "label": "机械臂外参姿态 7"
+        },
+        {
+          "key": "handeye-08",
+          "file": "wrist-left-handeye-08.png",
+          "label": "机械臂外参姿态 8"
+        },
+        {
+          "key": "handeye-09",
+          "file": "wrist-left-handeye-09.png",
+          "label": "机械臂外参姿态 9"
+        },
+        {
+          "key": "handeye-10",
+          "file": "wrist-left-handeye-10.png",
+          "label": "机械臂外参姿态 10"
+        },
+        {
+          "key": "handeye-11",
+          "file": "wrist-left-handeye-11.png",
+          "label": "机械臂外参姿态 11"
+        },
+        {
+          "key": "handeye-12",
+          "file": "wrist-left-handeye-12.png",
+          "label": "机械臂外参姿态 12"
+        }
+      ]
+    },
+    {
+      "source_id": "replay:wrist-right",
+      "display_name": "测试画面 · 腕部 右",
+      "width": 1920,
+      "height": 1080,
+      "frames": [
+        {
+          "key": "scene",
+          "file": "wrist-right-scene.png",
+          "label": "桌面深度测试"
+        },
+        {
+          "key": "board-01",
+          "file": "wrist-right-board-01.png",
+          "label": "ChArUco 姿态 1"
+        },
+        {
+          "key": "board-02",
+          "file": "wrist-right-board-02.png",
+          "label": "ChArUco 姿态 2"
+        },
+        {
+          "key": "board-03",
+          "file": "wrist-right-board-03.png",
+          "label": "ChArUco 姿态 3"
+        },
+        {
+          "key": "board-04",
+          "file": "wrist-right-board-04.png",
+          "label": "ChArUco 姿态 4"
+        },
+        {
+          "key": "board-05",
+          "file": "wrist-right-board-05.png",
+          "label": "ChArUco 姿态 5"
+        },
+        {
+          "key": "board-06",
+          "file": "wrist-right-board-06.png",
+          "label": "ChArUco 姿态 6"
+        },
+        {
+          "key": "board-07",
+          "file": "wrist-right-board-07.png",
+          "label": "ChArUco 姿态 7"
+        },
+        {
+          "key": "board-08",
+          "file": "wrist-right-board-08.png",
+          "label": "ChArUco 姿态 8"
+        },
+        {
+          "key": "board-09",
+          "file": "wrist-right-board-09.png",
+          "label": "ChArUco 姿态 9"
+        },
+        {
+          "key": "board-10",
+          "file": "wrist-right-board-10.png",
+          "label": "ChArUco 姿态 10"
+        },
+        {
+          "key": "board-11",
+          "file": "wrist-right-board-11.png",
+          "label": "ChArUco 姿态 11"
+        },
+        {
+          "key": "board-12",
+          "file": "wrist-right-board-12.png",
+          "label": "ChArUco 姿态 12"
+        },
+        {
+          "key": "board-13",
+          "file": "wrist-right-board-13.png",
+          "label": "ChArUco 姿态 13"
+        },
+        {
+          "key": "board-14",
+          "file": "wrist-right-board-14.png",
+          "label": "ChArUco 姿态 14"
+        },
+        {
+          "key": "board-15",
+          "file": "wrist-right-board-15.png",
+          "label": "ChArUco 姿态 15"
+        },
+        {
+          "key": "board-16",
+          "file": "wrist-right-board-16.png",
+          "label": "ChArUco 姿态 16"
+        },
+        {
+          "key": "board-17",
+          "file": "wrist-right-board-17.png",
+          "label": "ChArUco 姿态 17"
+        },
+        {
+          "key": "board-18",
+          "file": "wrist-right-board-18.png",
+          "label": "ChArUco 姿态 18"
+        },
+        {
+          "key": "board-19",
+          "file": "wrist-right-board-19.png",
+          "label": "ChArUco 姿态 19"
+        },
+        {
+          "key": "board-20",
+          "file": "wrist-right-board-20.png",
+          "label": "ChArUco 姿态 20"
+        },
+        {
+          "key": "board-21",
+          "file": "wrist-right-board-21.png",
+          "label": "ChArUco 姿态 21"
+        },
+        {
+          "key": "board-22",
+          "file": "wrist-right-board-22.png",
+          "label": "ChArUco 姿态 22"
+        },
+        {
+          "key": "board-23",
+          "file": "wrist-right-board-23.png",
+          "label": "ChArUco 姿态 23"
+        },
+        {
+          "key": "board-24",
+          "file": "wrist-right-board-24.png",
+          "label": "ChArUco 姿态 24"
+        },
+        {
+          "key": "handeye-01",
+          "file": "wrist-right-handeye-01.png",
+          "label": "机械臂外参姿态 1"
+        },
+        {
+          "key": "handeye-02",
+          "file": "wrist-right-handeye-02.png",
+          "label": "机械臂外参姿态 2"
+        },
+        {
+          "key": "handeye-03",
+          "file": "wrist-right-handeye-03.png",
+          "label": "机械臂外参姿态 3"
+        },
+        {
+          "key": "handeye-04",
+          "file": "wrist-right-handeye-04.png",
+          "label": "机械臂外参姿态 4"
+        },
+        {
+          "key": "handeye-05",
+          "file": "wrist-right-handeye-05.png",
+          "label": "机械臂外参姿态 5"
+        },
+        {
+          "key": "handeye-06",
+          "file": "wrist-right-handeye-06.png",
+          "label": "机械臂外参姿态 6"
+        },
+        {
+          "key": "handeye-07",
+          "file": "wrist-right-handeye-07.png",
+          "label": "机械臂外参姿态 7"
+        },
+        {
+          "key": "handeye-08",
+          "file": "wrist-right-handeye-08.png",
+          "label": "机械臂外参姿态 8"
+        },
+        {
+          "key": "handeye-09",
+          "file": "wrist-right-handeye-09.png",
+          "label": "机械臂外参姿态 9"
+        },
+        {
+          "key": "handeye-10",
+          "file": "wrist-right-handeye-10.png",
+          "label": "机械臂外参姿态 10"
+        },
+        {
+          "key": "handeye-11",
+          "file": "wrist-right-handeye-11.png",
+          "label": "机械臂外参姿态 11"
+        },
+        {
+          "key": "handeye-12",
+          "file": "wrist-right-handeye-12.png",
+          "label": "机械臂外参姿态 12"
+        }
+      ]
+    }
+  ]
+}

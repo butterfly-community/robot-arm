@@ -46,12 +46,14 @@ pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
     frames: VideoStreams,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    routes: Router,
 ) -> Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/ws", get(video_upgrade))
         .route("/snapshot", get(snapshot))
-        .with_state(VideoState { frames });
+        .with_state(VideoState { frames })
+        .merge(routes);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
@@ -353,6 +355,7 @@ mod tests {
             listener,
             BTreeMap::from([(CameraRole::Depth, receiver)]),
             stopped,
+            Router::new(),
         ));
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             let (mut client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
@@ -427,6 +430,7 @@ mod tests {
                 listener,
                 BTreeMap::from([(CameraRole::Depth, frames)]),
                 stopped,
+                Router::new(),
             ));
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 let (mut client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();

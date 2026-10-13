@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type {
   CameraCaptureState,
+  CameraRole,
   PerceptionState,
   MotionPreview,
 } from "@robot/contracts";
@@ -33,12 +34,12 @@ function perceptionResult(result: unknown): PerceptionState {
 export function robotTools(context: RobotToolsContext): ToolSet {
   let serial = Promise.resolve();
   const observeRole = z
-    .enum(["depth", "external", "wrist"])
+    .enum(["depth", "external", "external_right", "wrist", "wrist_right"])
     .nullish()
     .describe(
       "需要动作后的新图时填写角色；无需观察则省略或 null，不增加模型往返",
     );
-  async function observe(role: "depth" | "external" | "wrist") {
+  async function observe(role: CameraRole) {
     const captured = await cameraImage(role, context.signal);
     const [image, robot] = await Promise.all([
       putImage(captured.bytes),
@@ -92,9 +93,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           const result = await action(input, (path, fields, label = name) =>
             context.command(toolCallId, index++, path, fields, label),
           );
-          const role = (
-            input as { observe_role?: "depth" | "external" | "wrist" }
-          ).observe_role;
+          const role = (input as { observe_role?: CameraRole }).observe_role;
           let output = result;
           if (role) {
             try {
@@ -260,7 +259,10 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     set_camera_capture: define(
       "set_camera_capture",
       "用户单独要求开关采集时使用，与网页开关相同。仅为切换视角看图时直接用 observe_camera(exclusive=true)，不要拆成关闭、开启、观察三轮。保留绑定和分辨率，不运动。",
-      z.object({ role: z.enum(["external", "wrist"]), enabled: z.boolean() }),
+      z.object({
+        role: z.enum(["external", "external_right", "wrist", "wrist_right"]),
+        enabled: z.boolean(),
+      }),
       async ({ role, enabled }, post) => {
         const result = (await post("/api/perception/camera", {
           role,
@@ -277,19 +279,33 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     observe_camera: define(
       "observe_camera",
-      "读取指定角色的新原分辨率 RGB 图和实际机器人反馈，不运动。exclusive=true 时先关闭另一路普通相机并开启本路，复用网页开关，缓解共享带宽；不改变绑定或分辨率。",
+      "读取指定角色的新原分辨率 RGB 图和实际机器人反馈，不运动。external/wrist 为各组左相机，external_right/wrist_right 为右相机。exclusive=true 关闭其他组、开启本组已绑定相机，保留双目左右同时采集；不改变绑定或分辨率。",
       z.object({
-        role: z.enum(["depth", "external", "wrist"]),
+        role: z.enum([
+          "depth",
+          "external",
+          "external_right",
+          "wrist",
+          "wrist_right",
+        ]),
         exclusive: z.boolean().nullish(),
       }),
       async ({ role, exclusive }, post) => {
         if (exclusive && role !== "depth") {
           const bindings =
             (await perceptionSnapshot()).values.camera_state?.bindings ?? [];
+          const group = bindings.filter(
+            (b) =>
+              b.source_id &&
+              b.role.replace("_right", "") === role.replace("_right", ""),
+          );
+          if (!group.some((b) => b.role === role))
+            throw Error("请先绑定该相机");
           for (const binding of bindings) {
             if (
               binding.role !== "depth" &&
-              binding.role !== role &&
+              binding.role.replace("_right", "") !==
+                role.replace("_right", "") &&
               (binding.enabled || binding.streaming)
             ) {
               await post("/api/perception/camera", {
@@ -298,11 +314,44 @@ export function robotTools(context: RobotToolsContext): ToolSet {
               });
             }
           }
-          const current = bindings.find((b) => b.role === role);
-          if (!current?.enabled || !current.streaming)
-            await post("/api/perception/camera", { role, action: "connect" });
+          for (const binding of group) {
+            if (!binding.enabled || !binding.streaming)
+              await post("/api/perception/camera", {
+                role: binding.role,
+                action: "connect",
+              });
+          }
         }
         return observe(role);
+      },
+      true,
+    ),
+    observe_stereo_depth: define(
+      "observe_stereo_depth",
+      "读取外部或腕部双目的新校正左图、深度统计及指定像素的米制三维坐标，不运动。需绑定两台并完成网页双目标定；机械臂坐标还需外参，腕部另需实际反馈。u/v 是校正图中 0..1 的横/纵坐标，省略取中心。无有效匹配返回空点，不猜测深度。软件配对不等于硬件同步，采样时保持场景静止。",
+      z.object({
+        rig: z.enum(["external", "wrist"]),
+        u: z.number().min(0).max(1).nullish(),
+        v: z.number().min(0).max(1).nullish(),
+      }),
+      async ({ rig, u, v }) => {
+        const base =
+          process.env.CAMERA_INTERNAL_URL?.replace(/\/$/, "") ??
+          "http://camera:8081";
+        const query = new URLSearchParams({ rig, image: "true" });
+        if (u != null) query.set("u", String(u));
+        if (v != null) query.set("v", String(v));
+        const response = await fetch(`${base}/stereo/depth?${query}`, {
+          cache: "no-store",
+          signal: context.signal,
+        });
+        if (!response.ok) throw Error(await response.text());
+        const metadata = JSON.parse(
+          response.headers.get("x-camera-frame") ?? "null",
+        );
+        if (!metadata?.source_id) throw Error("双目图像缺少对应深度元数据");
+        const image = await putImage(Buffer.from(await response.arrayBuffer()));
+        return { image_id: image.id, ...image, ...metadata };
       },
       true,
     ),

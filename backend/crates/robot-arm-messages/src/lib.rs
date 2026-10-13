@@ -791,7 +791,18 @@ pub enum CameraRole {
     #[default]
     Depth,
     External,
+    ExternalRight,
     Wrist,
+    WristRight,
+}
+
+impl CameraRole {
+    pub const COLOR_ROLES: [Self; 4] = [
+        Self::External,
+        Self::ExternalRight,
+        Self::Wrist,
+        Self::WristRight,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

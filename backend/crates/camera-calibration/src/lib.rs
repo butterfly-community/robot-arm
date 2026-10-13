@@ -1,4 +1,5 @@
 use eyre::{Result, bail, eyre};
+pub mod stereo;
 use nalgebra::{
     Isometry3, Matrix3, Matrix4, Quaternion, Rotation3, Translation3, UnitQuaternion, Vector3,
 };

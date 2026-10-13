@@ -12,7 +12,7 @@ RUN git clone --depth=1 --branch 5.0.0 https://github.com/opencv/opencv.git /ope
     && cmake -S /opencv -B /opencv-build -G Ninja \
        -DCMAKE_BUILD_TYPE=Release \
        -DCMAKE_INSTALL_PREFIX=/opt/opencv5 \
-       -DBUILD_LIST=core,calib,geometry,imgcodecs,imgproc,objdetect \
+       -DBUILD_LIST=core,calib,geometry,imgcodecs,imgproc,objdetect,stereo \
        -DBUILD_opencv_apps=OFF \
        -DBUILD_PERF_TESTS=OFF \
        -DBUILD_TESTS=OFF \
@@ -33,6 +33,10 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install --yes librealsense2-dev librealsense2-utils
 
+# Runtime must install the exact ABI that the Rust binary links against. An
+# independently cached apt layer can otherwise retain an older SONAME.
+RUN dpkg-query -W -f='${Version}' librealsense2 > /opt/realsense-version
+
 RUN apt-get update && apt-get install --yes --no-install-recommends \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 
@@ -47,10 +51,15 @@ COPY --from=build /etc/apt/keyrings/librealsenseai.gpg \
      /etc/apt/keyrings/librealsenseai.gpg
 COPY --from=build /etc/apt/sources.list.d/librealsense.list \
      /etc/apt/sources.list.d/librealsense.list
+COPY --from=build /opt/realsense-version /opt/robot-arm/realsense-version
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends librealsense2 \
+    && apt-get install --yes --no-install-recommends "librealsense2=$(cat /opt/robot-arm/realsense-version)" \
        libavcodec62 libavformat62 libavutil60 libswscale9
 COPY --from=build /opt/opencv5 /opt/opencv5
 ENV LD_LIBRARY_PATH=/opt/opencv5/lib
+COPY backend/nodes/camera/assets/stereo /opt/robot-arm/stereo
+ENV CAMERA_STEREO_ASSETS=/opt/robot-arm/stereo
 COPY --from=build /src/target/release/camera-node \
      /usr/local/bin/camera-node
+RUN ldd /usr/local/bin/camera-node \
+    | awk '/not found/ { missing=1; print } END { exit missing }'

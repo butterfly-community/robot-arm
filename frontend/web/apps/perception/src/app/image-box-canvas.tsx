@@ -68,6 +68,7 @@ export function ImageBoxCanvas({
     <svg
       ref={svg}
       aria-label={label}
+      aria-busy={loaded !== src}
       role={onSelect ? "group" : "img"}
       viewBox={`0 0 ${width} ${height}`}
       style={{

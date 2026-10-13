@@ -1,3 +1,4 @@
+mod replay;
 mod simulation;
 
 #[cfg(feature = "realsense-runtime")]
@@ -53,6 +54,13 @@ impl Drivers {
         source_id: &str,
         color: &CameraStreamProfile,
     ) -> Result<Box<dyn CameraStream>> {
+        eyre::ensure!(
+            !source_id.starts_with("stereo:"),
+            "双目深度是左右绑定的计算结果，不能再作为它自己的输入相机"
+        );
+        if source_id.starts_with("replay:") {
+            return replay::open(source_id, color);
+        }
         if source_id.starts_with("v4l2:") {
             return Ok(Box::new(ColorStream(uvc_camera::Stream::open(
                 source_id, color,
@@ -93,7 +101,10 @@ impl Drivers {
 
     pub(crate) fn discover(&mut self) -> (Vec<CameraSourceInfo>, Vec<String>) {
         let mut sources = Vec::new();
+        #[cfg(feature = "opencv-runtime")]
+        sources.extend(crate::stereo::sources());
         let mut errors = Vec::new();
+        collect_discovery(&mut sources, &mut errors, replay::discover(), "replay");
         let (ordinary, ordinary_errors) = uvc_camera::discover();
         sources.extend(ordinary);
         errors.extend(ordinary_errors);
@@ -121,6 +132,8 @@ impl Drivers {
         driver_parameters: &[CameraDriverParameterValue],
     ) -> Result<Box<dyn CameraStream>> {
         match source_id.split_once(':').map(|value| value.0) {
+            #[cfg(feature = "opencv-runtime")]
+            Some("stereo") => Ok(Box::new(crate::stereo::Stream::open(source_id)?)),
             Some("simulation") => {
                 self.simulation
                     .open(source_id, color_profile, depth_profile, driver_parameters)
@@ -139,6 +152,8 @@ impl Drivers {
 
     pub(crate) fn reset(&mut self, source_id: &str) -> Result<()> {
         match source_id.split_once(':').map(|value| value.0) {
+            #[cfg(feature = "opencv-runtime")]
+            Some("stereo") => crate::stereo::forget(source_id),
             Some("simulation") => self.simulation.reset(source_id),
             #[cfg(feature = "realsense-runtime")]
             Some("realsense") => self.realsense.reset(source_id),

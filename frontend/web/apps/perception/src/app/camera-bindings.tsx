@@ -1,12 +1,15 @@
 "use client";
+import { Select } from "@robot/ui";
 import { useState } from "react";
 import type { CameraCaptureState, CameraRole } from "@robot/contracts";
 import { Button, Field, KeyValue } from "@robot/ui";
 
 export const cameraTitles: Record<CameraRole, string> = {
   depth: "深度相机彩色画面",
-  external: "外部摄像头",
-  wrist: "腕部摄像头",
+  external: "外部摄像头 1（左）",
+  external_right: "外部摄像头 2（右）",
+  wrist: "腕部摄像头 1（左）",
+  wrist_right: "腕部摄像头 2（右）",
 };
 
 export function CameraBindings({
@@ -23,13 +26,20 @@ export function CameraBindings({
       </p>
       <p className="status">
         共享 USB
-        带宽不足时，可先关闭一路采集、再开启另一路，轮流采集以缓解带宽占用。关闭采集会释放设备，保留绑定和分辨率；再次开启后使用新图像，不复用关闭前的画面。
+        带宽不足时，可关闭暂不使用的相机组以释放带宽。双目左右两路必须同时采集，不能轮流开启代替同步图像。关闭采集保留绑定和分辨率；再次开启后使用新图像。
         降低感知上送频率不会降低 USB
         带宽；需要选择设备支持的低帧率流配置，或关闭一路采集。
       </p>
-      {(["external", "wrist"] as const).map((role) => (
-        <Binding key={role} role={role} camera={camera} onRequest={onRequest} />
-      ))}
+      {(["external", "external_right", "wrist", "wrist_right"] as const).map(
+        (role) => (
+          <Binding
+            key={role}
+            role={role}
+            camera={camera}
+            onRequest={onRequest}
+          />
+        ),
+      )}
     </div>
   );
 }
@@ -39,7 +49,7 @@ function Binding({
   camera,
   onRequest,
 }: {
-  role: "external" | "wrist";
+  role: Exclude<CameraRole, "depth">;
   camera?: CameraCaptureState;
   onRequest: (body: Record<string, unknown>) => Promise<boolean>;
 }) {
@@ -78,16 +88,16 @@ function Binding({
         label={`${cameraTitles[role]}来源`}
         hint="绑定按稳定设备标识保存，设备编号变化不影响配置；无序列号设备按物理端口识别。"
       >
-        <select
+        <Select
           aria-label={`${cameraTitles[role]}来源`}
           value={sourceId}
           disabled={pending}
-          onChange={(e) => {
+          onValueChange={(nextValue) => {
             const source = camera?.available_sources.find(
-              (s) => s.source_id === e.target.value,
+              (s) => s.source_id === nextValue,
             );
             setDraft({
-              source: e.target.value,
+              source: nextValue,
               profile:
                 source?.profiles.find(
                   (p) => p.stream === "color" && p.available,
@@ -96,25 +106,27 @@ function Binding({
           }}
         >
           <option value="">不绑定</option>
-          {camera?.available_sources.map((s) => (
-            <option
-              key={s.source_id}
-              value={s.source_id}
-              disabled={!s.available}
-            >
-              {s.display_name}
-              {s.available ? "" : " · 未连接（绑定保留）"}
-            </option>
-          ))}
-        </select>
+          {camera?.available_sources
+            .filter((s) => s.driver_id !== "stereo")
+            .map((s) => (
+              <option
+                key={s.source_id}
+                value={s.source_id}
+                disabled={!s.available}
+              >
+                {s.display_name}
+                {s.available ? "" : " · 未连接（绑定保留）"}
+              </option>
+            ))}
+        </Select>
       </Field>
       <Field label={`${cameraTitles[role]}流配置`}>
-        <select
+        <Select
           aria-label={`${cameraTitles[role]}流配置`}
           value={profile}
           disabled={pending}
-          onChange={(e) =>
-            setDraft({ source: sourceId, profile: e.target.value })
+          onValueChange={(nextValue) =>
+            setDraft({ source: sourceId, profile: nextValue })
           }
         >
           <option value="">选择分辨率和帧率</option>
@@ -122,10 +134,13 @@ function Binding({
             <option key={p.key} value={p.key} disabled={!p.available}>
               {p.width} × {p.height} · {p.frames_per_second} FPS ·{" "}
               {p.pixel_format}
+              {source?.driver_id === "replay"
+                ? ` · ${p.key.split(":")[0]}`
+                : ""}
               {p.available ? "" : ` · ${p.unavailable_reason ?? "不可用"}`}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <div className="card-actions">
         <Button

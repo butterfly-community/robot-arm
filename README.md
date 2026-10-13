@@ -21,8 +21,12 @@ With a depth camera, the core workflow comprises six stages:
 
 **RGB-only operation** uses external and wrist-mounted ordinary cameras. AI combines successive
 images and actual joint/TCP feedback with existing movement, gripping and working-pose tools,
-without depth reconstruction or GraspGenX. Both modes share motion and execution services.
+without depth reconstruction or GraspGenX.
 Camera binding does not generate depth or calibration; RGB-only results depend on image quality and model judgment.
+
+**Stereo operation** uses a calibrated external or wrist camera pair for depth, segmentation and 3D localization.
+AI decides movements through existing motion and gripper tools, without GraspGenX. The opposite view may use
+a single camera. All three modes share motion and execution services.
 
 ### Physical task example
 
@@ -144,9 +148,15 @@ Provide image observations, object recognition and spatial localization for AI m
 
 ### Camera management and acquisition
 
-One camera service manages depth, external and wrist roles with persistent device bindings,
+One camera service manages a depth camera, two external cameras and two wrist cameras with persistent device bindings,
 individual stream profiles and capture switches. Each live role has its own floating preview.
-Capture can alternate when shared USB bandwidth is insufficient; AI uses the same switches and snapshot interface.
+Camera groups can alternate when shared USB bandwidth is insufficient; AI uses the same switches and snapshot interface.
+Each ordinary-camera pair supports ChArUco intrinsic, stereo and robot extrinsic calibration. Its metric depth
+feeds the existing segmentation and 3D localization pipeline. In stereo mode, AI uses these positions with
+the existing motion and gripper tools, without GraspGenX. Either pair can work alongside a single camera
+on the opposite side; two stereo pairs are not required. Both cameras in a pair must capture
+simultaneously; software timestamp pairing is not hardware synchronization. All four roles include test images
+for binding, preview and calibration without physical cameras.
 
 The interface presents camera sources, device information, color images and depth data. Color supplies object appearance; depth supplies distance to visible surfaces. Together they support recognition and 3D localization.
 

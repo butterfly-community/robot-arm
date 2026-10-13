@@ -6,6 +6,7 @@ export const settingsSchema = z.object({
   effort: z.string().trim(),
 });
 export type AISettings = z.infer<typeof settingsSchema>;
+export type AIPromptMode = "depth" | "stereo" | "vision";
 export const idSchema = z.string().regex(/^[A-Za-z0-9_-]+$/);
 export const startSchema = z.object({
   sessionId: idSchema,
@@ -47,7 +48,7 @@ export interface RobotRequest {
 }
 export interface ExperienceScope {
   modelRevision: string;
-  mode: "depth" | "vision";
+  mode: AIPromptMode;
   feedbackSource: string;
 }
 export const experienceInputSchema = z.object({
@@ -112,7 +113,7 @@ export interface AIRun {
   acceptingInput?: boolean;
   updates?: AIUpdate[];
   networkRetry?: { attempt: number; nextAt: number; error: string };
-  promptMode?: "depth" | "vision";
+  promptMode?: AIPromptMode;
   experienceScope?: ExperienceScope;
   experienceSummary?: {
     state: "running" | "succeeded" | "failed" | "cancelled";

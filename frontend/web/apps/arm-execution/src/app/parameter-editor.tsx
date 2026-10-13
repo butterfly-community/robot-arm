@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 import { useState } from "react";
 import { Button, Field, Input } from "@robot/ui";
 import { post, requestId } from "@robot/gateway-client";
@@ -73,12 +74,12 @@ export function ParameterEditor({
       </p>
       <div className="grid">
         <Field label="参数执行器">
-          <select
+          <Select
             aria-label="参数执行器"
             value={selectedActuator}
             disabled={busy}
-            onChange={(e) => {
-              setActuator(e.target.value);
+            onValueChange={(nextValue) => {
+              setActuator(nextValue);
               setError(undefined);
               setDraft(undefined);
               setSubmitted(false);
@@ -89,15 +90,15 @@ export function ParameterEditor({
                 {a}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label="可写参数">
-          <select
+          <Select
             aria-label="可写参数"
             value={selectedField}
             disabled={busy}
-            onChange={(e) => {
-              setField(e.target.value);
+            onValueChange={(nextValue) => {
+              setField(nextValue);
               setError(undefined);
               setDraft(undefined);
               setSubmitted(false);
@@ -109,7 +110,7 @@ export function ParameterEditor({
                 {f.unit ? `（${f.unit}）` : ""}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label="参数值">
           <Input

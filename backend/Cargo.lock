@@ -675,6 +675,7 @@ dependencies = [
  "nalgebra",
  "opencv",
  "robot-arm-messages",
+ "serde",
 ]
 
 [[package]]

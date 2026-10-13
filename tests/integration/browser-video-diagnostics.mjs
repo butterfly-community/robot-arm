@@ -49,7 +49,9 @@ try {
   await expect(page.locator(".topbar-state")).toHaveText("实时连接正常", {
     timeout: 60000,
   });
-  const preview = page.getByLabel("外部摄像头浮动窗口", { exact: true });
+  const preview = page.getByLabel("外部摄像头 1（左）浮动窗口", {
+    exact: true,
+  });
   const expand = preview.getByRole("button", { name: "展开", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect

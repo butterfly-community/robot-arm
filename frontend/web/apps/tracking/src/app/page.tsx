@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import {
   actionGroupLabels,
@@ -481,14 +482,14 @@ export default function Page() {
       <div className="action-binding-editor">
         <label>
           <span>输入设备</span>
-          <select
+          <Select
             aria-label={`${definition.label}输入设备`}
             value={sourceIds[key] ?? ""}
-            onChange={(event) => {
+            onValueChange={(nextValue) => {
               updateDraft({
                 sourceIds: {
                   ...sourceIds,
-                  [key]: event.currentTarget.value,
+                  [key]: nextValue,
                 },
                 paths: { ...paths, [key]: "" },
               });
@@ -503,19 +504,19 @@ export default function Page() {
                 {sourceLabel(candidate)}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           <span>输入方式</span>
-          <select
+          <Select
             aria-label={`${definition.label}输入方式`}
             value={mode}
             disabled={definition.actionType === "boolean"}
-            onChange={(event) => {
+            onValueChange={(nextValue) => {
               updateDraft({
                 inputModes: {
                   ...inputModes,
-                  [key]: event.currentTarget.value as InputMode,
+                  [key]: nextValue as InputMode,
                 },
                 sourceIds: { ...sourceIds, [key]: "" },
                 paths: { ...paths, [key]: "" },
@@ -530,7 +531,7 @@ export default function Page() {
                 <option value="buttons">正负按钮对</option>
               </>
             )}
-          </select>
+          </Select>
         </label>
         {Array.from({ length: mode === "buttons" ? 2 : 1 }).map((_, index) => {
           const direction =
@@ -542,12 +543,10 @@ export default function Page() {
           return (
             <label key={index}>
               <span>{direction}</span>
-              <select
+              <Select
                 aria-label={`${definition.label}${direction}`}
                 value={(paths[key] ?? "").split(",")[index]?.trim() ?? ""}
-                onChange={(event) =>
-                  setPath(key, index, event.currentTarget.value)
-                }
+                onValueChange={(nextValue) => setPath(key, index, nextValue)}
               >
                 <option value="">选择{direction}</option>
                 {components.map((component) => (
@@ -558,7 +557,7 @@ export default function Page() {
                     {componentLabel(component)}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
           );
         })}
@@ -747,10 +746,10 @@ export default function Page() {
           }
         >
           <div className="input-test-toolbar">
-            <select
+            <Select
               aria-label="选择测试设备"
               value={currentTestSourceId}
-              onChange={(event) => setTestSourceId(event.currentTarget.value)}
+              onValueChange={(nextValue) => setTestSourceId(nextValue)}
             >
               <option value="">选择要测试的输入设备</option>
               {actionSources.map((source) => (
@@ -761,7 +760,7 @@ export default function Page() {
                   {sourceLabel(source)}
                 </option>
               ))}
-            </select>
+            </Select>
             <p>
               按住按钮或推动摇杆、扳机，这里实时显示设备实际触发的组件和值。
             </p>
@@ -887,11 +886,11 @@ export default function Page() {
                         <div className="action-binding-editor feedback-editor">
                           <label>
                             <span>反馈设备</span>
-                            <select
+                            <Select
                               aria-label="夹爪力度反馈设备"
                               value={feedbackSourceIds[feedback.key] ?? ""}
-                              onChange={(event) => {
-                                const sourceId = event.currentTarget.value;
+                              onValueChange={(nextValue) => {
+                                const sourceId = nextValue;
                                 updateDraft({
                                   feedbackSourceIds: {
                                     ...feedbackSourceIds,
@@ -928,18 +927,18 @@ export default function Page() {
                                     {sourceLabel(source)}
                                   </option>
                                 ))}
-                            </select>
+                            </Select>
                           </label>
                           <label>
                             <span>反馈能力</span>
-                            <select
+                            <Select
                               aria-label="夹爪力度反馈能力"
                               value={feedbackPaths[feedback.key] ?? ""}
-                              onChange={(event) =>
+                              onValueChange={(nextValue) =>
                                 updateDraft({
                                   feedbackPaths: {
                                     ...feedbackPaths,
-                                    [feedback.key]: event.currentTarget.value,
+                                    [feedback.key]: nextValue,
                                   },
                                 })
                               }
@@ -956,7 +955,7 @@ export default function Page() {
                                   )}
                                 </option>
                               ))}
-                            </select>
+                            </Select>
                           </label>
                         </div>
                         <div className="action-detail-actions">

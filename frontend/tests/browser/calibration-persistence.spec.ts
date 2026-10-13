@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 
 const calibrationFixture = {
@@ -149,9 +150,10 @@ test("saved calibration survives reload and requires explicit recalibration", as
   await expect(saved).toContainText("0.310000 / 0.050000 / 0.790000");
   await page.reload();
   await expect(saved).toContainText("0.310000 / 0.050000 / 0.790000");
-  await page
-    .getByLabel("相机来源", { exact: true })
-    .selectOption("uncalibrated");
+  await chooseOption(
+    page.getByLabel("相机来源", { exact: true }),
+    "uncalibrated",
+  );
   await expect(saved).toHaveCount(0);
   await expect(restart).toHaveCount(0);
   expect(actions).toEqual(["start", "cancel", "start", "apply"]);
@@ -199,7 +201,7 @@ test("serial fault is visible above collapsed calibration, preserves saved resul
     return route.fulfill({ json: { original_error: session.original_error } });
   });
   await page.addInitScript(() => {
-    localStorage.setItem("robot-arm:card:/perception/:相机外参标定", "closed");
+    localStorage.setItem("robot-arm:card:/perception/:深度相机标定", "closed");
   });
   await page.goto("/perception/");
   const alert = page.getByRole("alert", { name: "机械臂连接异常" });
@@ -208,7 +210,7 @@ test("serial fault is visible above collapsed calibration, preserves saved resul
   await expect(
     alert.getByRole("link", { name: "机械臂执行页" }),
   ).toHaveAttribute("href", "/arm-execution/");
-  await page.getByRole("button", { name: /相机外参标定/ }).click();
+  await page.getByRole("button", { name: /深度相机标定/ }).click();
   await expect(
     page.getByRole("button", { name: "终止本次标定", exact: true }),
   ).toBeDisabled();

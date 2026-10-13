@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 
 // Click the actual Start button; all writes are intercepted, no real arm motion.
@@ -94,8 +95,8 @@ for (const width of [1440, 390])
     await page.setViewportSize({ width, height: 1000 });
     await page.goto("/perception/");
     await page.getByText("抓放场景", { exact: true }).click();
-    await page.getByLabel("抓取目标", { exact: true }).selectOption("box");
-    await page.getByLabel("放置区域", { exact: true }).selectOption("pad");
+    await chooseOption(page.getByLabel("抓取目标", { exact: true }), "box");
+    await chooseOption(page.getByLabel("放置区域", { exact: true }), "pad");
     await page.getByRole("button", { name: "启动", exact: true }).click();
     const progress = page.getByLabel("抓放进度", { exact: true });
     await expect(progress).toContainText("生成并筛选抓取候选");

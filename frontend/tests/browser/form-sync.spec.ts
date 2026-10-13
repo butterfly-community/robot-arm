@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import {
   expect,
   test,
@@ -72,8 +73,8 @@ test("binding drafts survive remote updates and failed saves, and can be restore
     .locator("summary")
     .click();
   const target = page.getByLabel("夹爪力度反馈设备", { exact: true });
-  await target.selectOption({ label: "网页虚拟反馈" });
-  const chosen = await target.inputValue();
+  await chooseOption(target, { label: "网页虚拟反馈" });
+  const chosen = await target.getAttribute("data-value");
   // Another client changes an unrelated binding while this draft is unsaved.
   state.bindings = [
     {
@@ -85,12 +86,12 @@ test("binding drafts survive remote updates and failed saves, and can be restore
     },
   ];
   f.publish();
-  await expect(target).toHaveValue(chosen);
+  await expect(target).toHaveAttribute("data-value", chosen);
   await page.getByRole("button", { name: "应用绑定", exact: true }).click();
   await expect(page.locator('p.error[role="alert"]')).toContainText(
     "测试绑定失败",
   );
-  await expect(target).toHaveValue(chosen);
+  await expect(target).toHaveAttribute("data-value", chosen);
   fail = false;
   await page
     .getByRole("button", { name: "应用失败，重试", exact: true })
@@ -98,15 +99,15 @@ test("binding drafts survive remote updates and failed saves, and can be restore
   await expect(
     page.getByRole("button", { name: "绑定已应用", exact: true }),
   ).toBeDisabled();
-  await expect(target).toHaveValue(chosen);
+  await expect(target).toHaveAttribute("data-value", chosen);
   state.feedback_bindings = [];
   f.publish();
-  await expect(target).toHaveValue("");
-  await target.selectOption({ label: "网页虚拟反馈" });
+  await expect(target).toHaveAttribute("data-value", "");
+  await chooseOption(target, { label: "网页虚拟反馈" });
   await page
     .getByRole("button", { name: "恢复已保存绑定", exact: true })
     .click();
-  await expect(target).toHaveValue("");
+  await expect(target).toHaveAttribute("data-value", "");
 });
 
 test("a missing depth preview loads after the snapshot button, without running inference", async ({
@@ -203,14 +204,14 @@ test("AI model default saves independently; failure preserves edits and never ru
   await page.goto("/perception/");
   await page.getByText("高级设置", { exact: true }).click();
   const model = page.getByLabel("AI 默认分割模型", { exact: true });
-  await model.selectOption("auto-model");
+  await chooseOption(model, "auto-model");
   await expect(page.getByText("有待保存修改", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(page.locator('p.error[role="alert"]')).toContainText(
     "测试保存失败",
   );
   expect(actions).toEqual(["apply"]);
-  await expect(model).toHaveValue("auto-model");
+  await expect(model).toHaveAttribute("data-value", "auto-model");
   fail = false;
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect.poll(() => actions.length).toBe(2);
@@ -219,7 +220,7 @@ test("AI model default saves independently; failure preserves edits and never ru
   state.model = "text-model";
   state.classes = ["updated remotely"];
   f.publish();
-  await expect(model).toHaveValue("text-model");
+  await expect(model).toHaveAttribute("data-value", "text-model");
   await page
     .getByText("提示词分割", { exact: true })
     .locator("xpath=ancestor::button[1]")
@@ -349,10 +350,11 @@ test("camera profile switching preserves 1 FPS output and shows source-specific 
     driver_parameters: [],
   });
   await page.goto("/perception/");
-  await page
-    .getByLabel("相机来源", { exact: true })
-    .selectOption(source.source_id);
-  await page.getByLabel("彩色流", { exact: true }).selectOption("color-60");
+  await chooseOption(
+    page.getByLabel("相机来源", { exact: true }),
+    source.source_id,
+  );
+  await chooseOption(page.getByLabel("彩色流", { exact: true }), "color-60");
   const fps = page.getByLabel("上送频率", { exact: true });
   await expect(fps).toHaveValue("1");
   const status = page.locator(".key-value").filter({ hasText: "参数与标定" });

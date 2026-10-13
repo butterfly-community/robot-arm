@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import type {
   ArmCommand,
@@ -352,17 +353,15 @@ export default function Page() {
             }
           >
             <Field label="执行模式">
-              <select
+              <Select
                 aria-label="执行模式"
                 value={executionMode}
                 disabled={!execution || Boolean(pendingAction)}
-                onChange={(event) =>
-                  setExecutionMode(event.currentTarget.value)
-                }
+                onValueChange={(nextValue) => setExecutionMode(nextValue)}
               >
                 <option value="software">模拟器模式</option>
                 <option value="hardware">真机执行反馈模式</option>
-              </select>
+              </Select>
             </Field>
             <KeyValue
               label="当前生效模式"
@@ -392,7 +391,7 @@ export default function Page() {
                     {field.field_type === "endpoint" ? (
                       <>
                         <Field label={`${field.label}选择`}>
-                          <select
+                          <Select
                             aria-label={`${field.label}选择`}
                             disabled={connected || Boolean(pendingAction)}
                             value={
@@ -404,10 +403,10 @@ export default function Page() {
                                 ? resolvedConnectionFields.port
                                 : ""
                             }
-                            onChange={(event) =>
+                            onValueChange={(nextValue) =>
                               setConnectionFields({
                                 ...connectionFields,
-                                [field.key]: event.currentTarget.value,
+                                [field.key]: nextValue,
                               })
                             }
                           >
@@ -421,7 +420,7 @@ export default function Page() {
                                 {endpoint.label}
                               </option>
                             ))}
-                          </select>
+                          </Select>
                         </Field>
                         <Field label={`${field.label}路径（可手动输入）`}>
                           <Input

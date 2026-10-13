@@ -112,7 +112,7 @@ async fn serve_browser_fixture() {
     }
     let (_stop, shutdown) = tokio::sync::watch::channel(false);
     let listener = video_server::bind().await.unwrap();
-    video_server::serve(listener, streams, shutdown)
+    video_server::serve(listener, streams, shutdown, axum::Router::new())
         .await
         .unwrap();
 }

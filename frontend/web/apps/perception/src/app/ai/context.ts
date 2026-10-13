@@ -76,7 +76,11 @@ export function modelContext(messages: ModelMessage[]): ModelMessage[] {
             if (part.type !== "tool-result" || part.output.type !== "content")
               return part;
             const text = part.output.value.find((v) => v.type === "text");
-            let metadata: { image_id?: string; role?: string };
+            let metadata: {
+              image_id?: string;
+              role?: string;
+              source_id?: string;
+            };
             try {
               metadata = JSON.parse(text?.text ?? "null") ?? {};
             } catch {
@@ -84,10 +88,11 @@ export function modelContext(messages: ModelMessage[]): ModelMessage[] {
             }
             if (!metadata.image_id || part.toolName === "recall_image")
               return part;
-            const key = metadata.role ?? part.toolName;
+            const key = metadata.role ?? metadata.source_id ?? part.toolName;
             const count = seen.get(key) ?? 0;
             seen.set(key, count + 1);
-            if (count < (metadata.role ? 2 : 1)) return part;
+            if (count < (metadata.role || metadata.source_id ? 2 : 1))
+              return part;
             return {
               ...part,
               output: {

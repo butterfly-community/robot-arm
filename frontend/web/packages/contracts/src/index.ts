@@ -354,7 +354,8 @@ export interface CameraCaptureState {
   service: ServiceState;
 }
 
-export type CameraRole = "depth" | "external" | "wrist";
+export type CameraRole =
+  "depth" | "external" | "external_right" | "wrist" | "wrist_right";
 export interface CameraBindingState {
   role: CameraRole;
   source_id: string;

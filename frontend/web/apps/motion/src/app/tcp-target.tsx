@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import { useState } from "react";
 import {
@@ -77,14 +78,14 @@ export function TcpTarget({
     <Card className="span-12" title="TCP 定点运动">
       <div className="tcp-target-fields">
         <Field label="目标方式">
-          <select
+          <Select
             aria-label="目标方式"
             value={value.relative ? "relative" : "absolute"}
-            onChange={(event) =>
+            onValueChange={(nextValue) =>
               setDraft({
-                relative: event.target.value === "relative",
+                relative: nextValue === "relative",
                 pose:
-                  event.target.value === "relative"
+                  nextValue === "relative"
                     ? {
                         frame: model.base_frame,
                         position_m: [0, 0, 0],
@@ -96,16 +97,16 @@ export function TcpTarget({
           >
             <option value="absolute">绝对位姿</option>
             <option value="relative">相对当前实际 TCP</option>
-          </select>
+          </Select>
         </Field>
         <Field label="目标坐标系">
-          <select
+          <Select
             aria-label="目标坐标系"
             value={value.pose.frame}
-            onChange={(event) =>
+            onValueChange={(nextValue) =>
               setDraft({
                 ...value,
-                pose: { ...value.pose, frame: event.target.value },
+                pose: { ...value.pose, frame: nextValue },
               })
             }
           >
@@ -113,7 +114,7 @@ export function TcpTarget({
             {value.relative && (
               <option value={model.tcp_frame}>工具 · {model.tcp_frame}</option>
             )}
-          </select>
+          </Select>
         </Field>
         {(["X", "Y", "Z"] as const).map((axis, i) => (
           <Field key={axis} label={`${axis} / m`}>

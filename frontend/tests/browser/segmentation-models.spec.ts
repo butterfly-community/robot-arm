@@ -1,3 +1,4 @@
+import { chooseOption } from "../../../tests/integration/select-controls.mjs";
 import { expect, test } from "@playwright/test";
 
 test("AI groups segmentation and a minimal Start that generates selected-object grasps before execution", async ({
@@ -132,8 +133,10 @@ test("AI groups segmentation and a minimal Start that generates selected-object 
   const grab = page
     .getByText("抓放场景", { exact: true })
     .locator("xpath=ancestor::div[contains(@class, 'disclosure')][1]");
-  await expect(grab.locator("select")).toHaveCount(2);
-  await expect(grab.locator(".disclosure-content button")).toHaveCount(1);
+  await expect(grab.getByRole("combobox")).toHaveCount(2);
+  await expect(
+    grab.getByRole("button", { name: "启动", exact: true }),
+  ).toBeVisible();
   await page.getByText("自动分割", { exact: true }).click();
   const segment = page.getByRole("button", {
     name: "运行自动分割",
@@ -157,8 +160,8 @@ test("AI groups segmentation and a minimal Start that generates selected-object 
   state.calibrated = true;
   publish();
   await reconstruct.click();
-  await page.getByLabel("抓取目标", { exact: true }).selectOption("two");
-  await page.getByLabel("放置区域", { exact: true }).selectOption("pad");
+  await chooseOption(page.getByLabel("抓取目标", { exact: true }), "two");
+  await chooseOption(page.getByLabel("放置区域", { exact: true }), "pad");
   await expect(execute).toBeEnabled();
   expect(writes.map((x) => x.action)).toEqual(["refresh", "reconstruct"]);
   await execute.click();
@@ -240,7 +243,7 @@ test("visual reference editor saves image-space prompts through the normal form 
   await page.goto("/perception/");
   await page.getByText("高级设置", { exact: true }).click();
   await page.getByText("提示词分割", { exact: true }).click();
-  await page.getByLabel("提示方式", { exact: true }).selectOption("visual");
+  await chooseOption(page.getByLabel("提示方式", { exact: true }), "visual");
   await page.getByText("视觉示例提示", { exact: true }).click();
   await page
     .getByRole("button", { name: "载入采集图作为示例", exact: true })
@@ -268,7 +271,7 @@ test("visual reference editor saves image-space prompts through the normal form 
     await page.mouse.up();
   }
   await draw([0.1, 0.1], [0.3, 0.3]);
-  await page.getByLabel("示例类别", { exact: true }).selectOption("1");
+  await chooseOption(page.getByLabel("示例类别", { exact: true }), "1");
   // Reverse dragging must still serialize ordered pixel bounds.
   await region.scrollIntoViewIfNeeded();
   const nextBounds = (await region.boundingBox())!;
@@ -337,10 +340,11 @@ test("AI default never hides either segmentation model or its configuration", as
   const roles = page.getByLabel("放置区域角色", { exact: true });
   await expect(prompts).toHaveValue("pager, square paper");
   await expect(page.getByLabel("提示方式", { exact: true })).toBeVisible();
-  await model.selectOption("automatic-fixture");
+  await chooseOption(model, "automatic-fixture");
   await expect(prompts).toBeVisible();
   await expect(roles).toBeVisible();
-  await expect(page.getByLabel("提示方式", { exact: true })).toHaveValue(
+  await expect(page.getByLabel("提示方式", { exact: true })).toHaveAttribute(
+    "data-value",
     "saved",
   );
   expect(requests).toHaveLength(0);
@@ -351,7 +355,7 @@ test("AI default never hides either segmentation model or its configuration", as
     classes: null,
     placement_labels: null,
   });
-  await model.selectOption("prompted-fixture");
+  await chooseOption(model, "prompted-fixture");
   await expect(prompts).toHaveValue("pager, square paper");
   await expect(roles).toHaveValue("square paper");
   expect(requests).toHaveLength(1);

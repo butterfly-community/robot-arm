@@ -35,6 +35,35 @@ function frame(id: string, role: string): ModelMessage {
   };
 }
 describe("model image window without losing conversation history", () => {
+  it("keeps external and wrist rectified views separate in stereo tool history", () => {
+    const stereo = (id: string, rig: string) => {
+      const message = frame(id, rig);
+      if (
+        message.role === "tool" &&
+        message.content[0].type === "tool-result"
+      ) {
+        const part = message.content[0];
+        part.toolName = "observe_stereo_depth";
+        if (part.output.type === "content") {
+          part.output.value[0] = {
+            type: "text",
+            text: JSON.stringify({ image_id: id, source_id: `stereo:${rig}` }),
+          };
+        }
+      }
+      return message;
+    };
+    const history = [
+      stereo("w1", "wrist"),
+      stereo("e1", "external"),
+      stereo("e2", "external"),
+      stereo("e3", "external"),
+    ];
+    const result = modelContext(history);
+    expect(result[0]).toEqual(history[0]);
+    expect(JSON.stringify(result[1])).not.toContain('"type":"file"');
+    expect(result.slice(2)).toEqual(history.slice(2));
+  });
   it("summarizes machine-generated failed-run payloads, retaining IDs and errors rather than duplicating results", () => {
     const requests = [
       {

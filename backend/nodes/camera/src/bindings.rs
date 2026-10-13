@@ -41,7 +41,7 @@ impl Bindings {
         saved: &BTreeMap<CameraRole, SavedBinding>,
     ) -> Self {
         let mut slots = BTreeMap::new();
-        for role in [CameraRole::External, CameraRole::Wrist] {
+        for role in CameraRole::COLOR_ROLES {
             let channels = capture_worker::spawn(runtime);
             let binding = saved.get(&role).cloned();
             let mut error = None;

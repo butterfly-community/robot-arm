@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Compare text prompts through the normal frozen-frame editor, without saving
 // over the user's visual examples. No capture, motion or internal API writes.
 import {
@@ -16,7 +17,7 @@ try {
   const section = page.getByRole("button", { name: /^提示词分割/ });
   if ((await section.getAttribute("aria-expanded")) === "false")
     await section.click();
-  await page.getByLabel("提示方式", { exact: true }).selectOption("text");
+  await chooseOption(page.getByLabel("提示方式", { exact: true }), "text");
   for (const label of process.argv.slice(2)) {
     await page
       .getByLabel("识别与分割提示词", { exact: true })

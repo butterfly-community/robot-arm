@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Real deployed browser path: no POST interception, API injection or fake feedback.
 // Run only with authorization to move the connected arm and an empty gripper.
 import {
@@ -122,10 +123,11 @@ try {
         refresh = false,
         expected = "succeeded",
       ) {
-        await card
-          .getByLabel("目标方式")
-          .selectOption(relative ? "relative" : "absolute");
-        await card.getByLabel("目标坐标系").selectOption(frame);
+        await chooseOption(
+          card.getByLabel("目标方式"),
+          relative ? "relative" : "absolute",
+        );
+        await chooseOption(card.getByLabel("目标坐标系"), frame);
         for (const [i, name] of ["X / m", "Y / m", "Z / m"].entries())
           await card
             .getByLabel(name, { exact: true })

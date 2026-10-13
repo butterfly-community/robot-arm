@@ -1,3 +1,4 @@
+import { chooseOption } from "./select-controls.mjs";
 // Actual page operations, no interception or internal API writes. Software
 // execution is explicitly selected before calibration or grasp motion.
 import {
@@ -54,9 +55,10 @@ try {
   });
   await execution.goto(`${base}/arm-execution/`);
   await expand(execution, "执行连接");
-  await execution
-    .getByLabel("执行模式", { exact: true })
-    .selectOption("software");
+  await chooseOption(
+    execution.getByLabel("执行模式", { exact: true }),
+    "software",
+  );
   const apply = execution.getByRole("button", {
     name: "应用执行模式",
     exact: true,
@@ -69,16 +71,18 @@ try {
       s.arm_state.feedback_source === "software",
   );
 
-  await page
-    .getByLabel("相机来源", { exact: true })
-    .selectOption("simulation:pick-place-scene");
+  await chooseOption(
+    page.getByLabel("相机来源", { exact: true }),
+    "simulation:pick-place-scene",
+  );
   for (const [label, value] of [
     ["彩色流", "color:1920x1080:rgb8:10"],
     ["深度流", "depth:1920x1080:z16le:10"],
   ])
-    await page
-      .getByRole("combobox", { name: label, exact: true })
-      .selectOption(value);
+    await chooseOption(
+      page.getByRole("combobox", { name: label, exact: true }),
+      value,
+    );
   await page.getByRole("spinbutton", { name: "上送频率" }).fill("1");
   await click("保存并启用");
   await waitFor(
@@ -131,7 +135,7 @@ try {
 
   await click("载入新分割帧");
   await expand(page, "提示词分割");
-  await page.getByLabel("提示方式", { exact: true }).selectOption("text");
+  await chooseOption(page.getByLabel("提示方式", { exact: true }), "text");
   await page
     .getByLabel("识别与分割提示词", { exact: true })
     .fill("red cube, dark rectangle");
@@ -158,12 +162,14 @@ try {
     (o) => o.label === "red cube",
   );
   expect(target).toBeTruthy();
-  await page
-    .getByLabel("抓取目标", { exact: true })
-    .selectOption(target.object_id);
-  await page
-    .getByLabel("放置区域", { exact: true })
-    .selectOption(current.world_scene.placement_regions[0].region_id);
+  await chooseOption(
+    page.getByLabel("抓取目标", { exact: true }),
+    target.object_id,
+  );
+  await chooseOption(
+    page.getByLabel("放置区域", { exact: true }),
+    current.world_scene.placement_regions[0].region_id,
+  );
   await click("启动");
   await waitFor(
     async () => events,
@@ -229,9 +235,10 @@ try {
       await stop.click();
     // Restore through the same controls; leave the new simulation calibration
     // attached to its simulation source, never overwrite real-camera extrinsics.
-    await page
-      .getByLabel("相机来源", { exact: true })
-      .selectOption(original.camera_state.selected_source_id ?? "");
+    await chooseOption(
+      page.getByLabel("相机来源", { exact: true }),
+      original.camera_state.selected_source_id ?? "",
+    );
     await waitFor(
       state,
       (s) =>
@@ -240,9 +247,10 @@ try {
     );
   }
   if (originalExecution?.transport_state.selected_endpoint) {
-    await execution
-      .getByLabel("执行模式", { exact: true })
-      .selectOption("hardware");
+    await chooseOption(
+      execution.getByLabel("执行模式", { exact: true }),
+      "hardware",
+    );
     await execution
       .getByLabel("串口路径（可手动输入）", { exact: true })
       .fill(originalExecution.transport_state.selected_endpoint);

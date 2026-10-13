@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import type {
   AbsolutePoseFrame,
@@ -313,16 +314,16 @@ export default function Page() {
               </div>
             </Field>
             <Field label="设备垂直姿态语义">
-              <select
+              <Select
                 aria-label="设备垂直姿态语义"
                 value={String(
                   (config.orientation_mapping as Record<string, unknown>)
                     ?.vertical ?? "front_pitch",
                 )}
-                onChange={(event) =>
+                onValueChange={(nextValue) =>
                   update({
                     orientation_mapping: {
-                      vertical: event.currentTarget.value,
+                      vertical: nextValue,
                       horizontal: String(
                         (config.orientation_mapping as Record<string, unknown>)
                           ?.horizontal ?? "horizontal_arc",
@@ -333,30 +334,30 @@ export default function Page() {
               >
                 <option value="front_pitch">垂直圆弧</option>
                 <option value="tool_pitch">定点垂直旋转</option>
-              </select>
+              </Select>
             </Field>
             <Field label="设备水平姿态语义">
-              <select
+              <Select
                 aria-label="设备水平姿态语义"
                 value={String(
                   (config.orientation_mapping as Record<string, unknown>)
                     ?.horizontal ?? "horizontal_arc",
                 )}
-                onChange={(event) =>
+                onValueChange={(nextValue) =>
                   update({
                     orientation_mapping: {
                       vertical: String(
                         (config.orientation_mapping as Record<string, unknown>)
                           ?.vertical ?? "front_pitch",
                       ),
-                      horizontal: event.currentTarget.value,
+                      horizontal: nextValue,
                     },
                   })
                 }
               >
                 <option value="horizontal_arc">水平圆弧</option>
                 <option value="tool_yaw">定点水平旋转</option>
-              </select>
+              </Select>
             </Field>
             <Field
               label="无绝对位置时的平移速度"

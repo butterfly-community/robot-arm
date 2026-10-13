@@ -1,3 +1,4 @@
+import { chooseOption, readOptions } from "./select-controls.mjs";
 // Source: real general-AI UI. No API writes, request interception, injected
 // results or manual pick/place. Captures browser-visible run records + video.
 import {
@@ -167,19 +168,13 @@ try {
       await advanced.click();
     const camera = page.getByLabel("相机来源", { exact: true });
     await expect(camera).toBeEnabled({ timeout: 300000 });
-    const options = await camera.locator("option").evaluateAll((els) =>
-      els.map((e) => ({
-        value: e.value,
-        label: e.textContent,
-        disabled: e.disabled,
-      })),
-    );
+    const options = await readOptions(camera);
     console.log("CAMERAS", JSON.stringify(options));
     const real = options.find(
       (v) => v.value.startsWith("realsense:") && !v.disabled,
     );
     if (!real) throw Error("网页没有可用 RealSense 相机");
-    await camera.selectOption(real.value);
+    await chooseOption(camera, real.value);
     const save = page.getByRole("button", { name: "保存并启用", exact: true });
     await save.click();
     await expect(save).toBeEnabled({ timeout: 60000 });
@@ -497,7 +492,7 @@ try {
     await expect(page.locator("[data-run-id]")).toHaveCount(0);
   }
   if (mode === "history") {
-    await page.getByLabel("AI 历史会话", { exact: true }).selectOption(text);
+    await chooseOption(page.getByLabel("AI 历史会话", { exact: true }), text);
     await expect
       .poll(() => page.locator("[data-run-id]").count())
       .toBeGreaterThan(0);

@@ -118,7 +118,7 @@ export function AIExperiencePanel({ revision }: { revision: number }) {
               <div className="card-stack">
                 <KeyValue
                   label="范围"
-                  value={`${item.scope.modelRevision} · ${item.scope.mode === "vision" ? "纯视觉" : "深度"} · ${item.scope.feedbackSource}`}
+                  value={`${item.scope.modelRevision} · ${{ vision: "纯视觉", stereo: "双目", depth: "深度" }[item.scope.mode]} · ${item.scope.feedbackSource}`}
                 />
                 <KeyValue
                   label="记录性质"

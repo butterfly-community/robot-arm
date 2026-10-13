@@ -1,4 +1,5 @@
 "use client";
+import { Select } from "@robot/ui";
 
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
@@ -434,15 +435,15 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
       </div>
       {Boolean(snapshot?.sessions.length) && (
         <Field label="历史会话">
-          <select
+          <Select
             aria-label="AI 历史会话"
             value={session}
             disabled={Boolean(current) || Boolean(pending)}
-            onChange={(e) => {
-              if (e.target.value === session) return;
-              localStorage.setItem("robot-arm:ai-session", e.target.value);
+            onValueChange={(nextValue) => {
+              if (nextValue === session) return;
+              localStorage.setItem("robot-arm:ai-session", nextValue);
               setRuns([]);
-              setSession(e.target.value);
+              setSession(nextValue);
             }}
           >
             <option value={session}>当前会话</option>
@@ -453,7 +454,7 @@ export function AIPanel({ onBusy }: { onBusy: (busy: boolean) => void }) {
                   {v.title}
                 </option>
               ))}
-          </select>
+          </Select>
         </Field>
       )}
       {images.length > 0 && (
