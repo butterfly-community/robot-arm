@@ -5,9 +5,9 @@ use std::{
 };
 
 use robot_arm_messages::{
-    ActuatorMetadata, ArmCommand, JointMetadata, LinkMaterial, ModelAssetRequest,
-    ModelAssetResponse, NamedMotionTarget, NumericFieldSchema, RobotModelInfo, SCHEMA_VERSION,
-    VisualizationManifest,
+    ActuatorMetadata, ActuatorOpeningReference, ActuatorOpeningSample, ArmCommand, JointMetadata,
+    LinkMaterial, ModelAssetRequest, ModelAssetResponse, NamedMotionTarget, NumericFieldSchema,
+    RobotModelInfo, SCHEMA_VERSION, VisualizationManifest,
 };
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -306,7 +306,45 @@ fn tool_actuators() -> Vec<ActuatorMetadata> {
         minimum: GRIPPER_DRIVE_JOINT_CLOSED_RAD,
         maximum: GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD,
         visualization_joint_key: Some(GRIPPER_JOINT.into()),
+        opening_reference: Some(gripper_opening_reference()),
     }]
+}
+
+fn gripper_opening_reference() -> ActuatorOpeningReference {
+    // Same reviewed source as the compute image's GraspGenX asset generator.
+    // Do not independently copy its measured dimensions into AI prompts.
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../../graspgenx/manifest.json"))
+            .expect("embedded GraspGenX manifest must be valid");
+    let descriptor = manifest["descriptors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == GRIPPER_ASSET_ID)
+        .expect("GraspGenX manifest must contain the model's gripper");
+    let opened = descriptor["drive_joint_work_open_degrees"][GRIPPER_JOINT]
+        .as_f64()
+        .unwrap();
+    let closed = descriptor["drive_joint_closed_degrees"][GRIPPER_JOINT]
+        .as_f64()
+        .unwrap();
+    let axis = descriptor["closing_axis"].as_u64().unwrap() as usize;
+    let volume = &descriptor["sweep_volume"];
+    ActuatorOpeningReference {
+        source: "backend/devices/stararm-102/graspgenx/manifest.json#sweep_volume".into(),
+        frame: "gripper_base".into(),
+        samples: [
+            ((opened + closed) / 2.0, "extents2", "offset2"),
+            (opened, "extents", "offset"),
+        ]
+        .into_iter()
+        .map(|(angle, extent, offset)| ActuatorOpeningSample {
+            position_rad: angle.to_radians(),
+            inner_width_m: volume[extent][axis].as_f64().unwrap(),
+            reference_center_m: std::array::from_fn(|i| volume[offset][i].as_f64().unwrap()),
+        })
+        .collect(),
+    }
 }
 
 fn link_materials() -> BTreeMap<String, LinkMaterial> {
@@ -470,6 +508,15 @@ mod tests {
         let actuator = &tool_actuators()[0];
         assert_eq!(actuator.minimum, GRIPPER_DRIVE_JOINT_CLOSED_RAD);
         assert_eq!(actuator.maximum, GRIPPER_DRIVE_JOINT_MECHANICAL_LIMIT_RAD);
+        let reference = actuator.opening_reference.as_ref().unwrap();
+        assert_eq!(reference.frame, "gripper_base");
+        assert_eq!(reference.samples.len(), 2);
+        assert!((reference.samples[0].position_rad.to_degrees() - 30.0).abs() < 1e-9);
+        assert_eq!(reference.samples[0].inner_width_m, 0.071);
+        assert_eq!(reference.samples[0].reference_center_m[2], 0.08);
+        assert!((reference.samples[1].position_rad.to_degrees() - 60.0).abs() < 1e-9);
+        assert_eq!(reference.samples[1].inner_width_m, 0.129);
+        assert_eq!(reference.samples[1].reference_center_m[2], 0.06);
     }
 
     #[test]

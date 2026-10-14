@@ -80,6 +80,9 @@ describe("one end-of-run summary, never intermediate failure writes", () => {
       expect(instructions).toContain("本次没有提供原图，不能声称重新看图验证");
       expect(instructions).toContain("有依据但原因或效果尚未验证");
       expect(instructions).toContain("没有新结论返回空 lessons");
+      expect(instructions).toContain(
+        "只读查询中对模型参数、工具用法或提示词的转述不是新的任务经验",
+      );
       const sections = [
         "## 1. 核对依据",
         "## 2. 提炼结论",

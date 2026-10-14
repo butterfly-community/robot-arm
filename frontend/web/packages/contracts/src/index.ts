@@ -39,6 +39,15 @@ export interface JointMetadata {
 
 export interface ActuatorMetadata extends JointMetadata {
   visualization_joint_key?: string;
+  opening_reference?: {
+    source: string;
+    frame: string;
+    samples: Array<{
+      position_rad: number;
+      inner_width_m: number;
+      reference_center_m: [number, number, number];
+    }>;
+  };
 }
 
 export interface RobotModelInfo {

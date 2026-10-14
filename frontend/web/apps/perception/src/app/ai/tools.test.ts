@@ -77,6 +77,36 @@ function setup() {
 describe("AI segmentation uses the same single refresh request as the UI", () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => vi.unstubAllGlobals());
+  it("forwards partial gripper angles unchanged and observes the wrist without adjusting force or whole-arm joints", async () => {
+    const { command, tools } = setup();
+    for (const degrees of [30, 15, 40]) {
+      const result = await tools.gripper.execute!(
+        {
+          actuator_key: "gripper",
+          position_rad: (degrees * Math.PI) / 180,
+          observe_role: "wrist",
+        },
+        { toolCallId: `partial-${degrees}`, messages: [], context: {} },
+      );
+      expect(command.mock.calls.at(-1)?.slice(2, 4)).toEqual([
+        "/api/motion/actuator",
+        {
+          actuator_key: "gripper",
+          position_rad: (degrees * Math.PI) / 180,
+          model_revision: "test-model",
+        },
+      ]);
+      expect(result).toMatchObject({
+        role: "wrist",
+        robot: { force: { target: 30 } },
+      });
+    }
+    expect(command).toHaveBeenCalledTimes(3);
+    expect(cameraImage).toHaveBeenCalledTimes(3);
+    expect(tools.gripper.description).toContain("不是只有全开/全闭");
+    expect(tools.gripper.description).toContain("不是每次必须张到 60°");
+    expect(tools.gripper.description).toContain("不能按比例推算实际开口宽度");
+  });
   it("returns stereo coordinates with their rectified image and never commands motion", async () => {
     const metadata = {
       source_id: "stereo:wrist",

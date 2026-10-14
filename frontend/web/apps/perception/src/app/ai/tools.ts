@@ -176,7 +176,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     read_robot: define(
       "read_robot",
-      "读取实际姿态摘要 posture：关节度/弧度、TCP 米/毫米与 xyzw 朝向、采样时间/来源、夹爪及力度。区分实际反馈、FK 对应反馈和命令目标。只读，不运动。",
+      "读取实际姿态摘要 posture：关节度/弧度、TCP 米/毫米与 xyzw 朝向、采样时间/来源；夹爪包含实际驱动角、模型角度范围与 travel_percent 行程比例，力度另见 force。区分实际反馈、FK 对应反馈和命令目标。只读，不运动。",
       empty,
       readRobot,
     ),
@@ -615,10 +615,16 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     gripper: define(
       "gripper",
-      "独立执行夹爪驱动关节目标（弧度），等待控制器终态。驱动关节角不是两指总开角。闭合后的保持力仍由执行层持续调节。",
+      "按任意绝对驱动角调整夹爪开口，不是只有全开/全闭。StarArm-102 为双指齿轮联动夹爪：0°闭合，增大驱动角张开；右指反向联动，两指总开角为驱动角的两倍。模型范围为 0–90°，常用 open 为 60°，不是每次必须张到 60°。read_robot 的 model.tool_actuators 提供范围和 opening_reference：复用 GraspGenX 已审核的角度—夹持宽度参考及测量位置；posture.actual.gripper 提供实际角度。travel_percent 是角度行程比例，不是毫米间距或力度，不能按比例推算实际开口宽度。按物体宽度和参考尺寸选择足够的开口；腕部画面因张开过大看不到指尖时，在物体外缩小开口并用 observe_role=wrist 查看新图，不默认全开或仅凭指尖不可见判断动作失败。工具只改变开合，不旋转整个夹爪，等待控制器终态并返回实际反馈；闭合后的保持力仍由执行层持续调节。",
       z.object({
-        actuator_key: z.string(),
-        position_rad: z.number(),
+        actuator_key: z
+          .string()
+          .describe("来自 model.tool_actuators 的 key；StarArm-102 为 gripper"),
+        position_rad: z
+          .number()
+          .describe(
+            "绝对驱动角，单位弧度，不是增量、总开角或毫米。度数×π/180；例如 30°=0.5235987756 rad。可选择范围内任意中间角度，越小开口越小。",
+          ),
         observe_role: observeRole,
       }),
       async (input, post) =>
@@ -632,7 +638,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     set_grip_force: define(
       "set_grip_force",
-      "设置现有持续力度反馈目标 0–100；这是相对反馈目标，不是固定 mW，也不是达到后停止。",
+      "设置现有持续力度反馈目标 0–100；这是相对负载反馈目标，不是夹爪开口大小或驱动角行程比例，不是固定 mW，也不是达到后停止。",
       z.object({ target: z.number() }),
       async (input, post) =>
         post("/api/arm-execution/config", {

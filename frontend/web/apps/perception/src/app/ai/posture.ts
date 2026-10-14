@@ -7,6 +7,25 @@ import type {
 
 const degrees = (radians: number) => (radians * 180) / Math.PI;
 
+export function gripperParameters(model: RobotModelInfo) {
+  return model.tool_actuators.map((actuator) => ({
+    ...actuator,
+    range_deg: [degrees(actuator.minimum), degrees(actuator.maximum)],
+    opening_reference: actuator.opening_reference && {
+      ...actuator.opening_reference,
+      samples: actuator.opening_reference.samples.map((sample) => ({
+        ...sample,
+        position_deg: degrees(sample.position_rad),
+        inner_width_mm: sample.inner_width_m * 1000,
+        reference_center_mm: sample.reference_center_m.map(
+          (value) => value * 1000,
+        ),
+      })),
+      note: "经审核的 GraspGenX 指间夹持空间宽度，中心位置在 gripper_base 资产坐标系；不是所有深度处都相同的指尖间距，也不是连续角度—宽度标定曲线。",
+    },
+  }));
+}
+
 /** Display conversions only; FK and target transforms stay in the motion node. */
 export function readablePose(pose: ToolPose) {
   return {
@@ -40,7 +59,9 @@ export const coordinateGuide = {
   tcp_frame:
     "原点是模型定义的工具中心点；X/Y/Z 随夹爪朝向旋转。沿工具 +Z 不一定向上。",
   rotations:
-    "正转遵循指定坐标轴的右手定则；TCP 旋转以工具中心点为目标参考点。增量四元数 [0,0,0,1] 表示保持朝向。",
+    "正转遵循指定坐标轴的右手定则：从轴正端朝原点看，正角逆时针，负角顺时针；从另一侧看视觉方向相反。TCP 旋转以工具中心点为目标参考点。增量四元数 [0,0,0,1] 表示保持朝向。",
+  rotation_view:
+    "画面方向取决于相机视角：外部相机看夹爪，腕部相机看背景相对运动。J1 工作位实测用于确认该机位的左右方向，其他轴按坐标系判断。",
   joints:
     "关节目标是模型坐标中的绝对关节角，不是舵机原始协议角度，方向和零位转换由驱动处理。未指定关节保持。改变一个关节会连带移动后续连杆，末端效果取决于整臂构型，不能固定解释成某关节增加就向上。",
   preview:
@@ -71,11 +92,18 @@ export function postureSummary(
           joints: jointReadings(model, actual.joints_rad),
           gripper: model.tool_actuators.map((actuator, index) => {
             const value = actual.actuators_rad[index];
+            const span = actuator.maximum - actuator.minimum;
             return {
               actuator_key: actuator.key,
               label: actuator.label,
               position_rad: Number.isFinite(value) ? value : null,
               position_deg: Number.isFinite(value) ? degrees(value) : null,
+              range_rad: [actuator.minimum, actuator.maximum],
+              range_deg: [degrees(actuator.minimum), degrees(actuator.maximum)],
+              travel_percent:
+                Number.isFinite(value) && Number.isFinite(span) && span > 0
+                  ? ((value - actuator.minimum) / span) * 100
+                  : null,
             };
           }),
         }
@@ -95,6 +123,6 @@ export function postureSummary(
     commanded_tcp_not_measured: motion?.target_tool_pose
       ? readablePose(motion.target_tool_pose)
       : null,
-    note: "actual 来自当前反馈，measured_tcp 来自 FK 对应反馈；null 表示不可用，不表示零位。",
+    note: "actual 来自当前反馈，measured_tcp 来自 FK 对应反馈；null 表示不可用，不表示零位。夹爪 travel_percent 是驱动角在模型范围内的行程比例，不是毫米开口宽度或力度百分比。",
   };
 }

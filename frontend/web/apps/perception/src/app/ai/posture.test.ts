@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { ArmState, MotionState, RobotModelInfo } from "@robot/contracts";
-import { jointReadings, postureSummary } from "./posture";
+import { gripperParameters, jointReadings, postureSummary } from "./posture";
 
 const model = {
   model_revision: "test",
   base_frame: "base",
   tcp_frame: "tcp",
   joints: [{ key: "j1", label: "J1", minimum: -Math.PI, maximum: Math.PI }],
-  tool_actuators: [{ key: "gripper", label: "夹爪" }],
+  tool_actuators: [
+    {
+      key: "gripper",
+      label: "夹爪",
+      minimum: 0,
+      maximum: Math.PI / 2,
+      unit: "rad",
+    },
+  ],
 } as RobotModelInfo;
 const arm: ArmState = {
   model_revision: "test",
@@ -33,6 +41,70 @@ const motion: MotionState = {
 };
 
 describe("AI actual posture and units", () => {
+  it("converts model-owned opening references without copying or inventing a calibration curve", () => {
+    const reference = {
+      source: "fixture/graspgenx/manifest.json",
+      frame: "gripper_base",
+      samples: [
+        {
+          position_rad: Math.PI / 6,
+          inner_width_m: 0.071,
+          reference_center_m: [0.00134, 0.00015, 0.08] as [
+            number,
+            number,
+            number,
+          ],
+        },
+      ],
+    };
+    const withReference = {
+      ...model,
+      tool_actuators: [
+        { ...model.tool_actuators[0], opening_reference: reference },
+      ],
+    };
+    const result = gripperParameters(withReference)[0];
+    expect(result.range_deg).toEqual([0, 90]);
+    expect(result.opening_reference?.source).toBe(reference.source);
+    expect(result.opening_reference?.samples).toHaveLength(1);
+    expect(result.opening_reference?.samples[0].inner_width_mm).toBe(71);
+    expect(result.opening_reference?.samples[0].position_deg).toBeCloseTo(30);
+    expect(reference.samples[0]).not.toHaveProperty("position_deg");
+    expect(gripperParameters(model)[0].opening_reference).toBeUndefined();
+  });
+  it("reports intermediate gripper travel from actual feedback and model limits, without inventing gap width", () => {
+    const summary = postureSummary(
+      model,
+      { ...arm, actuators_rad: [Math.PI / 6] },
+      motion,
+    );
+    const gripper = summary.actual!.gripper[0];
+    expect(gripper.position_deg).toBeCloseTo(30);
+    expect(gripper.range_deg).toEqual([0, 90]);
+    expect(gripper.travel_percent).toBeCloseTo(100 / 3);
+    expect(gripper).not.toHaveProperty("width_mm");
+    for (const value of [0, Math.PI / 4, Math.PI / 2]) {
+      expect(
+        postureSummary(model, { ...arm, actuators_rad: [value] }).actual!
+          .gripper[0].travel_percent,
+      ).toBeCloseTo((value / (Math.PI / 2)) * 100);
+    }
+    const other = {
+      ...model,
+      tool_actuators: [{ ...model.tool_actuators[0], minimum: -1, maximum: 1 }],
+    };
+    expect(postureSummary(other, arm).actual!.gripper[0].travel_percent).toBe(
+      50,
+    );
+    expect(
+      postureSummary(model, { ...arm, actuators_rad: [] }).actual!.gripper[0]
+        .travel_percent,
+    ).toBeNull();
+    expect(
+      postureSummary(model, { ...arm, actuators_rad: [NaN] }).actual!.gripper[0]
+        .travel_percent,
+    ).toBeNull();
+  });
   it("keeps actual angles, FK sample and commanded target distinct", () => {
     const summary = postureSummary(model, arm, motion);
     expect(summary.actual?.sequence).toBe(12);

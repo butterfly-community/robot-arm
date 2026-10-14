@@ -1625,6 +1625,23 @@ pub struct ActuatorMetadata {
     pub maximum: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visualization_joint_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_reference: Option<ActuatorOpeningReference>,
+}
+
+/// Audited opening samples, not a linear angle-to-gap calibration curve.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActuatorOpeningReference {
+    pub source: String,
+    pub frame: String,
+    pub samples: Vec<ActuatorOpeningSample>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActuatorOpeningSample {
+    pub position_rad: f64,
+    pub inner_width_m: f64,
+    pub reference_center_m: [f64; 3],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2152,6 +2169,7 @@ mod tests {
                     minimum: 0.0,
                     maximum: 1.0,
                     visualization_joint_key: Some("tool_joint_a".into()),
+                    opening_reference: None,
                 },
                 ActuatorMetadata {
                     key: "tool-b".into(),
@@ -2160,6 +2178,7 @@ mod tests {
                     minimum: -1.0,
                     maximum: 1.0,
                     visualization_joint_key: Some("tool_joint_b".into()),
+                    opening_reference: None,
                 },
             ],
             named_targets: vec![NamedMotionTarget {

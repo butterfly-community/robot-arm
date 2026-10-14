@@ -10,7 +10,7 @@ import {
 import { randomUUID } from "node:crypto";
 import type { AIRun } from "./types";
 import { saveRun } from "./store";
-import { postureSummary } from "./posture";
+import { gripperParameters, postureSummary } from "./posture";
 import { networkRecovery } from "./network";
 
 const base = () =>
@@ -100,7 +100,7 @@ export async function readRobot() {
       base_frame: model.base_frame,
       tcp_frame: model.tcp_frame,
       joints: model.joints,
-      tool_actuators: model.tool_actuators,
+      tool_actuators: gripperParameters(model),
       named_targets: model.named_targets,
     },
     posture: postureSummary(model, motion.arm_state, motion.motion_state),
