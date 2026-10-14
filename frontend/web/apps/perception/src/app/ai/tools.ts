@@ -258,7 +258,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     set_camera_capture: define(
       "set_camera_capture",
-      "用户单独要求开关采集时使用，与网页开关相同。仅为切换视角看图时直接用 observe_camera(exclusive=true)，不要拆成关闭、开启、观察三轮。保留绑定和分辨率，不运动。",
+      "开关指定相机采集，与网页开关相同。已开启的相机直接用 observe_camera 取图，不为切换观察视角关闭其他相机；需要启用未开启的相机时只开启所需相机。保留绑定和分辨率，不运动。",
       z.object({
         role: z.enum(["external", "external_right", "wrist", "wrist_right"]),
         enabled: z.boolean(),
@@ -279,7 +279,7 @@ export function robotTools(context: RobotToolsContext): ToolSet {
     ),
     observe_camera: define(
       "observe_camera",
-      "读取指定角色的新原分辨率 RGB 图和实际机器人反馈，不运动。external/wrist 为各组左相机，external_right/wrist_right 为右相机。exclusive=true 关闭其他组、开启本组已绑定相机，保留双目左右同时采集；不改变绑定或分辨率。",
+      "读取指定角色的新原分辨率 RGB 图和实际机器人反馈，不运动。external/wrist 为各组左相机，external_right/wrist_right 为右相机。默认不改变任何相机采集状态；仅在确认带宽不足或用户要求轮流采集时，exclusive=true 关闭其他组、开启本组已绑定相机，保留双目左右同时采集；不改变绑定或分辨率。",
       z.object({
         role: z.enum([
           "depth",
@@ -288,7 +288,12 @@ export function robotTools(context: RobotToolsContext): ToolSet {
           "wrist",
           "wrist_right",
         ]),
-        exclusive: z.boolean().nullish(),
+        exclusive: z
+          .boolean()
+          .nullish()
+          .describe(
+            "默认 false（null 或省略同义），保留其他相机采集；仅在确认带宽不足或用户要求轮流采集时设为 true。",
+          ),
       }),
       async ({ role, exclusive }, post) => {
         if (exclusive && role !== "depth") {

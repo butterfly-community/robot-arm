@@ -104,6 +104,10 @@ H.264 编解码与浏览器播放的隔离回归见 [媒体测试说明](../fron
 `AI_RELOAD_AFTER_START=1` 实测发送后刷新仍跟踪原运行，不重发。
 `AI_WAIT_TIMEOUT_MS` 只设置测试等待时间，不限制后端任务。
 浏览器状态在 `temp/general-ai/browser-state.json`，丢失后通过网页历史会话恢复。
+
+`node tests/integration/ai-camera-parallel.mjs temp/ai-camera-parallel` 从 AI 页面请求外部、腕部各取一张新图，
+检查模型没有关闭其他采集流。要求已绑定外部、腕部测试画面、未选择深度来源且执行为软件反馈；
+只接受 `replay:` 来源，会向已配置模型发送测试画面与状态，不运动。脚本通过网页开启采集并在结束后恢复开关。
 输出包含请求终态、相机画面、网页执行反馈及耗时；AI 自报成功不算实际抓放成功。
 `timing.json` 的整轮减串行工具时间包含网络等待和本地编排，不是纯模型推理耗时。
 

@@ -239,6 +239,57 @@ describe("AI segmentation uses the same single refresh request as the UI", () =>
     expect(cameraImage).not.toHaveBeenCalled();
     expect(command).not.toHaveBeenCalled();
   });
+  it.each([undefined, null, false])(
+    "keeps every streaming camera open with exclusive=%s",
+    async (exclusive) => {
+      const { command, tools } = setup();
+      const snapshot = {
+        values: {
+          camera_state: {
+            bindings: [
+              "external",
+              "external_right",
+              "wrist",
+              "wrist_right",
+            ].map((role) => ({
+              role,
+              source_id: `replay:${role}`,
+              enabled: true,
+              streaming: true,
+            })),
+          },
+        },
+      } as never;
+      await vi.mocked(perceptionSnapshot).withImplementation(
+        async () => snapshot,
+        async () => {
+          for (const role of [
+            "external",
+            "external_right",
+            "wrist",
+            "wrist_right",
+          ] as const) {
+            await tools.observe_camera.execute!(
+              { role, exclusive },
+              { toolCallId: `concurrent-${role}`, messages: [], context: {} },
+            );
+            expect(cameraImage).toHaveBeenLastCalledWith(
+              role,
+              expect.any(AbortSignal),
+            );
+          }
+          expect(command).not.toHaveBeenCalled();
+        },
+      );
+      expect(cameraImage).toHaveBeenCalledTimes(4);
+      expect(tools.set_camera_capture.description).not.toContain(
+        "observe_camera(exclusive=true)",
+      );
+      expect(tools.observe_camera.description).toContain(
+        "默认不改变任何相机采集状态",
+      );
+    },
+  );
   it("does not restart a camera that is already exclusively streaming", async () => {
     const { command, tools } = setup();
     vi.mocked(perceptionSnapshot).mockResolvedValueOnce({

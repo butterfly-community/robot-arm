@@ -365,7 +365,17 @@ describe("Responses configuration", () => {
       "沿用同一会话已确认的方向、动作效果和进度",
     );
     expect(visionInstructions).toContain("建立方向关系，之后复用");
-    expect(visionInstructions).toContain("必要时才切换相机");
+    for (const prompt of [
+      visionInstructions,
+      depthInstructions,
+      stereoInstructions,
+    ]) {
+      expect(prompt).toContain("取图默认使用 observe_camera(exclusive=false)");
+      expect(prompt).toContain(
+        "仅在确认带宽不足或用户要求轮流采集时使用 exclusive=true",
+      );
+      expect(prompt).toContain("共享 USB 不等于带宽不足");
+    }
     expect(visionInstructions).toContain("保持既有力度和速度");
     expect(visionInstructions).toContain("observe_role");
     for (const prompt of [visionInstructions, depthInstructions])
