@@ -188,8 +188,31 @@ controller-input 设置 `SDL_JOYSTICK_DISABLE_UDEV=1`、`SDL_HIDAPI_UDEV=0`，�
 inotify/轮询发现 evdev 与 HIDAPI 设备。Docker 网络命名空间不能接收主机的 udev 热插拔通知，
 仅挂载 `/run/udev` 不会转发通知；默认 udev 发现可能表现为启动前插入可见、启动后插入不可见。
 保留 udev 数据挂载用于设备属性读取，不禁用 HIDAPI、传感器或震动，也不增加自定义设备扫描路径。
+
+`SDL_HIDAPI_LIBUSB_WHITELIST=0` 允许 SDL 通过 libusb 访问 USB Xbox 手柄，获取左右扳机振动；
+仅走 Linux evdev/xpad 时只会显示普通手柄振动。有 hidraw 的设备仍由 SDL 优先使用 hidraw，
+不强制所有设备使用 libusb。反馈选项始终以设备实际上报能力为准，PS4 不显示独立扳机振动。
+
 依据：[SDL Linux 手柄发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/joystick/linux/SDL_sysjoystick.c)、
 [SDL HIDAPI 发现实现](https://github.com/libsdl-org/SDL/blob/release-3.4.14/src/hidapi/SDL_hidapi.c)。
+
+### 手柄反馈
+
+控制绑定页自动列出设备支持的反馈能力，不需要手动设置手柄型号：
+
+- 手柄振动：使用 SDL 普通振动输出。
+- 左右扳机振动：使用 SDL 独立扳机振动输出，例如 Xbox One 手柄。
+- 左右扳机自适应阻力：PS5/DualSense 通过 SDL 自定义效果接口输出连续阻力；
+  USB/蓝牙封包由 SDL 处理。设备效果接口不可用时不显示阻力选项。
+
+这些能力共用执行节点的 `ActionFeedback`，将夹爪的 0–100 力度反馈映射到所选输出，
+不修改机械臂夹持力度。振动与阻力是不同能力，普通 PS4 DualShock 4 不具备可编程扳机阻力。
+反馈持续到下一次更新；归零、取消绑定、执行连接断开或正常关闭输入节点时清除输出。
+网页“测试反馈”运行独立的 0→100→0 曲线，不驱动机械臂，也不被同期的真机空载回读覆盖。
+测试结束恢复真实力度反馈。输出失败显示设备原始错误，不静默当作成功。
+
+适配依据：[SDL 扳机振动](https://wiki.libsdl.org/SDL3/SDL_RumbleGamepadTriggers)、
+[SDL PS5 效果示例](https://github.com/libsdl-org/SDL/blob/main/test/testcontroller.c)。
 
 ### 相机绑定与 USB 带宽
 

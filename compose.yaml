@@ -64,6 +64,10 @@ services:
       # Use SDL's own inotify/polling discovery for evdev and HIDAPI instead.
       SDL_JOYSTICK_DISABLE_UDEV: "1"
       SDL_HIDAPI_UDEV: "0"
+      # USB Xbox controllers need SDL's libusb backend for trigger rumble;
+      # Linux evdev/xpad exposes only whole-controller rumble. Keep hidraw
+      # preferred where available, but allow libusb beyond SDL's whitelist.
+      SDL_HIDAPI_LIBUSB_WHITELIST: "0"
     volumes:
       - ./backend/config/runtime:/config
       - /dev:/dev

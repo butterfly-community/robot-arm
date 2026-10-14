@@ -1,3 +1,4 @@
+mod feedback;
 mod simulation;
 
 use std::{
@@ -11,6 +12,7 @@ use std::{
 
 use dora_node_api::{DoraNode, Event, MetadataParameters, dora_core::config::DataId};
 use eyre::{Context, Result, eyre};
+use feedback::FeedbackOutput;
 use fusion_ahrs::{Ahrs, Offset, OffsetSettings};
 use hidapi::HidApi;
 use json_config_store::{load_or_default, save};
@@ -21,11 +23,11 @@ use robot_arm_messages::{
     AbsolutePoseFrame, ActionBinding, ActionFeedback, ActionFeedbackBinding,
     ActionFeedbackBindingState, ActionType, ActuatorActions, ApplyInputBindingsRequest,
     BooleanActionSample, ControlInputFrame, FloatActionSample, INPUT_ACTIONS, InputBindingState,
-    InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputFeedbackCapabilityInfo,
-    InputSimulationItem, InputSimulationRequest, InputSimulationState, InputSourceInfo,
-    InputStreamDiagnostics, PoseComponent, PoseFlags, RenameInputSourceRequest, RequestAction,
-    RequestResult, SCHEMA_VERSION, SelectPoseSourceRequest, SelectedInputSourceState, ServiceState,
-    from_arrow, input_action_spec, to_arrow,
+    InputComponentInfo, InputDiscoveryState, InputDriverInfo, InputSimulationItem,
+    InputSimulationRequest, InputSimulationState, InputSourceInfo, InputStreamDiagnostics,
+    PoseComponent, PoseFlags, RenameInputSourceRequest, RequestAction, RequestResult,
+    SCHEMA_VERSION, SelectPoseSourceRequest, SelectedInputSourceState, ServiceState, from_arrow,
+    input_action_spec, to_arrow,
 };
 use sdl3::{
     event::Event as SdlEvent,
@@ -41,7 +43,6 @@ use simulation::{
 const NOLO_DRIVER_ID: &str = "nolo-cv1-hid";
 const SDL_DRIVER_ID: &str = "sdl3-gamepad";
 const CONFIG_SCHEMA_VERSION: u32 = 3;
-const HAPTIC_DURATION_MS: u32 = 100;
 const VIRTUAL_FEEDBACK_SOURCE_ID: &str = "virtual-feedback";
 const VIRTUAL_FEEDBACK_CAPABILITY_PATH: &str = "feedback/virtual";
 const DYNAMIC_OFFSET_STABLE_DURATION: Duration = Duration::from_secs(3);
@@ -103,7 +104,7 @@ fn main() -> Result<()> {
     let (driver_tx, driver_rx) = mpsc::channel();
     let (haptic_tx, haptic_rx) = mpsc::channel();
     spawn_nolo_driver(driver_tx.clone());
-    spawn_sdl_driver(driver_tx, haptic_rx);
+    let sdl_driver = spawn_sdl_driver(driver_tx, haptic_rx);
 
     let mut input = ControllerInput::load(driver_rx, haptic_tx)?;
     publish_snapshot(&mut node, &mut input)?;
@@ -152,7 +153,7 @@ fn main() -> Result<()> {
                 "action_feedback" => {
                     let feedback: ActionFeedback =
                         from_arrow(data.as_array()).context("decode action_feedback")?;
-                    input.apply_feedback(feedback);
+                    input.receive_feedback(feedback);
                 }
                 _ => {}
             },
@@ -160,6 +161,10 @@ fn main() -> Result<()> {
             _ => {}
         }
     }
+    drop(input);
+    sdl_driver
+        .join()
+        .map_err(|_| eyre!("SDL 采集线程退出失败"))?;
     Ok(())
 }
 
@@ -334,6 +339,11 @@ impl ControllerInput {
     }
 
     fn apply_config(&mut self, config: InputConfig) {
+        for binding in &self.config.feedback_bindings {
+            if !config.feedback_bindings.contains(binding) {
+                self.clear_feedback_binding(binding);
+            }
+        }
         self.config = config;
         self.last_published_sequences.clear();
         self.pose_dirty = true;
@@ -820,6 +830,11 @@ impl ControllerInput {
         let Some(_simulation) = self.simulation.take() else {
             return;
         };
+        if self.simulation_state.item == Some(InputSimulationItem::PrimaryToolFeedback) {
+            for binding in &self.config.feedback_bindings {
+                self.clear_feedback_binding(binding);
+            }
+        }
         self.replace_driver_sources(simulation::driver_info(), vec![]);
         if let Some(config) = self.config_before_simulation.take() {
             self.config = config;
@@ -839,6 +854,27 @@ impl ControllerInput {
         {
             self.virtual_feedback = None;
         }
+    }
+
+    fn clear_feedback_binding(&self, binding: &ActionFeedbackBinding) {
+        if !is_virtual_feedback(binding) {
+            let _ = self.haptic.send(HapticCommand {
+                source_id: binding.source_id.clone(),
+                capability_path: binding.capability_path.clone(),
+                intensity: 0,
+            });
+        }
+    }
+
+    fn receive_feedback(&mut self, feedback: ActionFeedback) {
+        // The explicit feedback test owns this output until it finishes. Live
+        // idle telemetry must not cancel every pulse with a zero-strength write.
+        if self.simulation.is_some()
+            && self.simulation_state.item == Some(InputSimulationItem::PrimaryToolFeedback)
+        {
+            return;
+        }
+        self.apply_feedback(feedback);
     }
 
     fn apply_feedback(&mut self, feedback: ActionFeedback) {
@@ -1534,6 +1570,7 @@ fn nolo_source(info: &hidapi::DeviceInfo, device_id: &str, controller: u8) -> In
 
 struct SdlGamepadState {
     gamepad: Gamepad,
+    feedback: FeedbackOutput,
     source: InputSourceInfo,
     sequence: u64,
     fusion: Option<ImuFusion>,
@@ -1541,12 +1578,21 @@ struct SdlGamepadState {
     orientation: Option<[f64; 4]>,
 }
 
-fn spawn_sdl_driver(sender: Sender<DriverEvent>, haptic: Receiver<HapticCommand>) {
+impl Drop for SdlGamepadState {
+    fn drop(&mut self) {
+        self.feedback.clear(&mut self.gamepad);
+    }
+}
+
+fn spawn_sdl_driver(
+    sender: Sender<DriverEvent>,
+    haptic: Receiver<HapticCommand>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if let Err(error) = run_sdl_driver(&sender, &haptic) {
             report_driver_stopped(&sender, SDL_DRIVER_ID, "SDL3 gamepad", error);
         }
-    });
+    })
 }
 
 fn report_driver_stopped(
@@ -1631,12 +1677,34 @@ fn run_sdl_driver(sender: &Sender<DriverEvent>, haptic: &Receiver<HapticCommand>
             }
         }
 
-        while let Ok(command) = haptic.try_recv() {
+        loop {
+            let command = match haptic.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+            };
             if let Some(state) = gamepads
                 .values_mut()
                 .find(|state| state.source.source_id == command.source_id)
             {
-                apply_haptic(state, command);
+                let error = state
+                    .feedback
+                    .apply(
+                        &mut state.gamepad,
+                        &command.capability_path,
+                        command.intensity,
+                    )
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "{} 反馈输出失败（{}）：{error}",
+                            state.source.display_name, command.capability_path
+                        )
+                    });
+                if error != state.source.original_error {
+                    state.source.original_error = error;
+                    publish_sdl_sources(sender, &gamepads)?;
+                }
             }
         }
 
@@ -1682,7 +1750,7 @@ fn open_sdl_gamepad(
     if gamepads.contains_key(&raw_id) {
         return Ok(());
     }
-    let gamepad = subsystem
+    let mut gamepad = subsystem
         .open(id)
         .map_err(|error| eyre!(error))
         .with_context(|| format!("打开 SDL 手柄失败（当前连接实例 {raw_id}）"))?;
@@ -1708,8 +1776,7 @@ fn open_sdl_gamepad(
     let serial = gamepad.serial_number();
     let device_id = sdl_device_id(serial.as_deref(), gamepad.path().as_deref(), raw_id);
     let source_id = format!("sdl3:{device_id}");
-    let has_rumble = unsafe { gamepad.has_rumble() };
-    let has_trigger_rumble = unsafe { gamepad.has_rumble_triggers() };
+    let feedback = FeedbackOutput::discover(&mut gamepad);
     let components = SDL_AXES
         .iter()
         .filter(|(axis, _, _)| gamepad.has_axis(*axis))
@@ -1731,7 +1798,7 @@ fn open_sdl_gamepad(
                 }),
         )
         .collect();
-    let feedback_capabilities = sdl_feedback_capabilities(has_trigger_rumble, has_rumble);
+    let feedback_capabilities = feedback.capabilities();
     let source = InputSourceInfo {
         source_id,
         driver_id: SDL_DRIVER_ID.into(),
@@ -1755,6 +1822,7 @@ fn open_sdl_gamepad(
         raw_id,
         SdlGamepadState {
             gamepad,
+            feedback,
             source,
             sequence: 0,
             fusion,
@@ -1800,56 +1868,8 @@ fn stable_input_alias(path: &str) -> Option<String> {
     None
 }
 
-fn sdl_feedback_capabilities(
-    has_trigger_feedback: bool,
-    has_controller_rumble: bool,
-) -> Vec<InputFeedbackCapabilityInfo> {
-    let mut feedback_capabilities = vec![];
-    if has_trigger_feedback {
-        feedback_capabilities.extend([
-            InputFeedbackCapabilityInfo {
-                path: "feedback/trigger_left".into(),
-                localized_name: Some("左扳机力度反馈".into()),
-            },
-            InputFeedbackCapabilityInfo {
-                path: "feedback/trigger_right".into(),
-                localized_name: Some("右扳机力度反馈".into()),
-            },
-        ]);
-    }
-    if has_controller_rumble {
-        feedback_capabilities.push(InputFeedbackCapabilityInfo {
-            path: "feedback/rumble".into(),
-            localized_name: Some("手柄振动".into()),
-        });
-    }
-    feedback_capabilities
-}
-
 fn haptic_intensity(strength_percent: f64) -> u16 {
     (strength_percent.clamp(0.0, 100.0) * f64::from(u16::MAX) / 100.0).round() as u16
-}
-
-fn apply_haptic(state: &mut SdlGamepadState, command: HapticCommand) {
-    let intensity = command.intensity;
-    match command.capability_path.as_str() {
-        "feedback/trigger_left" => {
-            let _ = state
-                .gamepad
-                .set_rumble_triggers(intensity, 0, HAPTIC_DURATION_MS);
-        }
-        "feedback/trigger_right" => {
-            let _ = state
-                .gamepad
-                .set_rumble_triggers(0, intensity, HAPTIC_DURATION_MS);
-        }
-        "feedback/rumble" => {
-            let _ = state
-                .gamepad
-                .set_rumble(intensity, intensity, HAPTIC_DURATION_MS);
-        }
-        _ => {}
-    }
 }
 
 fn publish_sdl_sources(
@@ -2672,8 +2692,66 @@ mod tests {
     }
 
     #[test]
+    fn feedback_test_is_not_overwritten_by_live_zero_and_stop_releases_output() {
+        let (_tx, rx) = mpsc::channel();
+        let (haptic, output) = mpsc::channel();
+        let mut input = ControllerInput::new(rx, haptic);
+        input.config.feedback_bindings.push(ActionFeedbackBinding {
+            action: "primary_tool".into(),
+            source_id: "pad".into(),
+            capability_path: "feedback/resistance_right".into(),
+        });
+        let result = input.set_simulation(InputSimulationRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "feedback-test".into(),
+            enabled: true,
+            item: Some(InputSimulationItem::PrimaryToolFeedback),
+            value: None,
+        });
+        assert!(result.original_error.is_none());
+        let zero = ActionFeedback {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            sample_time_ns: 1,
+            action: "primary_tool".into(),
+            strength_percent: 0.0,
+        };
+        input.tick();
+        output.try_iter().for_each(drop);
+        input.receive_feedback(zero.clone());
+        assert!(
+            output.try_recv().is_err(),
+            "live zero must not cancel the test"
+        );
+        for _ in 0..300 {
+            input.tick();
+        }
+        assert_eq!(output.try_iter().last().unwrap().intensity, u16::MAX);
+        input.stop_simulation();
+        assert_eq!(output.try_iter().last().unwrap().intensity, 0);
+        input.receive_feedback(zero);
+        assert_eq!(output.try_recv().unwrap().intensity, 0);
+    }
+
+    #[test]
+    fn changing_feedback_binding_clears_the_old_output() {
+        let (_tx, rx) = mpsc::channel();
+        let (haptic, output) = mpsc::channel();
+        let mut input = ControllerInput::new(rx, haptic);
+        input.config.feedback_bindings.push(ActionFeedbackBinding {
+            action: "primary_tool".into(),
+            source_id: "pad".into(),
+            capability_path: "feedback/resistance_right".into(),
+        });
+        input.apply_config(InputConfig::default());
+        let stop = output.try_recv().unwrap();
+        assert_eq!(stop.capability_path, "feedback/resistance_right");
+        assert_eq!(stop.intensity, 0);
+    }
+
+    #[test]
     fn trigger_feedback_reports_two_independent_bindable_capabilities() {
-        let capabilities = sdl_feedback_capabilities(true, false);
+        let capabilities = FeedbackOutput::for_test(false, true, false).capabilities();
         assert_eq!(
             capabilities
                 .iter()
@@ -2681,7 +2759,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["feedback/trigger_left", "feedback/trigger_right"]
         );
-        assert!(sdl_feedback_capabilities(false, false).is_empty());
+        assert!(FeedbackOutput::default().capabilities().is_empty());
     }
 
     #[test]

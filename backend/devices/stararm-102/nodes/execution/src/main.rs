@@ -1077,15 +1077,19 @@ fn publish_transport(node: &mut DoraNode, execution: &StarArmExecution) -> Resul
 }
 fn publish_state(node: &mut DoraNode, execution: &StarArmExecution) -> Result<()> {
     send(node, "arm_state", &execution.state)?;
-    if execution.transport.connected && execution.state.feedback_source == FeedbackSource::Hardware
-    {
-        send(
-            node,
-            "action_feedback",
-            &primary_tool_feedback(&execution.telemetry),
-        )?;
-    }
+    send(node, "action_feedback", &execution_feedback(execution))?;
     send(node, "service_state", &execution.service_state())
+}
+fn execution_feedback(execution: &StarArmExecution) -> ActionFeedback {
+    let mut feedback = primary_tool_feedback(&execution.telemetry);
+    // A held haptic output must be explicitly released when its real source is
+    // disconnected or switched to software feedback, not left at the last load.
+    if !execution.transport.connected || execution.state.feedback_source != FeedbackSource::Hardware
+    {
+        feedback.strength_percent = 0.0;
+        feedback.sample_time_ns = now_ns();
+    }
+    feedback
 }
 fn send<T: serde::Serialize>(node: &mut DoraNode, id: &str, value: &T) -> Result<()> {
     node.send_output(
@@ -1132,6 +1136,31 @@ mod tests {
         execution.apply_command(command(joints.clone(), 0.2));
         assert_eq!(execution.state.feedback_source, FeedbackSource::Software);
         assert_eq!(execution.state.joints_rad, joints);
+    }
+
+    #[test]
+    fn disconnected_or_software_feedback_releases_haptics() {
+        let mut execution = StarArmExecution::new();
+        execution.state.feedback_source = FeedbackSource::Hardware;
+        execution.transport.connected = true;
+        // Use the same telemetry fixture shape as the production feedback.
+        execution.telemetry.actuators.push(ActuatorTelemetry {
+            actuator_key: "gripper".into(),
+            power_mw: GRIPPER_COMMAND_POWER_MW,
+            position_tenths_degree: None,
+            turns: None,
+            voltage_mv: 12000,
+            current_ma: 0,
+            command_power_limit_mw: Some(GRIPPER_COMMAND_POWER_MW),
+            temperature_raw: 0,
+            status: 0,
+        });
+        assert_eq!(execution_feedback(&execution).strength_percent, 100.0);
+        execution.transport.connected = false;
+        assert_eq!(execution_feedback(&execution).strength_percent, 0.0);
+        execution.transport.connected = true;
+        execution.state.feedback_source = FeedbackSource::Software;
+        assert_eq!(execution_feedback(&execution).strength_percent, 0.0);
     }
 
     #[test]
